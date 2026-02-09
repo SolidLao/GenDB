@@ -1,0 +1,18 @@
+/**
+ * Centralized path resolution & constants for GenDB.
+ * All paths computed relative to project root.
+ */
+
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+export const PROJECT_ROOT = resolve(__dirname, "..", "..");
+export const BENCHMARKS_DIR = resolve(PROJECT_ROOT, "benchmarks");
+export const OUTPUT_DIR = resolve(PROJECT_ROOT, "output");
+export const AGENTS_DIR = resolve(__dirname, "agents");
+
+export const DEFAULT_SCHEMA = resolve(BENCHMARKS_DIR, "tpc-h/schema.sql");
+export const DEFAULT_QUERIES = resolve(BENCHMARKS_DIR, "tpc-h/queries.sql");
