@@ -1,0 +1,163 @@
+{
+  "tables": {
+    "lineitem": {
+      "access_patterns": ["full_scan", "index_lookup"],
+      "access_frequency": 3,
+      "hot_columns": [
+        "l_shipdate",
+        "l_extendedprice",
+        "l_discount",
+        "l_returnflag",
+        "l_linestatus",
+        "l_quantity",
+        "l_tax",
+        "l_orderkey"
+      ]
+    },
+    "customer": {
+      "access_patterns": ["index_lookup"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "c_custkey",
+        "c_mktsegment"
+      ]
+    },
+    "orders": {
+      "access_patterns": ["index_lookup"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "o_orderkey",
+        "o_custkey",
+        "o_orderdate",
+        "o_shippriority"
+      ]
+    },
+    "nation": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": []
+    },
+    "region": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": []
+    },
+    "supplier": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": []
+    },
+    "part": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": []
+    },
+    "partsupp": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "frequency": 1
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "frequency": 1
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1"
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "high",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "high",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">=",
+      "selectivity": "high",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<",
+      "selectivity": "high",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "high",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6"
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM", "AVG", "COUNT"],
+      "query": "Q1"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM"],
+      "query": "Q3"
+    },
+    {
+      "group_by": [],
+      "functions": ["SUM"],
+      "query": "Q6"
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "has_limit": false,
+      "query": "Q1"
+    },
+    {
+      "columns": ["revenue", "o_orderdate"],
+      "has_limit": true,
+      "query": "Q3"
+    }
+  ],
+  "summary": "The workload is dominated by lineitem table access (3/3 queries), with heavy use of date-based range filters on l_shipdate. Key patterns include: (1) analytical aggregations with SUM/AVG operations on l_extendedprice and l_discount, (2) selective date-range scans that could benefit from indexing on l_shipdate, (3) a star-join pattern in Q3 connecting customer->orders->lineitem via FK relationships, and (4) computed expressions involving l_extendedprice * (1 - l_discount) appearing in multiple queries. The lineitem table is the primary fact table with hot columns being l_shipdate, l_extendedprice, l_discount, l_quantity, and l_orderkey. Optimization opportunities include: materialized views for the revenue calculation, partitioning lineitem by l_shipdate, and indexes on c_mktsegment, o_orderdate, and l_shipdate. The workload shows low cardinality grouping (Q1) and top-K retrieval (Q3 with LIMIT 10), suggesting potential for pre-aggregation and early-stop optimizations."
+}

@@ -1,0 +1,103 @@
+{
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 109,
+        "target_time_ms": 32,
+        "gap_multiplier": 3.4,
+        "bottleneck": "Full table scan of 6M lineitem rows with date filter and string operations on returnflag/linestatus columns",
+        "root_cause": "Despite integer encoding for group keys, the implementation still loads and processes l_returnflag/l_linestatus as std::string vectors during the scan. Each row access involves string copying and character access. The date filter (l_shipdate <= cutoff) processes all 6M rows sequentially without leveraging any sorted index structure on l_shipdate."
+      },
+      "Q3": {
+        "current_time_ms": 135,
+        "target_time_ms": 57,
+        "gap_multiplier": 2.4,
+        "bottleneck": "Full sort of all aggregated groups when only top 10 needed, plus runtime hash index construction",
+        "root_cause": "The implementation performs a full std::sort on potentially thousands of aggregated order groups, then truncates to 10 results. This is O(n log n) when a partial sort or top-K heap would be O(n log 10). Additionally, two hash indexes are built at runtime (customer filter map, orders filter map) on every query execution."
+      },
+      "Q6": {
+        "current_time_ms": 45,
+        "target_time_ms": 7,
+        "gap_multiplier": 6.4,
+        "bottleneck": "Full sequential scan of 6M lineitem rows without exploiting sorted l_shipdate index",
+        "root_cause": "Although l_shipdate has a sorted index in the storage design, the current implementation doesn't use it. The query scans all 6M rows checking 4 predicates per row. With the l_shipdate range filter (1994-01-01 to 1995-01-01), only ~1M rows (~17% of dataset) fall in the date range, but we're evaluating all other predicates on the remaining 5M rows unnecessarily. Sorted index scan could reduce I/O by 83%."
+      }
+    },
+    "overall": "GenDB outperforms PostgreSQL by 10-20x on Q1 and 3-15x on Q3/Q6, but lags DuckDB by 2.4-6.4x across all queries. The largest performance gap is in Q6 (6.4x slower), which is a pure scan + filter query - this suggests significant opportunity in scan optimization and predicate pushdown. Q1 (3.4x gap) suffers from full table scans without date index exploitation. Q3 (2.4x gap) has the smallest gap but still wastes time on full sorting when partial sorting suffices. All queries would benefit from: (1) exploiting sorted l_shipdate indexes for range scans, (2) avoiding unnecessary string operations, and (3) using top-K algorithms instead of full sorts."
+  },
+  "recommendations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "operator": "scan",
+      "technique": "sorted_index_range_scan",
+      "description": "Replace full table scan with sorted index range scan on l_shipdate. Since l_shipdate is marked as 'sorted' index in storage_design.json, implement a range scan that: (1) Uses binary search to find the first row where l_shipdate >= 1994-01-01, (2) Scans sequentially until l_shipdate >= 1995-01-01, (3) Only evaluates the discount and quantity predicates on rows within the date range. This reduces evaluated rows from 6M to ~1M (17% selectivity). Implementation: Add a sorted_index structure in LineitemTable that maintains row indices sorted by l_shipdate, or sort the lineitem table by l_shipdate during loading. Expected speedup: 3-5x on Q6 alone.",
+      "expected_improvement": "Q6: 45ms → 10-15ms (3-4.5x speedup). Reduces evaluated rows from 6M to ~1M by exploiting sorted l_shipdate index.",
+      "risk": "medium"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "operator": "sort",
+      "technique": "partial_sort_top_k",
+      "description": "Replace full std::sort with std::partial_sort or a min-heap to find top 10 results. Current implementation sorts all aggregated groups (potentially 10K-100K groups), then truncates to 10. Instead: (1) Use std::partial_sort(results.begin(), results.begin() + 10, results.end()) which only partially sorts the first 10 elements (O(n log 10) instead of O(n log n)), OR (2) Use a min-heap of size 10 to maintain top 10 candidates during aggregation (even better, O(n log 10) with lower constant). Expected: 1.5-2x speedup on Q3.",
+      "expected_improvement": "Q3: 135ms → 70-90ms (1.5-1.9x speedup). Reduces sorting complexity from O(n log n) to O(n log 10) for large result sets.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q1",
+      "operator": "scan",
+      "technique": "sorted_index_range_scan",
+      "description": "Similar to Q6, exploit sorted l_shipdate index for Q1's date filter (l_shipdate <= '1998-09-02'). Since ~98.5% of SF1 lineitem data has l_shipdate before this cutoff, a sorted index won't help much with selectivity BUT it enables sequential I/O patterns and better cache locality. More importantly, combine this with integer-encoded storage for l_returnflag and l_linestatus. Currently these are stored as std::vector<std::string> which causes string copies on every access. Change storage to std::vector<uint8_t> with inline encoding (A->0, N->1, R->2, F->0, O->1) during loading. This eliminates string operations entirely in the hot loop.",
+      "expected_improvement": "Q1: 109ms → 50-70ms (1.5-2.2x speedup). Eliminates string copy overhead and improves cache locality through integer-encoded flag/status columns.",
+      "risk": "medium"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "operator": "join",
+      "technique": "bloom_filter_pruning",
+      "description": "Add Bloom filter to prune lineitem rows before join probe. Current Q3 implementation: (1) filters customers (c_mktsegment = 'BUILDING'), gets ~30K custkeys, (2) filters orders by date and custkey, gets ~100K-200K orderkeys, (3) scans all 6M lineitem rows with l_shipdate filter, probing orders_idx for each. Problem: Most lineitem rows (after shipdate filter) won't match any orderkey in orders_idx. Solution: After building orders_idx, construct a Bloom filter of the qualifying orderkeys (100K-200K keys, ~200KB memory for 1% false positive rate). Before hash probe on lineitem.l_orderkey, check Bloom filter first. This eliminates ~70-80% of unnecessary hash lookups. Expected: 1.3-1.5x speedup on Q3.",
+      "expected_improvement": "Q3: 135ms → 90-105ms (1.3-1.5x speedup). Reduces unnecessary hash probes by 70-80% using Bloom filter precheck.",
+      "risk": "medium"
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "operator": "scan",
+      "technique": "simd_vectorization",
+      "description": "After implementing sorted index range scan (Priority 1), further optimize the predicate evaluation loop with SIMD vectorization. The inner loop evaluates 4 predicates (2 double comparisons for discount, 1 double comparison for quantity, already filtered by date range). Use SSE/AVX intrinsics to process 4-8 rows in parallel: load l_discount, l_quantity, l_extendedprice vectors, compare all elements simultaneously, compute revenue for matching rows. This is especially effective after range scan reduces data to ~1M rows. Expected: additional 1.3-1.5x speedup on top of range scan.",
+      "expected_improvement": "Q6: After priority 1 (10-15ms) → 7-10ms (1.3-2x additional speedup). Vectorizes predicate evaluation for 4-8 rows in parallel.",
+      "risk": "high"
+    },
+    {
+      "priority": 6,
+      "target": "Q1",
+      "operator": "aggregation",
+      "technique": "array_based_aggregation",
+      "description": "Replace std::unordered_map aggregation with direct array indexing. Q1 groups by (returnflag, linestatus) which has only 6 possible combinations: A/F, A/O, N/F, N/O, R/F, R/O (though actual data typically has 3-4 groups). Currently uses hash map with uint16_t encoded key. Instead, use a fixed array of 6 Q1Aggregates structs indexed directly by encoded key. Since encoded_key = (returnflag << 8) | linestatus is small (0-767 range), allocate array[768] and index directly: agg[encoded_key] += values. This eliminates hash computation, collision handling, and memory allocation overhead. Expected: 1.2-1.3x speedup on Q1.",
+      "expected_improvement": "Q1: 109ms → 85-95ms (1.15-1.3x speedup). Replaces hash map with direct array indexing for low-cardinality grouping.",
+      "risk": "low"
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Add sorted row index on l_shipdate: During load_lineitem(), after reading all rows, create a std::vector<size_t> l_shipdate_sorted_index containing row indices sorted by l_shipdate. This enables binary search to find date range boundaries.",
+      "rationale": "Critical for Q6 (6.4x gap) and Q1 (3.4x gap). Both queries filter on l_shipdate ranges. Sorted index allows skipping 83% of rows in Q6 and enables sequential scan patterns in Q1. One-time O(n log n) sort cost during loading, amortized across all query executions."
+    },
+    {
+      "table": "lineitem",
+      "change": "Change l_returnflag and l_linestatus storage from std::vector<std::string> to std::vector<uint8_t> with inline encoding during load: A->0, N->1, R->2 for returnflag; F->0, O->1 for linestatus. Update Q1GroupKey constructor to accept uint8_t directly.",
+      "rationale": "Eliminates string copy overhead in Q1's hot loop. std::string access involves pointer dereferencing and potential heap allocation, while uint8_t is direct memory access. Reduces memory footprint from 12-24 bytes per string to 1 byte per value (72MB saved for 6M rows). Improves cache locality by 12-24x."
+    },
+    {
+      "table": "orders",
+      "change": "Optional: Pre-sort orders by o_orderdate during loading if memory allows. Alternatively, add sorted index on o_orderdate similar to lineitem.l_shipdate.",
+      "rationale": "Q3 filters orders by o_orderdate < '1995-03-15'. Most TPC-H data has orders spanning 7 years, so this filter has ~20% selectivity. Sorted index could reduce the 1.5M orders scanned to ~300K before joining with customer filter. Lower priority than lineitem.l_shipdate because orders table is smaller (1.5M vs 6M rows)."
+    }
+  ],
+  "summary": "Focus iteration 2 on closing the 6.4x gap in Q6 by implementing sorted index range scans on l_shipdate (Priority 1). This single optimization should bring Q6 from 45ms to 10-15ms, approaching DuckDB's 7ms. For Q3, implement partial_sort for top-K retrieval (Priority 2) to close the 2.4x gap from 135ms to 70-90ms. For Q1, convert string-based returnflag/linestatus columns to integer encoding in storage (Priority 3) to reduce the 3.4x gap from 109ms to 50-70ms. These three changes are medium-low risk and target the three largest bottlenecks. Priorities 4-6 (Bloom filters, SIMD, array aggregation) are additional incremental gains but can be deferred if implementation time is limited. Combined expected results: Q1: 50-70ms (1.5-2.2x), Q3: 70-90ms (1.5-1.9x), Q6: 10-15ms (3-4.5x)."
+}

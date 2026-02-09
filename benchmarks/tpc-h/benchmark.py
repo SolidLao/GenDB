@@ -24,7 +24,8 @@ Output:
 Prerequisites:
     - TPC-H data generated: bash benchmarks/tpc-h/setup_data.sh <SF>
     - GenDB pipeline executed: node src/gendb/orchestrator.mjs --sf <SF> --max-iterations <N>
-    - PostgreSQL running with accessible 'postgres' user
+    - PostgreSQL 18 cluster "tpch" running on port 5435 (use: ./setup_postgresql_latest.sh)
+      Memory settings: shared_buffers=40GB, work_mem=8GB, effective_cache_size=280GB
     - Python packages: psycopg2, duckdb, matplotlib, pandas
 """
 
@@ -103,7 +104,7 @@ def get_pg_conn_params(scale_factor: int) -> dict:
     """Get PostgreSQL connection parameters for the given scale factor."""
     return {
         "host": "/var/run/postgresql",
-        "port": 5433,
+        "port": 5435,  # PostgreSQL 18 tpch cluster
         "user": "postgres",
         "dbname": f"tpch_sf{scale_factor}",
     }
@@ -153,7 +154,7 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     # Connect to postgres database to create/drop target database
     conn_default = psycopg2.connect(
         host="/var/run/postgresql",
-        port=5433,
+        port=5435,  # PostgreSQL 18 tpch cluster
         user="postgres",
         dbname="postgres",
     )
