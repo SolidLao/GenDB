@@ -5,10 +5,18 @@ TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB
 Runs TPC-H Q1, Q3, Q6 on all three systems and plots execution time comparison.
 
 Usage:
-    python3 benchmarks/tpc-h/benchmark.py [--gendb-bin <path>] [--data-dir <path>] [--runs <N>]
+    python3 benchmarks/tpc-h/benchmark.py --sf <N> [options]
+
+Options:
+    --sf <N>              Scale factor (required, e.g., 1, 10)
+    --gendb-bin <path>    Path to compiled GenDB main binary
+    --data-dir <path>     Path to TPC-H data directory (default: benchmarks/tpc-h/data/sf{N})
+    --runs <N>            Number of runs per query (default: 3)
+    --setup               Force database setup/reload (default: skip if DB exists)
+    --output <path>       Output plot path (default: results/sf{N}/figures/benchmark_results.png)
 
 Prerequisites:
-    - TPC-H data generated: bash benchmarks/tpc-h/setup_data.sh
+    - TPC-H data generated: bash benchmarks/tpc-h/setup_data.sh <SF>
     - GenDB C++ binary compiled: make -C <generated_dir>
     - PostgreSQL running with accessible 'postgres' user
     - Python packages: psycopg2, duckdb, matplotlib, pandas
@@ -85,12 +93,14 @@ QUERIES = {
 # PostgreSQL benchmark
 # ---------------------------------------------------------------------------
 
-PG_CONN_PARAMS = {
-    "host": "/var/run/postgresql",
-    "port": 5433,
-    "user": "postgres",
-    "dbname": "gendb_bench",
-}
+def get_pg_conn_params(scale_factor: int) -> dict:
+    """Get PostgreSQL connection parameters for the given scale factor."""
+    return {
+        "host": "/var/run/postgresql",
+        "port": 5433,
+        "user": "postgres",
+        "dbname": f"tpch_sf{scale_factor}",
+    }
 
 
 def _strip_fk_constraints(schema_sql: str) -> str:
@@ -106,18 +116,56 @@ def _strip_fk_constraints(schema_sql: str) -> str:
     return result
 
 
-def pg_setup(data_dir: Path):
+def pg_database_exists(scale_factor: int) -> bool:
+    """Check if PostgreSQL database exists and has data."""
+    try:
+        conn_params = get_pg_conn_params(scale_factor)
+        conn = psycopg2.connect(**conn_params)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM lineitem")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+
+def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     """Create TPC-H tables in PostgreSQL and load data from .tbl files."""
+    dbname = f"tpch_sf{scale_factor}"
+
+    # Check if database exists and has data
+    if not force_setup and pg_database_exists(scale_factor):
+        print(f"  Database '{dbname}' already exists with data, skipping setup.")
+        print(f"  Use --setup flag to force data reload.")
+        return
+
     schema_path = Path(__file__).parent / "schema.sql"
     schema_sql = schema_path.read_text()
 
-    conn = psycopg2.connect(**PG_CONN_PARAMS)
+    # Connect to postgres database to create/drop target database
+    conn_default = psycopg2.connect(
+        host="/var/run/postgresql",
+        port=5433,
+        user="postgres",
+        dbname="postgres",
+    )
+    conn_default.autocommit = True
+    cur_default = conn_default.cursor()
+
+    # Drop and recreate database
+    print(f"  Creating database '{dbname}'...")
+    cur_default.execute(f"DROP DATABASE IF EXISTS {dbname}")
+    cur_default.execute(f"CREATE DATABASE {dbname}")
+    cur_default.close()
+    conn_default.close()
+
+    # Connect to the new database
+    conn_params = get_pg_conn_params(scale_factor)
+    conn = psycopg2.connect(**conn_params)
     conn.autocommit = True
     cur = conn.cursor()
-
-    # Drop existing tables (reverse dependency order)
-    for table in ["lineitem", "partsupp", "orders", "customer", "supplier", "part", "region", "nation"]:
-        cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
 
     # Create tables (without FK constraints for faster loading)
     schema_no_fk = _strip_fk_constraints(schema_sql)
@@ -157,9 +205,10 @@ def pg_setup(data_dir: Path):
     conn.close()
 
 
-def pg_benchmark(num_runs: int) -> dict:
+def pg_benchmark(scale_factor: int, num_runs: int) -> dict:
     """Run queries on PostgreSQL and return timing results."""
-    conn = psycopg2.connect(**PG_CONN_PARAMS)
+    conn_params = get_pg_conn_params(scale_factor)
+    conn = psycopg2.connect(**conn_params)
     cur = conn.cursor()
 
     results = {}
@@ -330,23 +379,61 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
 
     ax.set_xlabel("TPC-H Query", fontsize=12)
     ax.set_ylabel("Execution Time (ms)", fontsize=12)
-    ax.set_title("TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB (SF={scale_factor})", fontsize=14)
+    ax.set_title(f"TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB (SF={scale_factor})", fontsize=14)
     ax.set_xticks([xi + width for xi in x])
     ax.set_xticklabels(queries, fontsize=11)
     ax.legend(fontsize=11)
     ax.grid(axis="y", alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    print(f"\nPlot saved to: {output_path}")
-
-    # Also save a log-scale version for large differences
+    # Use log scale for per-query plot to handle large differences
     ax.set_yscale("log")
     ax.set_ylabel("Execution Time (ms, log scale)", fontsize=12)
-    ax.set_title(f"TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB (SF={scale_factor}, log scale)", fontsize=14)
-    log_path = output_path.with_name(output_path.stem + "_log" + output_path.suffix)
-    plt.savefig(log_path, dpi=150)
-    print(f"Log-scale plot saved to: {log_path}")
+    ax.set_title(f"TPC-H Per-Query Execution Time (SF={scale_factor})", fontsize=14)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    print(f"\nPer-query plot saved to: {output_path}")
+
+    # Create a second plot showing total execution time
+    fig2, ax2 = plt.subplots(figsize=(8, 6))
+
+    # Calculate total execution time for each system
+    totals = {}
+    for system in systems:
+        totals[system] = sum(data[system])
+
+    x_pos = range(len(systems))
+    bars = ax2.bar(
+        x_pos,
+        [totals[s] for s in systems],
+        color=[colors.get(s, "#999999") for s in systems],
+    )
+
+    # Add value labels on bars
+    for bar, system in zip(bars, systems):
+        val = totals[system]
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() * 1.02,
+            f"{val:.1f} ms",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax2.set_xlabel("System", fontsize=12)
+    ax2.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
+    ax2.set_title(f"TPC-H Total Execution Time (SF={scale_factor})", fontsize=14)
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(systems, fontsize=11)
+    ax2.set_yscale("log")
+    ax2.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    total_path = output_path.with_name(output_path.stem + "_total" + output_path.suffix)
+    plt.savefig(total_path, dpi=150)
+    print(f"Total execution time plot saved to: {total_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +444,12 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
 def main():
     parser = argparse.ArgumentParser(description="TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB")
     parser.add_argument(
+        "--sf",
+        type=int,
+        required=True,
+        help="Scale factor (e.g., 1, 10)",
+    )
+    parser.add_argument(
         "--gendb-bin",
         type=Path,
         default=None,
@@ -365,15 +458,32 @@ def main():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path(__file__).parent / "data",
-        help="Path to TPC-H .tbl data files",
+        default=None,
+        help="Path to TPC-H .tbl data files (default: benchmarks/tpc-h/data/sf{N})",
     )
     parser.add_argument("--runs", type=int, default=3, help="Number of runs per query (default: 3)")
-    parser.add_argument("--sf", type=str, default=None, help="Scale factor label for plot title (auto-detected if omitted)")
-    parser.add_argument("--output", type=Path, default=None, help="Output plot path")
+    parser.add_argument("--setup", action="store_true", help="Force database setup/reload (default: skip if DB exists)")
+    parser.add_argument("--output", type=Path, default=None, help="Output plot path (default: results/sf{N}/figures/benchmark_results.png)")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent.parent
+    benchmark_root = Path(__file__).parent
+
+    # Set default data directory to data/sf{N}
+    if args.data_dir is None:
+        args.data_dir = benchmark_root / "data" / f"sf{args.sf}"
+
+    data_dir = args.data_dir.resolve()
+    if not (data_dir / "lineitem.tbl").exists():
+        print(f"Error: TPC-H data not found at {data_dir}")
+        print(f"Run: bash benchmarks/tpc-h/setup_data.sh {args.sf}")
+        sys.exit(1)
+
+    # Set default output path to results/sf{N}/figures/
+    if args.output is None:
+        results_dir = benchmark_root / "results" / f"sf{args.sf}" / "figures"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        args.output = results_dir / "benchmark_results.png"
 
     # Auto-detect GenDB binary
     if args.gendb_bin is None:
@@ -384,24 +494,10 @@ def main():
             print("Warning: GenDB binary not found. Run the GenDB pipeline first.")
             print(f"  Expected at: {latest_link}")
 
-    if args.output is None:
-        args.output = project_root / "benchmarks" / "tpc-h" / "benchmark_results.png"
-
-    data_dir = args.data_dir.resolve()
-    if not (data_dir / "lineitem.tbl").exists():
-        print(f"Error: TPC-H data not found at {data_dir}")
-        print("Run: bash benchmarks/tpc-h/setup_data.sh")
-        sys.exit(1)
-
-    # Auto-detect scale factor from lineitem row count (~6M per SF)
-    if args.sf is None:
-        li_lines = sum(1 for _ in open(data_dir / "lineitem.tbl"))
-        sf_est = round(li_lines / 6_000_000)
-        args.sf = str(max(sf_est, 1))
-
-    print(f"Data directory: {data_dir}")
     print(f"Scale factor:   {args.sf}")
+    print(f"Data directory: {data_dir}")
     print(f"Runs per query: {args.runs}")
+    print(f"Force setup:    {args.setup}")
     print()
 
     all_results = {}
@@ -418,9 +514,9 @@ def main():
     # --- PostgreSQL ---
     print("\n=== PostgreSQL Setup ===")
     try:
-        pg_setup(data_dir)
+        pg_setup(data_dir, args.sf, args.setup)
         print("\n=== PostgreSQL Benchmark ===")
-        all_results["PostgreSQL"] = pg_benchmark(args.runs)
+        all_results["PostgreSQL"] = pg_benchmark(args.sf, args.runs)
     except Exception as e:
         print(f"  PostgreSQL error: {e}")
 
@@ -454,7 +550,9 @@ def main():
     print()
 
     # --- Save JSON results ---
-    json_path = args.output.with_suffix(".json")
+    metrics_dir = benchmark_root / "results" / f"sf{args.sf}" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    json_path = metrics_dir / "benchmark_results.json"
     json_data = {}
     for system, results in all_results.items():
         json_data[system] = {q: {"all_ms": times, "best_ms": min(times)} for q, times in results.items()}
@@ -464,7 +562,7 @@ def main():
 
     # --- Plot ---
     if len(all_results) >= 2:
-        plot_results(all_results, args.output, scale_factor=args.sf)
+        plot_results(all_results, args.output, scale_factor=str(args.sf))
     else:
         print("Not enough systems to plot (need at least 2).")
 
