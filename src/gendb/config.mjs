@@ -16,3 +16,8 @@ export const AGENTS_DIR = resolve(__dirname, "agents");
 
 export const DEFAULT_SCHEMA = resolve(BENCHMARKS_DIR, "tpc-h/schema.sql");
 export const DEFAULT_QUERIES = resolve(BENCHMARKS_DIR, "tpc-h/queries.sql");
+
+/** Resolve the data directory for a given benchmark and scale factor. */
+export function getDataDir(benchmark, scaleFactor) {
+  return resolve(BENCHMARKS_DIR, benchmark, "data", `sf${scaleFactor}`);
+}

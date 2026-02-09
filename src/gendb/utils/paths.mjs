@@ -36,6 +36,16 @@ export async function createRunDir(workload, runId) {
   return runDir;
 }
 
+/**
+ * Creates `iterations/<i>/generated/` inside the run directory.
+ * Returns the absolute path to the iteration directory.
+ */
+export async function createIterationDir(runDir, iteration) {
+  const iterDir = resolve(runDir, "iterations", String(iteration));
+  await mkdir(resolve(iterDir, "generated"), { recursive: true });
+  return iterDir;
+}
+
 /** Updates (or creates) the `output/<workload>/latest` symlink to point at `<runId>`. */
 export async function updateLatestSymlink(workload, runId) {
   const linkPath = resolve(OUTPUT_DIR, workload, "latest");

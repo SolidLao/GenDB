@@ -3,21 +3,27 @@
 TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB
 
 Runs TPC-H Q1, Q3, Q6 on all three systems and plots execution time comparison.
+For GenDB, runs all iterations (baseline + optimizations) and uses best performance.
 
 Usage:
     python3 benchmarks/tpc-h/benchmark.py --sf <N> [options]
 
 Options:
     --sf <N>              Scale factor (required, e.g., 1, 10)
-    --gendb-bin <path>    Path to compiled GenDB main binary
+    --gendb-run <path>    Path to GenDB run directory (default: output/tpc-h/latest/)
     --data-dir <path>     Path to TPC-H data directory (default: benchmarks/tpc-h/data/sf{N})
     --runs <N>            Number of runs per query (default: 3)
     --setup               Force database setup/reload (default: skip if DB exists)
-    --output <path>       Output plot path (default: results/sf{N}/figures/benchmark_results.png)
+    --output <path>       Output plot path (default: results/sf{N}/figures/benchmark_results_per_query.png)
+
+Output:
+    - benchmark_results_per_query.png: Per-query comparison across all systems
+    - benchmark_results_total.png: Total execution time comparison across all systems
+    - benchmark_results_gendb_iterations.png: GenDB performance evolution (total + per-query)
 
 Prerequisites:
     - TPC-H data generated: bash benchmarks/tpc-h/setup_data.sh <SF>
-    - GenDB C++ binary compiled: make -C <generated_dir>
+    - GenDB pipeline executed: node src/gendb/orchestrator.mjs --sf <SF> --max-iterations <N>
     - PostgreSQL running with accessible 'postgres' user
     - Python packages: psycopg2, duckdb, matplotlib, pandas
 """
@@ -283,8 +289,8 @@ def duckdb_benchmark(conn: duckdb.DuckDBPyConnection, num_runs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def gendb_benchmark(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
-    """Run the GenDB compiled C++ binary and parse timing from its output."""
+def gendb_benchmark_single(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
+    """Run a single GenDB compiled C++ binary and parse timing from its output."""
     results = {}
 
     for _ in range(num_runs):
@@ -298,14 +304,8 @@ def gendb_benchmark(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
             print(f"  GenDB error: {proc.stderr}")
             return {}
 
-        # Parse "Query execution time: <N> ms" lines from output
-        for line in proc.stdout.splitlines():
-            for qname in QUERIES:
-                # Match lines like "=== Q1: ..." to know which query we're in
-                pass
-
-        # Parse timing: look for pattern "Query execution time: <N> ms"
-        # or "execution time: <N> ms" paired with query headers
+        # Parse timing: look for pattern "Execution time: <N> ms"
+        # paired with query headers like "=== Q1: ..."
         current_query = None
         for line in proc.stdout.splitlines():
             if "Q1" in line and "===" in line:
@@ -315,7 +315,7 @@ def gendb_benchmark(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
             elif "Q6" in line and "===" in line:
                 current_query = "Q6"
 
-            match = re.search(r"[Qq]uery execution time:\s*([\d.]+)\s*ms", line)
+            match = re.search(r"Execution time:\s*([\d.]+)\s*ms", line, re.IGNORECASE)
             if match and current_query:
                 ms = float(match.group(1))
                 if current_query not in results:
@@ -323,18 +323,143 @@ def gendb_benchmark(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
                 results[current_query].append(ms)
                 current_query = None
 
-    for qname in QUERIES:
-        if qname in results:
-            print(f"  GenDB {qname}: {min(results[qname]):.1f} ms (best of {num_runs})")
-        else:
-            print(f"  GenDB {qname}: NOT FOUND in output")
-
     return results
+
+
+def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int) -> dict:
+    """
+    Run all GenDB iterations (baseline + optimizations) and return performance history.
+    Returns:
+    {
+      "baseline": {"Q1": [times], "Q3": [times], "Q6": [times]},
+      "iterations": [
+        {"iteration": 1, "Q1": [times], "Q3": [times], "Q6": [times]},
+        {"iteration": 2, ...},
+      ],
+      "best": {"Q1": [times], "Q3": [times], "Q6": [times]}  # best overall
+    }
+    """
+    history = {"baseline": {}, "iterations": [], "best": {}}
+
+    # Run baseline
+    baseline_bin = run_dir / "generated" / "main"
+    if baseline_bin.exists():
+        print("  Running baseline...")
+        baseline_results = gendb_benchmark_single(baseline_bin, data_dir, num_runs)
+        history["baseline"] = baseline_results
+        for qname in QUERIES:
+            if qname in baseline_results:
+                print(f"    Baseline {qname}: {min(baseline_results[qname]):.1f} ms (best of {num_runs})")
+
+    # Run all optimization iterations
+    iterations_dir = run_dir / "iterations"
+    if iterations_dir.exists():
+        iter_dirs = sorted([d for d in iterations_dir.iterdir() if d.is_dir() and d.name.isdigit()],
+                          key=lambda d: int(d.name))
+
+        for iter_dir in iter_dirs:
+            iter_num = int(iter_dir.name)
+            iter_bin = iter_dir / "generated" / "main"
+
+            if iter_bin.exists():
+                print(f"  Running iteration {iter_num}...")
+                iter_results = gendb_benchmark_single(iter_bin, data_dir, num_runs)
+
+                iter_entry = {"iteration": iter_num}
+                for qname in QUERIES:
+                    if qname in iter_results:
+                        iter_entry[qname] = iter_results[qname]
+                        print(f"    Iteration {iter_num} {qname}: {min(iter_results[qname]):.1f} ms (best of {num_runs})")
+
+                history["iterations"].append(iter_entry)
+
+    # Determine best overall performance per query
+    all_results = [history["baseline"]] + history["iterations"]
+    for qname in QUERIES:
+        best_times = []
+        for result in all_results:
+            if qname in result and isinstance(result[qname], list):
+                best_times.extend(result[qname])
+        if best_times:
+            history["best"][qname] = [min(best_times)]  # Keep as list for consistency
+
+    return history
 
 
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
+
+
+def plot_gendb_iterations(gendb_history: dict, output_path: Path, scale_factor: str = "?"):
+    """
+    Create a two-subplot figure showing GenDB's performance evolution:
+    - Left: Total execution time across iterations
+    - Right: Per-query execution time across iterations
+    """
+    queries = ["Q1", "Q3", "Q6"]
+    colors = {"Q1": "#2196F3", "Q3": "#4CAF50", "Q6": "#FF9800", "Total": "#9C27B0"}
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Prepare data: baseline + iterations
+    labels = ["Baseline"]
+    baseline_data = {q: min(gendb_history["baseline"].get(q, [0])) if gendb_history["baseline"].get(q) else 0
+                     for q in queries}
+
+    iter_data = []
+    for iter_entry in gendb_history["iterations"]:
+        iter_num = iter_entry["iteration"]
+        labels.append(f"Iter {iter_num}")
+        iter_data.append({
+            q: min(iter_entry.get(q, [0])) if iter_entry.get(q) else 0
+            for q in queries
+        })
+
+    x_pos = range(len(labels))
+
+    # Left subplot: Total execution time
+    total_values = [sum(baseline_data.values())]
+    for d in iter_data:
+        total_values.append(sum(d.values()))
+
+    ax1.plot(x_pos, total_values, marker='o', linewidth=2.5, markersize=10,
+             color=colors["Total"], label="Total")
+
+    # Add value labels
+    for x, y in zip(x_pos, total_values):
+        if y > 0:
+            ax1.text(x, y * 1.02, f"{y:.1f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
+
+    ax1.set_xlabel("Iteration", fontsize=12)
+    ax1.set_ylabel("Total Execution Time (ms)", fontsize=12)
+    ax1.set_title(f"Total Execution Time Evolution (SF={scale_factor})", fontsize=13, fontweight="bold")
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(labels, fontsize=11)
+    ax1.grid(axis="y", alpha=0.3)
+
+    # Right subplot: Per-query execution time
+    for q in queries:
+        y_values = [baseline_data[q]] + [d[q] for d in iter_data]
+        ax2.plot(x_pos, y_values, marker='o', linewidth=2, markersize=8,
+                label=q, color=colors[q])
+
+        # Add value labels
+        for x, y in zip(x_pos, y_values):
+            if y > 0:
+                ax2.text(x, y * 1.05, f"{y:.0f}", ha="center", va="bottom", fontsize=9)
+
+    ax2.set_xlabel("Iteration", fontsize=12)
+    ax2.set_ylabel("Execution Time (ms)", fontsize=12)
+    ax2.set_title(f"Per-Query Execution Time Evolution (SF={scale_factor})", fontsize=13, fontweight="bold")
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(labels, fontsize=11)
+    ax2.legend(fontsize=11)
+    ax2.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    print(f"GenDB iteration plot saved to: {output_path}")
 
 
 def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
@@ -431,7 +556,9 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     ax2.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    total_path = output_path.with_name(output_path.stem + "_total" + output_path.suffix)
+    # Remove "_per_query" suffix if present for total plot
+    base_name = output_path.stem.replace("_per_query", "")
+    total_path = output_path.with_name(base_name + "_total" + output_path.suffix)
     plt.savefig(total_path, dpi=150)
     print(f"Total execution time plot saved to: {total_path}")
 
@@ -450,10 +577,10 @@ def main():
         help="Scale factor (e.g., 1, 10)",
     )
     parser.add_argument(
-        "--gendb-bin",
+        "--gendb-run",
         type=Path,
         default=None,
-        help="Path to compiled GenDB main binary (default: auto-detect from output/tpc-h/latest/generated/main)",
+        help="Path to GenDB run directory with iterations (default: auto-detect from output/tpc-h/latest/)",
     )
     parser.add_argument(
         "--data-dir",
@@ -483,15 +610,15 @@ def main():
     if args.output is None:
         results_dir = benchmark_root / "results" / f"sf{args.sf}" / "figures"
         results_dir.mkdir(parents=True, exist_ok=True)
-        args.output = results_dir / "benchmark_results.png"
+        args.output = results_dir / "benchmark_results_per_query.png"
 
-    # Auto-detect GenDB binary
-    if args.gendb_bin is None:
-        latest_link = project_root / "output" / "tpc-h" / "latest" / "generated" / "main"
-        if latest_link.exists():
-            args.gendb_bin = latest_link
+    # Auto-detect GenDB run directory
+    if args.gendb_run is None:
+        latest_link = project_root / "output" / "tpc-h" / "latest"
+        if latest_link.exists() and latest_link.is_dir():
+            args.gendb_run = latest_link
         else:
-            print("Warning: GenDB binary not found. Run the GenDB pipeline first.")
+            print("Warning: GenDB run directory not found. Run the GenDB pipeline first.")
             print(f"  Expected at: {latest_link}")
 
     print(f"Scale factor:   {args.sf}")
@@ -501,15 +628,20 @@ def main():
     print()
 
     all_results = {}
+    gendb_history = None
 
     # --- GenDB ---
-    if args.gendb_bin and args.gendb_bin.exists():
-        print(f"=== GenDB ({args.gendb_bin}) ===")
-        gendb_results = gendb_benchmark(args.gendb_bin, data_dir, args.runs)
-        if gendb_results:
-            all_results["GenDB"] = gendb_results
+    if args.gendb_run and args.gendb_run.exists():
+        print(f"=== GenDB ({args.gendb_run}) ===")
+        gendb_history = gendb_benchmark_all_iterations(args.gendb_run, data_dir, args.runs)
+        if gendb_history and gendb_history["best"]:
+            all_results["GenDB"] = gendb_history["best"]
+            print(f"\n  Best overall performance:")
+            for qname in QUERIES:
+                if qname in gendb_history["best"]:
+                    print(f"    {qname}: {min(gendb_history['best'][qname]):.1f} ms")
     else:
-        print("=== GenDB: SKIPPED (binary not found) ===")
+        print("=== GenDB: SKIPPED (run directory not found) ===")
 
     # --- PostgreSQL ---
     print("\n=== PostgreSQL Setup ===")
@@ -560,11 +692,20 @@ def main():
         json.dump(json_data, f, indent=2)
     print(f"Results saved to: {json_path}")
 
-    # --- Plot ---
+    # --- Plot system comparison ---
     if len(all_results) >= 2:
         plot_results(all_results, args.output, scale_factor=str(args.sf))
     else:
         print("Not enough systems to plot (need at least 2).")
+
+    # --- Plot GenDB iteration evolution ---
+    if gendb_history and (gendb_history["baseline"] or gendb_history["iterations"]):
+        # Remove "_per_query" suffix if present for iterations plot
+        base_name = args.output.stem.replace("_per_query", "")
+        iter_plot_path = args.output.with_name(base_name + "_gendb_iterations" + args.output.suffix)
+        plot_gendb_iterations(gendb_history, iter_plot_path, scale_factor=str(args.sf))
+    else:
+        print("No GenDB iteration data available for evolution plot.")
 
 
 if __name__ == "__main__":
