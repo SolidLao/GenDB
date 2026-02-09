@@ -6,14 +6,14 @@
  *
  * Pipeline: Workload Analyzer → Storage/Index Designer → Code Generator → Evaluator
  *
- * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>]
+ * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
  */
 
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { resolve } from "path";
 import { existsSync } from "fs";
-import { DEFAULT_SCHEMA, DEFAULT_QUERIES } from "./config.mjs";
+import { DEFAULT_SCHEMA, DEFAULT_QUERIES, BENCHMARKS_DIR } from "./config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
 import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
@@ -26,10 +26,15 @@ import { createRunId, getWorkloadName, createRunDir, updateLatestSymlink } from 
 
 /** Parse simple CLI args */
 function parseArgs(argv) {
-  const args = { schema: DEFAULT_SCHEMA, queries: DEFAULT_QUERIES };
+  const args = {
+    schema: DEFAULT_SCHEMA,
+    queries: DEFAULT_QUERIES,
+    dataDir: resolve(BENCHMARKS_DIR, "tpc-h/data"),
+  };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
     if (argv[i] === "--queries" && argv[i + 1]) args.queries = resolve(argv[++i]);
+    if (argv[i] === "--data-dir" && argv[i + 1]) args.dataDir = resolve(argv[++i]);
   }
   return args;
 }
@@ -113,6 +118,13 @@ async function main() {
   const schema = await readFile(args.schema, "utf-8");
   const queries = await readFile(args.queries, "utf-8");
 
+  // Validate data directory exists
+  if (!existsSync(args.dataDir)) {
+    console.error(`[Orchestrator] Error: data directory not found: ${args.dataDir}`);
+    console.error(`[Orchestrator] Run 'bash benchmarks/tpc-h/setup_data.sh' first to generate TPC-H data.`);
+    process.exit(1);
+  }
+
   // Determine workload and create run directory
   const workload = getWorkloadName(args.schema);
   const runId = createRunId();
@@ -121,12 +133,14 @@ async function main() {
   console.log("[Orchestrator] GenDB Pipeline");
   console.log(`[Orchestrator] Schema:   ${args.schema}`);
   console.log(`[Orchestrator] Queries:  ${args.queries}`);
+  console.log(`[Orchestrator] Data Dir: ${args.dataDir}`);
   console.log(`[Orchestrator] Workload: ${workload}`);
   console.log(`[Orchestrator] Run ID:   ${runId}`);
   console.log(`[Orchestrator] Run Dir:  ${runDir}`);
 
   // Initialize step tracking in run.json
   await updateRunMeta(runDir, (meta) => {
+    meta.dataDir = args.dataDir;
     meta.steps = {
       workload_analysis: { status: "pending" },
       storage_design: { status: "pending" },
@@ -262,6 +276,10 @@ async function main() {
   const generatorSystemPrompt = await readFile(codeGeneratorConfig.promptPath, "utf-8");
   const generatedDir = resolve(runDir, "generated");
   await mkdir(generatedDir, { recursive: true });
+  await mkdir(resolve(generatedDir, "utils"), { recursive: true });
+  await mkdir(resolve(generatedDir, "storage"), { recursive: true });
+  await mkdir(resolve(generatedDir, "index"), { recursive: true });
+  await mkdir(resolve(generatedDir, "queries"), { recursive: true });
 
   const generatorUserPrompt = [
     "Generate C++ code for this workload.",
@@ -272,9 +290,22 @@ async function main() {
     `- Schema: ${args.schema}`,
     `- Queries: ${args.queries}`,
     "",
+    `## Data Directory`,
+    `TPC-H .tbl files are located at: ${args.dataDir}`,
+    "",
     `## Output Directory`,
     `Write all generated files to: ${generatedDir}`,
-    `- ${resolve(generatedDir, "datagen.cpp")}`,
+    `Subdirectories already exist: utils/, storage/, index/, queries/`,
+    "",
+    `Files to produce:`,
+    `- ${resolve(generatedDir, "utils/date_utils.h")}`,
+    `- ${resolve(generatedDir, "storage/storage.h")}`,
+    `- ${resolve(generatedDir, "storage/storage.cpp")}`,
+    `- ${resolve(generatedDir, "index/index.h")}`,
+    `- ${resolve(generatedDir, "queries/queries.h")}`,
+    `- ${resolve(generatedDir, "queries/q1.cpp")}`,
+    `- ${resolve(generatedDir, "queries/q3.cpp")}`,
+    `- ${resolve(generatedDir, "queries/q6.cpp")}`,
     `- ${resolve(generatedDir, "main.cpp")}`,
     `- ${resolve(generatedDir, "Makefile")}`,
     "",
@@ -290,7 +321,18 @@ async function main() {
   });
 
   // Verify generated files exist
-  const requiredFiles = ["main.cpp", "datagen.cpp", "Makefile"];
+  const requiredFiles = [
+    "utils/date_utils.h",
+    "storage/storage.h",
+    "storage/storage.cpp",
+    "index/index.h",
+    "queries/queries.h",
+    "queries/q1.cpp",
+    "queries/q3.cpp",
+    "queries/q6.cpp",
+    "main.cpp",
+    "Makefile",
+  ];
   const missingFiles = requiredFiles.filter((f) => !existsSync(resolve(generatedDir, f)));
 
   if (missingFiles.length > 0) {
@@ -328,13 +370,12 @@ async function main() {
     `## Generated code directory`,
     `${generatedDir}`,
     "",
-    `The directory contains: main.cpp, datagen.cpp, Makefile`,
+    `## TPC-H data directory`,
+    `${args.dataDir}`,
     "",
     `## Evaluation steps`,
-    `1. cd ${generatedDir} && make datagen`,
-    `2. cd ${generatedDir} && ./datagen`,
-    `3. cd ${generatedDir} && make main`,
-    `4. cd ${generatedDir} && ./main .`,
+    `1. cd ${generatedDir} && make clean && make all`,
+    `2. cd ${generatedDir} && ./main ${args.dataDir}`,
     "",
     `IMPORTANT: Write the evaluation report to: ${evaluationPath}`,
     `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
