@@ -8,4 +8,5 @@ export const defaults = {
   scaleFactor: 1,
   targetBenchmark: "tpc-h",
   model: "sonnet",
+  optimizationTarget: "execution_time",
 };

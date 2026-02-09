@@ -6,19 +6,24 @@
  *   Phase 2 (Optimization Loop): Learner → Orchestrator Agent → Operator Specialist → Evaluator
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
- *        [--sf <N>] [--max-iterations <N>] [--model <name>]
+ *        [--sf <N>] [--max-iterations <N>] [--model <name>] [--optimization-target <target>]
  */
 
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, cp } from "fs/promises";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import { existsSync } from "fs";
+import { fileURLToPath } from "url";
 import {
   DEFAULT_SCHEMA,
   DEFAULT_QUERIES,
   BENCHMARKS_DIR,
   getDataDir,
 } from "./config.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const KNOWLEDGE_BASE_PATH = resolve(__dirname, "knowledge");
 import { defaults } from "./gendb.config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
@@ -48,6 +53,7 @@ function parseArgs(argv) {
     scaleFactor: defaults.scaleFactor,
     maxIterations: defaults.maxOptimizationIterations,
     model: defaults.model,
+    optimizationTarget: defaults.optimizationTarget,
   };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
@@ -56,6 +62,7 @@ function parseArgs(argv) {
     if (argv[i] === "--sf" && argv[i + 1]) args.scaleFactor = parseInt(argv[++i], 10);
     if (argv[i] === "--max-iterations" && argv[i + 1]) args.maxIterations = parseInt(argv[++i], 10);
     if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
+    if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
   }
   // If no explicit --data-dir, resolve from scale factor
   if (!args.dataDir) {
@@ -174,6 +181,7 @@ async function runBaseline(args, runDir, schema, queries) {
     meta.scaleFactor = args.scaleFactor;
     meta.maxIterations = args.maxIterations;
     meta.model = args.model;
+    meta.optimizationTarget = args.optimizationTarget;
     meta.phase1 = {
       status: "running",
       steps: {
@@ -198,6 +206,11 @@ async function runBaseline(args, runDir, schema, queries) {
 
   const analyzerUserPrompt = [
     "Analyze the following TPC-H workload.",
+    "",
+    `## Optimization Target: ${args.optimizationTarget}`,
+    "",
+    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+    `Read relevant knowledge files to inform your analysis.`,
     "",
     "## Schema",
     "```sql",
@@ -255,6 +268,11 @@ async function runBaseline(args, runDir, schema, queries) {
   const designerUserPrompt = [
     "Design the storage layout and index structures for this workload.",
     "",
+    `## Optimization Target: ${args.optimizationTarget}`,
+    "",
+    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+    `Read relevant knowledge files (especially storage/ and indexing/) to inform your design decisions.`,
+    "",
     "## Workload Analysis",
     `Read the workload analysis from: ${workloadAnalysisPath}`,
     "",
@@ -310,6 +328,11 @@ async function runBaseline(args, runDir, schema, queries) {
 
   const generatorUserPrompt = [
     "Generate C++ code for this workload.",
+    "",
+    `## Optimization Target: ${args.optimizationTarget}`,
+    "",
+    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+    `Consult relevant knowledge files for implementation patterns and optimization techniques.`,
     "",
     "## Input Files",
     `- Workload analysis: ${workloadAnalysisPath}`,
@@ -427,6 +450,8 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath) {
   const evaluatorUserPrompt = [
     "Evaluate the generated C++ code.",
     "",
+    `## Optimization Target: ${args.optimizationTarget}`,
+    "",
     `## Generated code directory`,
     `${generatedDir}`,
     "",
@@ -508,6 +533,11 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     const learnerUserPrompt = [
       `Analyze evaluation results and recommend optimizations for iteration ${iteration}.`,
       "",
+      `## Optimization Target: ${args.optimizationTarget}`,
+      "",
+      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+      `Read relevant knowledge files to inform your bottleneck analysis and optimization recommendations. You are encouraged to propose techniques beyond what's documented.`,
+      "",
       "## Input Files",
       `- Evaluation results: ${bestEvaluationPath}`,
       `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
@@ -544,6 +574,10 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
 
     const orchAgentUserPrompt = [
       `Decide whether to continue optimizing or stop (iteration ${iteration}/${maxIter}).`,
+      "",
+      `## Optimization Target: ${args.optimizationTarget}`,
+      "",
+      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
       "",
       "## Input Files",
       `- Current evaluation results: ${bestEvaluationPath}`,
@@ -589,6 +623,11 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
 
     const opSpecUserPrompt = [
       `Apply selected optimizations to the C++ code for iteration ${iteration}.`,
+      "",
+      `## Optimization Target: ${args.optimizationTarget}`,
+      "",
+      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+      `Read relevant knowledge files for implementation patterns. You are empowered to implement any technique — vectorized execution, SIMD intrinsics, custom hash tables, operator fusion, external libraries — as long as correctness is preserved.`,
       "",
       "## Input Files",
       `- Orchestrator decision: ${iterDecisionPath}`,
@@ -752,15 +791,17 @@ async function main() {
   }
 
   console.log("[Orchestrator] GenDB Pipeline");
-  console.log(`[Orchestrator] Schema:         ${args.schema}`);
-  console.log(`[Orchestrator] Queries:        ${args.queries}`);
-  console.log(`[Orchestrator] Data Dir:       ${args.dataDir}`);
-  console.log(`[Orchestrator] Scale Factor:   ${args.scaleFactor}`);
-  console.log(`[Orchestrator] Max Iterations: ${args.maxIterations}`);
-  console.log(`[Orchestrator] Model:          ${args.model}`);
-  console.log(`[Orchestrator] Workload:       ${workload}`);
-  console.log(`[Orchestrator] Run ID:         ${runId}`);
-  console.log(`[Orchestrator] Run Dir:        ${runDir}`);
+  console.log(`[Orchestrator] Schema:              ${args.schema}`);
+  console.log(`[Orchestrator] Queries:             ${args.queries}`);
+  console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
+  console.log(`[Orchestrator] Scale Factor:        ${args.scaleFactor}`);
+  console.log(`[Orchestrator] Max Iterations:      ${args.maxIterations}`);
+  console.log(`[Orchestrator] Model:               ${args.model}`);
+  console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
+  console.log(`[Orchestrator] Knowledge Base:      ${KNOWLEDGE_BASE_PATH}`);
+  console.log(`[Orchestrator] Workload:            ${workload}`);
+  console.log(`[Orchestrator] Run ID:              ${runId}`);
+  console.log(`[Orchestrator] Run Dir:             ${runDir}`);
 
   // Phase 1: Baseline
   const { generatedDir, evaluationPath } = await runBaseline(args, runDir, schema, queries);
