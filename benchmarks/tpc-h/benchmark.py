@@ -181,8 +181,9 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
         if stmt and stmt.upper().startswith("CREATE"):
             cur.execute(stmt)
 
-    # Load data using COPY
-    # TPC-H .tbl files have a trailing pipe on each line; strip it for PostgreSQL COPY
+    # Load data using COPY with PROGRAM to strip trailing pipes efficiently
+    # TPC-H .tbl files have a trailing pipe on each line (field1|field2|field3|)
+    # PostgreSQL COPY expects no trailing delimiter, so we use sed to strip it on-the-fly
     tables_to_load = ["nation", "region", "supplier", "part", "partsupp", "customer", "orders", "lineitem"]
     for table in tables_to_load:
         tbl_file = data_dir / f"{table}.tbl"
@@ -190,20 +191,30 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
             print(f"  Warning: {tbl_file} not found, skipping")
             continue
         print(f"  Loading {table}...", end="", flush=True)
-        import io
-        # Read file, strip trailing pipe from each line, feed to COPY
-        with open(tbl_file, "r") as f:
-            cleaned = io.StringIO()
-            for line in f:
-                line = line.rstrip("\n")
-                if line.endswith("|"):
-                    line = line[:-1]
-                cleaned.write(line + "\n")
-            cleaned.seek(0)
-            cur.copy_expert(
-                f"COPY {table} FROM STDIN WITH (DELIMITER '|')",
-                cleaned,
+
+        # Use PROGRAM to pipe through sed for efficient on-the-fly processing
+        # This avoids loading entire file into memory
+        try:
+            cur.execute(
+                f"COPY {table} FROM PROGRAM 'sed ''s/|$//' {tbl_file}' WITH (DELIMITER '|')"
             )
+        except Exception as e:
+            # Fallback to in-memory approach if PROGRAM doesn't work
+            print(f"\n  Note: Using fallback method for {table} ({e})")
+            import io
+            with open(tbl_file, "r") as f:
+                cleaned = io.StringIO()
+                for line in f:
+                    line = line.rstrip("\n")
+                    if line.endswith("|"):
+                        line = line[:-1]
+                    cleaned.write(line + "\n")
+                cleaned.seek(0)
+                cur.copy_expert(
+                    f"COPY {table} FROM STDIN WITH (DELIMITER '|')",
+                    cleaned,
+                )
+
         cur.execute(f"SELECT COUNT(*) FROM {table}")
         count = cur.fetchone()[0]
         print(f" {count:,} rows")
@@ -228,7 +239,8 @@ def pg_benchmark(scale_factor: int, num_runs: int) -> dict:
             elapsed = (time.perf_counter() - start) * 1000  # ms
             times.append(elapsed)
         results[qname] = times
-        print(f"  PostgreSQL {qname}: {min(times):.1f} ms (best of {num_runs})")
+        avg_time = sum(times) / len(times)
+        print(f"  PostgreSQL {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
 
     cur.close()
     conn.close()
@@ -240,9 +252,44 @@ def pg_benchmark(scale_factor: int, num_runs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def duckdb_setup(data_dir: Path) -> duckdb.DuckDBPyConnection:
-    """Create TPC-H tables in DuckDB and load data from .tbl files."""
-    conn = duckdb.connect()
+def duckdb_database_exists(db_path: Path) -> bool:
+    """Check if DuckDB database exists and has data."""
+    if not db_path.exists():
+        return False
+    try:
+        conn = duckdb.connect(str(db_path), read_only=True)
+        count = conn.execute("SELECT COUNT(*) FROM lineitem").fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+
+def duckdb_setup(data_dir: Path, scale_factor: int, force_setup: bool = False) -> duckdb.DuckDBPyConnection:
+    """Create TPC-H tables in DuckDB and load data from .tbl files.
+
+    Uses persistent storage in benchmarks/tpc-h/duckdb/tpch_sf{N}.duckdb
+    """
+    # Create duckdb directory if it doesn't exist
+    duckdb_dir = Path(__file__).parent / "duckdb"
+    duckdb_dir.mkdir(exist_ok=True)
+
+    db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
+
+    # Check if database exists and has data
+    if not force_setup and duckdb_database_exists(db_path):
+        print(f"  Database '{db_path.name}' already exists with data, skipping setup.")
+        print(f"  Use --setup flag to force data reload.")
+        conn = duckdb.connect(str(db_path))
+        return conn
+
+    # Remove existing database if force_setup
+    if force_setup and db_path.exists():
+        print(f"  Removing existing database '{db_path.name}'...")
+        db_path.unlink()
+
+    print(f"  Creating persistent database '{db_path.name}'...")
+    conn = duckdb.connect(str(db_path))
 
     schema_path = Path(__file__).parent / "schema.sql"
     schema_sql = schema_path.read_text()
@@ -253,6 +300,7 @@ def duckdb_setup(data_dir: Path) -> duckdb.DuckDBPyConnection:
         if stmt and stmt.upper().startswith("CREATE"):
             conn.execute(stmt)
 
+    # DuckDB automatically handles trailing pipe in .tbl files
     tables_to_load = ["nation", "region", "supplier", "part", "partsupp", "customer", "orders", "lineitem"]
     for table in tables_to_load:
         tbl_file = data_dir / f"{table}.tbl"
@@ -269,8 +317,20 @@ def duckdb_setup(data_dir: Path) -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def duckdb_benchmark(conn: duckdb.DuckDBPyConnection, num_runs: int) -> dict:
-    """Run queries on DuckDB and return timing results."""
+def duckdb_benchmark(scale_factor: int, num_runs: int) -> dict:
+    """Run queries on DuckDB and return timing results.
+
+    Connects to persistent database for benchmarking.
+    """
+    duckdb_dir = Path(__file__).parent / "duckdb"
+    db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
+
+    if not db_path.exists():
+        print(f"  Error: DuckDB database not found at {db_path}")
+        return {}
+
+    conn = duckdb.connect(str(db_path), read_only=True)
+
     results = {}
     for qname, sql in QUERIES.items():
         times = []
@@ -280,8 +340,10 @@ def duckdb_benchmark(conn: duckdb.DuckDBPyConnection, num_runs: int) -> dict:
             elapsed = (time.perf_counter() - start) * 1000  # ms
             times.append(elapsed)
         results[qname] = times
-        print(f"  DuckDB {qname}: {min(times):.1f} ms (best of {num_runs})")
+        avg_time = sum(times) / len(times)
+        print(f"  DuckDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
 
+    conn.close()
     return results
 
 
@@ -350,7 +412,8 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
         history["baseline"] = baseline_results
         for qname in QUERIES:
             if qname in baseline_results:
-                print(f"    Baseline {qname}: {min(baseline_results[qname]):.1f} ms (best of {num_runs})")
+                avg_time = sum(baseline_results[qname]) / len(baseline_results[qname])
+                print(f"    Baseline {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
 
     # Run all optimization iterations
     iterations_dir = run_dir / "iterations"
@@ -370,19 +433,24 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
                 for qname in QUERIES:
                     if qname in iter_results:
                         iter_entry[qname] = iter_results[qname]
-                        print(f"    Iteration {iter_num} {qname}: {min(iter_results[qname]):.1f} ms (best of {num_runs})")
+                        avg_time = sum(iter_results[qname]) / len(iter_results[qname])
+                        print(f"    Iteration {iter_num} {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
 
                 history["iterations"].append(iter_entry)
 
-    # Determine best overall performance per query
+    # Determine best overall performance per query (based on average of each iteration)
     all_results = [history["baseline"]] + history["iterations"]
     for qname in QUERIES:
-        best_times = []
+        best_avg = None
+        best_times_list = None
         for result in all_results:
-            if qname in result and isinstance(result[qname], list):
-                best_times.extend(result[qname])
-        if best_times:
-            history["best"][qname] = [min(best_times)]  # Keep as list for consistency
+            if qname in result and isinstance(result[qname], list) and len(result[qname]) > 0:
+                avg = sum(result[qname]) / len(result[qname])
+                if best_avg is None or avg < best_avg:
+                    best_avg = avg
+                    best_times_list = result[qname]
+        if best_times_list:
+            history["best"][qname] = best_times_list  # Keep original times for consistency
 
     return history
 
@@ -403,9 +471,10 @@ def plot_gendb_iterations(gendb_history: dict, output_path: Path, scale_factor: 
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-    # Prepare data: baseline + iterations
+    # Prepare data: baseline + iterations (using average times)
     labels = ["Baseline"]
-    baseline_data = {q: min(gendb_history["baseline"].get(q, [0])) if gendb_history["baseline"].get(q) else 0
+    baseline_data = {q: (sum(gendb_history["baseline"].get(q, [0])) / len(gendb_history["baseline"].get(q, [1])))
+                     if gendb_history["baseline"].get(q) else 0
                      for q in queries}
 
     iter_data = []
@@ -413,7 +482,7 @@ def plot_gendb_iterations(gendb_history: dict, output_path: Path, scale_factor: 
         iter_num = iter_entry["iteration"]
         labels.append(f"Iter {iter_num}")
         iter_data.append({
-            q: min(iter_entry.get(q, [0])) if iter_entry.get(q) else 0
+            q: (sum(iter_entry.get(q, [0])) / len(iter_entry.get(q, [1]))) if iter_entry.get(q) else 0
             for q in queries
         })
 
@@ -469,13 +538,13 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     systems = list(all_results.keys())
     colors = {"GenDB": "#2196F3", "PostgreSQL": "#4CAF50", "DuckDB": "#FF9800"}
 
-    # Use best (minimum) time for each query
+    # Use average time for each query
     data = {}
     for system in systems:
         data[system] = []
         for q in queries:
             times = all_results[system].get(q, [])
-            data[system].append(min(times) if times else 0)
+            data[system].append(sum(times) / len(times) if times else 0)
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -568,7 +637,6 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
 # Main
 # ---------------------------------------------------------------------------
 
-
 def main():
     parser = argparse.ArgumentParser(description="TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB")
     parser.add_argument(
@@ -637,15 +705,17 @@ def main():
         gendb_history = gendb_benchmark_all_iterations(args.gendb_run, data_dir, args.runs)
         if gendb_history and gendb_history["best"]:
             all_results["GenDB"] = gendb_history["best"]
-            print(f"\n  Best overall performance:")
+            print(f"\n  Best iteration overall performance:")
             for qname in QUERIES:
                 if qname in gendb_history["best"]:
-                    print(f"    {qname}: {min(gendb_history['best'][qname]):.1f} ms")
+                    times = gendb_history['best'][qname]
+                    avg_time = sum(times) / len(times) if times else 0
+                    print(f"    {qname}: {avg_time:.1f} ms (avg)")
     else:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 
     # --- PostgreSQL ---
-    print("\n=== PostgreSQL Setup ===")
+    print("=== PostgreSQL Setup ===")
     try:
         pg_setup(data_dir, args.sf, args.setup)
         print("\n=== PostgreSQL Benchmark ===")
@@ -656,16 +726,15 @@ def main():
     # --- DuckDB ---
     print("\n=== DuckDB Setup ===")
     try:
-        duck_conn = duckdb_setup(data_dir)
+        duckdb_setup(data_dir, args.sf, args.setup)
         print("\n=== DuckDB Benchmark ===")
-        all_results["DuckDB"] = duckdb_benchmark(duck_conn, args.runs)
-        duck_conn.close()
+        all_results["DuckDB"] = duckdb_benchmark(args.sf, args.runs)
     except Exception as e:
         print(f"  DuckDB error: {e}")
 
     # --- Results summary ---
     print("\n" + "=" * 60)
-    print("RESULTS SUMMARY (best of N runs, in ms)")
+    print("RESULTS SUMMARY (average of N runs, in ms)")
     print("=" * 60)
     queries = list(QUERIES.keys())
     header = f"{'Query':<8}" + "".join(f"{s:<15}" for s in all_results.keys())
@@ -676,7 +745,8 @@ def main():
         for system in all_results:
             times = all_results[system].get(q, [])
             if times:
-                row += f"{min(times):<15.2f}"
+                avg_time = sum(times) / len(times)
+                row += f"{avg_time:<15.2f}"
             else:
                 row += f"{'N/A':<15}"
         print(row)
@@ -688,7 +758,15 @@ def main():
     json_path = metrics_dir / "benchmark_results.json"
     json_data = {}
     for system, results in all_results.items():
-        json_data[system] = {q: {"all_ms": times, "best_ms": min(times)} for q, times in results.items()}
+        json_data[system] = {
+            q: {
+                "all_ms": times,
+                "average_ms": sum(times) / len(times) if times else 0,
+                "min_ms": min(times) if times else 0,
+                "max_ms": max(times) if times else 0
+            }
+            for q, times in results.items()
+        }
     with open(json_path, "w") as f:
         json.dump(json_data, f, indent=2)
     print(f"Results saved to: {json_path}")
