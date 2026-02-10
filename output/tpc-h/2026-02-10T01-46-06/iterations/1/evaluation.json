@@ -1,0 +1,44 @@
+{
+  "overall_status": "partial",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "rm -f main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o tpch_queries\ng++ -O2 -std=c++17 -Wall -c main.cpp -o main.o\ng++ -O2 -std=c++17 -Wall -c storage/storage.cpp -o storage/storage.o\ng++ -O2 -std=c++17 -Wall -c queries/q1.cpp -o queries/q1.o\ng++ -O2 -std=c++17 -Wall -c queries/q3.cpp -o queries/q3.o\ng++ -O2 -std=c++17 -Wall -c queries/q6.cpp -o queries/q6.o\ng++ -O2 -std=c++17 -Wall -o tpch_queries main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o"
+    },
+    "run_queries": {
+      "status": "fail",
+      "output": "=== GenDB TPC-H Query Engine ===\nData directory: /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/\n\nLoading tables...\nLoaded 59986052 lineitem rows from /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/lineitem.tbl\nLoaded 15000000 orders rows from /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/orders.tbl\nLoaded 1500000 customer rows from /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/customer.tbl\n\nTable row counts:\n  lineitem: 59986052 rows\n  orders:   15000000 rows\n  customer: 1500000 rows\n\nTotal load time: 141402 ms\n\n================================================================================\nExecuting queries...\n================================================================================\n\n=== Q1: Pricing Summary Report ===\nreturnflag | linestatus | sum_qty | sum_base_price | sum_disc_price | sum_charge | avg_qty | avg_price | avg_disc | count_order\n----------------------------------------------------------------------------------------------------------------------------------\nA          | F          | 377518399.00 | 566065727797.15 | 537759104278.12 | 559276670892.20 |   25.50 |  38237.15 |     0.05 |    14804077\nN          | F          | 9851614.00 | 14767438399.17 | 14028805792.21 | 14590490998.37 |   25.52 |  38257.81 |     0.05 |      385998\nQ          | F          | 743124873.00 | 1114302286902.13 | 1058580922145.20 | 1100937000170.77 |   25.50 |  38233.90 |     0.05 |    29144351\nR          | F          | 377732830.00 | 566431054976.02 | 538110922664.75 | 559634780885.11 |   25.51 |  38251.22 |     0.05 |    14808183\n\nQ1 execution time: 271 ms\nterminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\nCommand terminated by signal 6"
+    },
+    "profiling": {
+      "available": true,
+      "peak_memory_kb": 15689292,
+      "peak_memory_gb": 15.69,
+      "user_time_seconds": 133.64,
+      "system_time_seconds": 9.84,
+      "wall_clock_time": "2:23.61",
+      "minor_page_faults": 3923530,
+      "notes": "Program crashed with std::bad_alloc after Q1 completed, indicating memory exhaustion issue"
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "pass",
+      "num_groups": 4,
+      "timing_ms": 271,
+      "notes": "Query executed successfully with 4 groups (A|F, N|F, Q|F, R|F). All aggregates are non-negative and reasonable. Count_order sums to 59,142,609 which is close to the 59,986,052 lineitem rows (expected due to filtering by shipdate)."
+    },
+    "Q3": {
+      "status": "fail",
+      "num_rows": null,
+      "timing_ms": null,
+      "notes": "Query did not execute. Program crashed with std::bad_alloc before Q3 could run, indicating memory allocation failure."
+    },
+    "Q6": {
+      "status": "fail",
+      "revenue": null,
+      "timing_ms": null,
+      "notes": "Query did not execute. Program crashed with std::bad_alloc before Q6 could run, indicating memory allocation failure."
+    }
+  },
+  "summary": "Compilation succeeded cleanly with no warnings or errors. Data loading succeeded for all tables (59.9M lineitem, 15M orders, 1.5M customers) in 141 seconds. Q1 executed successfully in 271ms with correct results showing 4 groups. However, the program crashed with std::bad_alloc (memory exhaustion) after Q1 completed, before Q3 or Q6 could run. Peak memory usage reached 15.7 GB. The memory allocation failure suggests inefficient memory management in the generated code, likely attempting to materialize large intermediate results for Q3 or Q6."
+}

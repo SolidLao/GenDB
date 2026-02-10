@@ -1,0 +1,109 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-10T01-46-06/iterations/1/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Q3 top-K min-heap for LIMIT 10 (replace full sort with incremental tracking)",
+        "Q3 bloom filter on qualifying_orders (eliminate 88% of hash probes)",
+        "Q1 perfect hash aggregation (direct array indexing for 4 groups)"
+      ],
+      "overall_status": "partial",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 271,
+          "notes": "Query executed successfully with 4 groups (A|F, N|F, Q|F, R|F). All aggregates are non-negative and reasonable. Count_order sums to 59,142,609 which is close to the 59,986,052 lineitem rows (expected due to filtering by shipdate)."
+        },
+        "Q3": {
+          "status": "fail",
+          "num_rows": null,
+          "timing_ms": null,
+          "notes": "Query did not execute. Program crashed with std::bad_alloc before Q3 could run, indicating memory allocation failure."
+        },
+        "Q6": {
+          "status": "fail",
+          "revenue": null,
+          "timing_ms": null,
+          "notes": "Query did not execute. Program crashed with std::bad_alloc before Q6 could run, indicating memory allocation failure."
+        }
+      }
+    },
+    {
+      "iteration": 2,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-10T01-46-06/iterations/2/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Lazy column loading with projection pushdown (CRITICAL - load only 4-7 columns instead of 16 for lineitem)",
+        "Dictionary encoding for low-cardinality strings (c_mktsegment, o_orderpriority, o_orderstatus)",
+        "Right-size Q3 hash table reservations (reduce qualifying_orders from 1M to 350K)"
+      ],
+      "overall_status": "partial",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 275,
+          "notes": "Q1 executed successfully with 4 groups by (returnflag, linestatus). All aggregated values are non-negative and reasonable. Count_order totals to 59,142,609 which is close to the lineitem row count (59,986,052) accounting for the shipdate filter."
+        },
+        "Q3": {
+          "status": "fail",
+          "num_rows": null,
+          "timing_ms": null,
+          "notes": "Query did not execute. Program crashed with std::bad_alloc after Q1 completed, indicating a memory allocation failure likely in Q3 preparation or execution."
+        },
+        "Q6": {
+          "status": "fail",
+          "revenue": null,
+          "timing_ms": null,
+          "notes": "Query did not execute. Program crashed before reaching Q6."
+        }
+      }
+    },
+    {
+      "iteration": 3,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-10T01-46-06/iterations/3/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        4
+      ],
+      "focusAreas": [
+        "CRITICAL: Selective column loading for lineitem/orders/customer tables",
+        "String interning for c_mktsegment (5 distinct values)",
+        "Right-size Q3 hash table reservations (400K instead of 1M)"
+      ],
+      "overall_status": "partial",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 733,
+          "notes": "Q1 completed successfully with 4 groups (A|F, N|F, Q|F, R|F). All numeric values are non-negative. Count_order totals to 59142609, which is reasonable for 59986052 lineitem rows with date filtering. Results look correct."
+        },
+        "Q3": {
+          "status": "fail",
+          "num_rows": null,
+          "timing_ms": null,
+          "notes": "Program crashed with std::bad_alloc (out of memory) before Q3 could execute. The crash occurred after Q1 completed."
+        },
+        "Q6": {
+          "status": "fail",
+          "revenue": null,
+          "timing_ms": null,
+          "notes": "Program crashed with std::bad_alloc (out of memory) before Q6 could execute. The crash occurred after Q1 completed."
+        }
+      }
+    }
+  ]
+}

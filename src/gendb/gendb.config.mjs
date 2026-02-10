@@ -5,7 +5,7 @@
 
 export const defaults = {
   maxOptimizationIterations: 3,
-  scaleFactor: 1,
+  scaleFactor: 10,
   targetBenchmark: "tpc-h",
   model: "sonnet",
   optimizationTarget: "execution_time",

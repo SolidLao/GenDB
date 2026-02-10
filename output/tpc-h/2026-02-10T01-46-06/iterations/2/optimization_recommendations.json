@@ -1,0 +1,131 @@
+{
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 271,
+        "bottleneck": "Successfully executed but contributes to memory exhaustion. Full table scan of 60M rows with string columns fully materialized in memory.",
+        "root_cause": "Storage layer loads ALL columns (including unused string columns like l_comment, l_shipinstruct, l_shipmode) into std::vector<std::string>, consuming ~4-6 GB for lineitem alone. No lazy loading or projection pushdown.",
+        "benchmark_gap": "271ms vs DuckDB 199ms = 1.36x slower. Gap is reasonable but indicates room for optimization (vectorization, SIMD filters)."
+      },
+      "Q3": {
+        "current_time_ms": null,
+        "bottleneck": "Did not execute. Program crashed with std::bad_alloc after Q1, indicating memory allocation failure when trying to execute Q3.",
+        "root_cause": "Memory exhaustion (15.7 GB peak usage exceeded available memory). Q3 implementation pre-reserves massive hash tables: qualifying_customers (400K entries), qualifying_orders (1M entries), aggregates (500K entries). Combined with full table materialization in storage layer, this exceeds memory limits at SF=10. Hash table sizing is too aggressive and assumes worst-case cardinality.",
+        "benchmark_gap": "Unknown (did not execute) vs DuckDB 135ms. Expected gap is large (10-20x) due to memory issues preventing execution."
+      },
+      "Q6": {
+        "current_time_ms": null,
+        "bottleneck": "Did not execute. Program crashed before Q6 could run.",
+        "root_cause": "Same memory exhaustion issue as Q3. Q6 itself is simple (single table scan with filters), but the storage layer's memory consumption prevents execution.",
+        "benchmark_gap": "Unknown (did not execute) vs DuckDB 27ms. Expected to be competitive if memory issues are fixed, as Q6 is a simple scan."
+      }
+    },
+    "overall": "Critical memory management failure preventing 2 out of 3 queries from executing. Root cause: (1) Storage layer eagerly loads ALL columns including unused string columns into memory using std::vector<std::string> (4-6 GB per table at SF=10), (2) Q3 pre-reserves oversized hash tables (1.9M total entries = ~50-100 MB), (3) No memory-efficient string storage (dictionary encoding, string pooling, lazy loading). Q1 executes successfully in 271ms (1.36x vs DuckDB), demonstrating the query execution logic is sound, but memory consumption is unsustainable. At SF=10: lineitem has 60M rows × 16 columns, with 3 string columns averaging 20-40 bytes each = 3.6-7.2 GB just for lineitem strings. Peak memory reached 15.7 GB, exceeding limits and causing crash. Priority: Fix memory management before optimizing execution time."
+  },
+  "recommendations": [
+    {
+      "priority": 1,
+      "target": "storage",
+      "operator": "data_loading",
+      "technique": "Lazy column loading with projection pushdown",
+      "description": "CRITICAL: Modify storage/storage.cpp to implement lazy column loading. Instead of loading all 16 columns of lineitem, only load columns actually used by queries. Add a load_lineitem_columns() function that takes a vector of column names and loads only those. For Q1: load only 7 columns (l_shipdate, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus). For Q3: load only 4 columns (l_orderkey, l_shipdate, l_extendedprice, l_discount). For Q6: load only 4 columns. This reduces lineitem memory from 6 GB to 1-2 GB (6-7x reduction). Implementation: Add optional parameter std::vector<std::string> columns_to_load to load_lineitem(), modify parsing loop to skip unwanted columns. Files to change: storage/storage.h, storage/storage.cpp, queries/q1.cpp, queries/q3.cpp, queries/q6.cpp (call loader with specific column list).",
+      "expected_improvement": "Reduces lineitem memory from ~6 GB to ~1-2 GB (70-80% reduction). Total memory usage drops from 15.7 GB to ~6-8 GB, eliminating std::bad_alloc crash. This MUST be implemented first before any other optimizations, as Q3/Q6 cannot run without fixing memory exhaustion.",
+      "risk": "low",
+      "knowledge_source": "storage/memory-layout.md (hot-cold data separation, projection benefits)"
+    },
+    {
+      "priority": 2,
+      "target": "storage",
+      "operator": "string_storage",
+      "technique": "Dictionary encoding for low-cardinality string columns",
+      "description": "Replace std::vector<std::string> with dictionary-encoded integer vectors for low-cardinality columns: c_mktsegment (5 distinct values), o_orderpriority (5 values), o_orderstatus (3 values). Implementation: Create StringDictionary class in storage/string_dict.h with encode(string_view) -> uint32_t and decode(uint32_t) -> string_view methods. Change Customer::c_mktsegment from vector<string> to vector<uint8_t> + StringDictionary. Change filter in q3.cpp from string comparison to: uint8_t building_code = customer_dict.encode(\"BUILDING\"); if (customer.c_mktsegment[i] == building_code). This reduces customer table from ~200 MB to ~30 MB (strings replaced with 1-byte codes). Memory saving: ~150-200 MB. Performance: 10-100x faster string comparisons (integer equality vs strcmp).",
+      "expected_improvement": "Memory: 150-200 MB reduction for customer + orders tables. Query speedup: Q3 filter on c_mktsegment becomes 10-100x faster (integer comparison vs string comparison). Expected Q3 speedup: 5-10% overall (filter is small part of total time, but reduces hash table build time).",
+      "risk": "low",
+      "knowledge_source": "storage/string-optimization.md (dictionary encoding, compact representation)"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "operator": "hash_table_sizing",
+      "technique": "Right-size hash table reservations based on cardinality analysis",
+      "description": "Q3 currently reserves: qualifying_customers(400K), qualifying_orders(1M), aggregates(500K) = 1.9M entries total. This is massively oversized. Actual cardinalities at SF=10: qualifying_customers ~300K (20% of 1.5M), qualifying_orders ~200-300K (46% of 15M × 20% customer filter), aggregates ~150-200K unique orderkeys. Change reservations in queries/q3.cpp: qualifying_customers.reserve(350000) instead of 400000, qualifying_orders.reserve(350000) instead of 1000000 (3x reduction!), aggregates.reserve(250000) instead of 500000. Memory saving: ~50-70 MB for hash tables. Also consider using compact hash table (Robin Hood or abseil flat_hash_map) to reduce overhead from 100-200% (std::unordered_map) to 20-30% (flat_hash_map). Add #include <absl/container/flat_hash_map.h> if available, or implement Robin Hood variant.",
+      "expected_improvement": "Memory: 50-70 MB reduction from better sizing, additional 30-50 MB from compact hash table = 80-120 MB total savings. Performance: Compact hash tables are 2-3x faster for lookups due to cache locality (flat array vs linked list). Expected Q3 speedup: 20-40% from better cache behavior.",
+      "risk": "low",
+      "knowledge_source": "data-structures/compact-hash-tables.md (Robin Hood hashing, Swiss Tables)"
+    },
+    {
+      "priority": 4,
+      "target": "Q1",
+      "operator": "scan",
+      "technique": "SIMD-accelerated date filter",
+      "description": "Q1 scans 60M rows with a date filter (l_shipdate <= cutoff). Current implementation is scalar. Use AVX2 to process 8 int32_t dates simultaneously. Implementation in queries/q1.cpp: Add #include <immintrin.h>, replace scalar filter loop with: __m256i cutoff_vec = _mm256_set1_epi32(cutoff_date); for (size_t i = 0; i < n; i += 8) { __m256i dates = _mm256_loadu_si256((__m256i*)&lineitem.l_shipdate[i]); __m256i cmp = _mm256_cmpgt_epi32(cutoff_vec, dates); int mask = _mm256_movemask_epi8(cmp); /* process matching rows */ }. This processes 8 dates per instruction vs 1 date per instruction. Handle tail (n % 8 != 0) with scalar code. Also vectorize aggregation arithmetic: load 8 quantities, prices, discounts, taxes in parallel, compute disc_price and charge with SIMD, accumulate into vector registers, horizontal sum at end.",
+      "expected_improvement": "Date filter: 8x theoretical speedup, 3-5x practical (memory-bound). Aggregation arithmetic: 2-4x speedup. Overall Q1 speedup: 2-3x, bringing time from 271ms to ~90-135ms, closing gap with DuckDB (199ms). May achieve parity or beat DuckDB if vectorization is thorough.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md (AVX2 integer comparison, horizontal aggregation)"
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "operator": "scan",
+      "technique": "Multi-predicate SIMD filtering with early-out",
+      "description": "Q6 has 4 predicates: shipdate range (14% selective), discount range (20%), quantity < 24 (48%). Current implementation evaluates sequentially with scalar code. Use SIMD to evaluate all 4 predicates in parallel on 8 rows at once. Implementation in queries/q6.cpp: Load 8 shipdates, 8 discounts, 8 quantities in parallel. Use AVX2 comparison intrinsics to generate 4 bitmasks. AND all masks together to get final selection. Only compute revenue for selected rows. Also apply predicate reordering: evaluate most selective first (shipdate) to enable early-out in scalar tail. Expected filter reduction: 14% × 20% × 48% = 1.3% of rows qualify (~780K out of 60M). SIMD processes 8 rows in parallel, reducing loop iterations from 60M to 7.5M.",
+      "expected_improvement": "SIMD filtering: 4-6x speedup on filter evaluation. Overall Q6 speedup: 3-5x, bringing time from estimated ~300-400ms (if it could run) to ~60-100ms, approaching DuckDB's 27ms. Gap remains due to DuckDB's superior vectorization and zone maps, but becomes competitive.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md (multi-predicate filtering, selection vectors)"
+    },
+    {
+      "priority": 6,
+      "target": "storage",
+      "operator": "data_layout",
+      "technique": "Sort lineitem by l_shipdate during loading",
+      "description": "All 3 queries filter on l_shipdate. Sorting the table by l_shipdate enables: (1) Binary search for range queries (Q6 needs [1994-01-01, 1995-01-01)), (2) Early termination (Q1 needs l_shipdate <= 1998-09-02, can stop scan when date exceeds cutoff), (3) Better cache locality (sequential access to qualifying date ranges). Implementation: In storage/storage.cpp, after loading lineitem, sort all column vectors by l_shipdate using std::sort with custom comparator that swaps elements across all 16 columns in lockstep. Add a sorted flag to LineItem struct. Cost: O(n log n) sort adds 5-10 seconds to load time (acceptable for analytical workload). Benefit: Q6 can binary search for start/end of date range, scanning only 14% of data instead of 100%. Q1 can early-terminate after processing 98% of data.",
+      "expected_improvement": "Q6: Binary search reduces scan from 60M rows to ~8.4M rows (14% selectivity) = 7x I/O reduction. Q1: Minimal benefit (98% of data qualifies), but enables future zone map optimization. Q1 speedup: <5%. Q6 speedup: 2-3x from reduced I/O, bringing time to ~30-50ms (approaching DuckDB's 27ms).",
+      "risk": "low",
+      "knowledge_source": "indexing/sorted-indexes.md (sorted storage, binary search for range queries)"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "operator": "bloom_filter",
+      "technique": "Increase bloom filter size and reduce false positive rate",
+      "description": "Q3 currently uses BloomFilter(qualifying_orders.size(), 0.01) = 1% FPR. With ~200K qualifying orders, FPR of 1% means 600K false positives out of 60M lineitem rows (1% of non-qualifying 59.8M). Reducing FPR to 0.001 (0.1%) cuts false positives to 60K, saving 540K hash table probes. Bloom filter size increases from ~2.4 MB to ~3.6 MB (1.2 MB increase, negligible). Change in queries/q3.cpp: BloomFilter order_bloom(qualifying_orders.size(), 0.001). Also apply bloom filter on qualifying_customers for orders scan: after building qualifying_customers hash set, create BloomFilter customer_bloom(qualifying_customers.size(), 0.001). In orders scan loop, check customer_bloom.contains(orders.o_custkey[i]) before expensive hash table lookup. This filters out 80% of orders (non-BUILDING customers) with cheap bloom filter check.",
+      "expected_improvement": "Lineitem bloom filter: Reduces hash table probes by 540K (0.9% of 60M) = ~2-5ms savings. Customer bloom filter on orders scan: Filters 80% of 15M orders with cheap check, saving ~10-20ms in hash lookups. Combined Q3 speedup: 5-10% (12-25ms savings out of estimated ~2-3 second total time).",
+      "risk": "low",
+      "knowledge_source": "indexing/bloom-filters.md (false positive rate tuning, multi-stage filtering)"
+    },
+    {
+      "priority": 8,
+      "target": "Q1",
+      "operator": "aggregation",
+      "technique": "Vectorized aggregation with manual SIMD",
+      "description": "Q1 currently uses perfect hash aggregation (array indexing) which is already efficient, but aggregation arithmetic is scalar. Vectorize the inner aggregation loop: load 8 quantities, 8 prices, 8 discounts, 8 taxes in parallel using AVX2. Compute disc_price = price * (1 - discount) and charge = disc_price * (1 + tax) using _mm256_mul_pd (double precision). Accumulate into vector accumulators. At end, horizontal sum the accumulators. Implementation: Change loop in q1.cpp to process 8 rows per iteration when they map to same group (check returnflag and linestatus are identical for all 8 rows). If groups differ, fall back to scalar. This is complex but high-reward for sorted data (if lineitem is sorted by returnflag, linestatus, large runs have same group).",
+      "expected_improvement": "Arithmetic speedup: 3-5x for aggregation computation. Overall Q1 speedup: 20-30% (aggregation is ~30-40% of Q1 time, rest is scan I/O). Combined with priority 4 (SIMD filter), total Q1 speedup: 2.5-3.5x, bringing time from 271ms to ~75-110ms, beating DuckDB's 199ms.",
+      "risk": "high",
+      "knowledge_source": "query-execution/vectorized-execution.md (batch processing, SIMD aggregation), novel optimization (group-aware vectorized aggregation)"
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Load only required columns (7 for Q1, 4 for Q3/Q6) instead of all 16 columns. Eliminate loading of l_comment, l_shipinstruct, l_shipmode, l_partkey, l_suppkey, l_linenumber, l_commitdate, l_receiptdate unless needed.",
+      "rationale": "CRITICAL: Reduces lineitem memory from ~6 GB to ~1-2 GB (70-80% reduction). Eliminates std::bad_alloc crash that prevents Q3/Q6 execution. Most impactful single optimization."
+    },
+    {
+      "table": "customer",
+      "change": "Replace c_mktsegment (vector<string>) with dictionary encoding (vector<uint8_t> + StringDictionary with 5 entries). Load only c_custkey and c_mktsegment for Q3, skip other 6 columns.",
+      "rationale": "Reduces customer memory from ~200 MB to ~30 MB. Speeds up Q3 filter by 10-100x (integer comparison vs string comparison)."
+    },
+    {
+      "table": "orders",
+      "change": "Load only required columns (o_orderkey, o_custkey, o_orderdate, o_shippriority) for Q3, skip other 5 columns. Dictionary encode o_orderpriority and o_orderstatus if loaded.",
+      "rationale": "Reduces orders memory from ~600 MB to ~200 MB (load 4 columns instead of 9). Combined with customer reduction, saves ~600 MB."
+    },
+    {
+      "table": "lineitem",
+      "change": "Sort lineitem by l_shipdate during loading. Add sorted flag to struct. Store column vectors in l_shipdate order.",
+      "rationale": "Enables binary search for range queries (Q6), early termination (Q1), and lays groundwork for future zone map optimization. Sort cost (5-10 seconds) is amortized across all queries."
+    }
+  ],
+  "summary": "Iteration 2 focuses on **fixing critical memory exhaustion** that prevents Q3/Q6 from executing. Top priority: implement lazy column loading (only load 4-7 columns instead of all 16 for lineitem, reducing memory by 70-80%). This alone drops peak memory from 15.7 GB to ~6-8 GB, enabling all queries to run. Secondary priorities: (1) dictionary encoding for low-cardinality strings (c_mktsegment, saving 150-200 MB), (2) right-size hash table reservations in Q3 (saving 80-120 MB), (3) SIMD-accelerated filters and aggregations for Q1/Q6 (2-5x speedup), (4) sort lineitem by l_shipdate for binary search and early termination. Expected outcomes: Q1 drops from 271ms to ~75-110ms (2.5-3.5x speedup, beating DuckDB's 199ms), Q3 becomes runnable and achieves ~400-800ms (vs DuckDB's 135ms, 3-6x gap), Q6 becomes runnable at ~30-100ms (vs DuckDB's 27ms, near parity). Total memory usage drops from 15.7 GB to ~5-6 GB, well within limits. Risk assessment: Priorities 1-3 are low risk (standard techniques), priorities 4-5 are medium risk (SIMD requires careful implementation), priority 8 is high risk (complex group-aware vectorization, optional). Implement in priority order, test memory usage after each change."
+}
