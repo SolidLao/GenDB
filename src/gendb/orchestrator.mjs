@@ -83,16 +83,57 @@ async function updateRunMeta(runDir, updater) {
   return runMeta;
 }
 
+// ---------------------------------------------------------------------------
+// Telemetry tracking
+// ---------------------------------------------------------------------------
+
+const telemetryData = {
+  total_wall_clock_ms: 0,
+  total_tokens: { input: 0, output: 0 },
+  total_cost_usd: 0,
+  phases: {},
+};
+
+const runStartTime = Date.now();
+
+function recordAgentTelemetry(phase, agentName, durationMs, tokens, costUsd) {
+  if (!telemetryData.phases[phase]) {
+    telemetryData.phases[phase] = { total_ms: 0, agents: {} };
+  }
+  const p = telemetryData.phases[phase];
+  p.total_ms += durationMs;
+  if (!p.agents) p.agents = {};
+  if (!p.agents[agentName]) {
+    p.agents[agentName] = { duration_ms: 0, tokens: { input: 0, output: 0 }, cost_usd: 0 };
+  }
+  const a = p.agents[agentName];
+  a.duration_ms += durationMs;
+  a.tokens.input += tokens.input;
+  a.tokens.output += tokens.output;
+  a.cost_usd += costUsd;
+
+  telemetryData.total_tokens.input += tokens.input;
+  telemetryData.total_tokens.output += tokens.output;
+  telemetryData.total_cost_usd += costUsd;
+}
+
+function formatDuration(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+}
+
 /**
  * Invoke a Claude Code subprocess with the given system prompt and user prompt.
- * Returns the full stdout text.
+ * Returns { result, durationMs, tokens, costUsd }.
  */
 function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) {
   return new Promise((resolveP, rejectP) => {
     const args = [
       "--print",
       "--system-prompt", systemPrompt,
-      "--output-format", "text",
+      "--output-format", "json",
       "--permission-mode", "bypassPermissions",
       "--allowedTools", allowedTools.join(","),
     ];
@@ -102,6 +143,8 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     console.log(`\n[${"=".repeat(60)}]`);
     console.log(`[Orchestrator] Spawning agent: ${name}`);
     console.log(`[${"=".repeat(60)}]\n`);
+
+    const startTime = Date.now();
 
     const child = spawn("claude", args, {
       cwd,
@@ -113,9 +156,7 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     let stderr = "";
 
     child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      process.stdout.write(text);
+      stdout += chunk.toString();
     });
 
     child.stderr.on("data", (chunk) => {
@@ -123,13 +164,31 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     });
 
     child.on("close", (code) => {
+      const durationMs = Date.now() - startTime;
       if (code !== 0) {
-        console.error(`\n[Orchestrator] Agent "${name}" exited with code ${code}`);
+        console.error(`\n[Orchestrator] Agent "${name}" exited with code ${code} (${formatDuration(durationMs)})`);
         if (stderr) console.error(`[stderr] ${stderr}`);
         rejectP(new Error(`Agent "${name}" failed (exit ${code}): ${stderr}`));
       } else {
-        console.log(`\n[Orchestrator] Agent "${name}" completed successfully.`);
-        resolveP(stdout);
+        // Parse JSON output for telemetry
+        let resultText = stdout;
+        let tokens = { input: 0, output: 0 };
+        let costUsd = 0;
+        try {
+          const parsed = JSON.parse(stdout);
+          resultText = parsed.result || "";
+          tokens = {
+            input: parsed.usage?.input_tokens || 0,
+            output: parsed.usage?.output_tokens || 0,
+          };
+          costUsd = parsed.total_cost_usd || 0;
+        } catch {
+          // If JSON parsing fails, treat entire stdout as text
+          resultText = stdout;
+        }
+
+        console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
+        resolveP({ result: resultText, durationMs, tokens, costUsd });
       }
     });
 
@@ -225,13 +284,14 @@ async function runBaseline(args, runDir, schema, queries) {
     `IMPORTANT: You MUST use the Write tool to create the file ${workloadAnalysisPath} with your JSON analysis. Do NOT just print the analysis — use the Write tool to write it as a file.`,
   ].join("\n");
 
-  await runAgent(workloadAnalyzerConfig.name, {
+  const waResult = await runAgent(workloadAnalyzerConfig.name, {
     systemPrompt: analyzerSystemPrompt,
     userPrompt: analyzerUserPrompt,
     allowedTools: workloadAnalyzerConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
+  recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
 
   // Verify workload analysis output
   const analysis = await readJSON(workloadAnalysisPath);
@@ -284,13 +344,14 @@ async function runBaseline(args, runDir, schema, queries) {
     `IMPORTANT: You MUST use the Write tool to create the file ${storageDesignPath} with your JSON design. Do NOT just print it — use the Write tool to write it as a file.`,
   ].join("\n");
 
-  await runAgent(storageDesignerConfig.name, {
+  const sdResult = await runAgent(storageDesignerConfig.name, {
     systemPrompt: designerSystemPrompt,
     userPrompt: designerUserPrompt,
     allowedTools: storageDesignerConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
+  recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
 
   const design = await readJSON(storageDesignPath);
   if (!design) {
@@ -359,16 +420,20 @@ async function runBaseline(args, runDir, schema, queries) {
     `- ${resolve(generatedDir, "main.cpp")}`,
     `- ${resolve(generatedDir, "Makefile")}`,
     "",
-    `IMPORTANT: Use the Write tool to create each file. The files must compile with g++ -O2 -std=c++17. After writing all files, use Bash to verify compilation: cd ${generatedDir} && make clean && make all`,
+    `IMPORTANT: Use the Write tool to create each file. The files must compile with g++ -O2 -std=c++17.`,
+    `After writing all files, compile AND run to verify correctness:`,
+    `  cd ${generatedDir} && make clean && make all && ./main ${args.dataDir}`,
+    `If it crashes or produces wrong results, fix the code and re-run (up to 2 fix attempts).`,
   ].join("\n");
 
-  await runAgent(codeGeneratorConfig.name, {
+  const cgResult = await runAgent(codeGeneratorConfig.name, {
     systemPrompt: generatorSystemPrompt,
     userPrompt: generatorUserPrompt,
     allowedTools: codeGeneratorConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
+  recordAgentTelemetry("phase1", "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
 
   // Verify generated files exist
   const requiredFiles = [
@@ -411,7 +476,8 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const evaluationPath = resolve(runDir, "evaluation.json");
-  await runEvaluator(args, runDir, generatedDir, evaluationPath);
+  const evResult = await runEvaluator(args, runDir, generatedDir, evaluationPath);
+  recordAgentTelemetry("phase1", "evaluator", evResult.durationMs, evResult.tokens, evResult.costUsd);
 
   const evaluation = await readJSON(evaluationPath);
   if (evaluation) {
@@ -466,13 +532,14 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath) {
     `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
   ].join("\n");
 
-  await runAgent(evaluatorConfig.name, {
+  const evalResult = await runAgent(evaluatorConfig.name, {
     systemPrompt: evaluatorSystemPrompt,
     userPrompt: evaluatorUserPrompt,
     allowedTools: evaluatorConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
+  return evalResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +569,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
   // Track the "best so far" generated directory and its evaluation
   let bestGeneratedDir = baselineGeneratedDir;
   let bestEvaluationPath = baselineEvaluationPath;
+  let previousIterationOutcome = null; // Track whether previous iteration improved or regressed
 
   for (let iteration = 1; iteration <= maxIter; iteration++) {
     console.log(`\n[Orchestrator] --- Optimization Iteration ${iteration}/${maxIter} ---\n`);
@@ -538,6 +606,10 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
       `Read relevant knowledge files to inform your bottleneck analysis and optimization recommendations. You are encouraged to propose techniques beyond what's documented.`,
       "",
+      previousIterationOutcome
+        ? `## Previous Iteration Outcome\n${previousIterationOutcome}`
+        : "",
+      "",
       "## Input Files",
       `- Evaluation results: ${bestEvaluationPath}`,
       `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
@@ -552,13 +624,15 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       `Set "iteration" to ${iteration} in the JSON output.`,
     ].join("\n");
 
-    await runAgent(learnerConfig.name, {
+    const iterPhase = `iteration_${iteration}`;
+    const lnResult = await runAgent(learnerConfig.name, {
       systemPrompt: learnerSystemPrompt,
       userPrompt: learnerUserPrompt,
       allowedTools: learnerConfig.allowedTools,
       model: args.model,
       cwd: runDir,
     });
+    recordAgentTelemetry(iterPhase, "learner", lnResult.durationMs, lnResult.tokens, lnResult.costUsd);
 
     const recommendations = await readJSON(iterRecsPath);
     if (!recommendations) {
@@ -566,7 +640,9 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       await updateIterationStatus(runDir, iteration, "failed", "Learner failed to produce recommendations");
       break;
     }
-    console.log(`[Orchestrator] Learner produced ${(recommendations.recommendations || []).length} recommendations.`);
+    const criticalFixes = recommendations.critical_fixes || [];
+    const perfOptimizations = recommendations.performance_optimizations || recommendations.recommendations || [];
+    console.log(`[Orchestrator] Learner produced ${criticalFixes.length} critical fixes, ${perfOptimizations.length} performance optimizations.`);
 
     // 3. Run Orchestrator Agent
     console.log(`\n[Orchestrator] === Iteration ${iteration} Step 2: Orchestrator Agent ===`);
@@ -587,18 +663,24 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       "",
       `Remaining iterations after this one: ${maxIter - iteration}`,
       "",
+      criticalFixes.length > 0
+        ? `## CRITICAL: ${criticalFixes.length} critical fix(es) found\nThe Learner identified ${criticalFixes.length} critical fix(es) (crashes/correctness bugs). These MUST all be included in your selected_recommendations. Performance optimizations are secondary until all critical fixes are applied.`
+        : "",
+      "",
       `## Output`,
       `IMPORTANT: Write your decision to: ${iterDecisionPath}`,
       `Use the Write tool to create this file.`,
+      `Note: The Learner's recommendations now use "critical_fixes" (always apply) and "performance_optimizations" (select by priority). Your selected_recommendations should index into performance_optimizations. All critical_fixes are automatically included.`,
     ].join("\n");
 
-    await runAgent(orchestratorAgentConfig.name, {
+    const oaResult = await runAgent(orchestratorAgentConfig.name, {
       systemPrompt: orchAgentSystemPrompt,
       userPrompt: orchAgentUserPrompt,
       allowedTools: orchestratorAgentConfig.allowedTools,
       model: args.model,
       cwd: runDir,
     });
+    recordAgentTelemetry(iterPhase, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
 
     const decision = await readJSON(iterDecisionPath);
     if (!decision) {
@@ -637,27 +719,43 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       `- Storage design: ${resolve(runDir, "storage_design.json")}`,
       formatBenchmarkContext(args.benchmarkResults),
       "",
+      `## Data Directory`,
+      `TPC-H .tbl files: ${args.dataDir}`,
+      `Scale factor: ${args.scaleFactor}`,
+      "",
+      `## Previous Performance (baseline to beat)`,
+      `Read the evaluation at: ${bestEvaluationPath}`,
+      `Your optimized code must: (1) not crash, (2) produce correct results, (3) ideally be faster`,
+      "",
       "## Code Directory",
       `Read and modify C++ files in: ${iterGeneratedDir}`,
       `This directory contains the current best code. Apply optimizations here.`,
       "",
+      `## Test-Refine Budget`,
+      `You may compile+run up to 3 times to iteratively fix issues. If your changes break correctness, revert them.`,
+      `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.dataDir}`,
+      "",
       `## Important`,
-      `- Only apply the recommendations selected in the orchestrator's decision (selected_recommendations field)`,
-      `- After making changes, verify compilation: cd ${iterGeneratedDir} && make clean && make all`,
+      `- Apply ALL critical_fixes from optimization_recommendations.json FIRST (these fix crashes/correctness bugs)`,
+      `- Then apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
+      `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.dataDir}`,
       `- Correctness is paramount — results must remain identical`,
+      `- CRITICAL: Do not return code that crashes or produces wrong results`,
     ].join("\n");
 
-    await runAgent(operatorSpecialistConfig.name, {
+    const osResult = await runAgent(operatorSpecialistConfig.name, {
       systemPrompt: opSpecSystemPrompt,
       userPrompt: opSpecUserPrompt,
       allowedTools: operatorSpecialistConfig.allowedTools,
       model: args.model,
       cwd: runDir,
     });
+    recordAgentTelemetry(iterPhase, "operator_specialist", osResult.durationMs, osResult.tokens, osResult.costUsd);
 
     // 6. Run Evaluator
     console.log(`\n[Orchestrator] === Iteration ${iteration} Step 4: Evaluator ===`);
-    await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationPath);
+    const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationPath);
+    recordAgentTelemetry(iterPhase, "evaluator", iterEvResult.durationMs, iterEvResult.tokens, iterEvResult.costUsd);
 
     const iterEvaluation = await readJSON(iterEvaluationPath);
 
@@ -692,8 +790,10 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       console.log(`[Orchestrator] Iteration ${iteration} improved performance. Updating best.`);
       bestGeneratedDir = iterGeneratedDir;
       bestEvaluationPath = iterEvaluationPath;
+      previousIterationOutcome = `Iteration ${iteration} IMPROVED performance. Changes were kept.`;
     } else {
-      console.log(`[Orchestrator] Iteration ${iteration} did not improve. Keeping previous best.`);
+      console.log(`[Orchestrator] Iteration ${iteration} did not improve. Keeping previous best (code rolled back).`);
+      previousIterationOutcome = `Iteration ${iteration} REGRESSED — code was rolled back to previous best. The changes from iteration ${iteration} were discarded. Avoid repeating the same approach.`;
     }
 
     await updateIterationStatus(runDir, iteration, "completed", null);
@@ -720,37 +820,37 @@ async function updateIterationStatus(runDir, iteration, status, note) {
 
 /**
  * Check if the new evaluation is better than the previous one.
- * Compares total query time across all queries.
- * Returns true if new is strictly better.
+ * Handles partial results: more queries passing = improvement, even if slower.
+ * A previously-passing query that now crashes is a regression (always reject).
  */
 function checkImprovement(prevEval, newEval) {
   if (!prevEval || !newEval) return false;
   if (!prevEval.query_results || !newEval.query_results) return false;
-
-  // Must at least pass correctness
   if (newEval.overall_status === "fail") return false;
 
-  let prevTotal = 0;
-  let newTotal = 0;
-  let hasTimings = false;
+  let prevTotal = 0, newTotal = 0;
+  let prevCount = 0, newCount = 0;
 
   for (const qId of Object.keys(prevEval.query_results)) {
     const prevQ = prevEval.query_results[qId];
     const newQ = newEval.query_results[qId];
-    if (!newQ) return false; // regression: query missing
+    if (!newQ) continue;
 
     const prevTime = parseFloat(prevQ.timing_ms);
     const newTime = parseFloat(newQ.timing_ms);
 
-    if (!isNaN(prevTime) && !isNaN(newTime)) {
-      prevTotal += prevTime;
-      newTotal += newTime;
-      hasTimings = true;
-    }
+    // If prev query worked but new one crashes, that's a regression — reject
+    if (!isNaN(prevTime) && prevQ.status === "pass" && newQ.status !== "pass") return false;
+
+    if (!isNaN(prevTime) && prevQ.status === "pass") { prevTotal += prevTime; prevCount++; }
+    if (!isNaN(newTime) && newQ.status === "pass") { newTotal += newTime; newCount++; }
   }
 
-  if (!hasTimings) return false;
-  return newTotal < prevTotal;
+  // More queries working = improvement (even if slower)
+  if (newCount > prevCount) return true;
+  // Same queries working, check total time
+  if (newCount === prevCount && newCount > 0) return newTotal < prevTotal;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +916,40 @@ async function main() {
   });
 
   await updateLatestSymlink(workload, runId);
+
+  // Write telemetry
+  telemetryData.total_wall_clock_ms = Date.now() - runStartTime;
+  const telemetryPath = resolve(runDir, "telemetry.json");
+  await writeFile(telemetryPath, JSON.stringify(telemetryData, null, 2));
+
+  // Print cost summary
+  const totalTokens = telemetryData.total_tokens.input + telemetryData.total_tokens.output;
+  console.log(`\n[Orchestrator] === Run Summary ===`);
+  console.log(`[Orchestrator] Total time: ${formatDuration(telemetryData.total_wall_clock_ms)}`);
+  console.log(`[Orchestrator] Total tokens: ${Math.round(telemetryData.total_tokens.input / 1000)}K input, ${Math.round(telemetryData.total_tokens.output / 1000)}K output`);
+  console.log(`[Orchestrator] Estimated cost: $${telemetryData.total_cost_usd.toFixed(2)}`);
+
+  // Per-phase summary
+  const phaseSummaries = [];
+  for (const [phaseName, phase] of Object.entries(telemetryData.phases)) {
+    const phaseCost = Object.values(phase.agents || {}).reduce((s, a) => s + a.cost_usd, 0);
+    phaseSummaries.push(`${phaseName}: ${formatDuration(phase.total_ms)} ($${phaseCost.toFixed(2)})`);
+  }
+  console.log(`[Orchestrator] ${phaseSummaries.join(" | ")}`);
+
+  // Most expensive agent
+  let maxAgent = { name: "", cost: 0 };
+  for (const phase of Object.values(telemetryData.phases)) {
+    for (const [agentName, agent] of Object.entries(phase.agents || {})) {
+      if (agent.cost_usd > maxAgent.cost) {
+        maxAgent = { name: agentName, cost: agent.cost_usd };
+      }
+    }
+  }
+  if (maxAgent.cost > 0 && telemetryData.total_cost_usd > 0) {
+    const pct = Math.round((maxAgent.cost / telemetryData.total_cost_usd) * 100);
+    console.log(`[Orchestrator] Most expensive agent: ${maxAgent.name} (${pct}% of total cost)`);
+  }
 
   console.log("\n[Orchestrator] Pipeline complete.");
   console.log(`[Orchestrator] Run Dir:  ${runDir}`);

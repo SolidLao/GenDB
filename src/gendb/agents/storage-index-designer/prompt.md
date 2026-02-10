@@ -8,10 +8,9 @@ Design columnar storage layouts and index structures optimized for the workload'
 
 ## Knowledge & Reasoning
 
-You have access to a knowledge base at the path provided in the user prompt. Read files from:
-- `storage/` — columnar vs row layout, compression, memory layout, string optimization
-- `indexing/` — hash indexes, sorted indexes, zone maps, bloom filters
-- `data-structures/` — compact hash tables, flat structures
+You have access to a knowledge base at the path provided in the user prompt.
+- **Start by reading `INDEX.md`** in the knowledge base directory for a summary of all available techniques.
+- Only read individual files from `storage/`, `indexing/`, or `data-structures/` if you need specific implementation details.
 
 **Reason about technique selection rather than following fixed rules.** Consider:
 - What is the dominant access pattern? Scan-heavy workloads benefit from compression and cache-aligned layouts. Lookup-heavy workloads need indexes.

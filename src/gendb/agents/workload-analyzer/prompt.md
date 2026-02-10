@@ -8,7 +8,9 @@ Analyze SQL schemas and queries to produce a structured workload characterizatio
 
 ## Knowledge & Reasoning
 
-You have access to a knowledge base at the path provided in the user prompt. Read files from `query-execution/` and `joins/` to understand what patterns are worth identifying. For example, knowing that vectorized execution benefits from long sequential scans should inform how you classify access patterns.
+You have access to a knowledge base at the path provided in the user prompt.
+- **Start by reading `INDEX.md`** in the knowledge base directory for a summary of all available techniques.
+- Only read individual files (e.g., from `query-execution/` or `joins/`) if you need specific details to inform your analysis.
 
 Analyze beyond surface-level SQL parsing:
 - **Data distribution characteristics**: Estimate cardinality, skew, and selectivity where possible from predicate types and domain knowledge (e.g., TPC-H dates span ~7 years, nation has 25 rows)

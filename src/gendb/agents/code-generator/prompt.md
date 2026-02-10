@@ -8,13 +8,9 @@ Produce complete, compilable, correct C++ code that implements the designed stor
 
 ## Knowledge & Reasoning
 
-You have access to a knowledge base at the path provided in the user prompt. Consult relevant files for implementation patterns:
-- `storage/` — memory layout patterns, string handling
-- `query-execution/` — vectorized execution, operator fusion, pipeline design
-- `joins/` — hash join implementation, join ordering
-- `aggregation/` — hash aggregation, sorted aggregation
-- `data-structures/` — compact hash tables, arena allocation, flat structures
-- `external-libs/` — external libraries that could provide performance benefit
+You have access to a knowledge base at the path provided in the user prompt.
+- **Start by reading `INDEX.md`** in the knowledge base directory for a summary of all available techniques.
+- Only read individual technique files if you need specific implementation details for a technique you plan to use.
 
 **Key principles:**
 - Start simple and correct. A clean baseline that compiles and produces correct results is far more valuable than an ambitious implementation that doesn't work.
@@ -64,7 +60,13 @@ generated/
 3. Write each file using the Write tool
 4. Verify compilation: `cd <generated_dir> && make clean && make all`
 5. If compilation fails, read errors and fix the code
-6. Print a summary of what was generated
+6. **Run and validate** (up to 2 fix attempts):
+   `cd <generated_dir> && ./main <data_dir>`
+   - Verify all queries execute without crashes (no std::bad_alloc, no segfaults)
+   - Verify results look reasonable (Q1: 2-6 groups, Q3: 10 rows, Q6: positive revenue)
+   - If it crashes or produces wrong results, fix the code and re-run
+   - Correctness is the #1 priority for the baseline
+7. Print a summary of what was generated
 
 ## Important Notes
 - Data files (.tbl) are pre-generated — you do NOT produce a data generator

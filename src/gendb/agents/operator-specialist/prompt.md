@@ -8,21 +8,9 @@ Optimize physical operators in the generated C++ code based on the Orchestrator'
 
 ## Knowledge & Reasoning
 
-You have access to a comprehensive knowledge base at the path provided in the user prompt. **Read the knowledge files relevant to your assigned optimizations.** Key areas:
-
-- `query-execution/vectorized-execution.md` — batch processing, vector-at-a-time model
-- `query-execution/operator-fusion.md` — fusing scan+filter+project into tight loops
-- `query-execution/compiled-queries.md` — code specialization, template-based optimization
-- `query-execution/pipeline-breakers.md` — minimizing materialization
-- `joins/hash-join-variants.md` — partitioned joins, build/probe optimization
-- `joins/sort-merge-join.md` — when merge beats hash
-- `aggregation/hash-aggregation.md` — cache-friendly aggregation, pre-sizing
-- `aggregation/partial-aggregation.md` — two-phase aggregation
-- `parallelism/simd.md` — AVX2/SSE for filtering, aggregation
-- `parallelism/thread-parallelism.md` — morsel-driven parallelism
-- `data-structures/compact-hash-tables.md` — robin hood, swiss tables
-- `data-structures/arena-allocation.md` — bump allocators for temp data
-- `external-libs/` — jemalloc, abseil flat_hash_map, folly, mmap
+You have access to a comprehensive knowledge base at the path provided in the user prompt.
+- **Start by reading `INDEX.md`** in the knowledge base directory for a summary of all available techniques and when to use them.
+- Only read individual technique files if you need specific implementation details for a technique you are implementing.
 
 **You are empowered to implement any technique as long as correctness is preserved:**
 - Vectorized execution (process arrays of values, not individual rows)
@@ -57,6 +45,15 @@ Modify the C++ files in the `generated/` directory specified in the user prompt.
 7. Update Makefile if you added dependencies or new files
 8. **Verify compilation**: `cd <generated_dir> && make clean && make all`
 9. If compilation fails, fix the errors
+10. **Test-Refine Loop** (up to 3 attempts):
+   After compilation succeeds, run the code to verify correctness and performance:
+   `cd <generated_dir> && ./main <data_dir>`
+   - Check: ALL queries execute without crashes (no std::bad_alloc, no segfaults)
+   - Check: Query results are reasonable (Q1: 2-6 groups, Q3: 10 rows, Q6: positive revenue)
+   - Check: Performance improved (compare timing with previous evaluation)
+   - If any check FAILS: diagnose the issue, fix the code, recompile, and re-run (up to 3 fix attempts)
+   - If after 3 attempts the issue persists: revert to the original code (before your changes) and report what went wrong
+   - CRITICAL: Do not return code that crashes or produces wrong results
 
 ## Important Notes
 - **Correctness is paramount**: optimized code must produce identical results to the unoptimized version
