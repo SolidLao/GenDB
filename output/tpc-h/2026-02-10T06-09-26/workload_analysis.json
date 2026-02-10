@@ -1,0 +1,207 @@
+{
+  "tables": {
+    "lineitem": {
+      "access_patterns": ["full_scan", "range_filter"],
+      "access_frequency": 3,
+      "hot_columns": [
+        "l_shipdate",
+        "l_extendedprice",
+        "l_discount",
+        "l_quantity",
+        "l_returnflag",
+        "l_linestatus",
+        "l_tax",
+        "l_orderkey"
+      ],
+      "estimated_cardinality": "6M (SF=1) to 6B (SF=1000)",
+      "role": "fact",
+      "notes": "Largest table, always filtered by date ranges. Multiple computed columns (price*(1-discount)*(1+tax)) suggest expression evaluation optimization opportunities."
+    },
+    "orders": {
+      "access_patterns": ["index_lookup", "range_filter"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "o_orderkey",
+        "o_custkey",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "estimated_cardinality": "1.5M (SF=1) to 1.5B (SF=1000)",
+      "role": "fact",
+      "notes": "Joined via PK (o_orderkey) and FK (o_custkey). Date range filter in Q3."
+    },
+    "customer": {
+      "access_patterns": ["index_lookup", "point_filter"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "c_custkey",
+        "c_mktsegment"
+      ],
+      "estimated_cardinality": "150K (SF=1) to 150M (SF=1000)",
+      "role": "dimension",
+      "notes": "Small dimension table. c_mktsegment has low cardinality (~5 values) - highly selective filter."
+    },
+    "nation": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "25",
+      "role": "dimension",
+      "notes": "Tiny dimension table, not accessed in test queries but present in schema."
+    },
+    "region": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "5",
+      "role": "dimension",
+      "notes": "Tiny dimension table, not accessed in test queries."
+    },
+    "supplier": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "10K (SF=1) to 10M (SF=1000)",
+      "role": "dimension",
+      "notes": "Not accessed in test queries."
+    },
+    "part": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "200K (SF=1) to 200M (SF=1000)",
+      "role": "dimension",
+      "notes": "Not accessed in test queries."
+    },
+    "partsupp": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "800K (SF=1) to 800M (SF=1000)",
+      "role": "bridge",
+      "notes": "Many-to-many relationship table, not accessed in test queries."
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "frequency": 1,
+      "estimated_selectivity": "high",
+      "notes": "Q3: Should execute AFTER filtering customer by c_mktsegment='BUILDING'. Filter reduces customer from 150K to ~30K rows (1/5 selectivity)."
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "frequency": 1,
+      "estimated_selectivity": "medium",
+      "notes": "Q3: Should execute AFTER filtering orders by o_orderdate and lineitem by l_shipdate. Each order has ~4 lineitems on average."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1",
+      "notes": "Date filter: l_shipdate <= '1998-09-02'. Filters to ~98% of data (high selectivity = most rows pass). Zone maps critical."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "BETWEEN",
+      "selectivity": "high",
+      "query": "Q6",
+      "notes": "1-year range: '1994-01-01' to '1994-12-31'. Filters to ~14% of data (1 year / 7 years). Zone maps very effective."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "medium",
+      "query": "Q6",
+      "notes": "Range: 0.05 to 0.07 (2% width out of typical 0-10% range). Selectivity ~20%."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "high",
+      "query": "Q6",
+      "notes": "l_quantity < 24. Typical range 1-50, so ~48% selectivity."
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "high",
+      "query": "Q3",
+      "notes": "Point filter: 'BUILDING'. Low cardinality column (5 values), so ~20% selectivity. Prime candidate for dictionary encoding."
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3",
+      "notes": "o_orderdate < '1995-03-15'. Filters to orders before mid-1995, roughly 30-40% of data."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "high",
+      "query": "Q3",
+      "notes": "l_shipdate > '1995-03-15'. Complementary to orders filter - creates a temporal window."
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM", "AVG", "COUNT"],
+      "query": "Q1",
+      "estimated_groups": "4",
+      "notes": "Very low cardinality GROUP BY (returnflag: 3 values {A,N,R}, linestatus: 2 values {O,F} = 4-6 groups). Hash aggregation overkill - sorted aggregation with single-pass scan is optimal. Multiple aggregates (6 SUMs, 3 AVGs) suggest vectorized evaluation."
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM"],
+      "query": "Q3",
+      "estimated_groups": "10 (due to LIMIT 10), actual ~50K-100K before LIMIT",
+      "notes": "Medium-high cardinality GROUP BY. l_orderkey is unique per group. Hash aggregation appropriate. Top-K optimization possible: maintain min-heap of size 10 during aggregation instead of full hash table."
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "has_limit": false,
+      "query": "Q1",
+      "notes": "Sorting 4-6 groups is trivial. Can avoid sort if aggregation produces results in sorted order (e.g., sorted aggregation or small hash table with post-sort)."
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate"],
+      "has_limit": true,
+      "limit": 10,
+      "query": "Q3",
+      "notes": "Top-10 query with ORDER BY + LIMIT. Classic optimization opportunity: use min-heap during aggregation to track top 10, avoiding full sort of 50K-100K groups. Revenue is computed column, needs materialization."
+    }
+  ],
+  "optimization_opportunities": [
+    "Zone maps on date columns (l_shipdate, o_orderdate): TPC-H dates span 1992-1998. All queries have date filters. Zone maps can skip 80-90% of blocks.",
+    "Columnar storage for lineitem: All queries scan lineitem but access only 5-8 of 16 columns. Columnar layout reduces I/O by 50-70%.",
+    "Dictionary encoding for low-cardinality strings: c_mktsegment (5 values), l_returnflag (3 values), l_linestatus (2 values). Reduces memory footprint and enables integer comparisons.",
+    "Filter pushdown in Q3: Apply c_mktsegment filter first (reduces customer 5x), then join to orders. Current order matters: customer (30K) -> orders (150K) -> lineitem (600K) produces smaller intermediates than lineitem (6M) -> orders -> customer.",
+    "Join ordering for Q3: Optimal order is customer |><| orders |><| lineitem. Greedy heuristic: filter customer (150K -> 30K), join with filtered orders (1.5M -> 500K filtered by date), then join with filtered lineitem.",
+    "Computed expressions in Q1 and Q3: l_extendedprice * (1 - l_discount) appears in Q1, Q3, Q6. Consider pre-computing or using SIMD FMA (fused multiply-add) instructions.",
+    "Top-K optimization for Q3: Maintain heap of size 10 during aggregation instead of sorting 50K-100K groups. Reduces sort from O(n log n) to O(n log k) where k=10.",
+    "Sorted aggregation for Q1: Only 4-6 groups. If lineitem is sorted by (l_returnflag, l_linestatus) or scan produces sorted output, use single-pass sorted aggregation (O(1) memory vs hash table).",
+    "Late materialization in Q3: After joins and filters, only need l_orderkey for GROUP BY and 3 columns for final output. Avoid materializing full lineitem rows during join pipeline.",
+    "Vectorized execution for Q6: Tight loop with 4 filters (shipdate range, discount range, quantity threshold, expression computation). Ideal for SIMD: process 8 rows at once with AVX2.",
+    "Correlated column storage: (l_extendedprice, l_discount, l_tax) always accessed together for revenue computation. Store as column group for better cache locality.",
+    "Bloom filters for semi-join in Q3: Build bloom filter on filtered customer.c_custkey, probe during orders scan to skip non-matching orders early."
+  ],
+  "summary": "This workload is dominated by lineitem scans with selective date filters (Q1, Q6) and a 3-way join with temporal filters (Q3). Key characteristics: (1) Lineitem is the bottleneck - largest table, accessed in all queries. (2) Date filters are highly selective and clustered - zone maps will be extremely effective. (3) Low-cardinality aggregations (Q1: 4 groups) and Top-K pattern (Q3: LIMIT 10) offer specialized optimization opportunities. (4) Computed expressions (price*(1-discount)*(1+tax)) appear repeatedly - SIMD or pre-computation worthwhile. (5) Q3 join ordering matters: filter customer first (20% selectivity), then cascade to orders and lineitem. Recommended optimizations: columnar storage + zone maps for lineitem, dictionary encoding for flags/segments, filter pushdown + optimal join ordering for Q3, top-K heap for Q3, vectorized execution for expression-heavy Q1/Q6."
+}

@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 has a critical 34x performance gap (4594ms vs DuckDB's 135ms) caused by inefficient std::unordered_map usage. With 1 iteration remaining, focus on proven high-impact optimizations: flat hash tables for Q3 (expected 3-5x speedup) + customer filtering improvements + SIMD for Q6 (2-3x speedup). Q1 is already well-optimized (1.23x from DuckDB). These changes are complementary and have clear implementation paths.",
+  "selected_recommendations": [0, 1, 3],
+  "focus_areas": [
+    "Q3: Replace std::unordered_map with flat hash tables (order_info + revenue_map)",
+    "Q3: Optimize customer filtering with flat_hash_set or bitmap",
+    "Q6: SIMD vectorization for filter evaluation (AVX2)"
+  ],
+  "strategy_notes": "Prioritize Q3 optimization as it represents the largest bottleneck. Implement flat hash tables first (P0) as foundation, then customer filtering improvements (P1) which work on the same critical path. SIMD for Q6 (P3) is independent and can be developed in parallel. Avoid P5 (Q1 SIMD) due to high complexity and low ROI - Q1 is already 1.23x from target. Reserve prefetching (P2) and other advanced optimizations for iteration 3 if flat hash tables succeed.",
+  "notes": "Implementation guidance: For flat hash tables, prefer a custom Robin Hood implementation if Abseil is unavailable - see data-structures/compact-hash-tables.md for details. Pre-size both hash tables with reserve() to avoid rehashing. For SIMD, compile with -mavx2 and include runtime CPU feature detection. Expected results: Q3 should improve to 900-1500ms (3-5x speedup), Q6 to 20-30ms (2-3x speedup), bringing GenDB significantly closer to DuckDB's performance."
+}

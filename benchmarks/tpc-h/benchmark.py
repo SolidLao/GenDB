@@ -343,7 +343,7 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
     history = {"baseline": {}, "iterations": [], "best": {}}
 
     # Run baseline
-    baseline_bin = run_dir / "generated" / "gendb_tpch"
+    baseline_bin = run_dir / "generated" / "main"
     if baseline_bin.exists():
         print("  Running baseline...")
         baseline_results = gendb_benchmark_single(baseline_bin, data_dir, num_runs)
@@ -360,7 +360,7 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
 
         for iter_dir in iter_dirs:
             iter_num = int(iter_dir.name)
-            iter_bin = iter_dir / "generated" / "gendb_tpch"
+            iter_bin = iter_dir / "generated" / "main"
 
             if iter_bin.exists():
                 print(f"  Running iteration {iter_num}...")

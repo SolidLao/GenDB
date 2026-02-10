@@ -1,0 +1,40 @@
+{
+  "overall_status": "pass",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "rm -rf obj main\ng++ -O2 -std=c++17 -Wall -Wextra -c main.cpp -o obj/main.o\ng++ -O2 -std=c++17 -Wall -Wextra -c storage/storage.cpp -o obj/storage/storage.o\ng++ -O2 -std=c++17 -Wall -Wextra -c queries/q1.cpp -o obj/queries/q1.o\ng++ -O2 -std=c++17 -Wall -Wextra -c queries/q3.cpp -o obj/queries/q3.o\ng++ -O2 -std=c++17 -Wall -Wextra -c queries/q6.cpp -o obj/queries/q6.o\ng++ -O2 -std=c++17 -Wall -Wextra -o main obj/main.o obj/storage/storage.o obj/queries/q1.o obj/queries/q3.o obj/queries/q6.o"
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "Loading TPC-H data from: /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/\n\nLoading lineitem...\nLoaded 1000000 lineitem rows...Loaded 2000000 lineitem rows...Loaded 3000000 lineitem rows...Loaded 4000000 lineitem rows...Loaded 5000000 lineitem rows...Loaded 6000000 lineitem rows...Loaded 7000000 lineitem rows...Loaded 8000000 lineitem rows...Loaded 9000000 lineitem rows...Loaded 10000000 lineitem rows...Loaded 11000000 lineitem rows...Loaded 12000000 lineitem rows...Loaded 13000000 lineitem rows...Loaded 14000000 lineitem rows...Loaded 15000000 lineitem rows...Loaded 16000000 lineitem rows...Loaded 17000000 lineitem rows...Loaded 18000000 lineitem rows...Loaded 19000000 lineitem rows...Loaded 20000000 lineitem rows...Loaded 21000000 lineitem rows...Loaded 22000000 lineitem rows...Loaded 23000000 lineitem rows...Loaded 24000000 lineitem rows...Loaded 25000000 lineitem rows...Loaded 26000000 lineitem rows...Loaded 27000000 lineitem rows...Loaded 28000000 lineitem rows...Loaded 29000000 lineitem rows...Loaded 30000000 lineitem rows...Loaded 31000000 lineitem rows...Loaded 32000000 lineitem rows...Loaded 33000000 lineitem rows...Loaded 34000000 lineitem rows...Loaded 35000000 lineitem rows...Loaded 36000000 lineitem rows...Loaded 37000000 lineitem rows...Loaded 38000000 lineitem rows...Loaded 39000000 lineitem rows...Loaded 40000000 lineitem rows...Loaded 41000000 lineitem rows...Loaded 42000000 lineitem rows...Loaded 43000000 lineitem rows...Loaded 44000000 lineitem rows...Loaded 45000000 lineitem rows...Loaded 46000000 lineitem rows...Loaded 47000000 lineitem rows...Loaded 48000000 lineitem rows...Loaded 49000000 lineitem rows...Loaded 50000000 lineitem rows...Loaded 51000000 lineitem rows...Loaded 52000000 lineitem rows...Loaded 53000000 lineitem rows...Loaded 54000000 lineitem rows...Loaded 55000000 lineitem rows...Loaded 56000000 lineitem rows...Loaded 57000000 lineitem rows...Loaded 58000000 lineitem rows...Loaded 59000000 lineitem rows...\nLoading orders...\nLoaded 1000000 orders rows...Loaded 2000000 orders rows...Loaded 3000000 orders rows...Loaded 4000000 orders rows...Loaded 5000000 orders rows...Loaded 6000000 orders rows...Loaded 7000000 orders rows...Loaded 8000000 orders rows...Loaded 9000000 orders rows...Loaded 10000000 orders rows...Loaded 11000000 orders rows...Loaded 12000000 orders rows...Loaded 13000000 orders rows...Loaded 14000000 orders rows...Loaded 15000000 orders rows...\nLoading customer...\nLoaded 100000 customer rows...Loaded 200000 customer rows...Loaded 300000 customer rows...Loaded 400000 customer rows...Loaded 500000 customer rows...Loaded 600000 customer rows...Loaded 700000 customer rows...Loaded 800000 customer rows...Loaded 900000 customer rows...Loaded 1000000 customer rows...Loaded 1100000 customer rows...Loaded 1200000 customer rows...Loaded 1300000 customer rows...Loaded 1400000 customer rows...Loaded 1500000 customer rows...\n\n=== Data Loading Complete ===\nLineitem rows: 59986052\nOrders rows: 15000000\nCustomer rows: 1500000\nTotal load time: 127 seconds\n\n================================================================================\n\n=== Q1: Pricing Summary Report ===\nRETURNFLAG  LINESTATUS          SUM_QTY    SUM_BASE_PRICE    SUM_DISC_PRICE        SUM_CHARGE     AVG_QTY      AVG_PRICE    AVG_DISC    COUNT_ORDER\n-----------------------------------------------------------------------------------------------------------------------------------------------------------\nA           F              377518399.00   566065727797.15   537759104278.12   559276670892.20       25.50       38237.15        0.05       14804077\nN           F                9851614.00    14767438399.17    14028805792.21    14590490998.37       25.52       38257.81        0.05         385998\nN           O              743124873.00  1114302286902.13  1058580922145.20  1100937000170.77       25.50       38233.90        0.05       29144351\nR           F              377732830.00   566431054976.02   538110922664.75   559634780885.11       25.51       38251.22        0.05       14808183\n\nExecution time: 2706 ms\n\n================================================================================\n\n=== Q3: Shipping Priority ===\n    ORDERKEY           REVENUE      ORDERDATE   SHIPPRIORITY\n------------------------------------------------------------\n     4791171         440715.22     1995-02-23              0\n    46678469         439855.32     1995-01-27              0\n    23906758         432728.57     1995-03-14              0\n    23861382         428739.14     1995-03-09              0\n    59393639         426036.07     1995-02-12              0\n     3355202         425100.67     1995-03-04              0\n     9806272         425088.06     1995-03-13              0\n    22810436         423231.97     1995-01-02              0\n    16384100         421478.73     1995-03-02              0\n    52974151         415367.12     1995-02-05              0\n\nExecution time: 2277 ms\n\n================================================================================\n\n=== Q6: Forecasting Revenue Change ===\nREVENUE: 1230113636.01\n\nExecution time: 287 ms\n\n================================================================================\nAll queries completed successfully!"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "pass",
+      "num_groups": 4,
+      "timing_ms": 2706,
+      "notes": "Query executed successfully. Produced 4 groups by (returnflag, linestatus): A|F, N|F, N|O, R|F. All numeric values are non-negative. count_order sums to 59,142,609, consistent with ~59.9M lineitem rows loaded. Average quantities (~25.5) and prices (~38K) are reasonable for TPC-H data."
+    },
+    "Q3": {
+      "status": "pass",
+      "num_rows": 10,
+      "timing_ms": 2277,
+      "notes": "Query executed successfully. Returned exactly 10 rows as expected (LIMIT 10). All revenue values are positive and properly ordered in descending order (440715.22 down to 415367.12). Order dates are all in 1995 Q1 as expected for the shipping priority query with market segment filter."
+    },
+    "Q6": {
+      "status": "pass",
+      "revenue": 1230113636.01,
+      "timing_ms": 287,
+      "notes": "Query executed successfully. Single revenue value returned: $1,230,113,636.01, which is positive and reasonable for SF10 data with the specified filters (shipdate between 1994-01-01 and 1995-01-01, discount between 0.05 and 0.07, quantity < 24)."
+    }
+  },
+  "summary": "All evaluation steps passed successfully. Compilation completed without errors or warnings. All three TPC-H queries (Q1, Q3, Q6) executed correctly and produced valid results. Q1 execution time: 2706ms, Q3: 2277ms, Q6: 287ms. Data loading took 127 seconds for SF10 (59.9M lineitem, 15M orders, 1.5M customer rows). Profiling data unavailable (perf not installed). Overall: PASS."
+}
