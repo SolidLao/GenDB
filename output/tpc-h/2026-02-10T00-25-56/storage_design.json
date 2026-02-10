@@ -1,0 +1,715 @@
+{
+  "tables": {
+    "lineitem": {
+      "columns": [
+        {
+          "name": "l_orderkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join", "group_by"],
+          "index": "hash",
+          "index_rationale": "PK-FK join with orders table. Hash index provides O(1) lookup for join probing. Used in Q3 aggregation grouping.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality foreign key, no obvious pattern for compression."
+        },
+        {
+          "name": "l_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed in sample queries.",
+          "encoding": "none",
+          "encoding_rationale": "Not used, no compression needed."
+        },
+        {
+          "name": "l_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed in sample queries.",
+          "encoding": "none",
+          "encoding_rationale": "Not used, no compression needed."
+        },
+        {
+          "name": "l_linenumber",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Part of composite PK but not used in queries.",
+          "encoding": "none",
+          "encoding_rationale": "Small range (1-7 typically), but not accessed. Skip encoding overhead."
+        },
+        {
+          "name": "l_quantity",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": ["filter", "aggregation"],
+          "index": "none",
+          "index_rationale": "Range predicate (l_quantity < 24) in Q6. Sequential scan with vectorized filter is faster than index for medium selectivity (~46%).",
+          "encoding": "none",
+          "encoding_rationale": "Continuous values, no clear compression pattern. Delta encoding not beneficial for non-monotonic data."
+        },
+        {
+          "name": "l_extendedprice",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": ["aggregation"],
+          "index": "none",
+          "index_rationale": "Used only in arithmetic expressions for aggregation. No filter or join predicates.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality continuous values. Floating point compression yields minimal benefit and adds decompression overhead in hot aggregation path."
+        },
+        {
+          "name": "l_discount",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": ["filter", "aggregation"],
+          "index": "none",
+          "index_rationale": "BETWEEN predicate in Q6. Sequential scan with SIMD filter is optimal for range predicates.",
+          "encoding": "none",
+          "encoding_rationale": "Fixed precision decimal (0.00-0.10), but stored as double. Converting to int16_t (basis points) would enable better compression, but keep as-is for simplicity."
+        },
+        {
+          "name": "l_tax",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": ["aggregation"],
+          "index": "none",
+          "index_rationale": "Arithmetic expression only.",
+          "encoding": "none",
+          "encoding_rationale": "Similar to l_discount, no compression benefit."
+        },
+        {
+          "name": "l_returnflag",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": ["group_by", "order_by"],
+          "index": "none",
+          "index_rationale": "Low-cardinality (3 values: R/A/N). Aggregation scan is sequential; no index needed. Hash aggregation handles grouping efficiently.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Extremely low cardinality (3 values). Dictionary encoding: 8-byte string → 1-byte code. ~8x compression. Integer comparison in aggregation is 10x faster than string comparison."
+        },
+        {
+          "name": "l_linestatus",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": ["group_by", "order_by"],
+          "index": "none",
+          "index_rationale": "Low-cardinality (2 values: O/F). Sequential aggregation scan.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Extremely low cardinality (2 values). Dictionary encoding: 8-byte string → 1-byte code. ~8x compression, faster comparisons."
+        },
+        {
+          "name": "l_shipdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": ["filter"],
+          "index": "sorted",
+          "index_rationale": "CRITICAL: Used in range predicates in all 3 queries (Q1: <=, Q6: >= and <, Q3: >). Sorted index enables zone maps for block-level data skipping. With 7-year range (1992-1998) and selective filters (14% in Q6), zone maps can skip 80-90% of blocks. Binary search on sorted data gives O(log n) range bound lookup.",
+          "encoding": "delta",
+          "encoding_rationale": "DATE stored as days_since_epoch. Monotonic increasing in sorted order. Delta encoding: 32-bit dates → 8-bit deltas (daily increments). 4x compression. Zone maps provide min/max per block for pruning."
+        },
+        {
+          "name": "l_commitdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in sample queries.",
+          "encoding": "delta",
+          "encoding_rationale": "Even though not accessed, dates benefit from delta encoding. Minimal overhead, 4x compression if scanned."
+        },
+        {
+          "name": "l_receiptdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in sample queries.",
+          "encoding": "delta",
+          "encoding_rationale": "Same as l_commitdate."
+        },
+        {
+          "name": "l_shipinstruct",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "dictionary",
+          "encoding_rationale": "TPC-H spec defines 4 shipping instructions. Very low cardinality. Dictionary encoding: 25-byte string → 1-byte code. 25x compression."
+        },
+        {
+          "name": "l_shipmode",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "dictionary",
+          "encoding_rationale": "TPC-H spec defines 7 ship modes. Low cardinality. Dictionary encoding: 10-byte string → 1-byte code. 10x compression."
+        },
+        {
+          "name": "l_comment",
+          "sql_type": "VARCHAR(44)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Free-text comments, high cardinality. Not accessed in queries. No compression to avoid overhead."
+        }
+      ],
+      "file_format": {
+        "filename": "lineitem.tbl",
+        "delimiter": "|",
+        "column_order": ["l_orderkey", "l_partkey", "l_suppkey", "l_linenumber", "l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipinstruct", "l_shipmode", "l_comment"]
+      },
+      "estimated_rows": "6000000 (SF=1)",
+      "storage_notes": "CRITICAL TABLE: Columnar storage mandatory. Physically sort by l_shipdate to maximize zone map effectiveness (all queries filter on date). Column layout optimization: Store hot columns (l_shipdate, l_orderkey, l_extendedprice, l_discount, l_quantity, l_returnflag, l_linestatus, l_tax) contiguously for cache efficiency. Zone maps: 8192-row blocks with min/max on l_shipdate, l_discount, l_quantity for Q6 predicate pushdown. Late materialization: Filter on l_shipdate first (produces selection vector), then materialize other columns only for qualifying rows."
+    },
+    "orders": {
+      "columns": [
+        {
+          "name": "o_orderkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join", "group_by"],
+          "index": "hash",
+          "index_rationale": "Primary key. Hash index for O(1) join with lineitem (FK lookup). Also used in Q3 grouping.",
+          "encoding": "none",
+          "encoding_rationale": "Primary key, high cardinality, random distribution."
+        },
+        {
+          "name": "o_custkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join"],
+          "index": "hash",
+          "index_rationale": "Foreign key to customer. Hash index for join probing. Q3 filters customer first (20% selectivity), then probes orders by o_custkey. Hash lookup is critical for join performance.",
+          "encoding": "none",
+          "encoding_rationale": "Foreign key, high cardinality."
+        },
+        {
+          "name": "o_orderstatus",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Low cardinality (3 values: O/F/P). Dictionary encoding: 1-byte char → even smaller with bit packing, but minimal gain. Use dictionary for consistency."
+        },
+        {
+          "name": "o_totalprice",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality continuous values."
+        },
+        {
+          "name": "o_orderdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": ["filter", "group_by", "order_by"],
+          "index": "sorted",
+          "index_rationale": "Range filter in Q3 (o_orderdate < '1995-03-15'). Sorted index enables zone maps for ~50% data pruning. Also used in Q3 grouping/sorting, but sorting happens after aggregation (small result set).",
+          "encoding": "delta",
+          "encoding_rationale": "DATE as days_since_epoch. Delta encoding for 4x compression. Zone maps for range pruning."
+        },
+        {
+          "name": "o_orderpriority",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Low cardinality (5 priorities in TPC-H). Dictionary encoding: 15-byte string → 1-byte code."
+        },
+        {
+          "name": "o_clerk",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality (1000 clerks per SF). No compression benefit."
+        },
+        {
+          "name": "o_shippriority",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["group_by", "order_by"],
+          "index": "none",
+          "index_rationale": "Used in Q3 grouping/ordering, but after aggregation (small result set). No index needed.",
+          "encoding": "none",
+          "encoding_rationale": "Single value (0) in standard TPC-H. RLE would compress to near-zero, but not worth the complexity."
+        },
+        {
+          "name": "o_comment",
+          "sql_type": "VARCHAR(79)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Free-text, high cardinality."
+        }
+      ],
+      "file_format": {
+        "filename": "orders.tbl",
+        "delimiter": "|",
+        "column_order": ["o_orderkey", "o_custkey", "o_orderstatus", "o_totalprice", "o_orderdate", "o_orderpriority", "o_clerk", "o_shippriority", "o_comment"]
+      },
+      "estimated_rows": "1500000 (SF=1)",
+      "storage_notes": "Columnar storage. Physically sort by o_orderdate for zone map effectiveness in Q3. Hash index on o_orderkey and o_custkey pre-built for joins. Zone maps on o_orderdate with 8192-row blocks enable 50% data skipping in Q3."
+    },
+    "customer": {
+      "columns": [
+        {
+          "name": "c_custkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join"],
+          "index": "hash",
+          "index_rationale": "Primary key. Hash index for join with orders. Q3 filters customer first, then uses PK for join build phase.",
+          "encoding": "none",
+          "encoding_rationale": "Primary key, sequential (1..150000)."
+        },
+        {
+          "name": "c_name",
+          "sql_type": "VARCHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality (unique names)."
+        },
+        {
+          "name": "c_address",
+          "sql_type": "VARCHAR(40)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality."
+        },
+        {
+          "name": "c_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Low cardinality (25 nations), but not accessed. Skip encoding."
+        },
+        {
+          "name": "c_phone",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality."
+        },
+        {
+          "name": "c_acctbal",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Continuous values."
+        },
+        {
+          "name": "c_mktsegment",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": ["filter"],
+          "index": "none",
+          "index_rationale": "Equality filter (c_mktsegment = 'BUILDING') in Q3 with 20% selectivity. Small table (150K rows), sequential scan with dictionary-coded comparison is faster than index. Vectorized scan with SIMD string comparison or dictionary code lookup is optimal.",
+          "encoding": "dictionary",
+          "encoding_rationale": "CRITICAL: Low cardinality (5 segments). Dictionary encoding enables integer comparison in filter (10x faster than string comparison). 10-byte string → 1-byte code."
+        },
+        {
+          "name": "c_comment",
+          "sql_type": "VARCHAR(117)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Free-text."
+        }
+      ],
+      "file_format": {
+        "filename": "customer.tbl",
+        "delimiter": "|",
+        "column_order": ["c_custkey", "c_name", "c_address", "c_nationkey", "c_phone", "c_acctbal", "c_mktsegment", "c_comment"]
+      },
+      "estimated_rows": "150000 (SF=1)",
+      "storage_notes": "Columnar storage. Small dimension table. Pre-filter by c_mktsegment (dictionary-encoded) before join. Hash index on c_custkey for join build phase. Consider clustering by c_mktsegment for better cache locality during scan, but not critical given small size."
+    },
+    "nation": {
+      "columns": [
+        {
+          "name": "n_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Tiny table (25 rows), but hash index is trivial and enables consistent join interface.",
+          "encoding": "none",
+          "encoding_rationale": "25 rows, overhead exceeds benefit."
+        },
+        {
+          "name": "n_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "25 rows, no optimization needed."
+        },
+        {
+          "name": "n_regionkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "25 rows."
+        },
+        {
+          "name": "n_comment",
+          "sql_type": "VARCHAR(152)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "25 rows."
+        }
+      ],
+      "file_format": {
+        "filename": "nation.tbl",
+        "delimiter": "|",
+        "column_order": ["n_nationkey", "n_name", "n_regionkey", "n_comment"]
+      },
+      "estimated_rows": "25 (fixed)",
+      "storage_notes": "Tiny dimension table. Row storage acceptable, but use columnar for consistency. Entire table fits in L1 cache (few KB). No special optimizations needed."
+    },
+    "region": {
+      "columns": [
+        {
+          "name": "r_regionkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Tiny table (5 rows).",
+          "encoding": "none",
+          "encoding_rationale": "5 rows."
+        },
+        {
+          "name": "r_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "5 rows."
+        },
+        {
+          "name": "r_comment",
+          "sql_type": "VARCHAR(152)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "5 rows."
+        }
+      ],
+      "file_format": {
+        "filename": "region.tbl",
+        "delimiter": "|",
+        "column_order": ["r_regionkey", "r_name", "r_comment"]
+      },
+      "estimated_rows": "5 (fixed)",
+      "storage_notes": "Tiny dimension table. Fits in L1 cache. No optimizations needed."
+    },
+    "supplier": {
+      "columns": [
+        {
+          "name": "s_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Not used in queries, but hash index is standard for PKs.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_address",
+          "sql_type": "VARCHAR(40)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_phone",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_acctbal",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "s_comment",
+          "sql_type": "VARCHAR(101)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        }
+      ],
+      "file_format": {
+        "filename": "supplier.tbl",
+        "delimiter": "|",
+        "column_order": ["s_suppkey", "s_name", "s_address", "s_nationkey", "s_phone", "s_acctbal", "s_comment"]
+      },
+      "estimated_rows": "10000 (SF=1)",
+      "storage_notes": "Not accessed in sample queries. Basic columnar storage, no special optimizations."
+    },
+    "part": {
+      "columns": [
+        {
+          "name": "p_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "p_name",
+          "sql_type": "VARCHAR(55)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "p_mfgr",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed, but low cardinality (5 manufacturers). Could use dictionary if accessed."
+        },
+        {
+          "name": "p_brand",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed, but low cardinality (25 brands)."
+        },
+        {
+          "name": "p_type",
+          "sql_type": "VARCHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed, medium cardinality (150 types)."
+        },
+        {
+          "name": "p_size",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "p_container",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed, low cardinality (40 containers)."
+        },
+        {
+          "name": "p_retailprice",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "p_comment",
+          "sql_type": "VARCHAR(23)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        }
+      ],
+      "file_format": {
+        "filename": "part.tbl",
+        "delimiter": "|",
+        "column_order": ["p_partkey", "p_name", "p_mfgr", "p_brand", "p_type", "p_size", "p_container", "p_retailprice", "p_comment"]
+      },
+      "estimated_rows": "200000 (SF=1)",
+      "storage_notes": "Not accessed in sample queries. Basic columnar storage."
+    },
+    "partsupp": {
+      "columns": [
+        {
+          "name": "ps_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Part of composite PK.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "ps_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Part of composite PK.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "ps_availqty",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "ps_supplycost",
+          "sql_type": "DECIMAL(15,2)",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "ps_comment",
+          "sql_type": "VARCHAR(199)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        }
+      ],
+      "file_format": {
+        "filename": "partsupp.tbl",
+        "delimiter": "|",
+        "column_order": ["ps_partkey", "ps_suppkey", "ps_availqty", "ps_supplycost", "ps_comment"]
+      },
+      "estimated_rows": "800000 (SF=1)",
+      "storage_notes": "Not accessed in sample queries. Basic columnar storage."
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DECIMAL(15,2)": "double",
+    "DATE": "int32_t",
+    "CHAR(1)": "char",
+    "CHAR(10)": "std::string",
+    "CHAR(15)": "std::string",
+    "CHAR(25)": "std::string",
+    "VARCHAR": "std::string"
+  },
+  "date_encoding": "days_since_epoch_1970",
+  "design_rationale": "This design optimizes for the scan-heavy OLAP workload with emphasis on lineitem (hot table). Key decisions: (1) Columnar storage for all tables enables projection pushdown and SIMD vectorization. (2) Sorted indexes with zone maps on date columns (l_shipdate, o_orderdate) provide 50-90% data skipping for range predicates. Physical sorting by date creates clustered storage for maximum zone map effectiveness. (3) Hash indexes on all PK-FK join keys (o_orderkey, c_custkey, o_custkey) enable O(1) hash joins. (4) Dictionary encoding for low-cardinality strings (flags, segments, ship modes) reduces memory by 8-25x and enables integer comparisons. (5) Delta encoding for dates exploits monotonicity for 4x compression. (6) No indexes on filter columns with medium selectivity (l_discount, l_quantity) - sequential SIMD scans are faster than index overhead. (7) Late materialization strategy: filter on indexed/encoded columns first, materialize other columns only for qualifying rows. Trade-offs: Sorted indexes increase build time but pay off with zone map pruning. Dictionary encoding adds encode/decode overhead but dominates for low-cardinality (<100 unique values). Hash indexes use 20-50% extra memory but are mandatory for hash joins.",
+  "summary": "Columnar storage throughout. Critical optimizations: (1) lineitem physically sorted by l_shipdate with zone maps for 80-90% block pruning, (2) dictionary encoding on all low-cardinality strings (8-25x compression, 10x faster comparisons), (3) hash indexes on all join keys (o_orderkey, c_custkey, o_custkey) for O(1) lookups, (4) delta encoding on date columns for 4x compression. Expected performance: Q1/Q6 benefit from columnar scan + SIMD + late materialization (5-10x speedup). Q3 benefits from customer filter (20% selectivity) + zone map pruning on orders/lineitem dates (50% each) + hash joins (10x faster than nested loop). Overall: 10-20x speedup vs naive row storage with full scans."
+}

@@ -1,0 +1,106 @@
+{
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 22,
+        "bottleneck": "Scalar arithmetic in aggregation loop",
+        "root_cause": "The aggregation loop processes one row at a time with scalar arithmetic expressions (extendedprice * (1-discount) * (1+tax)). No SIMD vectorization for arithmetic despite columnar layout. Filter has 98% selectivity (barely filters), so most time spent in aggregate updates.",
+        "benchmark_gap": "3ms slower than DuckDB (22ms vs 19ms best) - 16% gap. Small but addressable with vectorization."
+      },
+      "Q3": {
+        "current_time_ms": 100,
+        "bottleneck": "Hash table probes and unordered memory access",
+        "root_cause": "Two hash table lookups per lineitem row: (1) order_info probe on l_orderkey, (2) agg_table probe/update on group key. Random memory access pattern causes cache misses. No prefetching. Hash table for agg_table grows to ~100K groups, exceeding L3 cache. Using std::unordered_map with chaining overhead.",
+        "benchmark_gap": "74ms slower than DuckDB (100ms vs 26ms best) - 284% gap. CRITICAL BOTTLENECK requiring immediate attention."
+      },
+      "Q6": {
+        "current_time_ms": 18,
+        "bottleneck": "Incomplete SIMD utilization and scalar tail processing",
+        "root_cause": "Current SIMD implementation only vectorizes date filtering (8 int32 at a time). Discount and quantity filters remain scalar. Revenue computation (extendedprice * discount) is scalar. Qualifying rate is 1.9%, so most work is filtering, not aggregation. Scalar tail loop processes remaining rows inefficiently.",
+        "benchmark_gap": "12ms slower than DuckDB (18ms vs 6ms best) - 200% gap. Significant room for improvement."
+      }
+    },
+    "overall": "GenDB is competitive on Q1 (16% slower than DuckDB) thanks to direct array indexing and dictionary encoding. Q6 shows SIMD potential but is incomplete (200% slower). Q3 is the critical bottleneck (284% slower) due to hash table overhead and random memory access. Overall performance: 140ms vs 71ms (DuckDB best cumulative) - 97% slower. Priority order: Q3 > Q6 > Q1."
+  },
+  "recommendations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "operator": "join",
+      "technique": "Linear probing hash table with prefetching",
+      "description": "Replace std::unordered_map with custom open-addressing hash table using linear probing. Pre-size both order_info and agg_table to avoid rehashing (order_info: 750K slots at 75% load, agg_table: 133K slots). Implement software prefetching: when probing lineitem[i], prefetch hash table bucket for lineitem[i+8]. Use power-of-2 table sizes for fast modulo with bitwise AND. Store hash values inline to avoid recomputation. Files to modify: queries/q3.cpp - replace unordered_map with vector<Entry> where Entry has {hash, key, value, occupied}.",
+      "expected_improvement": "20-30ms reduction (100ms → 70-80ms). Linear probing gives 10-20% faster lookups than chaining (15-20ms). Prefetching hides 50-100 cycle memory latency for random access (5-10ms). Combined: 20-30ms savings.",
+      "risk": "medium",
+      "knowledge_source": "joins/hash-join-variants.md, storage/memory-layout.md"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "operator": "aggregation",
+      "technique": "Compact group key layout and perfect hashing for small groups",
+      "description": "Current Q3GroupKey likely has padding overhead. Create packed struct with __attribute__((packed)) or manual layout: orderkey(4B) + orderdate(4B) + shippriority(4B) = 12B instead of potential 16B with padding. For the final top-10 extraction, since we're tracking ~100K groups but only need 10, consider two-phase approach: use compact int64_t hash of group key during aggregation (combine orderkey+date+priority into single 64-bit value), then expand to full keys only for top-10 results. Files: queries/q3.cpp and queries/queries.h (Q3GroupKey struct).",
+      "expected_improvement": "10-15ms reduction (after priority 1: 70-80ms → 60-65ms). Compact keys improve cache locality (20% fewer cache misses in aggregation phase = 8-12ms). Hash-based grouping reduces key comparison overhead (2-3ms).",
+      "risk": "low",
+      "knowledge_source": "aggregation/hash-aggregation.md, storage/memory-layout.md"
+    },
+    {
+      "priority": 3,
+      "target": "Q6",
+      "operator": "scan-filter",
+      "technique": "Full SIMD pipeline for all filters and aggregation",
+      "description": "Extend SIMD to cover all operations: (1) Vectorize discount and quantity filters using AVX2 double comparison (_mm256_cmp_pd for 4 doubles at once). (2) Vectorize revenue computation: load 4 extendedprice values, 4 discount values, multiply with _mm256_mul_pd, accumulate with _mm256_add_pd. (3) Use selection vectors: after date filter produces mask, apply subsequent filters only to selected indices to avoid wasted comparisons. (4) Process in 2048-element chunks (fits in L1 cache) rather than infinite stream. Files: queries/q6.cpp - restructure into vectorized batches with proper horizontal reduction at end.",
+      "expected_improvement": "6-9ms reduction (18ms → 9-12ms). Full SIMD for 3 filters + arithmetic: 4x throughput on double ops = 6-8ms savings. Chunk-based processing improves cache behavior = 1-2ms. Target: match DuckDB's 6ms.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md, query-execution/vectorized-execution.md"
+    },
+    {
+      "priority": 4,
+      "target": "Q1",
+      "operator": "aggregation",
+      "technique": "SIMD-vectorized arithmetic in aggregation loop",
+      "description": "Vectorize the arithmetic expressions in Q1's inner loop using AVX2. Process 4 rows at a time: load 4 extendedprice, 4 discount, 4 tax values into __m256d vectors, compute disc_price and charge using _mm256_mul_pd and _mm256_fmadd_pd (fused multiply-add). Challenge: group-by requires scatter to different array indices based on returnflag/linestatus codes. Solution: process in two passes: (1) full SIMD scan to compute intermediate results into temporary arrays indexed by group, (2) reduce temporaries into final aggregate states. Alternative: use gather/scatter intrinsics (_mm256_i32gather_pd) to vectorize despite indirect indexing, though scatter is slower. Files: queries/q1.cpp - add vectorized aggregation path with #ifdef __AVX2__.",
+      "expected_improvement": "3-6ms reduction (22ms → 16-19ms). SIMD arithmetic: 2-3x speedup on computation = 5-7ms savings from compute-bound portion. Scatter overhead may reduce gains to 3-6ms net. Target: match or beat DuckDB's 19ms.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md, aggregation/hash-aggregation.md"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "operator": "join",
+      "technique": "Bloom filter on order_info keys to skip lineitem probes",
+      "description": "After building order_info (filtered orders), construct a bloom filter on the orderkey set. Before probing order_info with lineitem rows, check bloom filter first. Since Q3 has ~750K filtered orders out of 1.5M total orders, and lineitem has 6M rows with ~1.5M distinct orderkeys, a bloom filter can skip ~40-50% of lineitem probes (orderkeys not in filtered orders) with high probability. Use 8-bit bloom filter (64KB for 750K keys at 1% FPR). Files: queries/q3.cpp - add bloom filter build after order_info construction, check before each lineitem probe. Consider using a library or simple k-hash implementation.",
+      "expected_improvement": "5-10ms reduction (after priority 1-2: 60-65ms → 50-55ms). Bloom filter eliminates 40-50% of hash probes = 10-15ms saved on probe cost. Bloom check overhead ~1-2ms. Net: 8-13ms, estimated 5-10ms conservatively given other optimizations already applied.",
+      "risk": "low",
+      "knowledge_source": "indexing/bloom-filters.md, joins/hash-join-variants.md"
+    },
+    {
+      "priority": 6,
+      "target": "all",
+      "operator": "data-loading",
+      "technique": "Memory-mapped I/O and parallel parsing",
+      "description": "Replace std::ifstream line-by-line parsing with memory-mapped I/O (mmap). Divide file into chunks (e.g., 1MB boundaries, align to newlines), spawn threads to parse chunks in parallel. Use fast integer/float parsing (avoid std::stoi/stod overhead - hand-rolled parsing with lookup tables for common cases). Pre-allocate all vectors with exact row counts (requires two-pass or reading row count from metadata). Files: storage/storage.cpp - implement mmap-based loader with parallel parsing. Note: This doesn't affect query execution time (optimization_target) but improves overall experience (17.7s data loading is 99% of wall clock time).",
+      "expected_improvement": "Data loading: 17.7s → 3-5s (70-80% reduction). Query execution time: NO DIRECT IMPACT. This is a UX optimization, not execution time optimization. However, reducing data loading from 17.7s to 3-5s dramatically improves iteration speed during development.",
+      "risk": "medium",
+      "knowledge_source": "novel - standard technique not in knowledge base but widely used (DuckDB, ClickHouse use parallel CSV parsing)"
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Add 32-byte alignment to l_extendedprice and l_discount columns for SIMD access",
+      "rationale": "Q6 and Q1 perform SIMD operations on these columns. Aligned loads (_mm256_load_pd) are 2x faster than unaligned (_mm256_loadu_pd). Use alignas(32) or custom allocator."
+    },
+    {
+      "table": "orders",
+      "change": "No changes recommended for iteration 2",
+      "rationale": "Hash table optimization (priority 1) doesn't require storage format changes. Focus on query execution improvements first."
+    },
+    {
+      "table": "customer",
+      "change": "No changes recommended for iteration 2",
+      "rationale": "Dictionary encoding already implemented. Further optimization not bottleneck."
+    }
+  ],
+  "summary": "Iteration 2 recommendations focus on closing the 97% performance gap with DuckDB by addressing three critical bottlenecks: (1) Q3 hash join overhead (74ms gap) via custom linear-probing hash tables with prefetching and compact keys, (2) Q6 incomplete SIMD (12ms gap) via full vectorization pipeline, (3) Q1 scalar aggregation (3ms gap) via SIMD arithmetic. High-priority optimizations (1-3) target execution time directly and should close the gap to ~20-30ms vs DuckDB (combined target: 75-90ms vs current 140ms). Medium-priority items (4-5) provide incremental gains. Low-priority item 6 (parallel data loading) improves developer UX but not the execution_time optimization target. Risk profile: Most recommendations are medium-risk (require careful SIMD and hash table implementation) with clear fallback paths. Estimated combined improvement: 140ms → 70-90ms (40-50% reduction), closing gap with DuckDB from 97% to 0-27%."
+}

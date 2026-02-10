@@ -1,0 +1,136 @@
+{
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 78,
+        "bottleneck": "Scalar aggregation loop with row-by-row processing",
+        "root_cause": "No vectorization: 6M row scan with per-row hash lookups and arithmetic. std::unordered_map has poor cache locality (chaining). Low-cardinality group keys (4 groups) use expensive string keys instead of dictionary codes.",
+        "benchmark_gap": "4.1x slower than DuckDB (19ms). DuckDB likely uses vectorized execution with SIMD, perfect hashing for low-cardinality groups, and dictionary-encoded flags."
+      },
+      "Q3": {
+        "current_time_ms": 102,
+        "bottleneck": "Multiple hash table operations and string comparisons in customer filter",
+        "root_cause": "Three separate hash table operations (customer filter, orders join, lineitem join) with std::unordered_map overhead. String comparison on c_mktsegment='BUILDING' triggers strcmp for every customer row (150K calls). Hash table for orders is built after filtering but still uses std::unordered_map with chaining.",
+        "benchmark_gap": "5.0x slower than DuckDB (26ms). DuckDB likely dictionary-encodes c_mktsegment (integer comparison), uses cache-friendly linear probing hash table, and prefetches during probe phase."
+      },
+      "Q6": {
+        "current_time_ms": 27,
+        "bottleneck": "Scalar filter evaluation across 6M rows",
+        "root_cause": "Three cascaded filters (date range, discount range, quantity threshold) evaluated row-by-row. Each filter requires memory load and branch. No SIMD to evaluate multiple predicates in parallel. Date range filter has ~14% selectivity (1 year out of 7) but is not exploited for early termination.",
+        "benchmark_gap": "3.0x slower than DuckDB (6ms). This is the smallest gap, but DuckDB likely uses SIMD filters to process 8-16 rows at once, reducing both memory bandwidth and branch mispredictions."
+      }
+    },
+    "overall": "GenDB is 3-5x slower than DuckDB across all queries. The root causes are: (1) Lack of vectorization - all operators use scalar row-at-a-time processing instead of batched execution, (2) Generic standard library data structures (std::unordered_map, std::string) instead of database-optimized implementations, (3) No SIMD for filters and aggregations, (4) String operations without dictionary encoding. Query execution time (262ms) is dominated by Q1 (51%) and Q3 (39%), making these the highest-priority targets. Load time (18.14s) is very high and should be addressed in parallel."
+  },
+  "recommendations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "operator": "scan-filter",
+      "technique": "SIMD-vectorized filtering with AVX2",
+      "description": "Replace scalar filter loop in q6.cpp with SIMD-vectorized predicate evaluation using AVX2 intrinsics. Process 8 int32_t shipdate values simultaneously with _mm256_cmpgt_epi32, then apply discount and quantity filters with SIMD. Use selection vectors to materialize only qualifying rows. See simd.md for implementation patterns. Target lines 34-51 in queries/q6.cpp.",
+      "expected_improvement": "2.5-3.5x speedup for Q6 (27ms → 8-11ms). SIMD filtering can process 8 rows per instruction, and Q6's highly selective filters (1.9% pass rate) benefit from parallel evaluation. This should bring Q6 close to DuckDB's 6ms.",
+      "risk": "low",
+      "knowledge_source": "parallelism/simd.md"
+    },
+    {
+      "priority": 2,
+      "target": "Q1",
+      "operator": "aggregation",
+      "technique": "Dictionary encoding for low-cardinality group keys",
+      "description": "Dictionary-encode l_returnflag and l_linestatus during data load (storage/storage.cpp). Store as uint8_t codes (0-3 for 4 combinations) instead of char. In q1.cpp aggregation, use direct array indexing instead of std::unordered_map: replace agg_table[key] with agg_array[key_code] where key_code = returnflag_code * 2 + linestatus_code. This eliminates hash computation and lookup overhead. See string-optimization.md for dictionary encoding patterns.",
+      "expected_improvement": "1.5-2x speedup for Q1 (78ms → 40-52ms). Direct array indexing is 10-20x faster than hash table lookup for low cardinality (4 groups). Saves ~6M hash computations and lookups. Combined with SIMD (recommendation #4), could achieve 3-4x total speedup.",
+      "risk": "low",
+      "knowledge_source": "storage/string-optimization.md"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "operator": "filter",
+      "technique": "Dictionary encoding for c_mktsegment",
+      "description": "Dictionary-encode c_mktsegment during customer table load. Store as uint8_t codes (0-4 for 5 market segments) instead of std::string. In q3.cpp line 52, replace string comparison customer.c_mktsegment[i] == \"BUILDING\" with integer comparison customer.c_mktsegment_code[i] == BUILDING_CODE (where BUILDING_CODE is the dictionary code for 'BUILDING', likely 0 or obtained from dictionary). This eliminates 150K strcmp calls. See string-optimization.md section on dictionary-coded comparisons.",
+      "expected_improvement": "1.3-1.5x speedup for Q3 (102ms → 68-78ms). String comparison on 150K rows is expensive (~10-20 cycles per strcmp vs 1 cycle for integer comparison). Savings: ~2-3ms. Combined with hash table optimization (recommendation #6), total speedup could be 2-2.5x.",
+      "risk": "low",
+      "knowledge_source": "storage/string-optimization.md"
+    },
+    {
+      "priority": 4,
+      "target": "Q1",
+      "operator": "scan-aggregate",
+      "technique": "Vectorized scan with blocked execution",
+      "description": "Restructure q1.cpp to process data in chunks of 2048 rows at a time. For each chunk: (1) SIMD filter l_shipdate (8 values at once), (2) extract returnflag/linestatus codes into separate arrays, (3) aggregate arithmetic (l_extendedprice * (1-discount) * (1+tax)) with SIMD multiply/FMA operations, (4) update aggregate array. This improves cache locality (chunk fits in L1) and enables auto-vectorization. See vectorized-execution.md for chunk-based patterns.",
+      "expected_improvement": "1.5-2x speedup on top of dictionary encoding (combined 3-4x from baseline 78ms → 20-26ms). Vectorized arithmetic and blocked execution improve IPC (instructions per cycle) and cache hit rate. Should bring Q1 very close to DuckDB's 19ms.",
+      "risk": "medium",
+      "knowledge_source": "query-execution/vectorized-execution.md"
+    },
+    {
+      "priority": 5,
+      "target": "data_loading",
+      "operator": "table_scan",
+      "technique": "Parallel CSV parsing with memory pre-allocation",
+      "description": "In storage/storage.cpp: (1) Add table.reserve(estimated_rows) before parsing loop to pre-allocate vectors (avoids 20+ reallocations during push_back), (2) Use mmap() or fast I/O to read file in bulk, (3) Partition file by newlines and parse chunks in parallel across 4-8 threads, (4) Use string_view for date parsing instead of creating temporary strings. Estimated rows: lineitem=6M, orders=1.5M, customer=150K.",
+      "expected_improvement": "3-5x speedup for data loading (18.14s → 3.6-6s). Pre-allocation eliminates realloc overhead. Parallel parsing utilizes multi-core. Fast I/O reduces system call overhead. Load time is currently 69x longer than query time - this is a major bottleneck.",
+      "risk": "medium",
+      "knowledge_source": "novel (standard database optimization)"
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "operator": "hash_join",
+      "technique": "Linear probing hash table with pre-sizing",
+      "description": "Replace std::unordered_map in q3.cpp with custom linear probing hash table. Pre-size table to 1.33x expected entries (75% load factor) to avoid resizing. Use power-of-2 size for fast modulo via bitwise AND. Store (hash, orderkey, orderdate, shippriority) in flat array. Linear probing: slot = (hash + probe_distance) & size_mask. See hash-join-variants.md for linear probing implementation. Target the order_info map on line 58.",
+      "expected_improvement": "1.4-1.7x speedup for Q3 (68-78ms after dictionary encoding → 40-56ms). Linear probing has 10-20% better cache locality than chaining (std::unordered_map). Pre-sizing avoids rehashing overhead. Combined with dictionary encoding, total Q3 speedup: 2.4-3.3x from baseline.",
+      "risk": "medium",
+      "knowledge_source": "joins/hash-join-variants.md"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "operator": "aggregation",
+      "technique": "Pre-sized hash aggregation table",
+      "description": "Pre-size the agg_table in q3.cpp line 68. Estimate distinct orderkeys after filtering: ~100K-300K groups (10-20% of 1.5M orders after date/customer filters). Pre-allocate: agg_table.reserve(estimated_groups * 1.5). This avoids rehashing during aggregation. Use same linear probing approach as recommendation #6 for consistency.",
+      "expected_improvement": "1.2-1.3x additional speedup for Q3 on top of prior optimizations (40-56ms → 31-47ms). Avoids 3-5 rehash operations during aggregation. Combined with all prior Q3 optimizations, total speedup: 2.9-4.3x from baseline (102ms → 24-35ms), very close to DuckDB's 26ms.",
+      "risk": "low",
+      "knowledge_source": "aggregation/hash-aggregation.md"
+    },
+    {
+      "priority": 8,
+      "target": "Q1",
+      "operator": "scan",
+      "technique": "Date filter with early termination via sorted data",
+      "description": "FUTURE: If lineitem is sorted by l_shipdate (as suggested in storage_design.json), binary search to find first row where l_shipdate > cutoff_date, then break loop early. This optimization requires storage-level changes (sorting during load). For now, note as future opportunity.",
+      "expected_improvement": "Minimal for Q1 since 98.6% of rows pass filter (only 1.4% filtered). Binary search overhead may exceed savings. Skip for iteration 1.",
+      "risk": "low",
+      "knowledge_source": "storage/memory-layout.md"
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Dictionary-encode l_returnflag and l_linestatus during load. Add uint8_t l_returnflag_code and l_linestatus_code vectors. Build dictionary: {R:0, A:1, N:2} for returnflag, {F:0, O:1} for linestatus.",
+      "rationale": "Q1 groups on these two low-cardinality fields (3x2=6 possible combinations, only 4 appear in data). Dictionary encoding enables direct array indexing instead of hash table lookup, eliminating 6M hash operations. See recommendation #2."
+    },
+    {
+      "table": "customer",
+      "change": "Dictionary-encode c_mktsegment during load. Add uint8_t c_mktsegment_code vector. Build dictionary: {AUTOMOBILE:0, BUILDING:1, FURNITURE:2, HOUSEHOLD:3, MACHINERY:4}.",
+      "rationale": "Q3 filters on c_mktsegment = 'BUILDING'. Dictionary encoding replaces 150K strcmp calls with integer comparisons (1 cycle vs 10-20 cycles). 10-20x faster filter evaluation. See recommendation #3."
+    },
+    {
+      "table": "lineitem",
+      "change": "Pre-allocate vectors with reserve(6000000) before parsing loop in load_lineitem().",
+      "rationale": "Avoids 20+ reallocations during push_back (each realloc copies entire array). Pre-allocation is standard practice for known table sizes. Part of load time optimization (recommendation #5)."
+    },
+    {
+      "table": "orders",
+      "change": "Pre-allocate vectors with reserve(1500000) in load_orders().",
+      "rationale": "Same as lineitem - avoid reallocation overhead during data load."
+    },
+    {
+      "table": "customer",
+      "change": "Pre-allocate vectors with reserve(150000) in load_customer().",
+      "rationale": "Same as lineitem - avoid reallocation overhead during data load."
+    }
+  ],
+  "summary": "Iteration 1 baseline is 3-5x slower than DuckDB. Primary bottlenecks: (1) Lack of vectorization/SIMD, (2) Generic std::unordered_map instead of cache-friendly linear probing, (3) String operations without dictionary encoding. Top priorities: SIMD filtering for Q6 (low-hanging fruit, 2.5-3.5x speedup), dictionary encoding for Q1/Q3 (enables direct array indexing and faster comparisons), and data load optimization (18s load time dominates 262ms query time). With these optimizations, expected performance: Q1: 78→20-26ms (3-4x), Q3: 102→24-35ms (3-4.3x), Q6: 27→8-11ms (2.5-3.5x), load time: 18s→3.6-6s (3-5x). This should bring GenDB to within 1.1-1.8x of DuckDB across all queries. Implementation strategy: Start with low-risk high-impact optimizations (dictionary encoding, SIMD for Q6) before tackling medium-risk changes (custom hash tables, vectorized execution). All recommendations avoid repeating failed optimizations (no history to avoid yet)."
+}
