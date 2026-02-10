@@ -352,13 +352,71 @@ def duckdb_benchmark(scale_factor: int, num_runs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def gendb_benchmark_single(gendb_bin: Path, data_dir: Path, num_runs: int) -> dict:
-    """Run a single GenDB compiled C++ binary and parse timing from its output."""
+def gendb_setup(data_dir: Path, scale_factor: int, run_dir: Path, force_setup: bool = False) -> Path:
+    """Ensure GenDB persistent binary storage exists. Returns the gendb_dir path.
+
+    If .gendb/ doesn't exist (or --setup is used), find the latest ingest binary and run it.
+    """
+    gendb_dir = Path(__file__).parent / "gendb" / f"tpch_sf{scale_factor}.gendb"
+
+    if not force_setup and gendb_dir.exists() and any(gendb_dir.iterdir()):
+        print(f"  GenDB storage '{gendb_dir.name}' already exists, skipping ingestion.")
+        print(f"  Use --setup flag to force re-ingestion.")
+        return gendb_dir
+
+    # Find the ingest binary from the run directory
+    ingest_bin = run_dir / "generated" / "ingest"
+    if not ingest_bin.exists():
+        # Try iterations
+        iterations_dir = run_dir / "iterations"
+        if iterations_dir.exists():
+            iter_dirs = sorted([d for d in iterations_dir.iterdir() if d.is_dir() and d.name.isdigit()],
+                               key=lambda d: int(d.name), reverse=True)
+            for iter_dir in iter_dirs:
+                candidate = iter_dir / "generated" / "ingest"
+                if candidate.exists():
+                    ingest_bin = candidate
+                    break
+
+    if not ingest_bin.exists():
+        print(f"  Warning: No ingest binary found in {run_dir}. Cannot create GenDB storage.")
+        return gendb_dir
+
+    # Remove existing storage if force_setup
+    if force_setup and gendb_dir.exists():
+        import shutil
+        print(f"  Removing existing GenDB storage '{gendb_dir.name}'...")
+        shutil.rmtree(gendb_dir)
+
+    gendb_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"  Running ingestion: {ingest_bin} {data_dir} {gendb_dir}")
+    start = time.perf_counter()
+    proc = subprocess.run(
+        [str(ingest_bin), str(data_dir), str(gendb_dir)],
+        capture_output=True,
+        text=True,
+        timeout=1200,
+    )
+    elapsed = (time.perf_counter() - start) * 1000
+    if proc.returncode != 0:
+        print(f"  Ingestion failed: {proc.stderr}")
+    else:
+        print(f"  Ingestion completed in {elapsed:.0f} ms")
+
+    return gendb_dir
+
+
+def gendb_benchmark_single(gendb_bin: Path, gendb_dir: Path, num_runs: int) -> dict:
+    """Run a single GenDB compiled C++ binary and parse timing from its output.
+
+    The binary reads from the .gendb/ persistent storage directory.
+    """
     results = {}
 
     for _ in range(num_runs):
         proc = subprocess.run(
-            [str(gendb_bin), str(data_dir)],
+            [str(gendb_bin), str(gendb_dir)],
             capture_output=True,
             text=True,
             timeout=600,
@@ -389,9 +447,12 @@ def gendb_benchmark_single(gendb_bin: Path, data_dir: Path, num_runs: int) -> di
     return results
 
 
-def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int) -> dict:
+def gendb_benchmark_all_iterations(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
     """
     Run all GenDB iterations (baseline + optimizations) and return performance history.
+
+    All iterations read from the same .gendb/ persistent storage directory.
+
     Returns:
     {
       "baseline": {"Q1": [times], "Q3": [times], "Q6": [times]},
@@ -408,7 +469,7 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
     baseline_bin = run_dir / "generated" / "main"
     if baseline_bin.exists():
         print("  Running baseline...")
-        baseline_results = gendb_benchmark_single(baseline_bin, data_dir, num_runs)
+        baseline_results = gendb_benchmark_single(baseline_bin, gendb_dir, num_runs)
         history["baseline"] = baseline_results
         for qname in QUERIES:
             if qname in baseline_results:
@@ -427,7 +488,7 @@ def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, num_runs: int)
 
             if iter_bin.exists():
                 print(f"  Running iteration {iter_num}...")
-                iter_results = gendb_benchmark_single(iter_bin, data_dir, num_runs)
+                iter_results = gendb_benchmark_single(iter_bin, gendb_dir, num_runs)
 
                 iter_entry = {"iteration": iter_num}
                 for qname in QUERIES:
@@ -701,8 +762,11 @@ def main():
 
     # --- GenDB ---
     if args.gendb_run and args.gendb_run.exists():
-        print(f"=== GenDB ({args.gendb_run}) ===")
-        gendb_history = gendb_benchmark_all_iterations(args.gendb_run, data_dir, args.runs)
+        print(f"=== GenDB Setup ===")
+        gendb_dir = gendb_setup(data_dir, args.sf, args.gendb_run, args.setup)
+
+        print(f"\n=== GenDB Benchmark ({args.gendb_run}) ===")
+        gendb_history = gendb_benchmark_all_iterations(args.gendb_run, gendb_dir, args.runs)
         if gendb_history and gendb_history["best"]:
             all_results["GenDB"] = gendb_history["best"]
             print(f"\n  Best iteration overall performance:")

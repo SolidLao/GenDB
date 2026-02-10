@@ -1,0 +1,11 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 remains a critical bottleneck (83% of execution time, 42.9x slower than DuckDB). The root cause is clearly identified (std::unordered_map overhead), and the fix has very high ROI (2-3x speedup) with low risk. Q6 also has a straightforward SIMD optimization path for 2-3x gain. With 1 iteration remaining, focusing on these two proven, high-impact changes should deliver 2x overall improvement.",
+  "selected_recommendations": [0, 1],
+  "focus_areas": [
+    "Q3: Replace std::unordered_map with Abseil flat_hash_map (2-3x speedup)",
+    "Q6: SIMD vectorized filtering with AVX2 (2-3x speedup)"
+  ],
+  "strategy_notes": "Priority 1 (flat_hash_map) is the single highest-ROI optimization with low risk. Priority 2 (SIMD for Q6) complements it by targeting a different bottleneck with a proven technique. Both are well-understood, low-risk changes that should stack multiplicatively. If time permits in final iteration, consider Priority 3 (bloom filter for Q3) as a quick add-on to P1.",
+  "notes": "For flat_hash_map: Replace all 3 hash tables in q3.cpp (valid_customers -> flat_hash_set, valid_orders -> flat_hash_map, groups -> flat_hash_map). For SIMD: Focus on the core filter loop in q6.cpp, process 4 doubles at a time with AVX2. Both optimizations don't require reingest. Expected combined result: Total time from 4.2s to ~2.0-2.5s (Q3: 3659ms->1200-1800ms, Q6: 185ms->60-90ms)."
+}

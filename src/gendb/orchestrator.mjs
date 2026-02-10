@@ -6,19 +6,20 @@
  *   Phase 2 (Optimization Loop): Learner → Orchestrator Agent → Operator Specialist → Evaluator
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
- *        [--sf <N>] [--max-iterations <N>] [--model <name>] [--optimization-target <target>]
+ *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>] [--optimization-target <target>]
  */
 
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, cp } from "fs/promises";
 import { resolve, dirname } from "path";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { fileURLToPath } from "url";
 import {
   DEFAULT_SCHEMA,
   DEFAULT_QUERIES,
   BENCHMARKS_DIR,
   getDataDir,
+  getGendbDir,
 } from "./config.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,6 +51,7 @@ function parseArgs(argv) {
     schema: DEFAULT_SCHEMA,
     queries: DEFAULT_QUERIES,
     dataDir: null, // resolved below from --data-dir or --sf
+    gendbDir: null, // resolved below from --gendb-dir or --sf
     scaleFactor: defaults.scaleFactor,
     maxIterations: defaults.maxOptimizationIterations,
     model: defaults.model,
@@ -59,6 +61,7 @@ function parseArgs(argv) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
     if (argv[i] === "--queries" && argv[i + 1]) args.queries = resolve(argv[++i]);
     if (argv[i] === "--data-dir" && argv[i + 1]) args.dataDir = resolve(argv[++i]);
+    if (argv[i] === "--gendb-dir" && argv[i + 1]) args.gendbDir = resolve(argv[++i]);
     if (argv[i] === "--sf" && argv[i + 1]) args.scaleFactor = parseInt(argv[++i], 10);
     if (argv[i] === "--max-iterations" && argv[i + 1]) args.maxIterations = parseInt(argv[++i], 10);
     if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
@@ -67,6 +70,10 @@ function parseArgs(argv) {
   // If no explicit --data-dir, resolve from scale factor
   if (!args.dataDir) {
     args.dataDir = getDataDir(defaults.targetBenchmark, args.scaleFactor);
+  }
+  // If no explicit --gendb-dir, resolve from scale factor
+  if (!args.gendbDir) {
+    args.gendbDir = getGendbDir(defaults.targetBenchmark, args.scaleFactor);
   }
   return args;
 }
@@ -237,6 +244,7 @@ async function runBaseline(args, runDir, schema, queries) {
   // Initialize step tracking
   await updateRunMeta(runDir, (meta) => {
     meta.dataDir = args.dataDir;
+    meta.gendbDir = args.gendbDir;
     meta.scaleFactor = args.scaleFactor;
     meta.maxIterations = args.maxIterations;
     meta.model = args.model;
@@ -388,12 +396,13 @@ async function runBaseline(args, runDir, schema, queries) {
   await mkdir(resolve(generatedDir, "queries"), { recursive: true });
 
   const generatorUserPrompt = [
-    "Generate C++ code for this workload.",
+    "Generate C++ code for this workload (two-program architecture: ingest + main).",
     "",
     `## Optimization Target: ${args.optimizationTarget}`,
     "",
     `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
     `Consult relevant knowledge files for implementation patterns and optimization techniques.`,
+    `Read storage/persistent-storage.md for binary columnar storage and mmap patterns.`,
     "",
     "## Input Files",
     `- Workload analysis: ${workloadAnalysisPath}`,
@@ -401,8 +410,12 @@ async function runBaseline(args, runDir, schema, queries) {
     `- Schema: ${args.schema}`,
     `- Queries: ${args.queries}`,
     "",
-    `## Data Directory`,
+    `## Data Directory (source .tbl files)`,
     `TPC-H .tbl files are located at: ${args.dataDir}`,
+    "",
+    `## GenDB Storage Directory (persistent binary storage)`,
+    `The ingest program should write binary columnar data to: ${args.gendbDir}`,
+    `The main program should read from this directory.`,
     "",
     `## Output Directory`,
     `Write all generated files to: ${generatedDir}`,
@@ -417,12 +430,15 @@ async function runBaseline(args, runDir, schema, queries) {
     `- ${resolve(generatedDir, "queries/q1.cpp")}`,
     `- ${resolve(generatedDir, "queries/q3.cpp")}`,
     `- ${resolve(generatedDir, "queries/q6.cpp")}`,
+    `- ${resolve(generatedDir, "ingest.cpp")}`,
     `- ${resolve(generatedDir, "main.cpp")}`,
     `- ${resolve(generatedDir, "Makefile")}`,
     "",
     `IMPORTANT: Use the Write tool to create each file. The files must compile with g++ -O2 -std=c++17.`,
     `After writing all files, compile AND run to verify correctness:`,
-    `  cd ${generatedDir} && make clean && make all && ./main ${args.dataDir}`,
+    `  cd ${generatedDir} && make clean && make all`,
+    `  cd ${generatedDir} && ./ingest ${args.dataDir} ${args.gendbDir}`,
+    `  cd ${generatedDir} && ./main ${args.gendbDir}`,
     `If it crashes or produces wrong results, fix the code and re-run (up to 2 fix attempts).`,
   ].join("\n");
 
@@ -445,6 +461,7 @@ async function runBaseline(args, runDir, schema, queries) {
     "queries/q1.cpp",
     "queries/q3.cpp",
     "queries/q6.cpp",
+    "ingest.cpp",
     "main.cpp",
     "Makefile",
   ];
@@ -476,6 +493,7 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const evaluationPath = resolve(runDir, "evaluation.json");
+  // Phase 1 evaluator: run ingest if gendb storage doesn't exist, then main
   const evResult = await runEvaluator(args, runDir, generatedDir, evaluationPath);
   recordAgentTelemetry("phase1", "evaluator", evResult.durationMs, evResult.tokens, evResult.costUsd);
 
@@ -510,26 +528,36 @@ async function runBaseline(args, runDir, schema, queries) {
 // Shared: Evaluator runner
 // ---------------------------------------------------------------------------
 
-async function runEvaluator(args, runDir, generatedDir, evaluationPath) {
+async function runEvaluator(args, runDir, generatedDir, evaluationPath, { skipIngest = false } = {}) {
   const evaluatorSystemPrompt = await readFile(evaluatorConfig.promptPath, "utf-8");
 
+  const gendbDirExists = existsSync(args.gendbDir);
+  const shouldIngest = !skipIngest && !gendbDirExists;
+
   const evaluatorUserPrompt = [
-    "Evaluate the generated C++ code.",
+    "Evaluate the generated C++ code (two-program architecture: ingest + main).",
     "",
     `## Optimization Target: ${args.optimizationTarget}`,
     "",
     `## Generated code directory`,
     `${generatedDir}`,
     "",
-    `## TPC-H data directory`,
+    `## TPC-H data directory (source .tbl files)`,
     `${args.dataDir}`,
     "",
+    `## GenDB storage directory (persistent binary storage)`,
+    `${args.gendbDir}`,
+    "",
     `## Evaluation steps`,
-    `1. cd ${generatedDir} && make clean && make all`,
-    `2. cd ${generatedDir} && ./main ${args.dataDir}`,
+    `1. Compile: cd ${generatedDir} && make clean && make all`,
+    shouldIngest
+      ? `2. Ingest (one-time): cd ${generatedDir} && ./ingest ${args.dataDir} ${args.gendbDir}`
+      : `2. Ingest: SKIP — persistent storage already exists at ${args.gendbDir}`,
+    `3. Run queries: cd ${generatedDir} && ./main ${args.gendbDir}`,
     "",
     `IMPORTANT: Write the evaluation report to: ${evaluationPath}`,
     `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
+    `Report ingestion_time_ms separately from query timing. The primary metric is query execution time from ./main.`,
   ].join("\n");
 
   const evalResult = await runAgent(evaluatorConfig.name, {
@@ -540,6 +568,27 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath) {
     cwd: runDir,
   });
   return evalResult;
+}
+
+/**
+ * Check if any files in the generated directory that affect storage/ingestion were modified.
+ * Used to detect when re-ingestion is needed after Operator Specialist changes.
+ */
+function checkIngestFilesModified(iterGeneratedDir, bestGeneratedDir) {
+  const ingestRelatedFiles = ["ingest.cpp", "storage/storage.h", "storage/storage.cpp"];
+  for (const f of ingestRelatedFiles) {
+    const iterFile = resolve(iterGeneratedDir, f);
+    const bestFile = resolve(bestGeneratedDir, f);
+    if (!existsSync(iterFile) || !existsSync(bestFile)) continue;
+    try {
+      const iterContent = readFileSync(iterFile, "utf-8");
+      const bestContent = readFileSync(bestFile, "utf-8");
+      if (iterContent !== bestContent) return true;
+    } catch {
+      // If read fails, assume not modified
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,10 +654,16 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       "",
       `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
       `Read relevant knowledge files to inform your bottleneck analysis and optimization recommendations. You are encouraged to propose techniques beyond what's documented.`,
+      `Read storage/persistent-storage.md for I/O optimization patterns.`,
       "",
       previousIterationOutcome
         ? `## Previous Iteration Outcome\n${previousIterationOutcome}`
         : "",
+      "",
+      `## Storage Architecture`,
+      `Data is stored in persistent binary columnar format at: ${args.gendbDir}`,
+      `The main program reads from .gendb/ via mmap — no .tbl text parsing.`,
+      `If you recommend storage layout changes (re-sorting, new indexes, block size changes), note that re-ingestion is needed.`,
       "",
       "## Input Files",
       `- Evaluation results: ${bestEvaluationPath}`,
@@ -709,7 +764,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       `## Optimization Target: ${args.optimizationTarget}`,
       "",
       `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      `Read relevant knowledge files for implementation patterns. You are empowered to implement any technique — vectorized execution, SIMD intrinsics, custom hash tables, operator fusion, external libraries — as long as correctness is preserved.`,
+      `Read relevant knowledge files for implementation patterns. You are empowered to implement any technique — vectorized execution, SIMD intrinsics, custom hash tables, operator fusion, external libraries, I/O optimizations — as long as correctness is preserved.`,
       "",
       "## Input Files",
       `- Orchestrator decision: ${iterDecisionPath}`,
@@ -719,9 +774,13 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       `- Storage design: ${resolve(runDir, "storage_design.json")}`,
       formatBenchmarkContext(args.benchmarkResults),
       "",
-      `## Data Directory`,
+      `## Data Directory (source .tbl files)`,
       `TPC-H .tbl files: ${args.dataDir}`,
       `Scale factor: ${args.scaleFactor}`,
+      "",
+      `## GenDB Storage Directory (persistent binary storage)`,
+      `Binary columnar data: ${args.gendbDir}`,
+      `The main program reads from this directory. If you modify ingest.cpp or storage format, re-ingestion will be needed.`,
       "",
       `## Previous Performance (baseline to beat)`,
       `Read the evaluation at: ${bestEvaluationPath}`,
@@ -733,12 +792,13 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       "",
       `## Test-Refine Budget`,
       `You may compile+run up to 3 times to iteratively fix issues. If your changes break correctness, revert them.`,
-      `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.dataDir}`,
+      `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
+      `If you modified ingest.cpp or storage format, re-run ingest first: ./ingest ${args.dataDir} ${args.gendbDir}`,
       "",
       `## Important`,
       `- Apply ALL critical_fixes from optimization_recommendations.json FIRST (these fix crashes/correctness bugs)`,
       `- Then apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
-      `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.dataDir}`,
+      `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
       `- Correctness is paramount — results must remain identical`,
       `- CRITICAL: Do not return code that crashes or produces wrong results`,
     ].join("\n");
@@ -752,7 +812,18 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     });
     recordAgentTelemetry(iterPhase, "operator_specialist", osResult.durationMs, osResult.tokens, osResult.costUsd);
 
-    // 6. Run Evaluator
+    // 6. Check if storage/ingest files were modified — if so, re-ingest
+    const needsReingest = checkIngestFilesModified(iterGeneratedDir, bestGeneratedDir);
+    if (needsReingest) {
+      console.log(`[Orchestrator] Storage/ingest files modified in iteration ${iteration}. Re-ingestion will be triggered.`);
+      // Remove existing gendb storage to force re-ingestion
+      if (existsSync(args.gendbDir)) {
+        rmSync(args.gendbDir, { recursive: true, force: true });
+        console.log(`[Orchestrator] Removed existing gendb storage at ${args.gendbDir} for re-ingestion.`);
+      }
+    }
+
+    // 7. Run Evaluator
     console.log(`\n[Orchestrator] === Iteration ${iteration} Step 4: Evaluator ===`);
     const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationPath);
     recordAgentTelemetry(iterPhase, "evaluator", iterEvResult.durationMs, iterEvResult.tokens, iterEvResult.costUsd);
@@ -894,6 +965,7 @@ async function main() {
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
+  console.log(`[Orchestrator] GenDB Dir:           ${args.gendbDir}`);
   console.log(`[Orchestrator] Scale Factor:        ${args.scaleFactor}`);
   console.log(`[Orchestrator] Max Iterations:      ${args.maxIterations}`);
   console.log(`[Orchestrator] Model:               ${args.model}`);

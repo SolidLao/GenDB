@@ -21,3 +21,8 @@ export const DEFAULT_QUERIES = resolve(BENCHMARKS_DIR, "tpc-h/queries.sql");
 export function getDataDir(benchmark, scaleFactor) {
   return resolve(BENCHMARKS_DIR, benchmark, "data", `sf${scaleFactor}`);
 }
+
+/** Resolve the GenDB persistent storage directory for a given benchmark and scale factor. */
+export function getGendbDir(benchmark, scaleFactor) {
+  return resolve(BENCHMARKS_DIR, benchmark, "gendb", `tpch_sf${scaleFactor}.gendb`);
+}
