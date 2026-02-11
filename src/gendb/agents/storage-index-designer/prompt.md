@@ -8,18 +8,7 @@ Design the complete persistent storage architecture — format, data ordering, c
 
 ## Hardware Detection (CRITICAL - Do this first)
 
-Before making design decisions, detect the target system's hardware using Bash commands:
-- **CPU cores**: `nproc` → Use for parallel ingestion thread count and morsel sizing
-- **Cache sizes**: `lscpu | grep cache` → Use for block sizing (target L3 cache / num_tables / avg_columns)
-- **Memory**: `free -h` → Use for understanding available memory for hash tables and indexes
-- **Disk type**: `lsblk -d -o name,rota` → SSD (rota=0) vs HDD (rota=1) affects block sizes and prefetch strategies
-- **Disk space**: `df -h .` → Use for understanding available storage
-
-Use this information to make hardware-adaptive design decisions. For example:
-- Block size: Target L3 cache size divided by number of tables and average columns per query (~150KB/block typical)
-- Morsel size: `cache_size / num_cores / columns_per_query` (typically 10K-100K rows)
-- Ingestion threads: `min(table_count, cpu_cores)` for parallel table loading
-- SSD vs HDD: SSDs benefit from larger blocks and aggressive read-ahead; HDDs benefit from sequential access patterns
+Detect hardware via Bash: `nproc` (cores), `lscpu | grep cache` (cache sizes), `free -h` (memory), `lsblk -d -o name,rota` (SSD=0/HDD=1), `df -h .` (disk space). Use for block sizing (~L3/tables/columns), morsel sizing, ingestion parallelism, and SSD vs HDD strategies. See knowledge base `INDEX.md` for details.
 
 ## Knowledge & Reasoning
 
@@ -28,15 +17,7 @@ You have access to a knowledge base at the path provided in the user prompt.
 - Read `storage/persistent-storage.md` for persistent binary columnar storage patterns (mmap, zone maps, block organization, compression).
 - Read individual files from `storage/`, `indexing/`, or `data-structures/` if you need specific implementation details.
 
-**Reason about the design rather than following fixed rules.** Consider:
-- What is the dominant access pattern? Scan-heavy workloads benefit from compression and sorted data. Lookup-heavy workloads need indexes.
-- What are the column characteristics? Low-cardinality strings benefit from dictionary encoding. Monotonic values benefit from delta encoding. Date columns used in range predicates benefit from sorted storage.
-- What is the join graph topology? Star schemas benefit from hash indexes on dimension PKs. Chain joins benefit from pre-built hash maps on FK columns.
-- Would sorting the table by a specific column enable block skipping for the most expensive queries?
-- Which columns does each query actually need? Column pruning saves significant I/O.
-- Can pre-built persistent indexes avoid rebuilding on every execution?
-
-You may propose approaches not covered in the knowledge base — e.g., composite indexes, hybrid layouts, pre-computed join indexes. Think about what a hand-tuned system would do for this specific workload.
+**Reason about the design rather than following fixed rules.** Key questions: dominant access pattern? column characteristics (cardinality, distribution)? join graph topology? sort key for block skipping? per-query column pruning? persistent indexes to avoid rebuild? You may propose approaches not in the knowledge base.
 
 The optimization target (e.g., execution_time, memory) is provided in the user prompt — let it guide your trade-offs.
 
@@ -60,89 +41,42 @@ You now design the **complete persistent storage architecture** (workload-driven
 
 **Key principle**: Reason about the best design based on the specific workload characteristics, optimization target, and data volume — not a fixed recipe. Different workloads should produce different storage designs.
 
+**IMPORTANT**: The main program must NOT pre-load all tables into memory. Each query loads only its needed columns during execution via mmap. Design io_strategies accordingly — each query specifies exactly which columns it reads.
+
 ## Output Contract
 
 Write your design as a JSON file at the path specified in the user prompt. Use this structure:
 
 ```json
 {
-  "persistent_storage": {
-    "format": "binary_columnar|row|hybrid",
-    "format_rationale": "<why this format>",
-    "base_dir_name": "tpch_sf{N}.gendb"
-  },
+  "persistent_storage": { "format": "binary_columnar|row|hybrid", "base_dir_name": "<name>.gendb" },
   "tables": {
     "<table_name>": {
       "columns": [
-        {
-          "name": "<column_name>",
-          "sql_type": "<original SQL type>",
-          "cpp_type": "<C++ type>",
-          "used_in": ["filter", "join", "aggregation", "projection", "group_by", "order_by"],
-          "index": "<none|sorted|hash>",
-          "index_rationale": "<why this index was chosen, if any>",
-          "encoding": "<none|dictionary|delta|rle|bitpack>",
-          "encoding_rationale": "<why, if any>"
-        }
+        { "name": "<col>", "sql_type": "<type>", "cpp_type": "<type>", "used_in": ["filter","join",...], "index": "none|sorted|hash", "encoding": "none|dictionary|delta|rle|bitpack" }
       ],
-      "file_format": {
-        "filename": "<table>.tbl",
-        "delimiter": "|",
-        "column_order": ["col1", "col2", "..."]
-      },
-      "sort_order": ["col1", "col2"] ,
-      "sort_rationale": "<why this sort order, or why no sort>",
-      "block_size": "<rows_per_block or null>",
-      "estimated_rows": "<hint from workload analysis or 'unknown'>",
-      "storage_notes": "<any special layout considerations>",
-      "indexes": [
-        {
-          "name": "<index_name>",
-          "type": "sorted|hash|zone_map|composite",
-          "columns": ["col1", "col2"],
-          "rationale": "<why this index>"
-        }
-      ]
+      "file_format": { "filename": "<table>.tbl", "delimiter": "|", "column_order": [...] },
+      "sort_order": ["col1"], "block_size": "<rows or null>", "estimated_rows": "<number>",
+      "indexes": [ { "name": "<name>", "type": "sorted|hash|zone_map|composite", "columns": [...] } ]
     }
   },
   "io_strategies": {
     "<query_name>": {
-      "tables_accessed": ["table1", "table2"],
-      "columns_needed": ["table1.col1", "table1.col2", "table2.col3"],
-      "index_usage": [
-        {"index": "<index_name>", "operation": "range_scan|point_lookup|block_skip"}
-      ],
-      "predicate_pushdown": ["<predicate that can be pushed to storage layer>"],
-      "parallel_scan": true,
-      "scan_rationale": "<why this I/O strategy>"
+      "tables_accessed": [...], "columns_needed": [...],
+      "index_usage": [ {"index": "<name>", "operation": "range_scan|point_lookup|block_skip"} ],
+      "predicate_pushdown": [...], "parallel_scan": true
     }
   },
-  "ingestion": {
-    "parallel_tables": true,
-    "parallel_columns": true,
-    "build_indexes_during_ingest": true,
-    "ingestion_rationale": "<reasoning about ingestion strategy>"
-  },
-  "type_mappings": {
-    "INTEGER": "int32_t",
-    "DECIMAL": "double",
-    "DATE": "int32_t",
-    "CHAR": "std::string",
-    "VARCHAR": "std::string"
-  },
+  "ingestion": { "parallel_tables": true, "parallel_columns": true, "build_indexes_during_ingest": true },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t", "CHAR": "std::string", "VARCHAR": "std::string" },
   "date_encoding": "days_since_epoch_1970",
-  "hardware_config": {
-    "cpu_cores": "<detected via nproc>",
-    "l3_cache_mb": "<detected via lscpu, if available>",
-    "disk_type": "ssd|hdd|unknown",
-    "total_memory_gb": "<detected via free, if available>"
-  },
-  "design_rationale": "<explain key design decisions and trade-offs, including how hardware influenced choices>",
-  "summary": "<brief natural language summary of key design decisions>"
+  "hardware_config": { "cpu_cores": "<N>", "l3_cache_mb": "<N>", "disk_type": "ssd|hdd", "total_memory_gb": "<N>" },
+  "design_rationale": "<key decisions and trade-offs>",
+  "summary": "<brief summary>"
 }
 ```
 
-Note: The `type_mappings` above are defaults. You may propose different mappings if justified (e.g., `int64_t` for large values, `int8_t` for flags, fixed-width `char[N]` for short strings). The Code Generator will use your mappings.
+Note: `type_mappings` are defaults — you may propose different mappings if justified.
 
 ## Instructions
 

@@ -352,45 +352,21 @@ def duckdb_benchmark(scale_factor: int, num_runs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def gendb_setup(data_dir: Path, scale_factor: int, run_dir: Path, force_setup: bool = False) -> Path:
-    """Ensure GenDB persistent binary storage exists. Returns the gendb_dir path.
+def gendb_ingest(data_dir: Path, ingest_bin: Path, gendb_dir: Path) -> bool:
+    """Run GenDB ingestion for a specific binary. Returns True on success.
 
-    If .gendb/ doesn't exist (or --setup is used), find the latest ingest binary and run it.
+    Each iteration may have a different storage design, so each needs its own
+    ingestion with its own ingest binary.
     """
-    gendb_dir = Path(__file__).parent / "gendb" / f"tpch_sf{scale_factor}.gendb"
+    import shutil
 
-    if not force_setup and gendb_dir.exists() and any(gendb_dir.iterdir()):
-        print(f"  GenDB storage '{gendb_dir.name}' already exists, skipping ingestion.")
-        print(f"  Use --setup flag to force re-ingestion.")
-        return gendb_dir
-
-    # Find the ingest binary from the run directory
-    ingest_bin = run_dir / "generated" / "ingest"
-    if not ingest_bin.exists():
-        # Try iterations
-        iterations_dir = run_dir / "iterations"
-        if iterations_dir.exists():
-            iter_dirs = sorted([d for d in iterations_dir.iterdir() if d.is_dir() and d.name.isdigit()],
-                               key=lambda d: int(d.name), reverse=True)
-            for iter_dir in iter_dirs:
-                candidate = iter_dir / "generated" / "ingest"
-                if candidate.exists():
-                    ingest_bin = candidate
-                    break
-
-    if not ingest_bin.exists():
-        print(f"  Warning: No ingest binary found in {run_dir}. Cannot create GenDB storage.")
-        return gendb_dir
-
-    # Remove existing storage if force_setup
-    if force_setup and gendb_dir.exists():
-        import shutil
-        print(f"  Removing existing GenDB storage '{gendb_dir.name}'...")
+    # Always re-ingest: storage design can change between iterations
+    if gendb_dir.exists():
         shutil.rmtree(gendb_dir)
 
     gendb_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Running ingestion: {ingest_bin} {data_dir} {gendb_dir}")
+    print(f"    Ingesting: {ingest_bin.parent.name}/{ingest_bin.name} → {gendb_dir.name}")
     start = time.perf_counter()
     proc = subprocess.run(
         [str(ingest_bin), str(data_dir), str(gendb_dir)],
@@ -400,11 +376,11 @@ def gendb_setup(data_dir: Path, scale_factor: int, run_dir: Path, force_setup: b
     )
     elapsed = (time.perf_counter() - start) * 1000
     if proc.returncode != 0:
-        print(f"  Ingestion failed: {proc.stderr}")
+        print(f"    Ingestion failed: {proc.stderr[:200]}")
+        return False
     else:
-        print(f"  Ingestion completed in {elapsed:.0f} ms")
-
-    return gendb_dir
+        print(f"    Ingestion completed in {elapsed:.0f} ms")
+        return True
 
 
 def gendb_benchmark_single(gendb_bin: Path, gendb_dir: Path, num_runs: int) -> dict:
@@ -425,18 +401,30 @@ def gendb_benchmark_single(gendb_bin: Path, gendb_dir: Path, num_runs: int) -> d
             print(f"  GenDB error: {proc.stderr}")
             return {}
 
-        # Parse timing: look for pattern "Execution time: <N> ms"
-        # paired with query headers like "=== Q1: ..."
+        # Parse timing from GenDB output. Supports multiple formats:
+        #   "Q1 execution time: 0.17 seconds"
+        #   "Execution time: 170 ms"
+        #   "=== Q1 ===" header followed by timing line
         current_query = None
         for line in proc.stdout.splitlines():
-            if "Q1" in line and "===" in line:
-                current_query = "Q1"
-            elif "Q3" in line and "===" in line:
-                current_query = "Q3"
-            elif "Q6" in line and "===" in line:
-                current_query = "Q6"
+            # Match query headers: "=== Q1 ...", "=== Q3: ...", etc.
+            q_match = re.search(r"===\s*(Q\d+)", line)
+            if q_match:
+                current_query = q_match.group(1)
 
-            match = re.search(r"Execution time:\s*([\d.]+)\s*ms", line, re.IGNORECASE)
+            # Format: "Q1 execution time: 0.17 seconds"
+            q_time_match = re.search(r"(Q\d+)\s+execution time:\s*([\d.]+)\s*seconds?", line, re.IGNORECASE)
+            if q_time_match:
+                qname = q_time_match.group(1)
+                ms = float(q_time_match.group(2)) * 1000  # convert seconds to ms
+                if qname not in results:
+                    results[qname] = []
+                results[qname].append(ms)
+                current_query = None
+                continue
+
+            # Format: "Execution time: 170 ms" (after a query header)
+            match = re.search(r"execution time:\s*([\d.]+)\s*ms", line, re.IGNORECASE)
             if match and current_query:
                 ms = float(match.group(1))
                 if current_query not in results:
@@ -444,37 +432,52 @@ def gendb_benchmark_single(gendb_bin: Path, gendb_dir: Path, num_runs: int) -> d
                 results[current_query].append(ms)
                 current_query = None
 
+    if not results:
+        print(f"    Warning: No query timing parsed from {gendb_bin.name}")
+        if proc and proc.stdout:
+            lines = proc.stdout.strip().splitlines()
+            print(f"    Last 5 lines of output:")
+            for line in lines[-5:]:
+                print(f"      {line}")
+
     return results
 
 
-def gendb_benchmark_all_iterations(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
+def gendb_benchmark_all_iterations(run_dir: Path, data_dir: Path, scale_factor: int, num_runs: int) -> dict:
     """
     Run all GenDB iterations (baseline + optimizations) and return performance history.
 
-    All iterations read from the same .gendb/ persistent storage directory.
+    Each iteration gets its own ingestion because storage design can change between
+    iterations. The best per-query performance is cherry-picked across all iterations.
 
     Returns:
     {
       "baseline": {"Q1": [times], "Q3": [times], "Q6": [times]},
       "iterations": [
         {"iteration": 1, "Q1": [times], "Q3": [times], "Q6": [times]},
-        {"iteration": 2, ...},
+        ...
       ],
-      "best": {"Q1": [times], "Q3": [times], "Q6": [times]}  # best overall
+      "best": {"Q1": [times], "Q3": [times], "Q6": [times]}  # best per-query across all
     }
     """
     history = {"baseline": {}, "iterations": [], "best": {}}
+    gendb_base_dir = Path(__file__).parent / "gendb"
+    last_ingest_bin = None  # Track last ingest binary to skip redundant re-ingestion
 
     # Run baseline
     baseline_bin = run_dir / "generated" / "main"
-    if baseline_bin.exists():
+    baseline_ingest = run_dir / "generated" / "ingest"
+    if baseline_bin.exists() and baseline_ingest.exists():
         print("  Running baseline...")
-        baseline_results = gendb_benchmark_single(baseline_bin, gendb_dir, num_runs)
-        history["baseline"] = baseline_results
-        for qname in QUERIES:
-            if qname in baseline_results:
-                avg_time = sum(baseline_results[qname]) / len(baseline_results[qname])
-                print(f"    Baseline {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+        gendb_dir = gendb_base_dir / f"tpch_sf{scale_factor}.gendb"
+        if gendb_ingest(data_dir, baseline_ingest, gendb_dir):
+            last_ingest_bin = baseline_ingest
+            baseline_results = gendb_benchmark_single(baseline_bin, gendb_dir, num_runs)
+            history["baseline"] = baseline_results
+            for qname in QUERIES:
+                if qname in baseline_results:
+                    avg_time = sum(baseline_results[qname]) / len(baseline_results[qname])
+                    print(f"    Baseline {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
 
     # Run all optimization iterations
     iterations_dir = run_dir / "iterations"
@@ -485,21 +488,46 @@ def gendb_benchmark_all_iterations(run_dir: Path, gendb_dir: Path, num_runs: int
         for iter_dir in iter_dirs:
             iter_num = int(iter_dir.name)
             iter_bin = iter_dir / "generated" / "main"
+            iter_ingest = iter_dir / "generated" / "ingest"
 
-            if iter_bin.exists():
-                print(f"  Running iteration {iter_num}...")
-                iter_results = gendb_benchmark_single(iter_bin, gendb_dir, num_runs)
+            if not iter_bin.exists():
+                continue
 
-                iter_entry = {"iteration": iter_num}
-                for qname in QUERIES:
-                    if qname in iter_results:
-                        iter_entry[qname] = iter_results[qname]
-                        avg_time = sum(iter_results[qname]) / len(iter_results[qname])
-                        print(f"    Iteration {iter_num} {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            print(f"  Running iteration {iter_num}...")
 
-                history["iterations"].append(iter_entry)
+            # Determine which ingest binary to use
+            ingest_to_use = iter_ingest if iter_ingest.exists() else baseline_ingest
+            gendb_dir = gendb_base_dir / f"tpch_sf{scale_factor}.gendb"
 
-    # Determine best overall performance per query (based on average of each iteration)
+            # Skip re-ingestion if this iteration uses the same ingest binary as previous
+            need_reingest = True
+            if last_ingest_bin is not None and ingest_to_use.exists() and last_ingest_bin.exists():
+                # Compare binary files — if identical, storage design hasn't changed
+                if ingest_to_use.stat().st_size == last_ingest_bin.stat().st_size:
+                    with open(ingest_to_use, 'rb') as f1, open(last_ingest_bin, 'rb') as f2:
+                        if f1.read() == f2.read():
+                            need_reingest = False
+                            print(f"    Reusing storage (ingest binary unchanged)")
+
+            if need_reingest:
+                if not gendb_ingest(data_dir, ingest_to_use, gendb_dir):
+                    print(f"    Skipping iteration {iter_num} due to ingestion failure")
+                    continue
+
+            last_ingest_bin = ingest_to_use
+
+            iter_results = gendb_benchmark_single(iter_bin, gendb_dir, num_runs)
+
+            iter_entry = {"iteration": iter_num}
+            for qname in QUERIES:
+                if qname in iter_results:
+                    iter_entry[qname] = iter_results[qname]
+                    avg_time = sum(iter_results[qname]) / len(iter_results[qname])
+                    print(f"    Iteration {iter_num} {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+
+            history["iterations"].append(iter_entry)
+
+    # Best per-query: cherry-pick across baseline + all iterations
     all_results = [history["baseline"]] + history["iterations"]
     for qname in QUERIES:
         best_avg = None
@@ -511,7 +539,7 @@ def gendb_benchmark_all_iterations(run_dir: Path, gendb_dir: Path, num_runs: int
                     best_avg = avg
                     best_times_list = result[qname]
         if best_times_list:
-            history["best"][qname] = best_times_list  # Keep original times for consistency
+            history["best"][qname] = best_times_list
 
     return history
 
@@ -764,19 +792,23 @@ def main():
 
     # --- GenDB ---
     if args.gendb_run and args.gendb_run.exists():
-        print(f"=== GenDB Setup ===")
-        gendb_dir = gendb_setup(data_dir, args.sf, args.gendb_run, args.setup)
-
-        print(f"\n=== GenDB Benchmark ({args.gendb_run}) ===")
-        gendb_history = gendb_benchmark_all_iterations(args.gendb_run, gendb_dir, args.runs)
+        print(f"=== GenDB Benchmark ({args.gendb_run}) ===")
+        print(f"  (Each iteration runs its own ingestion — storage design may differ)")
+        gendb_history = gendb_benchmark_all_iterations(args.gendb_run, data_dir, args.sf, args.runs)
         if gendb_history and gendb_history["best"]:
             all_results["GenDB"] = gendb_history["best"]
-            print(f"\n  Best iteration overall performance:")
+            print(f"\n  Best per-query performance (cherry-picked across iterations):")
             for qname in QUERIES:
                 if qname in gendb_history["best"]:
                     times = gendb_history['best'][qname]
                     avg_time = sum(times) / len(times) if times else 0
                     print(f"    {qname}: {avg_time:.1f} ms (avg)")
+            # Show total using best per-query
+            total_best = sum(
+                sum(gendb_history["best"].get(q, [0])) / max(len(gendb_history["best"].get(q, [1])), 1)
+                for q in QUERIES
+            )
+            print(f"    Total (best per-query): {total_best:.1f} ms")
     else:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 

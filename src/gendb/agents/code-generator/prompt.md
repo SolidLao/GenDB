@@ -12,13 +12,7 @@ Start with a simple, correct baseline — advanced optimizations come in later i
 
 ## Hardware Detection (CRITICAL - Do this first)
 
-Before generating code, detect the target system's hardware using Bash commands:
-- **CPU cores**: `nproc` → Use for thread pool sizing (include parallelism as baseline feature)
-- **SIMD support**: `lscpu | grep Flags` → Check for avx2, sse4_2 before using intrinsics
-- **Cache sizes**: `lscpu | grep cache` → Use for morsel/block sizing guidance
-- **Memory**: `free -h` → Use for hash table pre-allocation budgets
-
-Use `std::thread::hardware_concurrency()` in generated code to adapt thread count at runtime.
+Detect hardware via Bash: `nproc` (CPU cores), `lscpu | grep -E "Flags|cache"` (SIMD/cache), `free -h` (memory). Use `std::thread::hardware_concurrency()` in generated code. See knowledge base `INDEX.md` for details.
 
 ## Knowledge & Reasoning
 
@@ -63,29 +57,20 @@ generated/
 └── Makefile                 # Builds both `ingest` and `main` targets
 ```
 
-**NEW: Operator Library Structure**
-- Create reusable, templated operator implementations in `operators/` directory
-- Each operator should be generic and reusable across queries (e.g., `hash_join<KeyType, ValueType>`)
-- Query files (`queries/q*.cpp`) should instantiate and compose these operators
-- This enables later optimizations to improve operators once and benefit all queries
-- Operators should support parallelism out of the box (thread pools for large data)
-
 ### File requirements:
 
 - **date_utils.h**: `date_to_days()`, `days_to_date_str()`, `parse_date()` — all inline
 - **storage.h/cpp**: Columnar table structs with `std::vector<type>` columns, `size()` method. Two sets of I/O functions:
   - **Write functions** (used by ingest): Parse `.tbl` text → write binary column files to `.gendb/` directory. Write metadata (row count, column types) as JSON.
-  - **Read functions** (used by main): Read binary column files from `.gendb/` using `mmap()` or binary `fread()`. Only read columns needed per query (column pruning). Use `madvise()` hints per storage_design.json io_strategies.
+  - **Read functions** (used by main): Provide lazy column loading functions: `mmap_column<T>(table, column)` that returns a pointer to mmap'd data. Columns are loaded on-demand by each query, not pre-loaded. Use `madvise()` hints per storage_design.json io_strategies.
 - **index.h**: Hash index typedefs, composite key structs with hash functors. Support persistent index files (write during ingest, read during query).
-- **queries/*.cpp**: Each query reads from already-loaded columnar data (no text parsing). Prints tabular results and execution time via `std::chrono::high_resolution_clock`.
+- **queries/*.cpp**: Each query function loads ONLY its needed columns from `.gendb/` via mmap during execution. Do NOT pre-load all tables into memory in `main.cpp`. Each query should call mmap/read for exactly the columns it uses. Prints tabular results and execution time via `std::chrono::high_resolution_clock`.
 - **ingest.cpp**: Accept two arguments: `argv[1]` = data directory (with `.tbl` files), `argv[2]` = output `.gendb/` directory. Parse all `.tbl` files, write binary column files, build and write indexes, write metadata. Use parallelism per storage_design.json ingestion settings. Print progress and timing.
-- **main.cpp**: Accept one argument: `argv[1]` = `.gendb/` directory. Read metadata, mmap/load only needed columns, load indexes, execute all queries. Print row counts, query results, and per-query timing. This program should be **fast** — no text parsing, just binary I/O + computation.
+- **main.cpp**: Accept one argument: `argv[1]` = `.gendb/` directory. Read metadata, call each query function. Each query handles its own column loading via mmap. Print row counts, query results, and per-query timing. This program should be **fast** — no text parsing, just binary I/O + computation.
 - **Makefile**: `g++ -O2 -std=c++17 -Wall -lpthread`. Targets: `all` (builds both `ingest` and `main`), `ingest`, `main`, `clean`, `run-ingest`, `run-main`.
 
 ### Query specifications:
-- **Q1** (Pricing Summary): Scan lineitem where `l_shipdate <= date('1998-12-01') - 90 days`. Group by (returnflag, linestatus). Compute SUM/AVG/COUNT aggregates. Order by returnflag, linestatus.
-- **Q3** (Shipping Priority): 3-way join customer↔orders↔lineitem. Filters: `c_mktsegment='BUILDING'`, `o_orderdate < '1995-03-15'`, `l_shipdate > '1995-03-15'`. Group by (l_orderkey, o_orderdate, o_shippriority). Revenue DESC, LIMIT 10.
-- **Q6** (Forecasting Revenue): Scan lineitem. Filters: `l_shipdate ∈ [1994-01-01, 1995-01-01)`, `l_discount ∈ [0.05, 0.07]`, `l_quantity < 24`. SUM(l_extendedprice * l_discount).
+Query specifications are in the `queries.sql` file provided in the user prompt. Parse and implement each query. Derive the query file structure (e.g., `queries/q1.cpp`, `queries/q2.cpp`, ...) from the queries found in the SQL file.
 
 ## Instructions
 
@@ -98,7 +83,7 @@ generated/
    - First run ingestion: `cd <generated_dir> && ./ingest <data_dir> <gendb_dir>`
    - Then run queries: `cd <generated_dir> && ./main <gendb_dir>`
    - Verify all queries execute without crashes (no std::bad_alloc, no segfaults)
-   - Verify results look reasonable (Q1: 2-6 groups, Q3: 10 rows, Q6: positive revenue)
+   - Verify results look reasonable (correct row counts, non-negative values, correct ordering)
    - If it crashes or produces wrong results, fix the code and re-run
    - Correctness is the #1 priority for the baseline
 7. Print a summary of what was generated

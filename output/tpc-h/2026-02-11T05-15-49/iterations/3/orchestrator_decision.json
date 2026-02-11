@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "This is our final iteration with clear high-impact opportunities. Q1 is already beating DuckDB (80ms vs 84ms), but Q3 and Q6 are 3-3.5x slower primarily because zone map block skipping is NOT being utilized despite the storage design supporting it. Zone maps can eliminate 40-86% of I/O on date-filtered scans. Combined with full SIMD vectorization, we have a clear path to close the 2.3x gap with DuckDB (450ms → 177-213ms target vs 192ms). Strong positive trajectory (43% speedup last iteration) and low-risk optimizations justify aggressive final push.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Implement zone map block skipping for Q6 l_shipdate scan (Priority 1: skip 86% of blocks, 2-2.5x speedup expected)",
+    "Implement zone map block skipping for Q3 lineitem/orders date scans (Priority 2: skip 40-60% of blocks, 1.5-2x speedup expected)",
+    "Refactor Q6 SIMD to fully vectorize date comparisons (Priority 3: 1.3-1.5x additional speedup expected)"
+  ],
+  "strategy_notes": "FINAL ITERATION - Be aggressive. Focus on the PRIMARY bottleneck (zone map block skipping not utilized) which accounts for most of the 3-3.5x gap on Q3/Q6. Zone maps are already in the storage design but queries don't leverage them. Priority 1-2 implement zone map pruning (low-risk, high-impact I/O reduction). Priority 3 fixes Q6's SIMD vectorization inefficiency (medium-risk but necessary to reach DuckDB's performance). Combined expected outcome: Q3: 310ms → 155-200ms, Q6: 60ms → 15-20ms, Total: 450ms → 250-300ms (within 1.3-1.5x of DuckDB's 192ms). If zone maps + SIMD achieve full potential, we could reach 177-213ms and match/beat DuckDB overall.",
+  "notes": "Select top-3 highest-impact optimizations for final iteration. All three are synergistic (zone maps reduce I/O, SIMD improves CPU efficiency on remaining data). No reingest required. Focus implementation on: (1) Loading zone map metadata from storage, (2) Block range overlap checking before scans, (3) AVX2 integer comparisons for dates instead of scalar checks. Test thoroughly - these are core scan path changes."
+}

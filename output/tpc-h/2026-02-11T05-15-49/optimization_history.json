@@ -1,0 +1,119 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T05-15-49/iterations/1/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Fix Q3 critical issues: enable c_mktsegment filter and correct hash table structure",
+        "Optimize Q3 join order: build on filtered customers, probe with orders, then build on filtered orders, probe with lineitem",
+        "Replace Q3's full sort with top-K heap for LIMIT 10 aggregation",
+        "Implement partitioned hash join for 64-core parallelism in Q3"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_rows": 4,
+          "timing_ms": 100,
+          "semantically_different": false,
+          "notes": "Correct 4-group aggregation (returnflag × linestatus). All aggregate values are positive and reasonable. Ordering correct (A|F, N|F, N|O, R|F). Total count_order = 59,142,609 rows processed, matching ~99% of ingested 59,986,052 lineitem rows after date filter."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": 10,
+          "timing_ms": 540,
+          "semantically_different": false,
+          "notes": "Top-10 results correctly ordered by revenue DESC (440715.22 → 415367.12). Customer filter selectivity 20.02% (300,276/1,500,000) matches expected ~20% for single market segment. Orders filtered to 1,461,923 reasonable given date predicate. All revenue values positive."
+        },
+        "Q6": {
+          "status": "pass",
+          "num_rows": 1,
+          "timing_ms": 110,
+          "semantically_different": false,
+          "notes": "Single aggregate value 1,230,113,636.01 is positive and reasonable given multi-predicate filter (shipdate range, discount, quantity). Result consistent with expected high selectivity (~0.7%) on 60M lineitem rows."
+        }
+      }
+    },
+    {
+      "iteration": 2,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T05-15-49/iterations/2/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        3,
+        4
+      ],
+      "focusAreas": [
+        "Replace std::unordered_map with Robin Hood hash tables in Q3 hash join (Priority 1: 2-3x expected speedup)",
+        "Switch Q1 to sorted aggregation for 4-group cardinality (Priority 4: 2x expected speedup)",
+        "Add SIMD filter evaluation to Q6 (Priority 5: 2x expected speedup)"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_rows": 4,
+          "timing_ms": 80,
+          "semantically_different": false,
+          "notes": "Correct 4-group aggregation (returnflag × linestatus). All aggregate values match baseline exactly (within floating-point epsilon). Ordering correct (A|F, N|F, N|O, R|F). Total count_order = 59,142,609 rows processed. PERFORMANCE IMPROVEMENT: 20% faster than baseline (80ms vs 100ms)."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": 10,
+          "timing_ms": 310,
+          "semantically_different": false,
+          "notes": "Top-10 results correctly ordered by revenue DESC (440715.22 → 415367.12). One minor floating-point difference in row 2: 439855.32 vs baseline 439855.33 (epsilon=0.01, acceptable). Customer filter selectivity 20.02% (300,276/1,500,000) matches baseline. Orders filtered to 1,461,923 matches baseline. All revenue values positive. PERFORMANCE IMPROVEMENT: 43% faster than baseline (310ms vs 540ms)."
+        },
+        "Q6": {
+          "status": "pass",
+          "num_rows": 1,
+          "timing_ms": 60,
+          "semantically_different": false,
+          "notes": "Single aggregate value 1,230,113,636.01 matches baseline exactly. Result consistent with expected high selectivity (~0.7%) on 60M lineitem rows. PERFORMANCE IMPROVEMENT: 45% faster than baseline (60ms vs 110ms)."
+        }
+      }
+    },
+    {
+      "iteration": 3,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T05-15-49/iterations/3/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Implement zone map block skipping for Q6 l_shipdate scan (Priority 1: skip 86% of blocks, 2-2.5x speedup expected)",
+        "Implement zone map block skipping for Q3 lineitem/orders date scans (Priority 2: skip 40-60% of blocks, 1.5-2x speedup expected)",
+        "Refactor Q6 SIMD to fully vectorize date comparisons (Priority 3: 1.3-1.5x additional speedup expected)"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_rows": "4",
+          "timing_ms": 120,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returns 4 groups (A|F, N|F, N|O, R|F) with aggregates. All values are reasonable and non-negative. Zone map shows excellent pruning (54% of blocks scanned)."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": "10",
+          "timing_ms": 330,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returns top 10 orders by revenue, correctly sorted in descending order. Customer filtering (300,276 of 1.5M = 20%) and zone map pruning on lineitem (54% of blocks) working well. Revenue values are in expected range for SF10."
+        },
+        "Q6": {
+          "status": "pass",
+          "num_rows": "1",
+          "timing_ms": 20,
+          "semantically_different": false,
+          "notes": "Query executed successfully with excellent performance. Zone map pruning is highly effective (scanning only 15.28% of blocks, 9.2M rows). Single aggregate result (1.23B) is reasonable for SF10 dataset."
+        }
+      }
+    }
+  ]
+}

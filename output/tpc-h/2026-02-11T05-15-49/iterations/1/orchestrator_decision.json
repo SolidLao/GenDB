@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "Massive performance gap exists (26x slower than DuckDB). Q3 dominates runtime (81%) and has critical correctness issues (missing c_mktsegment filter causing 5x unnecessary work). Both critical fixes MUST be applied. Selecting top 3 performance optimizations targeting Q3's join and aggregation bottlenecks. Expected improvement: 3-5x speedup on Q3 (from 4520ms to ~900-1500ms), reducing total time from 5570ms to ~1500-2000ms. Clear optimization path with low-risk, high-impact changes available.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Fix Q3 critical issues: enable c_mktsegment filter and correct hash table structure",
+    "Optimize Q3 join order: build on filtered customers, probe with orders, then build on filtered orders, probe with lineitem",
+    "Replace Q3's full sort with top-K heap for LIMIT 10 aggregation",
+    "Implement partitioned hash join for 64-core parallelism in Q3"
+  ],
+  "strategy_notes": "Iteration 1 focuses exclusively on Q3 (the 81% bottleneck). Both critical fixes are mandatory and will reduce customer scan from 1.5M to 300K rows (5x improvement). The 3 selected performance optimizations are all low-risk and don't require reingest: (1) correct join order follows standard build-small-probe-large principle; (2) top-K heap is a textbook optimization for LIMIT queries; (3) partitioned hash join leverages the 64-core system. Expected Q3 time after these changes: 900-1500ms (3-5x speedup). Total expected time: 1500-2000ms. Save zone map optimizations (require reingest) for iteration 2 if needed.",
+  "notes": "Agent selection: All 3 selected optimizations target Q3 and fall under join_order (priority 1), algorithm (priority 2), and cpu_bound/join (priority 3) categories. Use the query rewriter agent for join order restructuring, aggregation optimizer for top-K heap, and parallelism specialist for partitioned hash join. The critical fixes (string column support + filter enable, hash table structure fix) should be handled by the storage and query rewriter agents respectively."
+}

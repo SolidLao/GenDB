@@ -25,37 +25,13 @@ You have access to a knowledge base at the path provided in the user prompt.
 - **Probe side**: The larger input. Each row probes the hash table.
 - **Wrong choice**: Building hash table on 60M row table when the other side has 1K rows wastes memory and time
 
-**Join sequence example:**
-```cpp
-// Bad: Large intermediate result early
-auto step1 = hash_join(lineitem, orders);  // 60M × 1.5M = huge intermediate
-auto result = hash_join(step1, customer);  // Filters at the end
-
-// Good: Selective join first
-auto step1 = hash_join(customer, orders);  // 150K × 1.5M with filter = smaller intermediate
-auto result = hash_join(step1, lineitem);  // Now joining smaller set with lineitem
-```
-
 ## Output Contract
 
-Modify the query implementation files (`queries/q*.cpp`) in the generated code directory:
+Modify the query implementation files (`queries/*.cpp`) in the generated code directory:
 1. Reorder join operations based on cardinality estimates and selectivity
-2. Ensure correct build/probe side assignment for each hash join
+2. Ensure correct build/probe side assignment for each hash join (smaller table builds)
 3. Add comments explaining the join order rationale
 4. Preserve correctness — results must remain identical
-
-**Example modification:**
-```cpp
-// Before:
-HashJoin<int, LineitemRow> join1;
-join1.build(lineitem_keys, lineitem_rows);  // BAD: Building on 60M rows
-auto intermediate = join1.probe(orders_keys);
-
-// After:
-HashJoin<int, OrderRow> join1;
-join1.build(orders_keys, orders_rows);  // GOOD: Building on 1.5M rows
-auto intermediate = join1.probe(lineitem_keys);
-```
 
 ## Instructions
 

@@ -1,0 +1,108 @@
+{
+  "iteration": 3,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 80,
+        "status": "pass",
+        "bottleneck": "None - already optimal",
+        "root_cause": "Q1 is BEATING DuckDB (80ms vs 84ms). The sorted aggregation with direct array indexing for 4-group cardinality is near-optimal. No further optimization needed."
+      },
+      "Q3": {
+        "current_time_ms": 310,
+        "status": "pass",
+        "bottleneck": "I/O-bound + join overhead",
+        "root_cause": "Q3 is 3.5x slower than DuckDB (310ms vs 89ms). PRIMARY ISSUE: Zone maps on l_shipdate and o_orderdate are not being utilized - should skip 40-60% of blocks but currently doing full scans. SECONDARY ISSUES: (1) Hash table merging across 64 threads has overhead, (2) No prefetching during hash probes causes cache misses. The query correctly uses Robin Hood hash tables and partial_sort for top-K."
+      },
+      "Q6": {
+        "current_time_ms": 60,
+        "status": "pass",
+        "bottleneck": "I/O-bound + SIMD inefficiency",
+        "root_cause": "Q6 is 3x slower than DuckDB (60ms vs 19ms). PRIMARY ISSUE: Zone maps on l_shipdate are not being utilized - should skip 86% of blocks (1 year out of 7) but currently doing full scan. SECONDARY ISSUE: AVX2 SIMD implementation mixes scalar date checks with vector operations, breaking vectorization efficiency. The query has thread parallelism which is good."
+      }
+    },
+    "overall": "Iteration 2 achieved 43% speedup over iteration 1 through Robin Hood hash tables, sorted aggregation, and SIMD. Q1 is now BEATING DuckDB. However, Q3 and Q6 are still 3-3.5x slower than DuckDB primarily due to NOT utilizing zone map block skipping on date-filtered scans. The storage design includes zone maps on l_shipdate and o_orderdate, but the query code doesn't leverage them. Implementing zone map pruning should eliminate 40-86% of I/O on these queries."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "Zone Map Block Skipping",
+      "description": "Implement zone map pruning for l_shipdate in Q6. The storage design sorts lineitem by l_shipdate with 64K-row blocks. Q6 filters for shipdate in [1994-01-01, 1995-01-01), which is 1 year out of 7 years (14% selectivity). Zone maps should skip entire blocks whose max < '1994-01-01' or min >= '1995-01-01', eliminating ~86% of blocks. Implementation: (1) Load zone map metadata from storage layer (min/max l_shipdate per 64K-row block), (2) Before scanning each block, check if block range overlaps [date_start, date_end), (3) Skip entire block if no overlap. Store zone maps in a metadata.json file or separate binary file alongside column data.",
+      "expected_improvement": "2-2.5x speedup (60ms → 24-30ms). Zone map pruning reduces effective I/O from 60M rows to ~8.4M rows (14%). On HDD with 150MB/s sequential read, this saves ~200ms of I/O time. Combined with existing SIMD and parallelism, should bring Q6 close to DuckDB's 19ms.",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "Zone Map Block Skipping",
+      "description": "Implement zone map pruning for lineitem.l_shipdate and orders.o_orderdate in Q3. (1) Lineitem scan: Filter for l_shipdate > '1995-03-15' should skip blocks with max <= '1995-03-15', eliminating ~40% of early-date blocks. (2) Orders scan: Filter for o_orderdate < '1995-03-15' should skip blocks with min >= '1995-03-15', eliminating ~60% of late-date blocks. Combined, these eliminate ~50% of I/O across both scans. Implementation: Same as Q6 - load zone map metadata, check block range overlap before scanning.",
+      "expected_improvement": "1.5-2x speedup (310ms → 155-200ms). Zone map pruning reduces lineitem scan from 60M to ~36M rows and orders scan from 15M to ~6M rows. This saves ~300ms of I/O time. Should narrow gap to DuckDB from 3.5x to ~2x.",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 3,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "operator": "filter",
+      "technique": "Full SIMD Filter Pipeline",
+      "description": "Refactor Q6's AVX2 SIMD implementation to eliminate scalar date checks inside the vectorized loop. Current implementation breaks vectorization by checking date filters per-element with scalar code. IMPROVED APPROACH: (1) Vectorize date comparisons using _mm256_cvtepi32_pd to convert int32 dates to doubles for comparison, or use AVX2 integer SIMD (_mm256_cmpgt_epi32) for date ranges. (2) Generate a combined 4-lane mask from all predicates (date, discount, quantity). (3) Use _mm256_maskload_pd to selectively load and process only passing rows. (4) Remove the scalar date_ok[] array and the loop that zeros out mask lanes. This enables full 4-wide SIMD throughout the filter evaluation.",
+      "expected_improvement": "1.3-1.5x additional speedup after zone maps. Full SIMD vectorization should improve filter throughput from ~4 rows/cycle to ~6-8 rows/cycle (50-100% faster filter evaluation). Combined with zone maps, Q6 should reach 15-20ms, matching DuckDB.",
+      "risk": "medium",
+      "requires_reingest": false
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "algorithm",
+      "operator": "join",
+      "technique": "Bloom Filter Semi-Join Reduction",
+      "description": "Add Bloom filter-based semi-join reduction to Q3's lineitem scan before hash probing. IMPLEMENTATION: (1) After building filtered_orders hash table (~1.46M keys), construct a Bloom filter with 8 hash functions and 2MB bitmap (16 bits per key, <1% FPR). (2) During lineitem scan, first probe Bloom filter on l_orderkey. If negative (no match), skip row immediately without probing the expensive hash table. (3) Only probe filtered_orders hash table if Bloom filter returns positive. BENEFIT: Bloom filter lookups are 10x faster than hash table probes (1-2ns vs 10-20ns). At 60M lineitem rows with ~24% join selectivity, this eliminates ~45M unnecessary hash probes, saving ~900ms of CPU time across 64 threads (~14ms wall time).",
+      "expected_improvement": "1.2-1.3x additional speedup after zone maps (155-200ms → 120-155ms). Bloom filters eliminate majority of expensive hash table probes for non-matching lineitem rows. Combined with zone maps, should bring Q3 to 120-155ms vs DuckDB's 89ms (1.3-1.7x gap).",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "operator": "aggregation",
+      "technique": "Reduce Hash Table Merge Overhead",
+      "description": "Optimize Q3's global aggregation merge to reduce overhead from merging 64 thread-local hash tables. CURRENT APPROACH: Sequential merge of 64 local Robin Hood hash tables into global_agg (400K groups * 64 threads = 25.6M inserts/probes). OPTIMIZED APPROACH: (1) Hierarchical merge: merge pairs of local hash tables in parallel (64 → 32 → 16 → 8 → 4 → 2 → 1), reducing total merge cost from O(64*N) to O(log(64)*N). (2) Pre-size global_agg to exact size = sum of local_agg sizes, eliminating rehashing. (3) Use std::move to transfer ownership of the largest local hash table as the starting global_agg instead of building from empty. BENEFIT: Reduces merge phase from ~50ms to ~15ms.",
+      "expected_improvement": "1.15-1.2x additional speedup (saves ~35ms). Combined with zone maps and Bloom filters, Q3 should reach 100-130ms vs DuckDB's 89ms (1.1-1.5x remaining gap).",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "madvise Prefetching",
+      "description": "Add madvise(MADV_WILLNEED) prefetch hints for upcoming column blocks during Q3's lineitem scan. IMPLEMENTATION: (1) During parallel scan, when thread starts processing block N, issue madvise(MADV_WILLNEED) for block N+1. (2) Use 64KB prefetch window (one block ahead). (3) Apply to all accessed lineitem columns (l_orderkey, l_extendedprice, l_discount, l_shipdate). BENEFIT: Overlaps I/O with computation, hiding ~30% of I/O latency on HDD (sequential read latency ~5ms per block). On 64 threads, prefetching eliminates ~15-20ms of I/O wait time.",
+      "expected_improvement": "1.1-1.15x additional speedup (saves ~15-20ms). Minor optimization but low-risk and easy to implement. Combined with other optimizations, Q3 should reach 85-115ms, potentially matching DuckDB's 89ms.",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 7,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "madvise Sequential Read Hint",
+      "description": "Add madvise(MADV_SEQUENTIAL) hint when mmapping lineitem columns in Q6 to optimize OS page-in behavior. IMPLEMENTATION: After mmapping each column, call madvise(ptr, size, MADV_SEQUENTIAL) to hint the OS that the column will be read sequentially. This tells the kernel to (1) aggressively read ahead (2x-4x default window), (2) immediately drop pages after they're read to free cache. BENEFIT: Reduces I/O latency by ~20% on sequential scans due to better read-ahead.",
+      "expected_improvement": "1.1x additional speedup (saves ~2-3ms). Minor optimization. Combined with zone maps and SIMD, Q6 should reach 12-18ms, matching or beating DuckDB's 19ms.",
+      "risk": "low",
+      "requires_reingest": false
+    }
+  ],
+  "storage_changes": [],
+  "summary": "Q1 is BEATING DuckDB (80ms vs 84ms) - no changes needed. Q3 and Q6 are 3-3.5x slower primarily due to NOT utilizing zone map block skipping. Priority 1-2: Implement zone map pruning on date-filtered scans (should skip 40-86% of blocks). Priority 3: Fix Q6's SIMD to fully vectorize date comparisons. Priority 4-5: Add Bloom filter semi-join and optimize hash table merging in Q3. Priority 6-7: Add madvise prefetch hints. Expected outcome: Q3: 310ms → 85-115ms (close to DuckDB's 89ms). Q6: 60ms → 12-18ms (matching/beating DuckDB's 19ms). Overall: Total time from 450ms to 177-213ms, closing gap to DuckDB's 192ms."
+}

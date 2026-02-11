@@ -1,0 +1,153 @@
+{
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 110,
+        "status": "pass",
+        "bottleneck": "None - already well optimized with thread parallelism",
+        "root_cause": "Query is already fast (1.3x slower than DuckDB). Zone map block skipping could provide 20-25% improvement by avoiding 25% of blocks that fall outside the date filter range."
+      },
+      "Q3": {
+        "current_time_ms": 4520,
+        "status": "pass",
+        "bottleneck": "CRITICAL - Join execution and filtering (51x slower than DuckDB)",
+        "root_cause": "Multiple severe issues: (1) c_mktsegment filter is disabled (line 42-43 in q3.cpp), causing ALL 1.5M customers to be indexed instead of ~300K (5x unnecessary work); (2) Wrong hash table structure - stores vectors of OrderInfo per key instead of single entries, wasting memory and causing cache thrashing; (3) Join order is suboptimal - should build on filtered customers (300K), probe with orders, then build on filtered orders (600K), probe with lineitem; (4) Full sort of 100K-500K groups instead of top-K heap for LIMIT 10; (5) No partitioned hash join despite 64 cores available."
+      },
+      "Q6": {
+        "current_time_ms": 60,
+        "status": "pass",
+        "bottleneck": "None - already well optimized",
+        "root_cause": "Query is already fast (3x slower than DuckDB). Zone map block skipping on l_shipdate could provide 80-85% I/O reduction since only 1 year out of 7 years is needed (1994), potentially reducing time to ~15-20ms."
+      }
+    },
+    "overall": "Q3 dominates execution time (4520ms / 5570ms = 81%). Fixing Q3's critical issues (missing filter, wrong data structures, suboptimal join order, full sort instead of top-K) should reduce Q3 time from 4520ms to ~150-250ms (18-30x speedup). Q1 and Q6 are already well-parallelized but lack zone map support for block skipping on sorted l_shipdate data."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q3",
+      "issue": "c_mktsegment filter is disabled (commented out)",
+      "fix": "Implement string column mmap loading and enable c_mktsegment = 'BUILDING' filter",
+      "description": "Lines 22-24 in q3.cpp show the c_mktsegment column load is missing. Line 42-43 has comment 'For simplicity, we'll skip the c_mktsegment filter for baseline'. This causes ALL 1.5M customers to be indexed instead of ~300K (20% selectivity). Add mmap_string_column() function to storage.cpp and enable the filter: if (c_mktsegment[i] != 'BUILDING') continue; This alone should reduce Q3 time by ~40-50%.",
+      "risk": "low"
+    },
+    {
+      "target": "Q3",
+      "issue": "Inefficient hash table structure - storing vectors per key",
+      "fix": "Change order_index from unordered_map<int32_t, vector<OrderInfo>> to unordered_map<int32_t, OrderInfo>",
+      "description": "Lines 57-69 in q3.cpp store vectors of OrderInfo per o_orderkey, but o_orderkey is a PRIMARY KEY (1:1 mapping). This wastes memory and causes unnecessary iteration (line 97). Change to single OrderInfo per key: unordered_map<int32_t, OrderInfo> order_index; This eliminates the inner loop at line 97-103 and improves cache locality.",
+      "risk": "low"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "join_order",
+      "operator": "join",
+      "technique": "Correct build/probe side selection",
+      "description": "Current implementation builds hash table on orders (line 57-70) and probes with lineitem. Correct order: (1) Scan customer with c_mktsegment filter -> ~300K rows; (2) Build hash table on filtered customers (c_custkey -> custkey); (3) Scan orders with date filter (o_orderdate < '1995-03-15') -> ~6M rows; (4) Probe customer hash table, keep matching orders -> ~1.2M rows; (5) Build hash table on filtered orders (o_orderkey -> OrderInfo); (6) Scan lineitem with date filter (l_shipdate > '1995-03-15') -> ~27M rows; (7) Probe orders hash table and aggregate. This follows the principle: build on smaller, probe with larger. Expected improvement: 3-5x speedup over current wrong order.",
+      "expected_improvement": "3-5x speedup (1500-2260ms reduction) - Reduces hash table sizes and probe work by building on filtered intermediate results",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "algorithm",
+      "operator": "aggregation",
+      "technique": "Top-K heap instead of full sort",
+      "description": "Lines 120-127 in q3.cpp perform full sort of 100K-500K aggregated groups, but only 10 rows are needed (LIMIT 10). Replace std::sort with a min-heap (std::priority_queue) of size 10 that tracks top 10 by revenue during aggregation. Update heap as new groups are aggregated. At the end, extract 10 elements and sort them. This avoids O(N log N) sort in favor of O(N log 10) = O(N) heap maintenance. Reference: query-execution/pipeline-breakers.md mentions materialization points optimization.",
+      "expected_improvement": "2-3x speedup for aggregation phase (200-400ms reduction) - Eliminates full sort of 100K-500K groups",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "operator": "join",
+      "technique": "Partitioned hash join for parallelism",
+      "description": "Current implementation (lines 72-110) does parallel scan of lineitem and probes a shared hash table, but the hash table build is sequential (lines 57-70). Implement partitioned hash join: (1) Hash-partition filtered customers by c_custkey into 64 partitions; (2) Hash-partition orders by o_custkey into 64 partitions; (3) In parallel, join partition pairs (customer[i], orders[i]) across 64 threads; (4) Hash-partition result by o_orderkey; (5) Hash-partition lineitem by l_orderkey; (6) In parallel, join partition pairs and aggregate. This eliminates shared data structure contention and achieves near-linear scaling on 64 cores. Reference: parallelism/data-partitioning.md and joins/hash-join-variants.md (radix partitioning section).",
+      "expected_improvement": "4-6x speedup (3000-3600ms reduction) - Near-linear scaling on 64 cores vs current sequential hash table build and contended probe",
+      "risk": "medium",
+      "requires_reingest": false
+    },
+    {
+      "priority": 4,
+      "target": "Q1",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "Zone map block skipping",
+      "description": "Q1 filters l_shipdate <= '1998-09-02'. Storage design specifies lineitem is sorted by l_shipdate (storage_design.json line 32) with zone maps at 65K row blocks (line 33). Implement zone map: (1) During ingestion, compute min/max l_shipdate per block and store in metadata.json; (2) During scan, load zone maps and skip blocks where min_shipdate > '1998-09-02'. Expected skip ratio: 25% (3 months out of 7 years). In q1.cpp, modify scan to check zone maps before mmaping blocks. Files to modify: storage/storage.cpp (add zone map metadata), queries/q1.cpp (add zone map filtering). Reference: indexing/zone-maps.md and storage/persistent-storage.md.",
+      "expected_improvement": "20-25% speedup (22-28ms reduction) - Skip 25% of blocks via zone map pruning on sorted data",
+      "risk": "low",
+      "requires_reingest": true
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "Zone map block skipping on date range",
+      "description": "Q6 filters l_shipdate BETWEEN '1994-01-01' AND '1994-12-31' (1 year out of 7 years = 14%). Since lineitem is sorted by l_shipdate with zone maps, implement block skipping: (1) Load zone map metadata (min/max l_shipdate per block); (2) Skip blocks where max < '1994-01-01' OR min >= '1995-01-01'. Expected skip ratio: 86% (6 years out of 7). This is the HIGHEST skip ratio in the workload. Modify q6.cpp scan loop to check zone maps before processing each block. Expected time reduction from 60ms to ~10-15ms, matching DuckDB. Reference: storage_design.json lines 38-42 specifies 86% blocks skipped for Q6.",
+      "expected_improvement": "4-6x speedup (45-50ms reduction) - Skip 86% of blocks via zone map pruning on 1-year date range filter",
+      "risk": "low",
+      "requires_reingest": true
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "operator": "aggregation",
+      "technique": "Partial aggregation with thread-local hash tables",
+      "description": "Current implementation (lines 75-86) uses thread-local hash tables for aggregation, which is correct. However, the aggregation happens AFTER joining lineitem with orders. Move partial aggregation EARLIER: aggregate revenue by (orderkey, orderdate, shippriority) in thread-local tables during the lineitem scan+join phase, before the global merge. This reduces memory footprint of thread-local tables and improves cache locality. The current implementation already does this, but can be optimized by pre-sizing the thread-local hash tables to ~(400K groups / 64 threads) = ~6K entries per thread. Reference: aggregation/partial-aggregation.md.",
+      "expected_improvement": "1.2-1.5x speedup (150-200ms reduction) - Better cache locality and pre-sized hash tables reduce allocation overhead",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 7,
+      "target": "Q1",
+      "bottleneck_category": "cpu_bound",
+      "operator": "scan",
+      "technique": "Operator fusion for filter+project+aggregate",
+      "description": "Q1's aggregation operator (lines 36-62 in q1.cpp) already fuses filter and aggregation in a single pass, which is good. However, the arithmetic operations (lines 50-51) can be further optimized by pre-computing l_extendedprice * l_discount and l_extendedprice * l_discount * l_tax in a single vectorized pass before aggregation. This reduces redundant arithmetic in the hot loop. Consider also using SIMD intrinsics (AVX2) for the date filter comparison and arithmetic operations. Reference: query-execution/operator-fusion.md and parallelism/simd.md.",
+      "expected_improvement": "1.1-1.2x speedup (9-18ms reduction) - Reduced arithmetic operations and better instruction-level parallelism",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 8,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "operator": "filter",
+      "technique": "Fused SIMD filter evaluation",
+      "description": "Q6 has 4 filter predicates (lines 53, 56-57, 60 in q6.cpp) evaluated sequentially. Use SIMD (AVX2) to evaluate all 4 predicates in parallel on 4 rows at a time: (1) Load 4 shipdates, compare >= date_start AND < date_end; (2) Load 4 discounts, compare >= 0.05 AND <= 0.07; (3) Load 4 quantities, compare < 24; (4) Combine with AND mask; (5) Conditionally load extendedprice and accumulate revenue. Expected throughput: 4x on AVX2. Reference: parallelism/simd.md. After implementing zone maps (priority 5), this provides additional speedup on the remaining 14% of data.",
+      "expected_improvement": "1.5-2x speedup on remaining data after zone maps (3-5ms reduction) - SIMD accelerates filter evaluation 4x",
+      "risk": "medium",
+      "requires_reingest": false
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Add zone map metadata (min/max l_shipdate per 65K-row block) to metadata.json",
+      "rationale": "Zone maps enable block skipping for Q1 (25% skip), Q6 (86% skip), and Q3 (40% skip). Lineitem is already sorted by l_shipdate (storage_design.json line 32), making zone maps highly effective. Zone map overhead is negligible (<0.1% memory). Expected I/O reduction: 25-86% across queries.",
+      "requires_reingest": true
+    },
+    {
+      "table": "customer",
+      "change": "Add string column support and mmap loading for c_mktsegment",
+      "rationale": "c_mktsegment filter is currently disabled in Q3 due to missing string column mmap support. Implementing this is CRITICAL to reduce customer scan from 1.5M to 300K rows (5x reduction). This is not a storage layout change but a missing feature in the storage layer. Required to enable the critical fix for Q3.",
+      "requires_reingest": false
+    },
+    {
+      "table": "orders",
+      "change": "Add zone map metadata (min/max o_orderdate per block) to metadata.json",
+      "rationale": "Q3 filters o_orderdate < '1995-03-15', which eliminates 60% of orders (post-1995). Zone maps would enable 60% block skip ratio. Orders table is ordered by o_orderkey, and o_orderdate is monotonically increasing with o_orderkey (TPC-H property), so zone maps will be effective. This is lower priority than lineitem zone maps but provides additional Q3 speedup.",
+      "requires_reingest": true
+    }
+  ],
+  "summary": "Iteration 1 analysis reveals Q3 is the dominant bottleneck (4520ms, 81% of total time, 51x slower than DuckDB). CRITICAL FIXES: (1) Enable missing c_mktsegment filter to reduce customer scan from 1.5M to 300K rows (5x reduction); (2) Fix hash table data structure (eliminate unnecessary vectors). PERFORMANCE OPTIMIZATIONS: (1) Correct join order (build on filtered customers, then filtered orders); (2) Top-K heap instead of full sort for LIMIT 10; (3) Partitioned hash join for 64-core parallelism; (4) Zone maps for block skipping in Q1 (25%), Q6 (86%), Q3 (40-60%). Expected Q3 time after all optimizations: 150-250ms (18-30x speedup). Expected Q1 time: 80-90ms (1.2-1.4x speedup). Expected Q6 time: 10-15ms (4-6x speedup). Total expected time: 240-355ms vs current 5570ms (16-23x overall speedup)."
+}
