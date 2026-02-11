@@ -9,76 +9,85 @@ GenDB takes a different approach to query execution: instead of routing queries 
 ## Key Ideas
 
 - **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
-- **Multi-agent architecture** — seven specialized agents collaborate to analyze, generate, optimize, and evaluate
+- **Multi-agent architecture** — specialized agents collaborate to analyze, generate, optimize, and evaluate; optimization agents are selected based on bottleneck type
+- **Hardware-aware optimization** — agents automatically detect CPU cores, cache sizes, disk type (SSD/HDD), and available memory to make adaptive optimization decisions
 - **Knowledge-driven autonomy** — agents receive deep domain knowledge and reason about which techniques to apply, rather than following fixed optimization steps
-- **Exploitation/exploration balance** — each agent has a tuned balance: mechanical agents (Evaluator: 95/5) follow protocols, creative agents (Operator Specialist: 30/70) freely explore novel approaches
-- **Incremental generation** — start with a simple correct baseline, then iteratively optimize based on profiling feedback
+- **Exploitation/exploration balance** — each agent has a tuned balance: mechanical agents (Evaluator: 95/5) follow protocols, creative agents (Execution Optimizer: 30/70) freely explore parallel execution strategies
+- **Incremental generation** — start with a simple correct baseline with reusable operator library, then iteratively optimize based on profiling feedback
 - **Learn from existing systems** — a structured knowledge base captures how PostgreSQL, DuckDB, ClickHouse, and others solve performance problems
-- **Flexible optimization** — no fixed optimization pipeline; explore different optimization orders since they can lead to different performance outcomes
+- **Flexible optimization** — no fixed optimization pipeline; conditional agent invocation based on bottleneck category (cpu_bound, io_bound, join_order, etc.)
 
 ## System Architecture
 
+**Phase 1 (Baseline):**
 ```
-                         ┌──────────────┐
-                         │ Orchestrator │
-                         └──────┬───────┘
-                                │ coordinates all agents,
-                                │ decides optimization order
-                ┌───────────────┼───────────────┐
-                │               │               │
-       ┌────────▼──────┐ ┌─────▼──────┐ ┌──────▼───────┐
-       │   Workload    │ │    Code    │ │   Storage/   │
-       │   Analyzer    │ │  Generator │ │Index Designer│
-       └───────────────┘ └────────────┘ └──────────────┘
-                │               │               │
-                │        ┌──────▼───────┐       │
-                └───────►│   Operator   │◄──────┘
-                         │  Specialist  │
-                         └──────┬───────┘
-                                │
-                ┌───────────────┼───────────────┐
-                │                               │
-         ┌──────▼───────┐               ┌───────▼──────┐
-         │  Evaluator   │──────────────►│   Learner    │
-         └──────────────┘  feedback     └──────────────┘
+Workload Analyzer → Storage/Index Designer → Code Generator
+                                              → Physical Operator Agent → Evaluator
 ```
 
-| Agent | Role |
-|-------|------|
-| **Orchestrator** | Coordinates the pipeline, decides what to optimize next, passes optimization target and knowledge base to all agents |
-| **Workload Analyzer** | Parses SQL workload to extract patterns, selectivities, join graphs, cardinality estimates, and optimization opportunities |
-| **Code Generator** | Produces executable C++ code guided by storage design and knowledge base; external libraries allowed |
-| **Storage/Index Designer** | Designs data layouts, encodings, compression, and index structures by reasoning about the specific workload |
-| **Operator Specialist** | The creative engine — implements any technique (SIMD, custom hash tables, operator fusion, parallel execution) to optimize physical operators |
-| **Evaluator** | Benchmarks generated code for correctness and performance, optionally profiles with `perf stat` |
-| **Learner** | Reads knowledge base to diagnose bottlenecks; proposes both known and novel optimization techniques |
+**Phase 2 (Optimization Loop):**
+```
+Learner → Orchestrator Agent → [Conditional Optimization Agent] → Evaluator
+                                     ↓
+                    ┌────────────────┴────────────────┬──────────────────┐
+                    │                                 │                  │
+          ┌─────────▼──────────┐           ┌─────────▼──────┐  ┌────────▼────────┐
+          │ Query Rewriter     │           │ Join Order     │  │ Execution       │
+          │ (query_structure)  │           │ Optimizer      │  │ Optimizer       │
+          └────────────────────┘           │ (join_order)   │  │ (cpu_bound)     │
+                                           └────────────────┘  └─────────────────┘
+          ┌────────────────────┐           ┌─────────────────────────────────────┐
+          │ I/O Optimizer      │           │ Physical Operator Agent             │
+          │ (io_bound)         │           │ (algorithm)                         │
+          └────────────────────┘           └─────────────────────────────────────┘
+```
+
+| Agent | Role | Phase |
+|-------|------|-------|
+| **Orchestrator** | Coordinates the pipeline, decides what to optimize next, selects optimization agents based on bottleneck category | Both |
+| **Workload Analyzer** | Parses SQL workload, identifies parallelism opportunities, estimates cardinalities and selectivities | Phase 1 |
+| **Storage/Index Designer** | Detects hardware (CPU cores, cache, SSD/HDD), designs data layouts, encodings, compression, and indexes | Phase 1 |
+| **Code Generator** | Generates C++ code with reusable operator library (operators/*.h), includes parallelism as baseline feature | Phase 1 |
+| **Physical Operator Agent** | Creates/optimizes reusable operator library (scan, hash join, hash aggregation) for algorithm-level bottlenecks | Both |
+| **Evaluator** | Benchmarks generated code, validates semantic equivalence for query rewrites | Both |
+| **Learner** | Diagnoses bottlenecks, categorizes by type (cpu_bound, io_bound, etc.), proposes hardware-aware optimizations | Phase 2 |
+| **Query Rewriter** | Rewrites SQL queries (correlated subqueries → joins, add CTEs) for query_structure bottlenecks | Phase 2 |
+| **Join Order Optimizer** | Optimizes physical join order and build/probe side selection for join_order bottlenecks | Phase 2 |
+| **Execution Optimizer** | Adds thread parallelism (morsel-driven) and SIMD vectorization for cpu_bound bottlenecks | Phase 2 |
+| **I/O Optimizer** | Optimizes storage access (madvise hints, column pruning, SSD/HDD strategies) for io_bound bottlenecks | Phase 2 |
 
 ## Knowledge Base
 
-Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 27 technique files across 8 domains:
+Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 27 technique files across 8 domains. **Parallelism is prioritized at the top** as the #1 performance optimization:
 
-| Domain | Topics |
-|--------|--------|
-| **storage** | Columnar vs row, compression, memory layout, string optimization |
-| **indexing** | Hash indexes, sorted indexes, zone maps, bloom filters |
-| **query-execution** | Vectorized execution, operator fusion, compiled queries, pipeline breakers |
-| **joins** | Hash join variants, sort-merge join, join ordering |
-| **aggregation** | Hash aggregation, sorted aggregation, partial aggregation |
-| **parallelism** | SIMD, thread parallelism, data partitioning |
-| **data-structures** | Compact hash tables, arena allocation, flat structures |
-| **external-libs** | jemalloc/tcmalloc, abseil/folly, I/O libraries |
+| Domain | Topics | Priority |
+|--------|--------|----------|
+| **parallelism** | Thread parallelism (morsel-driven), SIMD (AVX2/SSE), data partitioning, hardware detection | **CRITICAL** |
+| **storage** | Columnar vs row, compression, memory layout, string optimization, persistent binary storage | High |
+| **indexing** | Hash indexes, sorted indexes, zone maps, bloom filters | High |
+| **query-execution** | Vectorized execution, operator fusion, compiled queries, pipeline breakers | Medium |
+| **joins** | Hash join variants, sort-merge join, join ordering | Medium |
+| **aggregation** | Hash aggregation, sorted aggregation, partial aggregation | Medium |
+| **data-structures** | Compact hash tables, arena allocation, flat structures | Medium |
+| **external-libs** | jemalloc/tcmalloc, abseil/folly, I/O libraries | Low |
 
-Each file contains: what the technique is, when to use it, C++ implementation patterns, performance characteristics, real-world examples from production databases, and common pitfalls.
+Each file contains: what the technique is, when to use it, C++ implementation patterns, hardware detection commands (nproc, lscpu, lsblk), performance characteristics, real-world examples from production databases, and common pitfalls.
 
 ## Optimization Strategy
 
-GenDB does **not** follow a fixed optimization pipeline. Instead:
+GenDB uses **conditional agent invocation** based on bottleneck type:
 
 1. The **Evaluator** profiles the current generated code and identifies bottlenecks
-2. The **Learner** reads relevant knowledge base files, diagnoses root causes, and proposes optimizations — including novel techniques not in the knowledge base
-3. The **Orchestrator Agent** reviews recommendations and strategically selects which to apply, considering optimization history and remaining iteration budget
-4. The **Operator Specialist** implements selected optimizations, consulting the knowledge base for implementation patterns
-5. Different optimization orders are explored, since applying the same optimizations in different sequences can yield different performance
+2. The **Learner** reads relevant knowledge base files, diagnoses root causes, categorizes bottlenecks (`query_structure`, `join_order`, `cpu_bound`, `io_bound`, `algorithm`), and proposes hardware-aware optimizations
+3. The **Orchestrator Agent** reviews recommendations and strategically selects which to apply, considering optimization history and rollback capability (per-query rollback enables higher-risk optimizations)
+4. **Conditional optimization agent selection** based on bottleneck category:
+   - `query_structure` → Query Rewriter (SQL-level optimization)
+   - `join_order` → Join Order Optimizer (physical join reordering)
+   - `cpu_bound` → Execution Optimizer (thread parallelism + SIMD)
+   - `io_bound` → I/O Optimizer (madvise hints, column pruning)
+   - `algorithm` → Physical Operator Agent (operator algorithm changes)
+5. The selected agent implements optimizations, consulting the knowledge base for implementation patterns
+6. Hardware detection (nproc, lscpu, lsblk) enables adaptive optimizations (thread count, morsel sizing, SSD vs HDD strategies)
 
 ## Benchmarks
 

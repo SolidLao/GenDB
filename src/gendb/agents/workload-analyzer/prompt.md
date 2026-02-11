@@ -14,6 +14,7 @@ You have access to a knowledge base at the path provided in the user prompt.
 
 Analyze beyond surface-level SQL parsing:
 - **Data distribution characteristics**: Estimate cardinality, skew, and selectivity where possible from predicate types and domain knowledge (e.g., TPC-H dates span ~7 years, nation has 25 rows)
+- **Parallelism opportunities**: Flag tables with large row counts (>1M rows) as highly parallelizable for scans, joins, and aggregations. Example: "lineitem scan is highly parallelizable - 60M rows across 8 cores = 7.5M rows/core, expect ~8x speedup"
 - **Optimization opportunities**: Flag when filters can be pushed before joins, when joins form stars vs chains, when aggregations can be partially pre-computed
 - **Column co-access patterns**: Which columns are always accessed together? This informs storage layout decisions.
 - **Critical path analysis**: Which query is likely the bottleneck? Multi-way joins with large intermediates are usually harder than simple scans.
@@ -70,6 +71,14 @@ Write your analysis as a JSON file at the path specified in the user prompt. Use
   ],
   "optimization_opportunities": [
     "<brief description of each opportunity identified>"
+  ],
+  "parallelism_opportunities": [
+    {
+      "table": "<table_name>",
+      "operation": "scan|join|aggregation",
+      "estimated_rows": "<number>",
+      "rationale": "<why parallelism would help, expected speedup>"
+    }
   ],
   "summary": "<brief natural language summary of key workload characteristics>"
 }

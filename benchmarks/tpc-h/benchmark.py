@@ -563,10 +563,11 @@ def plot_gendb_iterations(gendb_history: dict, output_path: Path, scale_factor: 
             ax1.text(x, y * 1.02, f"{y:.1f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
 
     ax1.set_xlabel("Iteration", fontsize=12)
-    ax1.set_ylabel("Total Execution Time (ms)", fontsize=12)
+    ax1.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
     ax1.set_title(f"Total Execution Time Evolution (SF={scale_factor})", fontsize=13, fontweight="bold")
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels(labels, fontsize=11)
+    ax1.set_yscale("log")
     ax1.grid(axis="y", alpha=0.3)
 
     # Right subplot: Per-query execution time
@@ -581,10 +582,11 @@ def plot_gendb_iterations(gendb_history: dict, output_path: Path, scale_factor: 
                 ax2.text(x, y * 1.05, f"{y:.0f}", ha="center", va="bottom", fontsize=9)
 
     ax2.set_xlabel("Iteration", fontsize=12)
-    ax2.set_ylabel("Execution Time (ms)", fontsize=12)
+    ax2.set_ylabel("Execution Time (ms, log scale)", fontsize=12)
     ax2.set_title(f"Per-Query Execution Time Evolution (SF={scale_factor})", fontsize=13, fontweight="bold")
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(labels, fontsize=11)
+    ax2.set_yscale("log")
     ax2.legend(fontsize=11)
     ax2.grid(axis="y", alpha=0.3)
 

@@ -1,0 +1,947 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "format_rationale": "All queries scan lineitem (6M rows) but access only 5-8 of 16 columns. Columnar storage provides 2-3x I/O reduction through column pruning. Binary format eliminates text parsing overhead (60M row lineitem parsing: ~10 minutes text → <1 second binary mmap).",
+    "base_dir_name": "tpch_sf1.gendb"
+  },
+  "tables": {
+    "lineitem": {
+      "columns": [
+        {
+          "name": "l_orderkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join", "group_by"],
+          "index": "hash",
+          "index_rationale": "Primary join key for Q3 (lineitem ⋈ orders). Hash index enables O(1) probe lookups. 6M rows → ~24MB hash table fits in L3 cache.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality sequential integers. Delta encoding would save space but add decompression cost. Leave uncompressed for fast join key access."
+        },
+        {
+          "name": "l_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in any query in this workload subset.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed, no need to optimize."
+        },
+        {
+          "name": "l_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in any query in this workload subset.",
+          "encoding": "none",
+          "encoding_rationale": "Not accessed."
+        },
+        {
+          "name": "l_linenumber",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Part of composite PK but not used in any predicates or joins.",
+          "encoding": "none",
+          "encoding_rationale": "Small integers (1-7 range), could use bit-packing (3 bits), but not accessed in workload so no benefit."
+        },
+        {
+          "name": "l_quantity",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": ["filter", "aggregation"],
+          "index": "none",
+          "index_rationale": "Used in Q6 filter (l_quantity < 24) and Q1 aggregation. Full scan required, no index benefit.",
+          "encoding": "none",
+          "encoding_rationale": "Continuous decimal values, high entropy. Compression would add CPU cost without I/O benefit for in-memory scans."
+        },
+        {
+          "name": "l_extendedprice",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": ["aggregation"],
+          "index": "none",
+          "index_rationale": "Used in revenue calculations (Q1, Q3, Q6). Aggregation requires full column scan.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy price data. No compression benefit."
+        },
+        {
+          "name": "l_discount",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": ["filter", "aggregation"],
+          "index": "none",
+          "index_rationale": "Q6 filter (BETWEEN 0.05 AND 0.07) + revenue calculation. Full scan needed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Only 11 distinct values (0.00 to 0.10 in 0.01 increments). Dictionary encoding: 6M rows × 8 bytes = 48MB → 6M × 1 byte + 11 × 8 bytes = 6MB (8x compression). Very low decompression cost (array lookup)."
+        },
+        {
+          "name": "l_tax",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": ["aggregation"],
+          "index": "none",
+          "index_rationale": "Only used in Q1 aggregation. Full scan required.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Similar to l_discount, likely 9 distinct values (0.00 to 0.08). Dictionary encoding provides 8x compression."
+        },
+        {
+          "name": "l_returnflag",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": ["group_by", "aggregation"],
+          "index": "none",
+          "index_rationale": "Q1 GROUP BY key (only 3-4 groups). Hash aggregation on tiny cardinality, no index needed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "3 distinct values (A, N, R). 6M × 1 byte string → 6M × 1 byte code + 3 bytes dictionary. Minimal space savings but enables integer comparison (faster than string comparison in GROUP BY)."
+        },
+        {
+          "name": "l_linestatus",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": ["group_by", "aggregation"],
+          "index": "none",
+          "index_rationale": "Q1 GROUP BY key. Low cardinality, no index benefit.",
+          "encoding": "dictionary",
+          "encoding_rationale": "2 distinct values (F, O). Dictionary encoding enables fast integer-based GROUP BY."
+        },
+        {
+          "name": "l_shipdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": ["filter"],
+          "index": "sorted",
+          "index_rationale": "CRITICAL: All 3 queries filter on l_shipdate with range predicates. Zone maps on sorted data enable block skipping. Q6 filters to 14% of data (1-year window), Q3 filters to 60%, Q1 filters to 98%. Sorted index + zone maps can skip 86% of blocks for Q6.",
+          "encoding": "delta",
+          "encoding_rationale": "Dates are sorted (sort key) and monotonically increasing. Delta encoding: first_value (4 bytes) + 6M deltas (1-2 bytes each) = 4 + 12MB = 12MB vs 24MB raw (2x compression). Low decompression cost (prefix sum)."
+        },
+        {
+          "name": "l_commitdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in this workload subset.",
+          "encoding": "delta",
+          "encoding_rationale": "Correlates with l_shipdate (sorted together). Delta encoding provides 2x compression even though column not accessed."
+        },
+        {
+          "name": "l_receiptdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in this workload subset.",
+          "encoding": "delta",
+          "encoding_rationale": "Correlates with l_shipdate. Delta encoding for 2x compression."
+        },
+        {
+          "name": "l_shipinstruct",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "Likely low cardinality (4-5 standard shipping instructions in TPC-H). Dictionary encoding: 6M × 25 bytes = 150MB → 6M × 1 byte + 5 × 25 bytes = 6MB (25x compression)."
+        },
+        {
+          "name": "l_shipmode",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "7 distinct values in TPC-H (TRUCK, MAIL, SHIP, AIR, REG AIR, FOB, RAIL). Dictionary encoding: 6M × 10 bytes = 60MB → 6M × 1 byte + 70 bytes = 6MB (10x compression)."
+        },
+        {
+          "name": "l_comment",
+          "sql_type": "VARCHAR(44)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality free-text. No effective compression possible. Not accessed in workload, so compression effort wasted."
+        }
+      ],
+      "file_format": {
+        "filename": "lineitem.tbl",
+        "delimiter": "|",
+        "column_order": ["l_orderkey", "l_partkey", "l_suppkey", "l_linenumber", "l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipinstruct", "l_shipmode", "l_comment"]
+      },
+      "sort_order": ["l_shipdate", "l_orderkey"],
+      "sort_rationale": "Primary sort on l_shipdate enables zone map effectiveness (all 3 queries have date range predicates). Secondary sort on l_orderkey (join key) provides clustering for join performance. TPC-H data is pre-generated in this order, so maintain it. Q6 can skip 86% of blocks with zone maps on sorted dates.",
+      "block_size": 65536,
+      "block_size_rationale": "64K rows per block. For HDD (detected rota=1), larger blocks amortize seek time. 64K rows × 8 hot columns × 4-8 bytes = 2-4MB per block scan. With 64 cores, parallel scan of 6M rows = 94 blocks, ~1.5 blocks per core. Zone maps: 94 blocks × 16 bytes metadata = 1.5KB (fits in L1 cache).",
+      "estimated_rows": "6000000",
+      "storage_notes": "Lineitem is the dominant table (appears in all queries, largest size). Sort by l_shipdate is critical for zone map effectiveness. Store hot columns (l_shipdate, l_extendedprice, l_discount, l_quantity, l_orderkey, l_returnflag, l_linestatus, l_tax) with higher priority for prefetching. Cold columns (l_comment, l_partkey, l_suppkey) can use lazy loading.",
+      "indexes": [
+        {
+          "name": "idx_lineitem_shipdate",
+          "type": "zone_map",
+          "columns": ["l_shipdate"],
+          "rationale": "All 3 queries filter on l_shipdate. Zone maps (min/max per block) enable block skipping. With data sorted by l_shipdate, zone maps are highly effective: Q6 (1-year range) can skip 86% of blocks, Q3 can skip 40%, Q1 can skip 2%. Metadata overhead: 94 blocks × 16 bytes = 1.5KB."
+        },
+        {
+          "name": "idx_lineitem_orderkey",
+          "type": "hash",
+          "columns": ["l_orderkey"],
+          "rationale": "Q3 join key (lineitem ⋈ orders). Build hash table on orders.o_orderkey, probe with lineitem.l_orderkey. 6M probes benefit from hash index. Hash table size: 1.5M orders × 12 bytes (key + pointer) = 18MB (fits in L3 cache)."
+        }
+      ]
+    },
+    "orders": {
+      "columns": [
+        {
+          "name": "o_orderkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join", "group_by"],
+          "index": "hash",
+          "index_rationale": "Primary key and join key for Q3 (orders ⋈ lineitem). Hash index enables O(1) build for join hash table. 1.5M rows × 12 bytes = 18MB hash table.",
+          "encoding": "none",
+          "encoding_rationale": "Sequential primary key, high cardinality. Leave uncompressed for fast join access."
+        },
+        {
+          "name": "o_custkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join"],
+          "index": "hash",
+          "index_rationale": "Foreign key to customer (Q3 join: customer ⋈ orders). Build hash table on customer.c_custkey (30K rows after filter), probe with orders.o_custkey (1.5M rows). Hash index on customer side only.",
+          "encoding": "none",
+          "encoding_rationale": "Foreign key, high cardinality. No compression benefit."
+        },
+        {
+          "name": "o_orderstatus",
+          "sql_type": "CHAR(1)",
+          "cpp_type": "char",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not used in this workload subset.",
+          "encoding": "dictionary",
+          "encoding_rationale": "3 distinct values (O, F, P). Dictionary encoding for consistency, though column not accessed."
+        },
+        {
+          "name": "o_totalprice",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy price data."
+        },
+        {
+          "name": "o_orderdate",
+          "sql_type": "DATE",
+          "cpp_type": "int32_t",
+          "used_in": ["filter", "group_by", "order_by"],
+          "index": "sorted",
+          "index_rationale": "Q3 filters on o_orderdate < '1995-03-15' (25% selectivity). Sorted index with zone maps enables block skipping.",
+          "encoding": "delta",
+          "encoding_rationale": "Dates sorted monotonically. Delta encoding: 1.5M × 4 bytes = 6MB → 4 + 1.5M × 1-2 bytes = 3MB (2x compression)."
+        },
+        {
+          "name": "o_orderpriority",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "5 distinct values in TPC-H. Dictionary encoding: 1.5M × 15 bytes = 22MB → 1.5M × 1 byte + 75 bytes = 1.5MB (15x compression)."
+        },
+        {
+          "name": "o_clerk",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "1000 distinct clerk names (at SF=1). Dictionary encoding: 1.5M × 15 bytes = 22MB → 1.5M × 2 bytes + 15KB = 3MB + 15KB (7x compression)."
+        },
+        {
+          "name": "o_shippriority",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["group_by"],
+          "index": "none",
+          "index_rationale": "Q3 GROUP BY key. Only 1 distinct value (0) in TPC-H, so grouping is trivial.",
+          "encoding": "rle",
+          "encoding_rationale": "Constant value (0). RLE: 1.5M × 4 bytes = 6MB → 1 value + 1 length = 8 bytes (750000x compression)."
+        },
+        {
+          "name": "o_comment",
+          "sql_type": "VARCHAR(79)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-cardinality free text, not accessed."
+        }
+      ],
+      "file_format": {
+        "filename": "orders.tbl",
+        "delimiter": "|",
+        "column_order": ["o_orderkey", "o_custkey", "o_orderstatus", "o_totalprice", "o_orderdate", "o_orderpriority", "o_clerk", "o_shippriority", "o_comment"]
+      },
+      "sort_order": ["o_orderdate", "o_orderkey"],
+      "sort_rationale": "Primary sort on o_orderdate enables zone map effectiveness for Q3 filter (o_orderdate < '1995-03-15'). Secondary sort on o_orderkey (PK) provides clustering. Matches TPC-H data generation order.",
+      "block_size": 32768,
+      "block_size_rationale": "32K rows per block. Orders is smaller (1.5M rows). 1.5M / 32K = 47 blocks. 32K rows × 4 hot columns × 4-8 bytes = 0.5-1MB per block. With 64 cores, ~1 block per core for parallel scan.",
+      "estimated_rows": "1500000",
+      "storage_notes": "Medium-size fact table. Q3 scans with date filter (25% selectivity = 375K rows pass). Sort by o_orderdate enables zone map to skip 75% of blocks.",
+      "indexes": [
+        {
+          "name": "idx_orders_orderdate",
+          "type": "zone_map",
+          "columns": ["o_orderdate"],
+          "rationale": "Q3 filters o_orderdate < '1995-03-15'. Zone maps on sorted dates enable skipping 75% of blocks. Metadata: 47 blocks × 16 bytes = 752 bytes."
+        },
+        {
+          "name": "idx_orders_orderkey",
+          "type": "hash",
+          "columns": ["o_orderkey"],
+          "rationale": "Primary key. Hash index for fast join builds in Q3."
+        }
+      ]
+    },
+    "customer": {
+      "columns": [
+        {
+          "name": "c_custkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": ["join"],
+          "index": "hash",
+          "index_rationale": "Primary key, Q3 join key (customer ⋈ orders). After filter (c_mktsegment='BUILDING'), 30K rows. Hash table: 30K × 12 bytes = 360KB (fits in L2 cache).",
+          "encoding": "none",
+          "encoding_rationale": "Sequential primary key."
+        },
+        {
+          "name": "c_name",
+          "sql_type": "VARCHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Unique names, high cardinality."
+        },
+        {
+          "name": "c_address",
+          "sql_type": "VARCHAR(40)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality."
+        },
+        {
+          "name": "c_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed in this workload subset.",
+          "encoding": "dictionary",
+          "encoding_rationale": "25 distinct values (nation keys). Dictionary encoding: 150K × 4 bytes = 600KB → 150K × 1 byte + 100 bytes = 150KB (4x compression)."
+        },
+        {
+          "name": "c_phone",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Unique phone numbers."
+        },
+        {
+          "name": "c_acctbal",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy decimal."
+        },
+        {
+          "name": "c_mktsegment",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": ["filter"],
+          "index": "hash",
+          "index_rationale": "Q3 filter (c_mktsegment = 'BUILDING'). Hash index enables O(1) filter evaluation. Alternative: dictionary-encode and compare integer codes.",
+          "encoding": "dictionary",
+          "encoding_rationale": "5 distinct values (AUTOMOBILE, BUILDING, FURNITURE, MACHINERY, HOUSEHOLD). Dictionary encoding: 150K × 10 bytes = 1.5MB → 150K × 1 byte + 50 bytes = 150KB (10x compression). Integer comparison in filter faster than string."
+        },
+        {
+          "name": "c_comment",
+          "sql_type": "VARCHAR(117)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-cardinality text."
+        }
+      ],
+      "file_format": {
+        "filename": "customer.tbl",
+        "delimiter": "|",
+        "column_order": ["c_custkey", "c_name", "c_address", "c_nationkey", "c_phone", "c_acctbal", "c_mktsegment", "c_comment"]
+      },
+      "sort_order": ["c_mktsegment", "c_custkey"],
+      "sort_rationale": "Sort by c_mktsegment (filter column) to cluster matching rows together. Q3 filters to 20% (c_mktsegment='BUILDING'). Sorted data allows early termination and better cache locality. Secondary sort on c_custkey (PK).",
+      "block_size": 16384,
+      "block_size_rationale": "16K rows per block. Customer is small (150K rows). 150K / 16K = 10 blocks. Q3 scans with filter (30K rows pass). Smaller blocks allow finer-grained zone map pruning.",
+      "estimated_rows": "150000",
+      "storage_notes": "Small dimension table. Q3 scans entire table with highly selective filter (20% pass). Dictionary-encode c_mktsegment for fast integer comparison.",
+      "indexes": [
+        {
+          "name": "idx_customer_custkey",
+          "type": "hash",
+          "columns": ["c_custkey"],
+          "rationale": "Primary key. Hash index for join builds."
+        },
+        {
+          "name": "idx_customer_mktsegment",
+          "type": "zone_map",
+          "columns": ["c_mktsegment"],
+          "rationale": "Q3 filters c_mktsegment = 'BUILDING'. With data sorted by c_mktsegment, zone maps can skip blocks containing only non-BUILDING segments. Expected: skip 8 of 10 blocks (80%)."
+        }
+      ]
+    },
+    "supplier": {
+      "columns": [
+        {
+          "name": "s_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Not accessed in this workload subset, but maintain hash index for future queries.",
+          "encoding": "none",
+          "encoding_rationale": "Sequential primary key."
+        },
+        {
+          "name": "s_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Unique names."
+        },
+        {
+          "name": "s_address",
+          "sql_type": "VARCHAR(40)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality."
+        },
+        {
+          "name": "s_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed in this workload subset.",
+          "encoding": "dictionary",
+          "encoding_rationale": "25 distinct values (nation keys). Dictionary encoding: 10K × 4 bytes = 40KB → 10K × 1 byte + 100 bytes = 10KB (4x compression)."
+        },
+        {
+          "name": "s_phone",
+          "sql_type": "CHAR(15)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Unique phone numbers."
+        },
+        {
+          "name": "s_acctbal",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy decimal."
+        },
+        {
+          "name": "s_comment",
+          "sql_type": "VARCHAR(101)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-cardinality text."
+        }
+      ],
+      "file_format": {
+        "filename": "supplier.tbl",
+        "delimiter": "|",
+        "column_order": ["s_suppkey", "s_name", "s_address", "s_nationkey", "s_phone", "s_acctbal", "s_comment"]
+      },
+      "sort_order": ["s_suppkey"],
+      "sort_rationale": "Sort by primary key (default). Table not accessed in this workload subset.",
+      "block_size": 8192,
+      "block_size_rationale": "8K rows per block. Small table (10K rows). Single block sufficient, but use standard block size for consistency.",
+      "estimated_rows": "10000",
+      "storage_notes": "Small dimension table. Not accessed in this workload subset. Minimal storage optimization needed.",
+      "indexes": [
+        {
+          "name": "idx_supplier_suppkey",
+          "type": "hash",
+          "columns": ["s_suppkey"],
+          "rationale": "Primary key. Maintain for future queries."
+        }
+      ]
+    },
+    "part": {
+      "columns": [
+        {
+          "name": "p_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Not accessed in this workload subset.",
+          "encoding": "none",
+          "encoding_rationale": "Sequential primary key."
+        },
+        {
+          "name": "p_name",
+          "sql_type": "VARCHAR(55)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High cardinality."
+        },
+        {
+          "name": "p_mfgr",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "5 distinct manufacturers in TPC-H. Dictionary encoding: 200K × 25 bytes = 5MB → 200K × 1 byte + 125 bytes = 200KB (25x compression)."
+        },
+        {
+          "name": "p_brand",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "25 distinct brands. Dictionary encoding: 200K × 10 bytes = 2MB → 200K × 1 byte + 250 bytes = 200KB (10x compression)."
+        },
+        {
+          "name": "p_type",
+          "sql_type": "VARCHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "150 distinct types in TPC-H. Dictionary encoding: 200K × 25 bytes = 5MB → 200K × 1 byte + 3.75KB = 204KB (24x compression)."
+        },
+        {
+          "name": "p_size",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "50 distinct sizes (1-50). Dictionary encoding or bit-packing (6 bits). 200K × 4 bytes = 800KB → 200K × 1 byte + 200 bytes = 200KB (4x compression)."
+        },
+        {
+          "name": "p_container",
+          "sql_type": "CHAR(10)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "dictionary",
+          "encoding_rationale": "40 distinct containers. Dictionary encoding: 200K × 10 bytes = 2MB → 200K × 1 byte + 400 bytes = 200KB (10x compression)."
+        },
+        {
+          "name": "p_retailprice",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy price data."
+        },
+        {
+          "name": "p_comment",
+          "sql_type": "VARCHAR(23)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-cardinality text."
+        }
+      ],
+      "file_format": {
+        "filename": "part.tbl",
+        "delimiter": "|",
+        "column_order": ["p_partkey", "p_name", "p_mfgr", "p_brand", "p_type", "p_size", "p_container", "p_retailprice", "p_comment"]
+      },
+      "sort_order": ["p_partkey"],
+      "sort_rationale": "Sort by primary key. Table not accessed in this workload subset.",
+      "block_size": 16384,
+      "block_size_rationale": "16K rows per block. Medium-size table (200K rows). 200K / 16K = 13 blocks.",
+      "estimated_rows": "200000",
+      "storage_notes": "Medium-size dimension table. Not accessed in this workload subset. Dictionary-encode categorical columns for space savings.",
+      "indexes": [
+        {
+          "name": "idx_part_partkey",
+          "type": "hash",
+          "columns": ["p_partkey"],
+          "rationale": "Primary key. Maintain for future queries."
+        }
+      ]
+    },
+    "partsupp": {
+      "columns": [
+        {
+          "name": "ps_partkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Part of composite primary key. Not accessed in this workload subset.",
+          "encoding": "none",
+          "encoding_rationale": "Foreign key."
+        },
+        {
+          "name": "ps_suppkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Part of composite primary key. Not accessed in this workload subset.",
+          "encoding": "none",
+          "encoding_rationale": "Foreign key."
+        },
+        {
+          "name": "ps_availqty",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Wide range of values."
+        },
+        {
+          "name": "ps_supplycost",
+          "sql_type": "DECIMAL",
+          "cpp_type": "double",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-entropy price data."
+        },
+        {
+          "name": "ps_comment",
+          "sql_type": "VARCHAR(199)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "High-cardinality text."
+        }
+      ],
+      "file_format": {
+        "filename": "partsupp.tbl",
+        "delimiter": "|",
+        "column_order": ["ps_partkey", "ps_suppkey", "ps_availqty", "ps_supplycost", "ps_comment"]
+      },
+      "sort_order": ["ps_partkey", "ps_suppkey"],
+      "sort_rationale": "Sort by composite primary key. Table not accessed in this workload subset.",
+      "block_size": 16384,
+      "block_size_rationale": "16K rows per block. Medium-size table (800K rows). 800K / 16K = 50 blocks.",
+      "estimated_rows": "800000",
+      "storage_notes": "Bridge table between part and supplier. Not accessed in this workload subset.",
+      "indexes": [
+        {
+          "name": "idx_partsupp_pk",
+          "type": "hash",
+          "columns": ["ps_partkey", "ps_suppkey"],
+          "rationale": "Composite primary key. Maintain for future queries."
+        }
+      ]
+    },
+    "nation": {
+      "columns": [
+        {
+          "name": "n_nationkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Tiny table (25 rows), hash index overhead negligible.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        },
+        {
+          "name": "n_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table, compression overhead not worthwhile."
+        },
+        {
+          "name": "n_regionkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        },
+        {
+          "name": "n_comment",
+          "sql_type": "VARCHAR(152)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        }
+      ],
+      "file_format": {
+        "filename": "nation.tbl",
+        "delimiter": "|",
+        "column_order": ["n_nationkey", "n_name", "n_regionkey", "n_comment"]
+      },
+      "sort_order": ["n_nationkey"],
+      "sort_rationale": "Sort by primary key. Tiny table (25 rows), sort order doesn't matter.",
+      "block_size": null,
+      "estimated_rows": "25",
+      "storage_notes": "Tiny lookup table (25 rows). Entire table fits in L1 cache (~4KB). No need for blocks or advanced indexing.",
+      "indexes": [
+        {
+          "name": "idx_nation_nationkey",
+          "type": "hash",
+          "columns": ["n_nationkey"],
+          "rationale": "Primary key. Tiny hash table (25 entries)."
+        }
+      ]
+    },
+    "region": {
+      "columns": [
+        {
+          "name": "r_regionkey",
+          "sql_type": "INTEGER",
+          "cpp_type": "int32_t",
+          "used_in": [],
+          "index": "hash",
+          "index_rationale": "Primary key. Tiny table (5 rows).",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        },
+        {
+          "name": "r_name",
+          "sql_type": "CHAR(25)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        },
+        {
+          "name": "r_comment",
+          "sql_type": "VARCHAR(152)",
+          "cpp_type": "std::string",
+          "used_in": [],
+          "index": "none",
+          "index_rationale": "Not accessed.",
+          "encoding": "none",
+          "encoding_rationale": "Tiny table."
+        }
+      ],
+      "file_format": {
+        "filename": "region.tbl",
+        "delimiter": "|",
+        "column_order": ["r_regionkey", "r_name", "r_comment"]
+      },
+      "sort_order": ["r_regionkey"],
+      "sort_rationale": "Sort by primary key. Tiny table (5 rows).",
+      "block_size": null,
+      "estimated_rows": "5",
+      "storage_notes": "Tiny lookup table (5 rows). Entire table fits in L1 cache (~1KB). No need for blocks or advanced indexing.",
+      "indexes": [
+        {
+          "name": "idx_region_regionkey",
+          "type": "hash",
+          "columns": ["r_regionkey"],
+          "rationale": "Primary key. Tiny hash table (5 entries)."
+        }
+      ]
+    }
+  },
+  "io_strategies": {
+    "Q1": {
+      "tables_accessed": ["lineitem"],
+      "columns_needed": [
+        "lineitem.l_shipdate",
+        "lineitem.l_returnflag",
+        "lineitem.l_linestatus",
+        "lineitem.l_quantity",
+        "lineitem.l_extendedprice",
+        "lineitem.l_discount",
+        "lineitem.l_tax"
+      ],
+      "index_usage": [
+        {
+          "index": "idx_lineitem_shipdate",
+          "operation": "block_skip"
+        }
+      ],
+      "predicate_pushdown": [
+        "l_shipdate <= '1998-09-02' (pushed to storage layer, zone maps skip 2% of blocks)"
+      ],
+      "parallel_scan": true,
+      "scan_rationale": "Q1 scans lineitem (6M rows) with date filter (98% pass). Column pruning: read 7 of 16 columns = 56% I/O reduction. Zone maps on l_shipdate skip ~2% of blocks (low selectivity, but every bit helps). Parallel scan: 64 cores, 64K rows/block → 94 blocks, ~1.5 blocks per core. Expected speedup: 50-60x (near-linear due to scan-heavy workload). SIMD filter on l_shipdate for 2-4x additional speedup.",
+      "mmap_advice": "MADV_SEQUENTIAL for full column scans. MADV_WILLNEED on l_shipdate before query starts (prefetch filter column).",
+      "estimated_io_mb": "Column sizes: l_shipdate (12MB delta-encoded), l_returnflag (6MB dict), l_linestatus (6MB dict), l_quantity (48MB), l_extendedprice (48MB), l_discount (6MB dict), l_tax (6MB dict). Total: ~132MB (vs ~384MB for full 16-column scan, 66% reduction)."
+    },
+    "Q3": {
+      "tables_accessed": ["customer", "orders", "lineitem"],
+      "columns_needed": [
+        "customer.c_custkey",
+        "customer.c_mktsegment",
+        "orders.o_orderkey",
+        "orders.o_custkey",
+        "orders.o_orderdate",
+        "orders.o_shippriority",
+        "lineitem.l_orderkey",
+        "lineitem.l_extendedprice",
+        "lineitem.l_discount",
+        "lineitem.l_shipdate"
+      ],
+      "index_usage": [
+        {
+          "index": "idx_customer_mktsegment",
+          "operation": "block_skip"
+        },
+        {
+          "index": "idx_orders_orderdate",
+          "operation": "block_skip"
+        },
+        {
+          "index": "idx_lineitem_shipdate",
+          "operation": "block_skip"
+        },
+        {
+          "index": "idx_customer_custkey",
+          "operation": "hash_build"
+        },
+        {
+          "index": "idx_orders_orderkey",
+          "operation": "hash_build"
+        }
+      ],
+      "predicate_pushdown": [
+        "c_mktsegment = 'BUILDING' (pushed to customer scan, zone maps skip 80% of blocks)",
+        "o_orderdate < '1995-03-15' (pushed to orders scan, zone maps skip 75% of blocks)",
+        "l_shipdate > '1995-03-15' (pushed to lineitem scan, zone maps skip 40% of blocks)"
+      ],
+      "parallel_scan": true,
+      "scan_rationale": "Q3 joins customer ⋈ orders ⋈ lineitem. Filter pushdown critical: (1) Scan customer (150K rows) with c_mktsegment filter → 30K pass (zone maps skip 80% of blocks). (2) Build hash table on customer.c_custkey (30K entries, 360KB, fits in L2). (3) Scan orders (1.5M rows) with o_orderdate filter → 375K pass (zone maps skip 75% of blocks). Probe hash table with orders.o_custkey. (4) Build hash table on orders.o_orderkey (375K entries, 4.5MB, fits in L3). (5) Scan lineitem (6M rows) with l_shipdate filter → 3.6M pass (zone maps skip 40% of blocks). Probe hash table with lineitem.l_orderkey. Expected join output: ~1.2M rows. Parallel execution: scan each table in parallel, partition hash joins. Expected speedup: 30-40x (sublinear due to join overhead).",
+      "mmap_advice": "MADV_SEQUENTIAL for all scans. MADV_WILLNEED on filter columns (c_mktsegment, o_orderdate, l_shipdate) before query starts.",
+      "estimated_io_mb": "Customer: c_custkey (600KB), c_mktsegment (150KB dict) = 0.75MB. Orders: o_orderkey (6MB), o_custkey (6MB), o_orderdate (3MB delta), o_shippriority (8 bytes RLE) = 15MB. Lineitem: l_orderkey (24MB), l_extendedprice (48MB), l_discount (6MB dict), l_shipdate (12MB delta) = 90MB. Total: ~106MB (vs ~500MB full scan, 79% reduction). Zone maps reduce actual I/O by 40-80% for filtered tables."
+    },
+    "Q6": {
+      "tables_accessed": ["lineitem"],
+      "columns_needed": [
+        "lineitem.l_shipdate",
+        "lineitem.l_discount",
+        "lineitem.l_quantity",
+        "lineitem.l_extendedprice"
+      ],
+      "index_usage": [
+        {
+          "index": "idx_lineitem_shipdate",
+          "operation": "block_skip"
+        }
+      ],
+      "predicate_pushdown": [
+        "l_shipdate BETWEEN '1994-01-01' AND '1995-01-01' (pushed to storage, zone maps skip 86% of blocks)",
+        "l_discount BETWEEN 0.05 AND 0.07 (evaluated after date filter)",
+        "l_quantity < 24 (evaluated after date filter)"
+      ],
+      "parallel_scan": true,
+      "scan_rationale": "Q6 is highly selective: date filter (14% of data) + discount filter (27%) + quantity filter (48%) = ~1.8% final selectivity (~110K rows at SF=1). Zone maps on l_shipdate skip 86% of blocks (1-year window in 7-year dataset). Column pruning: read 4 of 16 columns = 75% I/O reduction. Parallel scan: 64 cores, only 13 blocks need scanning (86% skipped), <1 block per core. Expected speedup: 100-150x (excellent zone map effectiveness + SIMD-vectorized multi-predicate filter).",
+      "mmap_advice": "MADV_SEQUENTIAL for scanned columns. MADV_WILLNEED on l_shipdate (zone map determines which blocks to read). MADV_DONTNEED on skipped blocks.",
+      "estimated_io_mb": "Column sizes: l_shipdate (12MB delta, but only 14% scanned = 1.7MB), l_discount (6MB dict, 14% = 0.8MB), l_quantity (48MB, 14% = 6.7MB), l_extendedprice (48MB, 14% = 6.7MB). Total actual I/O: ~16MB (vs 384MB full scan, 96% reduction). Zone maps are the killer optimization here."
+    }
+  },
+  "ingestion": {
+    "parallel_tables": true,
+    "parallel_columns": true,
+    "build_indexes_during_ingest": true,
+    "parallel_threads": 64,
+    "ingestion_rationale": "Parallel ingestion across 8 tables: nation, region, supplier, part, partsupp, customer, orders, lineitem. Each table parsed by separate thread. Within lineitem (largest table), parse and write columns in parallel. Sort lineitem by l_shipdate during ingestion (required for zone map effectiveness). Build hash indexes and zone maps during ingestion (amortize cost). Expected ingestion time for SF=1: ~10-30 seconds (vs ~10 minutes for text parsing). Build zone maps: single pass over sorted data, compute min/max per block (O(n) time). Dictionary encoding: build during parse (hash map of unique values, emit codes). Delta encoding: compute deltas during write (single pass).",
+    "sort_strategy": "Sort lineitem and orders by date columns during ingestion. Use parallel sort (std::sort with thread pool, partition data into chunks, merge sorted chunks). For lineitem (6M rows), parallel sort: ~2-5 seconds. Maintain sort order in binary column files by writing sorted data.",
+    "index_build_strategy": "Hash indexes: build during ingestion by scanning PK columns, insert into hash table, serialize to .idx file. Zone maps: build during ingestion after sorting, compute min/max/count per block, write to metadata.json. Dictionary indexes: build during parse (hash map of unique strings), write dictionary to .dict file and codes to .col file.",
+    "compression_strategy": "Apply encoding during ingestion: Dictionary (build hash map, emit codes), Delta (compute deltas from sorted data), RLE (scan for consecutive duplicates). Write encoded data directly to .col files. Store encoding metadata in metadata.json (encoding_type, dictionary_size, etc.).",
+    "estimated_ingestion_time_sf1": "Text parsing + sorting + encoding + index building: ~30-60 seconds (8 threads on 64-core machine, dominated by lineitem sort and dictionary builds). Text parsing alone (single-threaded): ~10 minutes. Speedup from parallelism: ~10-20x."
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DECIMAL": "double",
+    "DATE": "int32_t",
+    "CHAR": "std::string",
+    "VARCHAR": "std::string"
+  },
+  "date_encoding": "days_since_epoch_1970",
+  "hardware_config": {
+    "cpu_cores": 64,
+    "l1_cache_kb": 64,
+    "l2_cache_mb": 32,
+    "l3_cache_mb": 44,
+    "disk_type": "hdd",
+    "total_memory_gb": 376,
+    "disk_space_available_gb": 1400,
+    "hardware_notes": "High core count (64) enables massive parallelism for scans/joins (expected 50-60x speedup for scan-heavy Q1). Large L3 cache (44MB) can hold multiple hash tables simultaneously (customer: 360KB, orders: 4.5MB, lineitem: 24MB). HDD storage (rota=1) benefits from larger block sizes (64K rows) and sequential access patterns (sorted data). Abundant RAM (376GB) allows in-memory execution for SF=1 (~2GB data) and SF=10 (~20GB data)."
+  },
+  "design_rationale": "This storage design is optimized for the TPC-H workload characteristics: (1) Scan-heavy queries on large lineitem table → binary columnar storage with column pruning (2-3x I/O reduction). (2) Date range predicates on all queries → sort by l_shipdate + zone maps enable 40-86% block skipping. (3) Join-heavy Q3 → hash indexes on PK/FK columns, filter pushdown before joins. (4) Low-cardinality columns → dictionary encoding (8-25x compression, faster comparisons). (5) 64-core CPU → parallel scanning/joining (50-60x speedup for Q1). (6) HDD storage → larger blocks (64K rows) amortize seek time, sequential access from sorted data. Key innovation: zone maps on sorted date columns are the killer optimization for this workload (Q6 skips 86% of I/O). Dictionary encoding enables fast integer comparisons for GROUP BY and filters. Hash indexes on join keys enable O(1) probes. Expected overall speedup vs naive row-store: 100-200x for Q6 (best case), 30-50x for Q1/Q3.",
+  "summary": "Binary columnar storage with sort-based clustering on date columns. Zone maps enable 40-86% block skipping for date predicates (critical for all queries). Dictionary encoding on low-cardinality columns (l_returnflag, l_linestatus, c_mktsegment) enables fast integer comparisons. Hash indexes on PK/FK columns for O(1) join probes. Parallel ingestion and query execution (64 cores). Expected speedup: 50-200x depending on query selectivity. Total storage for SF=1: ~1.5-2GB (vs ~3-4GB raw text, ~40% smaller with compression). Key insight: sorting by l_shipdate enables zone map effectiveness, which is the dominant optimization for this date-range-heavy workload."
+}

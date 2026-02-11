@@ -20,14 +20,46 @@ You have access to a comprehensive knowledge base at the path provided in the us
 4. Think about the full pipeline — sometimes the bottleneck isn't the obvious operator but the data movement between operators
 5. Consider whether storage layout changes could enable algorithmic improvements (e.g., sorted data enabling merge joins or binary search)
 
-**Bottleneck categories to consider:**
-- **I/O and storage access**: Column pruning (reading unnecessary columns), mmap hint tuning (wrong MADV_ flags), missing index usage, suboptimal block sizes, unnecessary data copies from mmap'd regions
-- **Joins**: Hash table sizing, hash function quality, build/probe order, join ordering
-- **Aggregation**: Hash table vs sorted aggregation, pre-sizing, partial aggregation
-- **Filtering**: Predicate evaluation order, SIMD filtering, branch-free comparisons
-- **Data structures**: std::unordered_map overhead, memory allocation patterns, cache alignment
-- **Parallelism**: Thread contention, partition strategy, SIMD utilization
-- **Storage layout changes**: Re-sorting data by a different column, changing block sizes, adding/removing indexes, changing compression — note these require re-ingestion
+**Bottleneck categories to consider (CRITICAL - This determines which optimization agent is invoked):**
+
+Your bottleneck analysis must categorize each recommendation to help the Orchestrator select the right specialized agent:
+
+- **query_structure** → Query Rewriter agent (SQL-level optimization)
+  - Correlated subqueries that should be joins
+  - Repeated subquery evaluation (add CTEs)
+  - IN/EXISTS that should be semi-joins
+  - Predicate reordering opportunities
+
+- **join_order** → Join Order Optimizer agent (physical join reordering in C++ code)
+  - Wrong build/probe side selection (larger table building hash table)
+  - Suboptimal join sequence (large intermediates early)
+  - Join algorithm selection (hash vs merge vs nested loop)
+
+- **cpu_bound** → Execution Optimizer agent (parallelism + SIMD)
+  - Single-threaded execution on multi-core hardware (e.g., "8-core CPU with single-threaded scan = 87.5% idle cores")
+  - Missing SIMD vectorization for filters/aggregations
+  - Sequential aggregation that could be parallelized
+  - Hash table sizing and quality issues
+
+- **io_bound** → I/O Optimizer agent (storage access optimization)
+  - Column pruning (reading unnecessary columns)
+  - Wrong mmap hints (MADV_SEQUENTIAL vs MADV_RANDOM vs MADV_WILLNEED)
+  - Missing index usage or zone map skipping
+  - Suboptimal block sizes for disk type (SSD vs HDD)
+  - Unnecessary data copies from mmap'd regions
+
+- **algorithm** → Physical Operator Agent (change operator implementation)
+  - Hash aggregation vs sorted aggregation choice
+  - Hash join vs sort-merge join choice
+  - Filter predicate evaluation strategy
+  - Data structure changes (std::unordered_map overhead)
+
+- **Storage layout changes**: Re-sorting data, changing block sizes, adding/removing indexes, compression — note these require re-ingestion
+
+**Hardware-aware analysis:**
+- Always consider whether the implementation is using available hardware resources (CPU cores, cache, SIMD instructions)
+- Example: "Single-threaded scan on 8-core machine = 87.5% idle cores. 60M rows / 8 cores = 7.5M rows/core = ~150ms/core (vs 1200ms single-thread)"
+- Detect hardware capabilities: CPU cores (nproc), cache (lscpu), disk type (lsblk)
 
 **You are strongly encouraged to propose optimizations beyond what's documented in the knowledge base.** Novel combinations, workload-specific tricks, and unconventional approaches are valuable. If you think of something that might work, recommend it with appropriate risk labeling.
 
@@ -77,6 +109,7 @@ Write your recommendations to the output path provided. **Important**: Separate 
     {
       "priority": 1,
       "target": "Q3",
+      "bottleneck_category": "query_structure|join_order|cpu_bound|io_bound|algorithm",
       "operator": "join|scan|aggregation|filter|io|storage",
       "technique": "<specific technique name>",
       "description": "<specific changes to make, referencing actual code/files>",

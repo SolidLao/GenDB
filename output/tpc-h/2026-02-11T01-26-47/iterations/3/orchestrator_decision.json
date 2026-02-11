@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 is the critical bottleneck (352ms vs 81ms DuckDB target = 4.3x gap). GenDB already beats DuckDB on Q1 (2x) and Q6 (1.7x). This is the final iteration, so we must aggressively target Q3 with all three high-impact optimizations: (1) robin_hood hash table for aggregation (low risk, 2-3x speedup), (2) operator fusion to eliminate join materialization (medium risk, 40-80ms savings), (3) pre-compute zone map skip ranges (low risk, 10-20ms savings). Combined impact could reduce Q3 from 352ms to 180-230ms, closing the DuckDB gap from 4.3x to 2-2.5x. With rollback capability and strong optimization trajectory (4.3x speedup in iteration 2), this is a high-confidence final push.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Q3: Replace std::unordered_map with robin_hood for aggregation hash table",
+    "Q3: Eliminate OrderMatch/LineitemMatch materialization via operator fusion",
+    "Q3: Pre-compute zone map skip ranges to avoid redundant per-row checks"
+  ],
+  "strategy_notes": "This is the final iteration. All three optimizations target Q3, the only remaining bottleneck. Priority order: (1) robin_hood is a simple find-and-replace with proven 2-5x speedup for hash tables, (2) operator fusion is the highest-impact change but requires careful refactoring of the join pipeline to fuse join+aggregation, (3) zone map optimization is a smaller win but compounds with the others. All are code-only changes (no reingest). If any optimization causes issues, we have rollback capability at the query level. Focus on correctness while being aggressive with performance.",
+  "notes": "Operator Specialist: For recommendation 1 (operator fusion), this is the most complex change. Currently q3.cpp creates intermediate vectors (thread_order_matches, thread_lineitem_matches) that materialize ~1.6M structs. The refactoring should: (1) After customer⋈orders join, stream filtered orders directly into the hash table builder without creating OrderMatch vector, (2) During lineitem probe, aggregate directly into thread-local Q3AggTable instead of creating LineitemMatch vector. This fuses join+aggregation into a single pass. Be careful to preserve parallel correctness - each thread should maintain its own aggregation table, then merge at the end. Test thoroughly to ensure correctness before benchmarking."
+}

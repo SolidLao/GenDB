@@ -1,0 +1,118 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T01-26-47/iterations/1/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Q3 parallel table scans (customer/orders/lineitem)",
+        "Q3 parallel hash join probe",
+        "Replace std::unordered_map with Swiss tables (all queries)"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 42,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned 4 groups (A-F, N-F, N-O, R-F). All aggregations have positive values. Count_order sums to 59,142,609, which is reasonable for 59,986,052 lineitem rows with the date filter."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": 10,
+          "timing_ms": 1516,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned exactly 10 rows (respecting LIMIT 10). Revenue values are positive and ordered descending. However, some o_orderdate values appear as 1970-01-01, which may indicate a date parsing issue or missing data, but the query executed correctly."
+        },
+        "Q6": {
+          "status": "pass",
+          "revenue": 1230113636.01,
+          "timing_ms": 22,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned a positive revenue value as expected."
+        }
+      }
+    },
+    {
+      "iteration": 2,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T01-26-47/iterations/2/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Q3 zone maps + mmap optimization (I/O layer)",
+        "Q3 top-K partial sort (algorithm layer)",
+        "Q3 eliminate parallel scan data copies (CPU layer)"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 43,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned 4 groups (A-F, N-F, N-O, R-F). All aggregations have positive values. Count_order sums to 59,142,609, which is reasonable for 59,986,052 lineitem rows with the date filter. Results are semantically equivalent to iteration 1."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": 10,
+          "timing_ms": 352,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned exactly 10 rows (respecting LIMIT 10). Revenue values are positive and ordered descending. Significant performance improvement over iteration 1 (1516ms → 352ms, 4.3x speedup). Some o_orderdate values appear as 1970-01-01, consistent with iteration 1."
+        },
+        "Q6": {
+          "status": "pass",
+          "revenue": 1230113636.01,
+          "timing_ms": 12,
+          "semantically_different": false,
+          "notes": "Query executed successfully. Returned the same revenue value as iteration 1 (1230113636.01). Performance improved from 22ms to 12ms (1.8x speedup)."
+        }
+      }
+    },
+    {
+      "iteration": 3,
+      "evaluationPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-11T01-26-47/iterations/3/evaluation.json",
+      "selectedRecommendations": [
+        0,
+        1,
+        2
+      ],
+      "focusAreas": [
+        "Q3: Replace std::unordered_map with robin_hood for aggregation hash table",
+        "Q3: Eliminate OrderMatch/LineitemMatch materialization via operator fusion",
+        "Q3: Pre-compute zone map skip ranges to avoid redundant per-row checks"
+      ],
+      "overall_status": "pass",
+      "query_results": {
+        "Q1": {
+          "status": "pass",
+          "num_groups": 4,
+          "timing_ms": 42,
+          "semantically_different": false,
+          "notes": "4 groups by (returnflag, linestatus). All numeric values non-negative. count_order sums to 59,142,609 which is reasonable for 59,986,052 total lineitem rows with date filter applied."
+        },
+        "Q3": {
+          "status": "pass",
+          "num_rows": 10,
+          "timing_ms": 335,
+          "semantically_different": false,
+          "notes": "Exactly 10 rows returned (LIMIT 10 respected). Revenue values all positive and ordered descending from 3,939,173.93 to 3,296,438.75. Dates in valid 1995 range."
+        },
+        "Q6": {
+          "status": "pass",
+          "revenue": 1230113636.01,
+          "timing_ms": 10,
+          "semantically_different": false,
+          "notes": "Single revenue value returned as expected, non-negative. Very fast execution at 10ms."
+        }
+      }
+    }
+  ]
+}

@@ -63,7 +63,21 @@ Record: cache-miss rates, branch mispredictions, IPC. This data helps the Learne
 **Q6 (Forecasting Revenue Change)**:
 - Single revenue number, non-negative
 
-### Step 6: Handle Failures
+### Step 6: Semantic Equivalence Validation (for Query Rewriter)
+
+**IMPORTANT**: If the optimization was performed by the Query Rewriter agent (which rewrites SQL queries), you MUST validate semantic equivalence:
+
+1. Compare current iteration results with baseline (iteration 0) results
+2. Check:
+   - Same number of output rows
+   - Same values in all columns (allow floating-point epsilon for decimals: < 0.01 difference)
+   - Same ordering (if ORDER BY is specified)
+3. If results differ:
+   - Mark the query as **semantically_different: true** in the evaluation output
+   - The orchestrator will rollback to the previous iteration for this query
+4. This validation is ONLY needed when Query Rewriter was used (check optimization_history.json for "agent": "query-rewriter")
+
+### Step 7: Handle Failures
 - **Compilation failure**: Note errors in the report. Do NOT attempt to fix the code.
 - **Ingestion failure**: Note the error. Query evaluation cannot proceed.
 - **Runtime error**: Note the error (segfault, exception, etc.)
@@ -103,18 +117,21 @@ Write your evaluation as a JSON file at the exact path specified in the user pro
       "status": "pass|fail",
       "num_groups": "<number>",
       "timing_ms": "<number or null>",
+      "semantically_different": false,
       "notes": "<any observations>"
     },
     "Q3": {
       "status": "pass|fail",
       "num_rows": "<number>",
       "timing_ms": "<number or null>",
+      "semantically_different": false,
       "notes": "<any observations>"
     },
     "Q6": {
       "status": "pass|fail",
       "revenue": "<number or null>",
       "timing_ms": "<number or null>",
+      "semantically_different": false,
       "notes": "<any observations>"
     }
   },

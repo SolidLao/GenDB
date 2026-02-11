@@ -2,8 +2,16 @@
  * GenDB Orchestrator
  *
  * Two-phase agentic system:
- *   Phase 1 (Baseline): Workload Analyzer → Storage/Index Designer → Code Generator → Evaluator
- *   Phase 2 (Optimization Loop): Learner → Orchestrator Agent → Operator Specialist → Evaluator
+ *   Phase 1 (Baseline): Workload Analyzer → Storage/Index Designer → Code Generator → Physical Operator Agent → Evaluator
+ *   Phase 2 (Optimization Loop): Learner → Orchestrator Agent → [Conditional Optimization Agent] → Evaluator
+ *
+ * Optimization agents (conditionally invoked based on bottleneck category):
+ *   - Query Rewriter (query_structure): Rewrites SQL queries for better performance
+ *   - Join Order Optimizer (join_order): Optimizes physical join order in C++ code
+ *   - Execution Optimizer (cpu_bound): Adds thread parallelism and SIMD vectorization
+ *   - I/O Optimizer (io_bound): Optimizes storage access (mmap hints, column pruning)
+ *   - Physical Operator Agent (algorithm): Changes operator algorithms (hash vs sort)
+ *   - Operator Specialist (general/fallback): Handles all optimizations when category unclear
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
  *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>] [--optimization-target <target>]
@@ -32,6 +40,11 @@ import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs
 import { config as evaluatorConfig } from "./agents/evaluator/index.mjs";
 import { config as learnerConfig } from "./agents/learner/index.mjs";
 import { config as operatorSpecialistConfig } from "./agents/operator-specialist/index.mjs";
+import { config as physicalOperatorConfig } from "./agents/physical-operator-agent/index.mjs";
+import { config as queryRewriterConfig } from "./agents/query-rewriter/index.mjs";
+import { config as joinOrderOptimizerConfig } from "./agents/join-order-optimizer/index.mjs";
+import { config as executionOptimizerConfig } from "./agents/execution-optimizer/index.mjs";
+import { config as ioOptimizerConfig } from "./agents/io-optimizer/index.mjs";
 import { config as orchestratorAgentConfig } from "./agents/orchestrator/index.mjs";
 import {
   createRunId,
@@ -255,6 +268,7 @@ async function runBaseline(args, runDir, schema, queries) {
         workload_analysis: { status: "pending" },
         storage_design: { status: "pending" },
         code_generation: { status: "pending" },
+        operator_library: { status: "pending" },
         evaluation: { status: "pending" },
       },
     };
@@ -484,8 +498,64 @@ async function runBaseline(args, runDir, schema, queries) {
     meta.phase1.steps.code_generation.completedAt = new Date().toISOString();
   });
 
-  // --- Step 4: Evaluation ---
-  console.log("\n[Orchestrator] === Step 4: Evaluation ===");
+  // --- Step 4: Physical Operator Library Creation ---
+  console.log("\n[Orchestrator] === Step 4: Physical Operator Library ===");
+
+  await updateRunMeta(runDir, (meta) => {
+    meta.phase1.steps.operator_library.status = "running";
+    meta.phase1.steps.operator_library.startedAt = new Date().toISOString();
+  });
+
+  const physOpSystemPrompt = await readFile(physicalOperatorConfig.promptPath, "utf-8");
+  await mkdir(resolve(generatedDir, "operators"), { recursive: true });
+
+  const physOpUserPrompt = [
+    "Create a reusable operator library from the generated query code (Phase 1 - Baseline).",
+    "",
+    `## Optimization Target: ${args.optimizationTarget}`,
+    "",
+    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+    `Read relevant knowledge files for operator implementation patterns.`,
+    "",
+    "## Input Files",
+    `- Workload analysis: ${workloadAnalysisPath}`,
+    `- Storage design: ${storageDesignPath}`,
+    `- Current generated code: ${generatedDir}`,
+    "",
+    "## Task",
+    "Extract common operator patterns (scans, hash joins, hash aggregations) from the query files",
+    "and create reusable operator implementations in the operators/ subdirectory.",
+    "Update query files to use these operators instead of inline implementations.",
+    "",
+    `## Output Directory`,
+    `Create operator library files in: ${resolve(generatedDir, "operators")}`,
+    `Examples: operators/scan.h, operators/hash_join.h, operators/hash_agg.h`,
+    `Update query files in: ${resolve(generatedDir, "queries")} to use these operators`,
+    "",
+    `## Verification`,
+    `After creating the operator library, compile and run to verify correctness:`,
+    `  cd ${generatedDir} && make clean && make all`,
+    `  cd ${generatedDir} && ./main ${args.gendbDir}`,
+    `Results must match the original implementation (same rows, same values).`,
+  ].join("\n");
+
+  const poResult = await runAgent(physicalOperatorConfig.name, {
+    systemPrompt: physOpSystemPrompt,
+    userPrompt: physOpUserPrompt,
+    allowedTools: physicalOperatorConfig.allowedTools,
+    model: args.model,
+    cwd: runDir,
+  });
+  recordAgentTelemetry("phase1", "physical_operator_agent", poResult.durationMs, poResult.tokens, poResult.costUsd);
+
+  console.log("\n[Orchestrator] Physical operator library creation completed.");
+  await updateRunMeta(runDir, (meta) => {
+    meta.phase1.steps.operator_library.status = "completed";
+    meta.phase1.steps.operator_library.completedAt = new Date().toISOString();
+  });
+
+  // --- Step 5: Evaluation ---
+  console.log("\n[Orchestrator] === Step 5: Evaluation ===");
 
   await updateRunMeta(runDir, (meta) => {
     meta.phase1.steps.evaluation.status = "running";
@@ -754,63 +824,107 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       break;
     }
 
-    // 5. Run Operator Specialist
-    console.log(`\n[Orchestrator] === Iteration ${iteration} Step 3: Operator Specialist ===`);
-    const opSpecSystemPrompt = await readFile(operatorSpecialistConfig.promptPath, "utf-8");
+    // 5. Determine which optimization agent to invoke based on bottleneck category
+    const selectedOptimizations = (decision.selected_recommendations || []).map(idx => perfOptimizations[idx]);
+    const bottleneckCategories = new Set(selectedOptimizations.map(opt => opt.bottleneck_category).filter(Boolean));
 
-    const opSpecUserPrompt = [
-      `Apply selected optimizations to the C++ code for iteration ${iteration}.`,
-      "",
-      `## Optimization Target: ${args.optimizationTarget}`,
-      "",
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      `Read relevant knowledge files for implementation patterns. You are empowered to implement any technique — vectorized execution, SIMD intrinsics, custom hash tables, operator fusion, external libraries, I/O optimizations — as long as correctness is preserved.`,
-      "",
-      "## Input Files",
-      `- Orchestrator decision: ${iterDecisionPath}`,
-      `- Optimization recommendations: ${iterRecsPath}`,
-      `- Evaluation results: ${bestEvaluationPath}`,
-      `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
-      `- Storage design: ${resolve(runDir, "storage_design.json")}`,
-      formatBenchmarkContext(args.benchmarkResults),
-      "",
-      `## Data Directory (source .tbl files)`,
-      `TPC-H .tbl files: ${args.dataDir}`,
-      `Scale factor: ${args.scaleFactor}`,
-      "",
-      `## GenDB Storage Directory (persistent binary storage)`,
-      `Binary columnar data: ${args.gendbDir}`,
-      `The main program reads from this directory. If you modify ingest.cpp or storage format, re-ingestion will be needed.`,
-      "",
-      `## Previous Performance (baseline to beat)`,
-      `Read the evaluation at: ${bestEvaluationPath}`,
-      `Your optimized code must: (1) not crash, (2) produce correct results, (3) ideally be faster`,
-      "",
-      "## Code Directory",
-      `Read and modify C++ files in: ${iterGeneratedDir}`,
-      `This directory contains the current best code. Apply optimizations here.`,
-      "",
-      `## Test-Refine Budget`,
-      `You may compile+run up to 3 times to iteratively fix issues. If your changes break correctness, revert them.`,
-      `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
-      `If you modified ingest.cpp or storage format, re-run ingest first: ./ingest ${args.dataDir} ${args.gendbDir}`,
-      "",
-      `## Important`,
-      `- Apply ALL critical_fixes from optimization_recommendations.json FIRST (these fix crashes/correctness bugs)`,
-      `- Then apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
-      `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
-      `- Correctness is paramount — results must remain identical`,
-      `- CRITICAL: Do not return code that crashes or produces wrong results`,
-    ].join("\n");
+    // Add critical fixes (all have implicit bottleneck category)
+    const allOptimizations = [...criticalFixes, ...selectedOptimizations];
 
-    const osResult = await runAgent(operatorSpecialistConfig.name, {
-      systemPrompt: opSpecSystemPrompt,
-      userPrompt: opSpecUserPrompt,
-      allowedTools: operatorSpecialistConfig.allowedTools,
-      model: args.model,
-      cwd: runDir,
-    });
-    recordAgentTelemetry(iterPhase, "operator_specialist", osResult.durationMs, osResult.tokens, osResult.costUsd);
+    if (allOptimizations.length === 0) {
+      console.log(`[Orchestrator] No optimizations to apply in iteration ${iteration}. Skipping.`);
+      await updateIterationStatus(runDir, iteration, "skipped", "No optimizations selected");
+      continue;
+    }
+
+    // Select the appropriate optimization agent(s) based on bottleneck categories
+    const agentConfigs = [];
+
+    if (bottleneckCategories.has("query_structure")) {
+      agentConfigs.push({ config: queryRewriterConfig, category: "query_structure" });
+    }
+    if (bottleneckCategories.has("join_order")) {
+      agentConfigs.push({ config: joinOrderOptimizerConfig, category: "join_order" });
+    }
+    if (bottleneckCategories.has("cpu_bound")) {
+      agentConfigs.push({ config: executionOptimizerConfig, category: "cpu_bound" });
+    }
+    if (bottleneckCategories.has("io_bound")) {
+      agentConfigs.push({ config: ioOptimizerConfig, category: "io_bound" });
+    }
+    if (bottleneckCategories.has("algorithm")) {
+      agentConfigs.push({ config: physicalOperatorConfig, category: "algorithm" });
+    }
+
+    // If no specific category or multiple categories, fall back to operator specialist
+    if (agentConfigs.length === 0 || criticalFixes.length > 0) {
+      agentConfigs.push({ config: operatorSpecialistConfig, category: "general" });
+    }
+
+    // Run each selected optimization agent
+    for (const { config: agentConfig, category } of agentConfigs) {
+      console.log(`\n[Orchestrator] === Iteration ${iteration} Step 3: ${agentConfig.name} (${category}) ===`);
+      const agentSystemPrompt = await readFile(agentConfig.promptPath, "utf-8");
+
+      const agentUserPrompt = [
+        `Apply selected optimizations to the C++ code for iteration ${iteration}.`,
+        "",
+        `## Optimization Target: ${args.optimizationTarget}`,
+        "",
+        `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+        `Read relevant knowledge files for implementation patterns.`,
+        "",
+        "## Input Files",
+        `- Orchestrator decision: ${iterDecisionPath}`,
+        `- Optimization recommendations: ${iterRecsPath}`,
+        `- Evaluation results: ${bestEvaluationPath}`,
+        `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
+        `- Storage design: ${resolve(runDir, "storage_design.json")}`,
+        formatBenchmarkContext(args.benchmarkResults),
+        "",
+        `## Data Directory (source .tbl files)`,
+        `TPC-H .tbl files: ${args.dataDir}`,
+        `Scale factor: ${args.scaleFactor}`,
+        "",
+        `## GenDB Storage Directory (persistent binary storage)`,
+        `Binary columnar data: ${args.gendbDir}`,
+        `The main program reads from this directory. If you modify ingest.cpp or storage format, re-ingestion will be needed.`,
+        "",
+        `## Previous Performance (baseline to beat)`,
+        `Read the evaluation at: ${bestEvaluationPath}`,
+        `Your optimized code must: (1) not crash, (2) produce correct results, (3) ideally be faster`,
+        "",
+        "## Code Directory",
+        `Read and modify C++ files in: ${iterGeneratedDir}`,
+        `This directory contains the current best code. Apply optimizations here.`,
+        "",
+        `## Test-Refine Budget`,
+        `You may compile+run up to 3 times to iteratively fix issues. If your changes break correctness, revert them.`,
+        `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
+        `If you modified ingest.cpp or storage format, re-run ingest first: ./ingest ${args.dataDir} ${args.gendbDir}`,
+        "",
+        `## Important`,
+        criticalFixes.length > 0
+          ? `- Apply ALL critical_fixes from optimization_recommendations.json FIRST (these fix crashes/correctness bugs)`
+          : "",
+        `- Apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
+        `- Focus on optimizations with bottleneck_category: "${category}"`,
+        `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
+        `- Correctness is paramount — results must remain identical`,
+        `- CRITICAL: Do not return code that crashes or produces wrong results`,
+      ].join("\n");
+
+      const agentResult = await runAgent(agentConfig.name, {
+        systemPrompt: agentSystemPrompt,
+        userPrompt: agentUserPrompt,
+        allowedTools: agentConfig.allowedTools,
+        model: args.model,
+        cwd: runDir,
+      });
+
+      const agentNameKey = agentConfig.name.toLowerCase().replace(/\s+/g, "_");
+      recordAgentTelemetry(iterPhase, agentNameKey, agentResult.durationMs, agentResult.tokens, agentResult.costUsd);
+    }
 
     // 6. Check if storage/ingest files were modified — if so, re-ingest
     const needsReingest = checkIngestFilesModified(iterGeneratedDir, bestGeneratedDir);

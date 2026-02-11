@@ -1,0 +1,137 @@
+{
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 378,
+        "status": "pass",
+        "bottleneck": "Good performance with parallel aggregation. Gap is 3.4x vs DuckDB (111ms).",
+        "root_cause": "Already using parallel hash aggregation. Remaining gap likely due to: (1) std::unordered_map overhead vs Swiss tables, (2) no SIMD for filter (l_shipdate <= cutoff), (3) no mmap prefetch hints for hot columns.",
+        "benchmark_gap": "378ms vs 111ms DuckDB (3.4x slower). Already decent, lower priority than Q3."
+      },
+      "Q3": {
+        "current_time_ms": 1272,
+        "status": "pass",
+        "bottleneck": "CRITICAL: 12.9x slower than DuckDB. Single-threaded table scans for customer/orders/lineitem. Single-threaded join probes on 60M lineitem rows.",
+        "root_cause": "Q3 code manually iterates over entire tables in serial loops (lines 33-38 for customer, 52-55 for orders, 98-101 for lineitem). The hash join probe on 60M lineitem rows is single-threaded. With 64 cores available, this wastes 98% of CPU resources. Expected: 60M rows / 64 cores = ~937K rows/core = ~20ms/core vs 1272ms single-threaded = 63x idle hardware.",
+        "benchmark_gap": "1272ms vs 99ms DuckDB (12.9x slower). This is the #1 bottleneck."
+      },
+      "Q6": {
+        "current_time_ms": 44,
+        "status": "pass",
+        "bottleneck": "Good performance with parallel scan. Gap is 2.1x vs DuckDB (21ms).",
+        "root_cause": "Already using parallel_scan_aggregate. Remaining gap likely due to: (1) no SIMD for 4-predicate filter (date, discount, quantity ranges), (2) no zone maps to skip l_shipdate blocks (Q6 filters to 1994 only = 14% of 7-year range, could skip 86% of blocks).",
+        "benchmark_gap": "44ms vs 21ms DuckDB (2.1x slower). Already excellent, low priority."
+      }
+    },
+    "overall": "Q3 dominates execution time (1272ms of 1394ms total = 91%). It is 13x slower than DuckDB due to single-threaded table scans and join probes. Hardware utilization on 64-core machine is ~1.6% (1 of 64 cores active). Q1 and Q6 already use parallelism and perform reasonably well. Priority: (1) Parallelize Q3 scans and joins [CRITICAL], (2) Add SIMD filters for Q6 and Q1, (3) Improve hash table (std::unordered_map -> Swiss table), (4) Add zone maps for block skipping."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "operator": "scan",
+      "technique": "Parallel Table Scans",
+      "description": "Q3 currently uses serial for-loops to scan customer (lines 33-38), orders (52-55), and lineitem (98-101) in q3.cpp. Replace these with parallel_scan from operators/scan.h. The lineitem scan is especially critical (60M rows). Use parallel_scan to build the probe keys/values vectors in parallel. Expected: customer scan 1.5M rows / 64 cores = ~23K rows/core, orders 15M / 64 = ~234K/core, lineitem 60M / 64 = ~937K/core. Wall-clock time for lineitem scan: ~1000ms single-thread → ~20ms parallel (50x speedup). Total Q3 speedup: 5-8x.",
+      "expected_improvement": "Q3: 1272ms → ~200-250ms (5-6x speedup). Lineitem scan alone: 1000ms → 20ms (50x). This is the single largest bottleneck.",
+      "risk": "low",
+      "knowledge_source": "parallelism/thread-parallelism.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "operator": "join",
+      "technique": "Parallel Hash Join Probe",
+      "description": "The hash join probe in Q3 (lineitem probing orders hash table) currently iterates serially over 60M rows. The probe loop in hash_join.h (lines 156-163 for UniqueHashJoin::probe, lines 92-105 for probe_filtered) is sequential. Parallelize this by: (1) partitioning the probe keys/values into morsels (e.g., 100K rows each), (2) launching threads to probe in parallel, (3) merging result vectors. Use the same morsel-driven pattern from operators/scan.h. Expected: 60M probes / 64 cores = ~937K probes/core. Hash table lookups are O(1), so probe time is dominated by memory access. Expected speedup: 30-50x (sublinear due to shared hash table contention and result merging overhead).",
+      "expected_improvement": "Q3 join probe: ~400ms → ~15ms (25-30x speedup). Combined with parallel scans, Q3 total: 1272ms → ~150ms (8-9x speedup).",
+      "risk": "medium",
+      "knowledge_source": "parallelism/thread-parallelism.md + joins/hash-join-variants.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 3,
+      "target": "ALL",
+      "bottleneck_category": "algorithm",
+      "operator": "join",
+      "technique": "Replace std::unordered_map with Swiss Table",
+      "description": "All hash joins and hash aggregations currently use std::unordered_map (hash_join.h lines 32, 120; hash_agg.h line 16), which has poor cache locality and 30-50% overhead vs modern hash tables. Replace with Abseil's Swiss table (flat_hash_map) or implement a Robin Hood hash table. Swiss tables use SIMD for lookups (probe 16 slots at once with SSE) and have 2-5x better performance. Change: #include <absl/container/flat_hash_map.h> and replace std::unordered_map → absl::flat_hash_map. If Abseil unavailable, implement a simple open-addressing Robin Hood table with linear probing and backward shift deletion.",
+      "expected_improvement": "Q3 hash table operations: ~200ms → ~80ms (2.5x speedup). Q1 hash aggregation: ~50ms → ~30ms (1.7x). Overall Q3: ~150ms → ~120ms after other optimizations applied.",
+      "risk": "low",
+      "knowledge_source": "data-structures/compact-hash-tables.md + external-libs/abseil-folly.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 4,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "operator": "filter",
+      "technique": "SIMD-Vectorized Filter Evaluation",
+      "description": "Q6 evaluates 4 predicates (l_shipdate range, l_discount range, l_quantity < 24) on every row in serial. The predicate in q6.cpp lines 26-33 checks 4 conditions sequentially. Vectorize using AVX2 to process 8 rows at once: (1) load 8 l_shipdate values into __m256i, compare with _mm256_cmpgt_epi32 (2) load 8 l_discount values into __m256d, compare with _mm256_cmp_pd (3) combine with _mm256_and_si256 to get qualifying row mask (4) use _mm256_movemask_epi8 to extract bitmask and process only passing rows. This requires changing operators/scan.h to accept SIMD-izable predicates. Expected speedup: 2-4x for filter evaluation.",
+      "expected_improvement": "Q6: 44ms → ~18-25ms (2x speedup). Approaches DuckDB's 21ms. Filter time: ~20ms → ~7ms.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 5,
+      "target": "Q1",
+      "bottleneck_category": "cpu_bound",
+      "operator": "filter",
+      "technique": "SIMD-Vectorized Date Filter",
+      "description": "Q1 filters lineitem by l_shipdate <= cutoff (line 25 in q1.cpp). Currently evaluates one row at a time inside the aggregation lambda. Extract the date filter into a pre-pass using SIMD: process 8 l_shipdate values at once with AVX2 _mm256_cmpgt_epi32, generate a bitmask of qualifying rows, then aggregate only those rows. This reduces branch mispredictions (98% pass rate means predictable branch, but SIMD still faster for memory access pattern).",
+      "expected_improvement": "Q1: 378ms → ~300-330ms (1.2-1.3x speedup). Filter time: ~60ms → ~20ms. Diminishing returns vs other optimizations.",
+      "risk": "medium",
+      "knowledge_source": "parallelism/simd.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 6,
+      "target": "ALL",
+      "bottleneck_category": "io_bound",
+      "operator": "storage",
+      "technique": "mmap Prefetch Hints",
+      "description": "Current storage code (storage.cpp) uses std::ifstream and reads columns into std::vector, copying data into memory. The storage design specifies mmap with MADV_SEQUENTIAL/MADV_WILLNEED hints (storage_design.json io_strategies), but this isn't implemented. Modify read_column_binary template in storage.cpp (lines 27-35) to use mmap() instead of std::ifstream + vector allocation. Add madvise(MADV_SEQUENTIAL) for full-column scans (Q1, Q6) and madvise(MADV_WILLNEED) to prefetch hot columns (l_shipdate, l_discount) before query execution. This eliminates copy overhead and enables zero-copy access. Expected: 2009ms load time → ~500ms (4x speedup for cold-cache queries).",
+      "expected_improvement": "Data loading: 2009ms → ~500ms (4x). Query execution on warm cache: minor (already in memory), but eliminates vector allocation overhead (~50-100ms across queries).",
+      "risk": "medium",
+      "knowledge_source": "storage/persistent-storage.md + external-libs/io-libraries.md",
+      "requires_reingest": false
+    },
+    {
+      "priority": 7,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "operator": "io",
+      "technique": "Zone Maps for Block Skipping",
+      "description": "Q6 filters l_shipdate to [1994-01-01, 1995-01-01), which is 14% of the 7-year TPC-H range. With zone maps (min/max per 64K-row block) on sorted l_shipdate, 86% of blocks can be skipped without reading. Storage design (storage_design.json line 186) specifies idx_lineitem_shipdate zone map, but this isn't implemented. Implementation: (1) During ingestion (ingest.cpp), compute min/max l_shipdate per 64K-row block, store in metadata.json. (2) During query execution, check metadata before scanning each block: if block_max < 1994-01-01 or block_min >= 1995-01-01, skip the entire block. (3) Only mmap and scan qualifying blocks. Expected: 60M rows → 8.4M rows scanned (86% skipped), I/O: 240MB → 34MB.",
+      "expected_improvement": "Q6: 44ms → ~15ms (3x speedup). I/O reduction: 86%. Approaches DuckDB's 21ms. Requires re-ingestion to build zone maps.",
+      "risk": "medium",
+      "knowledge_source": "indexing/zone-maps.md + storage/persistent-storage.md",
+      "requires_reingest": true
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Sort by l_shipdate during ingestion and build zone maps (min/max per 64K-row block) in metadata.json",
+      "rationale": "All 3 queries filter on l_shipdate with range predicates. Sorted data + zone maps enable 40-86% block skipping (Q6: 86%, Q3: 40%, Q1: 2%). Storage design specifies this (line 176: sort_order l_shipdate + line 186: zone map index), but not yet implemented. Expected I/O reduction: Q6: 240MB → 34MB. Implementation: modify ingest.cpp to sort lineitem rows by l_shipdate before writing columns, then compute min/max per 64K rows and write to metadata.",
+      "requires_reingest": true
+    },
+    {
+      "table": "orders",
+      "change": "Sort by o_orderdate and build zone maps",
+      "rationale": "Q3 filters o_orderdate < '1995-03-15' (25% selectivity). Sorted data + zone maps enable 75% block skipping. Storage design specifies this (line 296: sort_order o_orderdate + line 302: zone map). Expected I/O reduction: 15M rows → 3.75M rows scanned.",
+      "requires_reingest": true
+    },
+    {
+      "table": "customer",
+      "change": "Sort by c_mktsegment and build zone maps",
+      "rationale": "Q3 filters c_mktsegment = 'BUILDING' (20% selectivity). Sorted data clusters matching rows together, enabling early termination. Zone maps can skip 80% of blocks. Storage design specifies this (line 404: sort_order c_mktsegment + line 421: zone map). Expected I/O reduction: 1.5M rows → 300K rows scanned.",
+      "requires_reingest": true
+    }
+  ],
+  "summary": "Q3 is the critical bottleneck (91% of execution time, 13x slower than DuckDB). Root cause: single-threaded table scans and join probes on 64-core machine = 98% idle hardware. Priority 1-2 optimizations (parallel scans + parallel join probes) should bring Q3 from 1272ms → ~150ms (8-9x speedup). Priority 3 (Swiss tables) adds another 1.5-2x. Total expected Q3: 1272ms → ~100-120ms, approaching DuckDB's 99ms. Q6 benefits most from zone maps (priority 7, requires re-ingestion): 44ms → ~15ms. Q1 is already well-optimized with parallel aggregation. Recommendation: Apply priorities 1-3 first (no re-ingestion needed), then evaluate if storage changes (priority 7 + zone maps) are worth the re-ingestion cost."
+}

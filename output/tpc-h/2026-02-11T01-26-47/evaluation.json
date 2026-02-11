@@ -1,0 +1,49 @@
+{
+  "overall_status": "pass",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "rm -f ingest main ingest.o main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c ingest.cpp -o ingest.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c storage/storage.cpp -o storage/storage.o\ng++ -pthread -o ingest ingest.o storage/storage.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c main.cpp -o main.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c queries/q1.cpp -o queries/q1.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c queries/q3.cpp -o queries/q3.o\ng++ -O2 -std=c++17 -Wall -Wextra -pthread -c queries/q6.cpp -o queries/q6.o\ng++ -pthread -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o"
+    },
+    "ingest": {
+      "status": "skipped",
+      "ingestion_time_ms": null,
+      "output": "Skipped - persistent storage already exists at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+      "reused_existing": true
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "=== GenDB Query Execution Program ===\nGenDB directory: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\n\nLoading tables from binary storage...\n  - Lineitem: 59986052 rows\n  - Orders: 15000000 rows\n  - Customer: 1500000 rows\nLoading complete in 2009 ms\n\n=== Executing TPC-H Queries ===\n\n=== Q1: Pricing Summary Report ===\nreturnflag  linestatus          sum_qty    sum_base_price    sum_disc_price     sum_charge     avg_qty      avg_price    avg_disc count_order\n----------------------------------------------------------------------------------------------------------------------------------------------------------------\nA           F              377518399.00   566065727797.25   537759104278.06559276670892.12       25.50       38237.15        0.05    14804077\nN           F                9851614.00    14767438399.17    14028805792.21 14590490998.37       25.52       38257.81        0.05      385998\nN           O              743124873.00  1114302286901.87  1058580922144.971100937000170.59       25.50       38233.90        0.05    29144351\nR           F              377732830.00   566431054976.00   538110922664.77559634780885.08       25.51       38251.22        0.05    14808183\n\nExecution time: 50 ms\nRows returned: 4\n\n=== Q6: Forecasting Revenue Change ===\nRevenue: 1230113636.01\n\nExecution time: 23 ms\n\n=== Q3: Shipping Priority ===\nl_orderkey                revenue    o_orderdate    o_shippriority\n------------------------------------------------------------------\n4791171                 440715.22     1995-02-23                 0\n46678469                439855.32     1995-01-27                 0\n23906758                432728.57     1995-03-14                 0\n23861382                428739.14     1995-03-09                 0\n59393639                426036.07     1995-02-12                 0\n3355202                 425100.67     1995-03-04                 0\n9806272                 425088.06     1995-03-13                 0\n22810436                423231.97     1995-01-02                 0\n16384100                421478.73     1995-03-02                 0\n52974151                415367.12     1995-02-05                 0\n\nExecution time: 2559 ms\nRows returned: 10\n\n=== All Queries Complete ==="
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "pass",
+      "num_groups": 4,
+      "timing_ms": 50,
+      "semantically_different": false,
+      "notes": "Query returned 4 groups as expected (returnflag x linestatus). All aggregates are non-negative and reasonable. Count_order totals to 59,142,609 which matches the lineitem row count of 59,986,052 (accounting for date filtering)."
+    },
+    "Q3": {
+      "status": "pass",
+      "num_rows": 10,
+      "timing_ms": 2559,
+      "semantically_different": false,
+      "notes": "Query returned exactly 10 rows (LIMIT 10) as expected. Revenue values are all positive and correctly ordered in descending order. Top revenue is 440,715.22."
+    },
+    "Q6": {
+      "status": "pass",
+      "revenue": 1230113636.01,
+      "timing_ms": 23,
+      "semantically_different": false,
+      "notes": "Query returned a single non-negative revenue value as expected. Execution time is excellent at 23ms."
+    }
+  },
+  "summary": "All compilation and execution steps passed successfully. All three queries (Q1, Q3, Q6) produced valid results with reasonable values. Total query execution time: 2,632ms (Q1: 50ms, Q3: 2559ms, Q6: 23ms). Data loading took 2,009ms. Q3 dominates execution time at 2.5 seconds. No semantic differences detected. Profiling data unavailable (perf not installed)."
+}

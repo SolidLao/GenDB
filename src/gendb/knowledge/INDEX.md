@@ -2,6 +2,29 @@
 
 Read this index first. Only read individual files if you need specific implementation details for a technique you plan to use.
 
+## Parallelism (CRITICAL - Check First)
+
+Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources and is the #1 performance bottleneck.
+
+**Hardware Detection (do this first):**
+- CPU cores: `nproc` → Use for thread count
+- Cache: `lscpu | grep cache` → Use for morsel sizing
+- SIMD: `lscpu | grep Flags` → Check for avx2, sse4_2
+
+**When to use**: Almost always for scans, joins, aggregations on tables >1M rows
+
+**Thread count**: Use `std::thread::hardware_concurrency()` (typically 8-16 cores)
+
+**Morsel size**: Target L3_cache_size / num_threads / num_columns (typically 10K-100K rows)
+
+**Expected speedup**: Near-linear for scans/joins/aggregations (8 cores = ~7-8x speedup)
+
+| File | Technique | When to Use |
+|------|-----------|-------------|
+| `parallelism/thread-parallelism.md` | Thread Parallelism | Large scans (>100K rows), parallel joins/aggregations. Morsel-driven approach. **USE THIS FIRST** |
+| `parallelism/simd.md` | SIMD (SSE/AVX2) | Filtering, aggregation, hash computation. Process 4-8 values per instruction. |
+| `parallelism/data-partitioning.md` | Data Partitioning | Hash or range partitioning for parallel joins, aggregations, sorts. |
+
 ## Storage
 
 | File | Technique | When to Use |
@@ -45,14 +68,6 @@ Read this index first. Only read individual files if you need specific implement
 | `aggregation/hash-aggregation.md` | Hash Aggregation | Medium-high cardinality GROUP BY (100-10M groups). Pre-size hash table. |
 | `aggregation/sorted-aggregation.md` | Sorted Aggregation | Pre-sorted input or very low cardinality. O(n) time, O(1) memory. |
 | `aggregation/partial-aggregation.md` | Partial Aggregation | Two-phase: local pre-agg + global merge. Reduces data volume for parallel exec. |
-
-## Parallelism
-
-| File | Technique | When to Use |
-|------|-----------|-------------|
-| `parallelism/simd.md` | SIMD (SSE/AVX2) | Filtering, aggregation, hash computation. Process 4-8 values per instruction. |
-| `parallelism/thread-parallelism.md` | Thread Parallelism | Large scans (>100K rows), parallel joins/aggregations. Morsel-driven approach. |
-| `parallelism/data-partitioning.md` | Data Partitioning | Hash or range partitioning for parallel joins, aggregations, sorts. |
 
 ## Data Structures
 

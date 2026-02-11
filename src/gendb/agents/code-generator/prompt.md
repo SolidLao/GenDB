@@ -10,15 +10,27 @@ Start with a simple, correct baseline — advanced optimizations come in later i
 
 **Exploitation/Exploration balance: 80/20** — Correctness and compilability are non-negotiable. Use proven patterns for the baseline, but feel free to apply well-understood optimizations (e.g., hash joins over nested loops, reserve() for vectors) from the start.
 
+## Hardware Detection (CRITICAL - Do this first)
+
+Before generating code, detect the target system's hardware using Bash commands:
+- **CPU cores**: `nproc` → Use for thread pool sizing (include parallelism as baseline feature)
+- **SIMD support**: `lscpu | grep Flags` → Check for avx2, sse4_2 before using intrinsics
+- **Cache sizes**: `lscpu | grep cache` → Use for morsel/block sizing guidance
+- **Memory**: `free -h` → Use for hash table pre-allocation budgets
+
+Use `std::thread::hardware_concurrency()` in generated code to adapt thread count at runtime.
+
 ## Knowledge & Reasoning
 
 You have access to a knowledge base at the path provided in the user prompt.
 - **Start by reading `INDEX.md`** in the knowledge base directory for a summary of all available techniques.
 - Read `storage/persistent-storage.md` for binary column file patterns, mmap usage, and block organization.
+- Read `parallelism/thread-parallelism.md` for parallel execution patterns (include parallelism as baseline, not just optimization).
 - Only read other technique files if you need specific implementation details.
 
 **Key principles:**
 - Start simple and correct. A clean baseline that compiles and produces correct results is far more valuable than an ambitious implementation that doesn't work.
+- **Include parallelism as baseline**: Modern CPUs have 8+ cores. Generate thread pools by default for scans, joins, and aggregations on large tables (>1M rows). Use `<thread>` and `<atomic>` headers.
 - Use the storage design's type mappings, index recommendations, and I/O strategies, but you may deviate if you have a good reason.
 - External libraries are allowed if they provide clear benefit — use your judgment (e.g., using `absl::flat_hash_map` instead of `std::unordered_map` is fine). Update the Makefile accordingly.
 - The optimization target (e.g., execution_time) is provided in the user prompt — let it guide your implementation trade-offs.
@@ -36,15 +48,27 @@ generated/
 │   └── storage.cpp          # Persistent storage I/O (write binary, read binary/mmap)
 ├── index/
 │   └── index.h              # Persistent + in-memory index structures (header-only)
+├── operators/               # Reusable operator library (NEW - see below)
+│   ├── scan.h               # Generic table scan with predicate pushdown
+│   ├── hash_join.h          # Reusable hash join (build, probe phases)
+│   ├── hash_agg.h           # Reusable hash aggregation
+│   └── sort.h               # Reusable sorting operator (if needed)
 ├── queries/
 │   ├── queries.h            # Query function declarations
-│   ├── q1.cpp               # Q1: Pricing Summary Report
-│   ├── q3.cpp               # Q3: Shipping Priority
-│   └── q6.cpp               # Q6: Forecasting Revenue Change
+│   ├── q1.cpp               # Q1: Pricing Summary Report (uses operators from operators/)
+│   ├── q3.cpp               # Q3: Shipping Priority (uses operators from operators/)
+│   └── q6.cpp               # Q6: Forecasting Revenue Change (uses operators from operators/)
 ├── ingest.cpp               # Entry point: .tbl → .gendb/ (one-time ingestion)
 ├── main.cpp                 # Entry point: .gendb/ → query execution (fast, repeated)
 └── Makefile                 # Builds both `ingest` and `main` targets
 ```
+
+**NEW: Operator Library Structure**
+- Create reusable, templated operator implementations in `operators/` directory
+- Each operator should be generic and reusable across queries (e.g., `hash_join<KeyType, ValueType>`)
+- Query files (`queries/q*.cpp`) should instantiate and compose these operators
+- This enables later optimizations to improve operators once and benefit all queries
+- Operators should support parallelism out of the box (thread pools for large data)
 
 ### File requirements:
 

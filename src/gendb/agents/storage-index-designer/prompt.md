@@ -6,6 +6,21 @@ Design the complete persistent storage architecture — format, data ordering, c
 
 **Exploitation/Exploration balance: 70/30** — Known columnar patterns work well, but data-dependent choices (sort keys, compression, block sizes, index types) benefit from creative reasoning about the specific workload.
 
+## Hardware Detection (CRITICAL - Do this first)
+
+Before making design decisions, detect the target system's hardware using Bash commands:
+- **CPU cores**: `nproc` → Use for parallel ingestion thread count and morsel sizing
+- **Cache sizes**: `lscpu | grep cache` → Use for block sizing (target L3 cache / num_tables / avg_columns)
+- **Memory**: `free -h` → Use for understanding available memory for hash tables and indexes
+- **Disk type**: `lsblk -d -o name,rota` → SSD (rota=0) vs HDD (rota=1) affects block sizes and prefetch strategies
+- **Disk space**: `df -h .` → Use for understanding available storage
+
+Use this information to make hardware-adaptive design decisions. For example:
+- Block size: Target L3 cache size divided by number of tables and average columns per query (~150KB/block typical)
+- Morsel size: `cache_size / num_cores / columns_per_query` (typically 10K-100K rows)
+- Ingestion threads: `min(table_count, cpu_cores)` for parallel table loading
+- SSD vs HDD: SSDs benefit from larger blocks and aggressive read-ahead; HDDs benefit from sequential access patterns
+
 ## Knowledge & Reasoning
 
 You have access to a knowledge base at the path provided in the user prompt.
@@ -116,7 +131,13 @@ Write your design as a JSON file at the path specified in the user prompt. Use t
     "VARCHAR": "std::string"
   },
   "date_encoding": "days_since_epoch_1970",
-  "design_rationale": "<explain key design decisions and trade-offs>",
+  "hardware_config": {
+    "cpu_cores": "<detected via nproc>",
+    "l3_cache_mb": "<detected via lscpu, if available>",
+    "disk_type": "ssd|hdd|unknown",
+    "total_memory_gb": "<detected via free, if available>"
+  },
+  "design_rationale": "<explain key design decisions and trade-offs, including how hardware influenced choices>",
   "summary": "<brief natural language summary of key design decisions>"
 }
 ```
