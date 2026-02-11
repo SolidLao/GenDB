@@ -32,7 +32,7 @@ You have access to a knowledge base at the path provided in the user prompt.
 
 Modify the SQL query definitions in the `queries.sql` file (or equivalent) in the workspace. Changes must:
 1. Preserve semantic equivalence (results must match exactly)
-2. Address the specific bottleneck identified in `optimization_recommendations.json`
+2. Address the specific bottleneck identified in `optimization_recommendations.toon`
 3. Be accompanied by a rationale comment explaining the rewrite
 
 **Example transformation:**
@@ -54,8 +54,8 @@ WHERE l.l_shipdate > '1995-03-15';
 
 ## Instructions
 
-1. Read `orchestrator_decision.json` to understand which query to optimize
-2. Read `optimization_recommendations.json` for specific guidance on the query structure issue
+1. Read `orchestrator_decision.toon` to understand which query to optimize
+2. Read `optimization_recommendations.toon` for specific guidance on the query structure issue
 3. Read the current SQL query definition from the workspace
 4. Analyze the query structure and identify the optimization opportunity
 5. Rewrite the query while preserving semantic equivalence

@@ -33,6 +33,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const KNOWLEDGE_BASE_PATH = resolve(__dirname, "knowledge");
+const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
 import { defaults } from "./gendb.config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
@@ -53,6 +54,8 @@ import {
   updateLatestSymlink,
   createIterationDir,
 } from "./utils/paths.mjs";
+import { readTOON, writeTOON } from "./utils/toon.mjs";
+import { encode as toonEncode } from "@toon-format/toon";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,12 +107,33 @@ async function updateRunMeta(runDir, updater) {
 }
 
 // ---------------------------------------------------------------------------
+// Model pricing (per million tokens)
+// ---------------------------------------------------------------------------
+
+const MODEL_PRICING = {
+  sonnet: { input: 3, output: 15, cache_read: 0.30, cache_creation: 3.75 },
+  haiku: { input: 0.80, output: 4, cache_read: 0.08, cache_creation: 1 },
+  opus: { input: 15, output: 75, cache_read: 1.50, cache_creation: 18.75 },
+};
+
+/** Estimate cost from token counts with cache-aware pricing. */
+function estimateCost(model, tokens) {
+  const pricing = MODEL_PRICING[model] || MODEL_PRICING.sonnet;
+  const perM = 1_000_000;
+  const inputCost = (tokens.input * pricing.input) / perM;
+  const outputCost = (tokens.output * pricing.output) / perM;
+  const cacheReadCost = ((tokens.cache_read || 0) * pricing.cache_read) / perM;
+  const cacheCreationCost = ((tokens.cache_creation || 0) * pricing.cache_creation) / perM;
+  return inputCost + outputCost + cacheReadCost + cacheCreationCost;
+}
+
+// ---------------------------------------------------------------------------
 // Telemetry tracking
 // ---------------------------------------------------------------------------
 
 const telemetryData = {
   total_wall_clock_ms: 0,
-  total_tokens: { input: 0, output: 0 },
+  total_tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
   total_cost_usd: 0,
   phases: {},
 };
@@ -124,16 +148,20 @@ function recordAgentTelemetry(phase, agentName, durationMs, tokens, costUsd) {
   p.total_ms += durationMs;
   if (!p.agents) p.agents = {};
   if (!p.agents[agentName]) {
-    p.agents[agentName] = { duration_ms: 0, tokens: { input: 0, output: 0 }, cost_usd: 0 };
+    p.agents[agentName] = { duration_ms: 0, tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 }, cost_usd: 0 };
   }
   const a = p.agents[agentName];
   a.duration_ms += durationMs;
   a.tokens.input += tokens.input;
   a.tokens.output += tokens.output;
+  a.tokens.cache_read += tokens.cache_read || 0;
+  a.tokens.cache_creation += tokens.cache_creation || 0;
   a.cost_usd += costUsd;
 
   telemetryData.total_tokens.input += tokens.input;
   telemetryData.total_tokens.output += tokens.output;
+  telemetryData.total_tokens.cache_read += tokens.cache_read || 0;
+  telemetryData.total_tokens.cache_creation += tokens.cache_creation || 0;
   telemetryData.total_cost_usd += costUsd;
 }
 
@@ -192,16 +220,20 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
       } else {
         // Parse JSON output for telemetry
         let resultText = stdout;
-        let tokens = { input: 0, output: 0 };
+        let tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
         let costUsd = 0;
         try {
           const parsed = JSON.parse(stdout);
           resultText = parsed.result || "";
+          const usage = parsed.usage || {};
           tokens = {
-            input: parsed.usage?.input_tokens || 0,
-            output: parsed.usage?.output_tokens || 0,
+            input: usage.input_tokens || 0,
+            output: usage.output_tokens || 0,
+            cache_read: usage.cache_read_input_tokens || 0,
+            cache_creation: usage.cache_creation_input_tokens || 0,
           };
-          costUsd = parsed.total_cost_usd || 0;
+          // Calculate cost from token counts with cache-aware pricing
+          costUsd = estimateCost(model || defaults.model, tokens);
         } catch {
           // If JSON parsing fails, treat entire stdout as text
           resultText = stdout;
@@ -240,8 +272,8 @@ function formatBenchmarkContext(benchmarkResults) {
     "## Benchmark Comparison (reference targets)",
     "Performance of other database systems on the same workload and scale factor.",
     "Use these as optimization targets — the goal is to close the gap with the fastest system.",
-    "```json",
-    JSON.stringify(benchmarkResults, null, 2),
+    "```toon",
+    toonEncode(benchmarkResults),
     "```",
   ];
   return lines.join("\n");
@@ -283,7 +315,7 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const analyzerSystemPrompt = await readFile(workloadAnalyzerConfig.promptPath, "utf-8");
-  const workloadAnalysisPath = resolve(runDir, "workload_analysis.json");
+  const workloadAnalysisPath = resolve(runDir, "workload_analysis.toon");
 
   const analyzerUserPrompt = [
     "Analyze the following TPC-H workload.",
@@ -303,7 +335,7 @@ async function runBaseline(args, runDir, schema, queries) {
     queries.trim(),
     "```",
     "",
-    `IMPORTANT: You MUST use the Write tool to create the file ${workloadAnalysisPath} with your JSON analysis. Do NOT just print the analysis — use the Write tool to write it as a file.`,
+    `IMPORTANT: You MUST use the Write tool to create the file ${workloadAnalysisPath} with your TOON analysis (Token-Oriented Object Notation — like JSON but more compact). Use the same structure as JSON but in TOON format. Do NOT just print it — use the Write tool to write it as a file.`,
   ].join("\n");
 
   const waResult = await runAgent(workloadAnalyzerConfig.name, {
@@ -316,14 +348,14 @@ async function runBaseline(args, runDir, schema, queries) {
   recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
 
   // Verify workload analysis output
-  const analysis = await readJSON(workloadAnalysisPath);
+  const analysis = await readTOON(workloadAnalysisPath);
   if (!analysis) {
     await updateRunMeta(runDir, (meta) => {
       meta.phase1.steps.workload_analysis.status = "failed";
       meta.phase1.status = "failed";
       meta.status = "failed";
     });
-    throw new Error("Workload analysis failed — could not read/parse workload_analysis.json.");
+    throw new Error("Workload analysis failed — could not read/parse workload_analysis.toon.");
   }
 
   console.log("\n[Orchestrator] Workload analysis written successfully.");
@@ -345,7 +377,7 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
-  const storageDesignPath = resolve(runDir, "storage_design.json");
+  const storageDesignPath = resolve(runDir, "storage_design.toon");
 
   const designerUserPrompt = [
     "Design the storage layout and index structures for this workload.",
@@ -363,7 +395,7 @@ async function runBaseline(args, runDir, schema, queries) {
     schema.trim(),
     "```",
     "",
-    `IMPORTANT: You MUST use the Write tool to create the file ${storageDesignPath} with your JSON design. Do NOT just print it — use the Write tool to write it as a file.`,
+    `IMPORTANT: You MUST use the Write tool to create the file ${storageDesignPath} with your TOON design (Token-Oriented Object Notation — like JSON but more compact). Do NOT just print it — use the Write tool to write it as a file.`,
   ].join("\n");
 
   const sdResult = await runAgent(storageDesignerConfig.name, {
@@ -375,14 +407,14 @@ async function runBaseline(args, runDir, schema, queries) {
   });
   recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
 
-  const design = await readJSON(storageDesignPath);
+  const design = await readTOON(storageDesignPath);
   if (!design) {
     await updateRunMeta(runDir, (meta) => {
       meta.phase1.steps.storage_design.status = "failed";
       meta.phase1.status = "failed";
       meta.status = "failed";
     });
-    throw new Error("Storage design failed — could not read/parse storage_design.json.");
+    throw new Error("Storage design failed — could not read/parse storage_design.toon.");
   }
 
   console.log("\n[Orchestrator] Storage design written successfully.");
@@ -553,12 +585,12 @@ async function runBaseline(args, runDir, schema, queries) {
     meta.phase1.steps.evaluation.startedAt = new Date().toISOString();
   });
 
-  const evaluationPath = resolve(runDir, "evaluation.json");
+  const evaluationPath = resolve(runDir, "evaluation.toon");
   // Phase 1 evaluator: run ingest if gendb storage doesn't exist, then main
   const evResult = await runEvaluator(args, runDir, generatedDir, evaluationPath);
   recordAgentTelemetry("phase1", "evaluator", evResult.durationMs, evResult.tokens, evResult.costUsd);
 
-  const evaluation = await readJSON(evaluationPath);
+  const evaluation = await readTOON(evaluationPath);
   if (evaluation) {
     console.log("\n[Orchestrator] Evaluation completed.");
     console.log(`[Orchestrator] Overall status: ${evaluation.overall_status}`);
@@ -570,10 +602,10 @@ async function runBaseline(args, runDir, schema, queries) {
       meta.phase1.steps.evaluation.overall_status = evaluation.overall_status;
     });
   } else {
-    console.error("[Orchestrator] Warning: could not read/parse evaluation.json");
+    console.error("[Orchestrator] Warning: could not read/parse evaluation.toon");
     await updateRunMeta(runDir, (meta) => {
       meta.phase1.steps.evaluation.status = "completed_with_warnings";
-      meta.phase1.steps.evaluation.warning = "Could not parse evaluation.json";
+      meta.phase1.steps.evaluation.warning = "Could not parse evaluation.toon";
     });
   }
 
@@ -595,6 +627,16 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath, { skipIn
   const gendbDirExists = existsSync(args.gendbDir);
   const shouldIngest = !skipIngest && !gendbDirExists;
 
+  // Set up results directory for file-based comparison
+  const resultsDir = resolve(dirname(evaluationPath), "query_results");
+  await mkdir(resultsDir, { recursive: true });
+
+  // Ground truth directory
+  const groundTruthDir = resolve(
+    BENCHMARKS_DIR, defaults.targetBenchmark, "query_results"
+  );
+  const hasGroundTruth = existsSync(groundTruthDir);
+
   const evaluatorUserPrompt = [
     "Evaluate the generated C++ code (two-program architecture: ingest + main).",
     "",
@@ -609,16 +651,27 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath, { skipIn
     `## GenDB storage directory (persistent binary storage)`,
     `${args.gendbDir}`,
     "",
+    `## Query results directory`,
+    `${resultsDir}`,
+    "",
     `## Evaluation steps`,
     `1. Compile: cd ${generatedDir} && make clean && make all`,
     shouldIngest
       ? `2. Ingest (one-time): cd ${generatedDir} && ./ingest ${args.dataDir} ${args.gendbDir}`
       : `2. Ingest: SKIP — persistent storage already exists at ${args.gendbDir}`,
-    `3. Run queries: cd ${generatedDir} && ./main ${args.gendbDir}`,
+    `3. Run queries with result output: cd ${generatedDir} && ./main ${args.gendbDir} ${resultsDir}`,
+    `   This writes CSV files to ${resultsDir}/Q<N>.csv and prints timing to terminal.`,
+    hasGroundTruth
+      ? `4. Validate correctness: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${resultsDir}`
+      : `4. Validate correctness: No ground truth available — check row counts and values manually from terminal output.`,
+    hasGroundTruth
+      ? `   The comparison tool outputs JSON with per-query match status. Use this for correctness validation.`
+      : "",
     "",
-    `IMPORTANT: Write the evaluation report to: ${evaluationPath}`,
+    `IMPORTANT: Write the evaluation report in TOON format (Token-Oriented Object Notation) to: ${evaluationPath}`,
     `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
     `Report ingestion_time_ms separately from query timing. The primary metric is query execution time from ./main.`,
+    `Do NOT read or compare full query result rows from terminal output — use the comparison tool instead.`,
   ].join("\n");
 
   const evalResult = await runAgent(evaluatorConfig.name, {
@@ -673,8 +726,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
   const optimizationHistory = {
     iterations: [],
   };
-  const historyPath = resolve(runDir, "optimization_history.json");
-  await writeFile(historyPath, JSON.stringify(optimizationHistory, null, 2));
+  const historyPath = resolve(runDir, "optimization_history.toon");
+  await writeTOON(historyPath, optimizationHistory);
 
   // Track the "best so far" generated directory and its evaluation
   let bestGeneratedDir = baselineGeneratedDir;
@@ -686,9 +739,9 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
 
     const iterDir = await createIterationDir(runDir, iteration);
     const iterGeneratedDir = resolve(iterDir, "generated");
-    const iterEvaluationPath = resolve(iterDir, "evaluation.json");
-    const iterRecsPath = resolve(iterDir, "optimization_recommendations.json");
-    const iterDecisionPath = resolve(iterDir, "orchestrator_decision.json");
+    const iterEvaluationPath = resolve(iterDir, "evaluation.toon");
+    const iterRecsPath = resolve(iterDir, "optimization_recommendations.toon");
+    const iterDecisionPath = resolve(iterDir, "orchestrator_decision.toon");
 
     const iterMeta = {
       iteration,
@@ -728,14 +781,14 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       "",
       "## Input Files",
       `- Evaluation results: ${bestEvaluationPath}`,
-      `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
-      `- Storage design: ${resolve(runDir, "storage_design.json")}`,
+      `- Workload analysis: ${resolve(runDir, "workload_analysis.toon")}`,
+      `- Storage design: ${resolve(runDir, "storage_design.toon")}`,
       `- Current C++ code directory: ${iterGeneratedDir}`,
       `- Optimization history: ${historyPath}`,
       formatBenchmarkContext(args.benchmarkResults),
       "",
       `## Output`,
-      `IMPORTANT: Write your recommendations to: ${iterRecsPath}`,
+      `IMPORTANT: Write your recommendations in TOON format (Token-Oriented Object Notation) to: ${iterRecsPath}`,
       `Use the Write tool to create this file.`,
       `Set "iteration" to ${iteration} in the JSON output.`,
     ].join("\n");
@@ -750,7 +803,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     });
     recordAgentTelemetry(iterPhase, "learner", lnResult.durationMs, lnResult.tokens, lnResult.costUsd);
 
-    const recommendations = await readJSON(iterRecsPath);
+    const recommendations = await readTOON(iterRecsPath);
     if (!recommendations) {
       console.error(`[Orchestrator] Learner failed to produce recommendations for iteration ${iteration}. Stopping loop.`);
       await updateIterationStatus(runDir, iteration, "failed", "Learner failed to produce recommendations");
@@ -784,7 +837,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
         : "",
       "",
       `## Output`,
-      `IMPORTANT: Write your decision to: ${iterDecisionPath}`,
+      `IMPORTANT: Write your decision in TOON format (Token-Oriented Object Notation) to: ${iterDecisionPath}`,
       `Use the Write tool to create this file.`,
       `Note: The Learner's recommendations now use "critical_fixes" (always apply) and "performance_optimizations" (select by priority). Your selected_recommendations should index into performance_optimizations. All critical_fixes are automatically included.`,
     ].join("\n");
@@ -798,7 +851,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     });
     recordAgentTelemetry(iterPhase, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
 
-    const decision = await readJSON(iterDecisionPath);
+    const decision = await readTOON(iterDecisionPath);
     if (!decision) {
       console.error(`[Orchestrator] Orchestrator Agent failed to produce decision. Stopping loop.`);
       await updateIterationStatus(runDir, iteration, "failed", "Orchestrator Agent failed to produce decision");
@@ -869,8 +922,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
         `- Orchestrator decision: ${iterDecisionPath}`,
         `- Optimization recommendations: ${iterRecsPath}`,
         `- Evaluation results: ${bestEvaluationPath}`,
-        `- Workload analysis: ${resolve(runDir, "workload_analysis.json")}`,
-        `- Storage design: ${resolve(runDir, "storage_design.json")}`,
+        `- Workload analysis: ${resolve(runDir, "workload_analysis.toon")}`,
+        `- Storage design: ${resolve(runDir, "storage_design.toon")}`,
         formatBenchmarkContext(args.benchmarkResults),
         "",
         `## Data Directory (source .tbl files)`,
@@ -896,7 +949,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
         "",
         `## Important`,
         criticalFixes.length > 0
-          ? `- Apply ALL critical_fixes from optimization_recommendations.json FIRST (these fix crashes/correctness bugs)`
+          ? `- Apply ALL critical_fixes from optimization_recommendations.toon FIRST (these fix crashes/correctness bugs)`
           : "",
         `- Apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
         `- Focus on optimizations with bottleneck_category: "${category}"`,
@@ -933,7 +986,7 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationPath);
     recordAgentTelemetry(iterPhase, "evaluator", iterEvResult.durationMs, iterEvResult.tokens, iterEvResult.costUsd);
 
-    const iterEvaluation = await readJSON(iterEvaluationPath);
+    const iterEvaluation = await readTOON(iterEvaluationPath);
 
     // 7. Record iteration results in optimization_history
     const iterResult = {
@@ -954,11 +1007,11 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     }
 
     optimizationHistory.iterations.push(iterResult);
-    await writeFile(historyPath, JSON.stringify(optimizationHistory, null, 2));
+    await writeTOON(historyPath, optimizationHistory);
 
     // 8. Update "current best" if improved
     const improved = checkImprovement(
-      await readJSON(bestEvaluationPath),
+      await readTOON(bestEvaluationPath),
       iterEvaluation
     );
 
@@ -1096,15 +1149,17 @@ async function main() {
 
   // Write telemetry
   telemetryData.total_wall_clock_ms = Date.now() - runStartTime;
-  const telemetryPath = resolve(runDir, "telemetry.json");
-  await writeFile(telemetryPath, JSON.stringify(telemetryData, null, 2));
+  const telemetryPath = resolve(runDir, "telemetry.toon");
+  await writeTOON(telemetryPath, telemetryData);
 
   // Print cost summary
-  const totalTokens = telemetryData.total_tokens.input + telemetryData.total_tokens.output;
   console.log(`\n[Orchestrator] === Run Summary ===`);
   console.log(`[Orchestrator] Total time: ${formatDuration(telemetryData.total_wall_clock_ms)}`);
   console.log(`[Orchestrator] Total tokens: ${Math.round(telemetryData.total_tokens.input / 1000)}K input, ${Math.round(telemetryData.total_tokens.output / 1000)}K output`);
-  console.log(`[Orchestrator] Estimated cost: $${telemetryData.total_cost_usd.toFixed(2)}`);
+  if (telemetryData.total_tokens.cache_read > 0) {
+    console.log(`[Orchestrator] Cache tokens: ${Math.round(telemetryData.total_tokens.cache_read / 1000)}K cache_read, ${Math.round(telemetryData.total_tokens.cache_creation / 1000)}K cache_creation`);
+  }
+  console.log(`[Orchestrator] Estimated cost: $${telemetryData.total_cost_usd.toFixed(2)} (cache-aware pricing)`);
 
   // Per-phase summary
   const phaseSummaries = [];

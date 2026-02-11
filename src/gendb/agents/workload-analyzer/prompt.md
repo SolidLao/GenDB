@@ -23,7 +23,7 @@ You may identify patterns not listed above — use your judgment about what woul
 
 ## Output Contract
 
-Write your analysis as a JSON file at the path specified in the user prompt. Use this structure:
+Write your analysis as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) at the path specified in the user prompt. Use this structure:
 
 ```json
 {

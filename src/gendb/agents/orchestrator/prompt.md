@@ -28,7 +28,7 @@ Decide what to optimize next (or whether to stop) based on evaluation results, o
 
 ## Output Contract
 
-Write a JSON file with your decision:
+Write a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) with your decision:
 
 ```json
 {
@@ -46,5 +46,5 @@ Write a JSON file with your decision:
 1. Read all input files carefully
 2. Analyze the optimization trajectory
 3. Evaluate each recommendation against history and remaining budget
-4. Make your decision and write the JSON output file
+4. Make your decision and write the TOON output file
 5. Print a brief summary

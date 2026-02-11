@@ -35,8 +35,8 @@ Modify the query implementation files (`queries/*.cpp`) in the generated code di
 
 ## Instructions
 
-1. Read `orchestrator_decision.json` to see which query to optimize
-2. Read `optimization_recommendations.json` for specific join order guidance
+1. Read `orchestrator_decision.toon` to see which query to optimize
+2. Read `optimization_recommendations.toon` for specific join order guidance
 3. Read the current query implementation from `generated/queries/q*.cpp`
 4. Read workload analysis and storage design to estimate cardinalities
 5. Analyze current join order and identify suboptimal choices

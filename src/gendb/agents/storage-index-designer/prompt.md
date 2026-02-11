@@ -37,7 +37,12 @@ You now design the **complete persistent storage architecture** (workload-driven
 
 6. **I/O strategy per query**: For each query, specify which columns to read, which indexes to use, predicate pushdown opportunities, and whether parallel scanning helps.
 
-7. **Parallel ingestion**: Reason about parallelism for data loading (multi-table, multi-column, or partitioned).
+7. **Parallel ingestion**: Design for maximum ingestion speed:
+   - **Multi-table parallelism**: Ingest independent tables concurrently (e.g., nation, region, supplier in parallel)
+   - **Intra-table parallelism**: For large tables (>1M rows), split the source file into chunks and parse in parallel threads
+   - **mmap input**: Specify mmap for reading .tbl files instead of ifstream
+   - **Pre-allocation**: Estimate row counts from file size to pre-allocate column vectors
+   - **Buffered writes**: Use large write buffers (1MB+) for binary column output
 
 **Key principle**: Reason about the best design based on the specific workload characteristics, optimization target, and data volume — not a fixed recipe. Different workloads should produce different storage designs.
 
@@ -45,7 +50,7 @@ You now design the **complete persistent storage architecture** (workload-driven
 
 ## Output Contract
 
-Write your design as a JSON file at the path specified in the user prompt. Use this structure:
+Write your design as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) at the path specified in the user prompt. Use this structure:
 
 ```json
 {

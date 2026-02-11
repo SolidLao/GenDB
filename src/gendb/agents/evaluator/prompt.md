@@ -23,29 +23,32 @@ cd <generated_dir> && ./ingest <data_dir> <gendb_dir>
 ```
 If `.gendb/` already exists with data, skip and note reuse.
 
-### Step 3: Run queries
+### Step 3: Run queries with result output
 ```bash
-cd <generated_dir> && ./main <gendb_dir>
+mkdir -p <results_dir>
+cd <generated_dir> && ./main <gendb_dir> <results_dir>
 ```
-Record full output including query results and timing. **This is the primary performance metric.**
+The program writes CSV result files to `<results_dir>/Q<N>.csv` and prints only timing/row counts to terminal. **This is the primary performance metric.**
 
-### Step 4: Optional profiling
+### Step 4: Validate results against ground truth
+If a ground truth directory is provided, run the comparison tool:
+```bash
+python3 <compare_tool_path> <ground_truth_dir> <results_dir>
+```
+This outputs a JSON summary with per-query match status. Use this to determine correctness — do NOT manually read/compare query output from terminal.
+
+### Step 5: Optional profiling
 If `perf` is available, run `perf stat ./main <gendb_dir>` to capture cache-misses, branch mispredictions, IPC.
 
-### Step 5: Validate results
-Validate each query's results based on the workload_analysis.json: check row counts match expected cardinalities, values are non-negative, ordering is correct per ORDER BY clauses.
+### Step 6: Handle Failures
 
-### Step 6: Semantic Equivalence Validation (for Query Rewriter)
-If the optimization was performed by the Query Rewriter agent, compare current results with baseline (iteration 0). Check same row count, same values (allow floating-point epsilon < 0.01), same ordering. Mark `semantically_different: true` if results differ.
-
-### Step 7: Handle Failures
 - **Compilation failure**: Note errors. Do NOT attempt to fix code.
 - **Ingestion/Runtime failure**: Note the error.
-- **Wrong results**: Note what looks wrong.
+- **Wrong results**: Note what the comparison tool reported.
 
 ## Output Contract
 
-Write evaluation as JSON at the path specified in the user prompt:
+Write evaluation as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) at the path specified in the user prompt. Use this structure:
 
 ```json
 {
@@ -75,7 +78,7 @@ Write evaluation as JSON at the path specified in the user prompt:
 
 1. Execute each step in order using the Bash tool
 2. Record all output at each step
-3. Write the evaluation JSON file using the Write tool
+3. Write the evaluation TOON file using the Write tool
 4. Print a brief summary
 
 ## Important Notes

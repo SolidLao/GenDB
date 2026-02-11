@@ -62,11 +62,24 @@ generated/
 - **date_utils.h**: `date_to_days()`, `days_to_date_str()`, `parse_date()` — all inline
 - **storage.h/cpp**: Columnar table structs with `std::vector<type>` columns, `size()` method. Two sets of I/O functions:
   - **Write functions** (used by ingest): Parse `.tbl` text → write binary column files to `.gendb/` directory. Write metadata (row count, column types) as JSON.
-  - **Read functions** (used by main): Provide lazy column loading functions: `mmap_column<T>(table, column)` that returns a pointer to mmap'd data. Columns are loaded on-demand by each query, not pre-loaded. Use `madvise()` hints per storage_design.json io_strategies.
+  - **Read functions** (used by main): Provide lazy column loading functions: `mmap_column<T>(table, column)` that returns a pointer to mmap'd data. Columns are loaded on-demand by each query, not pre-loaded. Use `madvise()` hints per storage_design.toon io_strategies.
 - **index.h**: Hash index typedefs, composite key structs with hash functors. Support persistent index files (write during ingest, read during query).
-- **queries/*.cpp**: Each query function loads ONLY its needed columns from `.gendb/` via mmap during execution. Do NOT pre-load all tables into memory in `main.cpp`. Each query should call mmap/read for exactly the columns it uses. Prints tabular results and execution time via `std::chrono::high_resolution_clock`.
-- **ingest.cpp**: Accept two arguments: `argv[1]` = data directory (with `.tbl` files), `argv[2]` = output `.gendb/` directory. Parse all `.tbl` files, write binary column files, build and write indexes, write metadata. Use parallelism per storage_design.json ingestion settings. Print progress and timing.
-- **main.cpp**: Accept one argument: `argv[1]` = `.gendb/` directory. Read metadata, call each query function. Each query handles its own column loading via mmap. Print row counts, query results, and per-query timing. This program should be **fast** — no text parsing, just binary I/O + computation.
+- **queries/*.cpp**: Each query function loads ONLY its needed columns from `.gendb/` via mmap during execution. Do NOT pre-load all tables into memory in `main.cpp`. Each query should call mmap/read for exactly the columns it uses. Each query function accepts an optional `results_dir` string parameter. If non-empty, write results to `<results_dir>/Q<N>.csv` (CSV with header row). Always print row count and execution time via `std::chrono::high_resolution_clock` to terminal (NOT full result rows).
+- **ingest.cpp**: Accept two arguments: `argv[1]` = data directory (with `.tbl` files), `argv[2]` = output `.gendb/` directory. Parse all `.tbl` files, write binary column files, build and write indexes, write metadata. Use parallelism per storage_design.toon ingestion settings. Print progress and timing per table.
+
+## High-Performance Ingestion (CRITICAL)
+
+The `ingest` program must use these techniques for fast data loading:
+
+1. **mmap input files**: Use `mmap()` to map .tbl files into memory instead of `std::ifstream`. This avoids syscall overhead for large files.
+2. **Parallel table ingestion**: Process multiple tables simultaneously using `std::thread`. Launch one thread per table (or per large table).
+3. **Pre-allocate vectors**: Estimate row count from file size (`file_size / avg_line_length`), then `reserve()` all column vectors upfront to avoid repeated reallocation.
+4. **Chunk-based parallel parsing**: For large tables (lineitem, orders), split the mmap'd file into chunks by finding newline boundaries, then parse each chunk in a separate thread. Merge results after.
+5. **Buffered binary writes**: Use large write buffers (1MB+) via `setvbuf()` or manual buffering with `fwrite()`. Avoid many small writes.
+6. **Minimize string allocations**: Parse numeric types (int, double, date) in-place from the mmap'd buffer without creating intermediate `std::string` objects. Use `strtol()`, `strtod()`, or custom parsers.
+7. **Batch column writes**: Accumulate all rows in memory, then write each column file in one large `fwrite()` call.
+8. **Progress reporting**: Print ingestion progress per table with timing (e.g., "lineitem: 6M rows in 2.3s").
+- **main.cpp**: Accept arguments: `argv[1]` = `.gendb/` directory, `argv[2]` (optional) = results output directory. Read metadata, call each query function. Each query handles its own column loading via mmap. **Terminal output**: only print row counts and per-query timing (do NOT print full result rows to terminal). **If `argv[2]` is provided**: write each query's results to `<results_dir>/Q<N>.csv` (CSV with header row matching column names). This program should be **fast** — no text parsing, just binary I/O + computation.
 - **Makefile**: `g++ -O2 -std=c++17 -Wall -lpthread`. Targets: `all` (builds both `ingest` and `main`), `ingest`, `main`, `clean`, `run-ingest`, `run-main`.
 
 ### Query specifications:
@@ -74,7 +87,7 @@ Query specifications are in the `queries.sql` file provided in the user prompt. 
 
 ## Instructions
 
-1. Read all input files (workload_analysis.json, storage_design.json, schema.sql, queries.sql)
+1. Read all input files (workload_analysis.toon, storage_design.toon, schema.sql, queries.sql)
 2. Optionally consult knowledge base files for implementation patterns
 3. Write each file using the Write tool
 4. Verify compilation: `cd <generated_dir> && make clean && make all`

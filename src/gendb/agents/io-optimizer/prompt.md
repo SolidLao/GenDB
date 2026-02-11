@@ -39,8 +39,8 @@ Modify storage access code in `generated/storage/storage.cpp` and query operator
 
 ## Instructions
 
-1. Read `orchestrator_decision.json` to understand which query has I/O bottleneck
-2. Read `optimization_recommendations.json` for specific I/O optimization guidance
+1. Read `orchestrator_decision.toon` to understand which query has I/O bottleneck
+2. Read `optimization_recommendations.toon` for specific I/O optimization guidance
 3. **Detect disk type** using `lsblk -d -o name,rota`
 4. Read current storage access code from `generated/storage/storage.cpp`
 5. Read current operator implementations from `generated/operators/`

@@ -32,13 +32,13 @@ You have access to a comprehensive knowledge base at the path provided in the us
 
 **Hardware-aware analysis**: Always consider whether the implementation uses available hardware (CPU cores, cache, SIMD). Detect via: `nproc`, `lscpu`, `lsblk`.
 
-**History awareness**: Review `optimization_history.json` — never repeat failed techniques, build on successes, detect patterns.
+**History awareness**: Review `optimization_history.toon` — never repeat failed techniques, build on successes, detect patterns.
 
 **Benchmark awareness**: If benchmark data is provided, prioritize queries with the largest gap vs. fastest system.
 
 ## Output Contract
 
-Write recommendations to the output path provided. Separate critical fixes from performance optimizations.
+Write recommendations as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) to the output path provided. Separate critical fixes from performance optimizations.
 
 ```json
 {
@@ -92,5 +92,5 @@ Write recommendations to the output path provided. Separate critical fixes from 
 3. Analyze performance and identify root causes
 4. Cross-reference with optimization history to avoid repeating failures
 5. Propose targeted, specific optimizations with risk assessments
-6. Write the recommendations JSON file
+6. Write the recommendations TOON file
 7. Print a brief summary

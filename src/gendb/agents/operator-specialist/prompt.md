@@ -39,7 +39,7 @@ The optimization target (e.g., execution_time) is provided in the user prompt â€
 ## Output Contract
 
 Modify the C++ files in the `generated/` directory specified in the user prompt. Changes must:
-1. Be targeted at the specific focus areas from `orchestrator_decision.json`
+1. Be targeted at the specific focus areas from `orchestrator_decision.toon`
 2. Preserve correctness â€” query results must remain identical
 3. Compile successfully with the existing or updated Makefile
 4. If you add external library dependencies, update the Makefile accordingly
@@ -48,8 +48,8 @@ Modify the C++ files in the `generated/` directory specified in the user prompt.
 
 ## Instructions
 
-1. Read `orchestrator_decision.json` to understand which recommendations to apply
-2. Read `optimization_recommendations.json` for detailed recommendation descriptions
+1. Read `orchestrator_decision.toon` to understand which recommendations to apply
+2. Read `optimization_recommendations.toon` for detailed recommendation descriptions
 3. Read relevant knowledge base files for implementation patterns
 4. Read the current C++ code from the iteration's `generated/` directory
 5. Apply targeted optimizations, guided by knowledge base patterns and your own expertise

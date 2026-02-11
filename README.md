@@ -13,6 +13,9 @@ GenDB takes a different approach to query execution: instead of routing queries 
 - **Hardware-aware optimization** — agents automatically detect CPU cores, cache sizes, disk type (SSD/HDD), and available memory to make adaptive optimization decisions
 - **Knowledge-driven autonomy** — agents receive deep domain knowledge and reason about which techniques to apply, rather than following fixed optimization steps
 - **Exploitation/exploration balance** — each agent has a tuned balance: mechanical agents (Evaluator: 95/5) follow protocols, creative agents (Execution Optimizer: 30/70) freely explore parallel execution strategies
+- **Token-efficient agent communication** — agents exchange artifacts in [TOON format](https://toonformat.dev/) (Token-Oriented Object Notation), reducing token consumption by ~30-40% compared to JSON
+- **File-based result validation** — query results are written to CSV files and compared against DuckDB ground truth using an automated comparison tool, eliminating token waste from large result sets in agent prompts
+- **Cache-aware cost tracking** — token costs calculated with Anthropic's prompt caching discounts (cache reads cost 90% less), providing accurate cost estimates
 - **Incremental generation** — start with a simple correct baseline with reusable operator library, then iteratively optimize based on profiling feedback
 - **Learn from existing systems** — a structured knowledge base captures how PostgreSQL, DuckDB, ClickHouse, and others solve performance problems
 - **Flexible optimization** — no fixed optimization pipeline; conditional agent invocation based on bottleneck category (cpu_bound, io_bound, join_order, etc.)

@@ -29,6 +29,34 @@ Store table data as binary column files on disk. Each column is written as a typ
 - **Column pruning**: I/O savings proportional to fraction of unused columns (e.g., 62% for 6/16 columns)
 - **Zone maps on sorted data**: Near-perfect block skipping for range predicates on the sort column
 
+## High-Performance Ingestion Techniques
+
+Ingestion (parsing .tbl text → binary column files) can be the slowest step. Use these techniques:
+
+- **mmap input files**: `mmap()` the entire .tbl file instead of using `ifstream`. Access the file as a `const char*` pointer. This avoids buffered I/O syscall overhead and lets the OS manage page caching.
+  ```cpp
+  int fd = open(path, O_RDONLY);
+  size_t sz = lseek(fd, 0, SEEK_END);
+  const char* data = (const char*)mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+  madvise((void*)data, sz, MADV_SEQUENTIAL);
+  ```
+
+- **Parallel table ingestion**: Launch `std::thread` per table. Independent tables (nation, region, supplier, part, customer) can all be parsed concurrently.
+
+- **Pre-allocate column vectors**: Estimate row count from file size: `estimated_rows = file_size / avg_bytes_per_line`. Then `vec.reserve(estimated_rows)` for every column vector. This avoids O(n) reallocations.
+
+- **Chunk-based parallel parsing**: For large tables (lineitem: 60M rows), split the mmap'd buffer into N chunks (N = nproc). Find the nearest newline after each chunk boundary. Parse each chunk in a separate thread into local vectors, then concatenate.
+
+- **In-place numeric parsing**: Avoid creating `std::string` for numeric fields. Use `strtol(ptr, &end, 10)` or `strtod(ptr, &end)` directly on the mmap'd buffer. Advance the pointer past the delimiter.
+
+- **Buffered binary writes**: Accumulate all parsed data in memory (column vectors), then write each column in one large `fwrite()` call. Use `setvbuf(f, buf, _IOFBF, 1<<20)` for 1MB write buffer.
+
+- **Batch writes**: Write entire column at once: `fwrite(vec.data(), sizeof(T), vec.size(), f)`. One syscall per column instead of one per row.
+
+- **Progress reporting**: Print per-table timing: `printf("lineitem: %zu rows in %.1fs\n", count, elapsed)`.
+
+Target ingestion performance: SF1 (6M rows lineitem) in <5 seconds, SF10 (60M rows) in <30 seconds.
+
 ## Pitfalls
 - **Unsorted data defeats zone maps**: Without sorting, blocks contain mixed values and few can be skipped
 - **Sort key trade-off**: Sorting benefits one column's predicates but may hurt queries filtering on other columns

@@ -42,7 +42,7 @@ Query files (`queries/*.cpp`) should instantiate and compose these operators, no
 5. Verify: `cd <generated_dir> && make clean && make all && ./main <gendb_dir>`
 
 **Phase 2 (Optimization)**:
-1. Read `orchestrator_decision.json` and `optimization_recommendations.json`
+1. Read `orchestrator_decision.toon` and `optimization_recommendations.toon`
 2. Read current operator implementation from `generated/operators/`
 3. Apply the recommended algorithm change
 4. Update operator files using Edit tool

@@ -38,7 +38,7 @@ Modify the **operator library** files in `generated/operators/`:
 
 ## Instructions
 
-1. Read `orchestrator_decision.json` and `optimization_recommendations.json`
+1. Read `orchestrator_decision.toon` and `optimization_recommendations.toon`
 2. **Detect hardware** using Bash commands (nproc, lscpu)
 3. Read current operator implementations from `generated/operators/`
 4. Read knowledge base files for parallelism patterns
