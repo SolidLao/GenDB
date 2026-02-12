@@ -405,12 +405,24 @@ def gendb_benchmark_single(gendb_bin: Path, gendb_dir: Path, num_runs: int) -> d
         #   "Q1 execution time: 0.17 seconds"
         #   "Execution time: 170 ms"
         #   "=== Q1 ===" header followed by timing line
+        #   "Q1: 4 rows in 0.0619299s"
         current_query = None
         for line in proc.stdout.splitlines():
             # Match query headers: "=== Q1 ...", "=== Q3: ...", etc.
             q_match = re.search(r"===\s*(Q\d+)", line)
             if q_match:
                 current_query = q_match.group(1)
+
+            # Format: "Q1: 4 rows in 0.0619299s"
+            rows_match = re.search(r"(Q\d+):\s*\d+\s*rows? in\s*([\d.]+)s", line, re.IGNORECASE)
+            if rows_match:
+                qname = rows_match.group(1)
+                ms = float(rows_match.group(2)) * 1000  # convert seconds to ms
+                if qname not in results:
+                    results[qname] = []
+                results[qname].append(ms)
+                current_query = None
+                continue
 
             # Format: "Q1 execution time: 0.17 seconds"
             q_time_match = re.search(r"(Q\d+)\s+execution time:\s*([\d.]+)\s*seconds?", line, re.IGNORECASE)

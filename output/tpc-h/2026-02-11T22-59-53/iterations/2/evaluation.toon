@@ -1,0 +1,38 @@
+overall_status: pass
+steps:
+  compile:
+    status: pass
+    output: "g++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c ingest.cpp -o ingest.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c storage/storage.cpp -o storage/storage.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o ingest ingest.o storage/storage.o -lpthread\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c main.cpp -o main.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q1.cpp -o queries/q1.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q3.cpp -o queries/q3.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q6.cpp -o queries/q6.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o -lpthread\n\nCompilation succeeded with minor warnings (format-truncation, unused variables). Both ingest and main executables created successfully."
+  ingest:
+    status: skipped
+    ingestion_time_ms: null
+    output: Skipped - reusing existing persistent storage at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb
+    reused_existing: true
+  run_queries:
+    status: pass
+    output: "GenDB Query Execution\nGenDB directory: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nResults directory: /home/jl4492/GenDB/output/tpc-h/2026-02-11T22-59-53/iterations/2/query_results\n\nQ1: 4 rows in 0.0600945s\nQ3: 10 rows in 0.384392s\nQ6: 1 row in 0.0188387s\n\nTotal query execution time: 0.485634s"
+  profiling:
+    available: false
+    cache_misses: null
+    branch_mispredictions: null
+    ipc: null
+query_results:
+  Q1:
+    status: pass
+    num_rows: "4"
+    timing_ms: "60.0945"
+    semantically_different: false
+    notes: "Minor floating-point precision differences in last decimal place of aggregate calculations (e.g., 1114302286901.88 vs 1114302286901.89). These are within acceptable numerical tolerance and semantically equivalent. All row counts match expected."
+  Q3:
+    status: pass
+    num_rows: "10"
+    timing_ms: "384.392"
+    semantically_different: false
+    notes: Exact match with ground truth. All rows and values identical.
+  Q6:
+    status: pass
+    num_rows: "1"
+    timing_ms: "18.8387"
+    semantically_different: false
+    notes: Exact match with ground truth. All rows and values identical.
+summary: "All queries executed successfully with correct results. Total execution time: 485.634ms. Q1 has minor floating-point precision differences (last decimal place) that are within acceptable tolerance. Q3 and Q6 are exact matches. The code demonstrates good performance with SIMD optimizations enabled (AVX2/FMA). No runtime errors or crashes observed."

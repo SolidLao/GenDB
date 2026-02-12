@@ -211,12 +211,13 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
       stderr += chunk.toString();
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       const durationMs = Date.now() - startTime;
       if (code !== 0) {
-        console.error(`\n[Orchestrator] Agent "${name}" exited with code ${code} (${formatDuration(durationMs)})`);
+        const exitInfo = signal ? `signal ${signal}` : `exit ${code}`;
+        console.error(`\n[Orchestrator] Agent "${name}" exited with ${exitInfo} (${formatDuration(durationMs)})`);
         if (stderr) console.error(`[stderr] ${stderr}`);
-        rejectP(new Error(`Agent "${name}" failed (exit ${code}): ${stderr}`));
+        rejectP(new Error(`Agent "${name}" failed (${exitInfo}): ${stderr}`));
       } else {
         // Parse JSON output for telemetry
         let resultText = stdout;
@@ -255,6 +256,24 @@ async function readJSON(path) {
   try {
     return JSON.parse(await readFile(path, "utf-8"));
   } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert a JSON file written by an agent to TOON format in-place.
+ * Agents write JSON (which LLMs produce reliably), and the orchestrator
+ * converts to TOON post-hoc for token efficiency when downstream agents read the file.
+ * Returns the parsed object, or null on failure.
+ */
+async function convertJsonFileToTOON(jsonPath, toonPath) {
+  try {
+    const content = await readFile(jsonPath, "utf-8");
+    const obj = JSON.parse(content);
+    await writeFile(toonPath, toonEncode(obj));
+    return obj;
+  } catch (err) {
+    console.error(`[Orchestrator] Warning: could not convert ${jsonPath} to TOON: ${err.message}`);
     return null;
   }
 }
@@ -306,6 +325,13 @@ async function runBaseline(args, runDir, schema, queries) {
     };
   });
 
+  // Clear gendb storage from previous runs to avoid naming convention conflicts
+  // Each run generates code with potentially different file naming, so stale data must be removed
+  if (existsSync(args.gendbDir)) {
+    rmSync(args.gendbDir, { recursive: true, force: true });
+    console.log(`[Orchestrator] Cleared previous gendb storage at ${args.gendbDir}`);
+  }
+
   // --- Step 1: Workload Analysis ---
   console.log("\n[Orchestrator] === Step 1: Workload Analysis ===");
 
@@ -315,6 +341,7 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const analyzerSystemPrompt = await readFile(workloadAnalyzerConfig.promptPath, "utf-8");
+  const workloadAnalysisJsonPath = resolve(runDir, "workload_analysis.json");
   const workloadAnalysisPath = resolve(runDir, "workload_analysis.toon");
 
   const analyzerUserPrompt = [
@@ -335,7 +362,8 @@ async function runBaseline(args, runDir, schema, queries) {
     queries.trim(),
     "```",
     "",
-    `IMPORTANT: You MUST use the Write tool to create the file ${workloadAnalysisPath} with your TOON analysis (Token-Oriented Object Notation — like JSON but more compact). Use the same structure as JSON but in TOON format. Do NOT just print it — use the Write tool to write it as a file.`,
+    `IMPORTANT: You MUST use the Write tool to write your JSON analysis to EXACTLY this path: ${workloadAnalysisJsonPath}`,
+    `Use this EXACT file path — do NOT change the filename or extension. Do NOT just print it.`,
   ].join("\n");
 
   const waResult = await runAgent(workloadAnalyzerConfig.name, {
@@ -347,8 +375,8 @@ async function runBaseline(args, runDir, schema, queries) {
   });
   recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
 
-  // Verify workload analysis output
-  const analysis = await readTOON(workloadAnalysisPath);
+  // Convert agent's JSON output to TOON for downstream token efficiency
+  const analysis = await convertJsonFileToTOON(workloadAnalysisJsonPath, workloadAnalysisPath);
   if (!analysis) {
     await updateRunMeta(runDir, (meta) => {
       meta.phase1.steps.workload_analysis.status = "failed";
@@ -377,6 +405,7 @@ async function runBaseline(args, runDir, schema, queries) {
   });
 
   const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
+  const storageDesignJsonPath = resolve(runDir, "storage_design.json");
   const storageDesignPath = resolve(runDir, "storage_design.toon");
 
   const designerUserPrompt = [
@@ -395,7 +424,8 @@ async function runBaseline(args, runDir, schema, queries) {
     schema.trim(),
     "```",
     "",
-    `IMPORTANT: You MUST use the Write tool to create the file ${storageDesignPath} with your TOON design (Token-Oriented Object Notation — like JSON but more compact). Do NOT just print it — use the Write tool to write it as a file.`,
+    `IMPORTANT: You MUST use the Write tool to write your JSON design to EXACTLY this path: ${storageDesignJsonPath}`,
+    `Use this EXACT file path — do NOT change the filename or extension. Do NOT just print it.`,
   ].join("\n");
 
   const sdResult = await runAgent(storageDesignerConfig.name, {
@@ -407,7 +437,8 @@ async function runBaseline(args, runDir, schema, queries) {
   });
   recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
 
-  const design = await readTOON(storageDesignPath);
+  // Convert agent's JSON output to TOON for downstream token efficiency
+  const design = await convertJsonFileToTOON(storageDesignJsonPath, storageDesignPath);
   if (!design) {
     await updateRunMeta(runDir, (meta) => {
       meta.phase1.steps.storage_design.status = "failed";
@@ -585,12 +616,14 @@ async function runBaseline(args, runDir, schema, queries) {
     meta.phase1.steps.evaluation.startedAt = new Date().toISOString();
   });
 
+  const evaluationJsonPath = resolve(runDir, "evaluation.json");
   const evaluationPath = resolve(runDir, "evaluation.toon");
   // Phase 1 evaluator: run ingest if gendb storage doesn't exist, then main
-  const evResult = await runEvaluator(args, runDir, generatedDir, evaluationPath);
+  const evResult = await runEvaluator(args, runDir, generatedDir, evaluationJsonPath);
   recordAgentTelemetry("phase1", "evaluator", evResult.durationMs, evResult.tokens, evResult.costUsd);
 
-  const evaluation = await readTOON(evaluationPath);
+  // Convert agent's JSON output to TOON for downstream token efficiency
+  const evaluation = await convertJsonFileToTOON(evaluationJsonPath, evaluationPath);
   if (evaluation) {
     console.log("\n[Orchestrator] Evaluation completed.");
     console.log(`[Orchestrator] Overall status: ${evaluation.overall_status}`);
@@ -621,14 +654,14 @@ async function runBaseline(args, runDir, schema, queries) {
 // Shared: Evaluator runner
 // ---------------------------------------------------------------------------
 
-async function runEvaluator(args, runDir, generatedDir, evaluationPath, { skipIngest = false } = {}) {
+async function runEvaluator(args, runDir, generatedDir, evaluationJsonPath, { skipIngest = false } = {}) {
   const evaluatorSystemPrompt = await readFile(evaluatorConfig.promptPath, "utf-8");
 
   const gendbDirExists = existsSync(args.gendbDir);
   const shouldIngest = !skipIngest && !gendbDirExists;
 
   // Set up results directory for file-based comparison
-  const resultsDir = resolve(dirname(evaluationPath), "query_results");
+  const resultsDir = resolve(dirname(evaluationJsonPath), "query_results");
   await mkdir(resultsDir, { recursive: true });
 
   // Ground truth directory
@@ -668,7 +701,8 @@ async function runEvaluator(args, runDir, generatedDir, evaluationPath, { skipIn
       ? `   The comparison tool outputs JSON with per-query match status. Use this for correctness validation.`
       : "",
     "",
-    `IMPORTANT: Write the evaluation report in TOON format (Token-Oriented Object Notation) to: ${evaluationPath}`,
+    `IMPORTANT: Write your evaluation report as JSON to EXACTLY this path: ${evaluationJsonPath}`,
+    `Use this EXACT file path — do NOT change the filename or extension.`,
     `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
     `Report ingestion_time_ms separately from query timing. The primary metric is query execution time from ./main.`,
     `Do NOT read or compare full query result rows from terminal output — use the comparison tool instead.`,
@@ -739,8 +773,11 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
 
     const iterDir = await createIterationDir(runDir, iteration);
     const iterGeneratedDir = resolve(iterDir, "generated");
+    const iterEvaluationJsonPath = resolve(iterDir, "evaluation.json");
     const iterEvaluationPath = resolve(iterDir, "evaluation.toon");
+    const iterRecsJsonPath = resolve(iterDir, "optimization_recommendations.json");
     const iterRecsPath = resolve(iterDir, "optimization_recommendations.toon");
+    const iterDecisionJsonPath = resolve(iterDir, "orchestrator_decision.json");
     const iterDecisionPath = resolve(iterDir, "orchestrator_decision.toon");
 
     const iterMeta = {
@@ -788,7 +825,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
       formatBenchmarkContext(args.benchmarkResults),
       "",
       `## Output`,
-      `IMPORTANT: Write your recommendations in TOON format (Token-Oriented Object Notation) to: ${iterRecsPath}`,
+      `IMPORTANT: Write your recommendations as JSON to EXACTLY this path: ${iterRecsJsonPath}`,
+      `Use this EXACT file path — do NOT change the filename or extension.`,
       `Use the Write tool to create this file.`,
       `Set "iteration" to ${iteration} in the JSON output.`,
     ].join("\n");
@@ -803,7 +841,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     });
     recordAgentTelemetry(iterPhase, "learner", lnResult.durationMs, lnResult.tokens, lnResult.costUsd);
 
-    const recommendations = await readTOON(iterRecsPath);
+    // Convert agent's JSON output to TOON for downstream token efficiency
+    const recommendations = await convertJsonFileToTOON(iterRecsJsonPath, iterRecsPath);
     if (!recommendations) {
       console.error(`[Orchestrator] Learner failed to produce recommendations for iteration ${iteration}. Stopping loop.`);
       await updateIterationStatus(runDir, iteration, "failed", "Learner failed to produce recommendations");
@@ -837,7 +876,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
         : "",
       "",
       `## Output`,
-      `IMPORTANT: Write your decision in TOON format (Token-Oriented Object Notation) to: ${iterDecisionPath}`,
+      `IMPORTANT: Write your decision as JSON to EXACTLY this path: ${iterDecisionJsonPath}`,
+      `Use this EXACT file path — do NOT change the filename or extension.`,
       `Use the Write tool to create this file.`,
       `Note: The Learner's recommendations now use "critical_fixes" (always apply) and "performance_optimizations" (select by priority). Your selected_recommendations should index into performance_optimizations. All critical_fixes are automatically included.`,
     ].join("\n");
@@ -851,7 +891,8 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
     });
     recordAgentTelemetry(iterPhase, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
 
-    const decision = await readTOON(iterDecisionPath);
+    // Convert agent's JSON output to TOON (not read by other agents, but consistent)
+    const decision = await convertJsonFileToTOON(iterDecisionJsonPath, iterDecisionPath);
     if (!decision) {
       console.error(`[Orchestrator] Orchestrator Agent failed to produce decision. Stopping loop.`);
       await updateIterationStatus(runDir, iteration, "failed", "Orchestrator Agent failed to produce decision");
@@ -983,10 +1024,11 @@ async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineE
 
     // 7. Run Evaluator
     console.log(`\n[Orchestrator] === Iteration ${iteration} Step 4: Evaluator ===`);
-    const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationPath);
+    const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationJsonPath);
     recordAgentTelemetry(iterPhase, "evaluator", iterEvResult.durationMs, iterEvResult.tokens, iterEvResult.costUsd);
 
-    const iterEvaluation = await readTOON(iterEvaluationPath);
+    // Convert agent's JSON output to TOON for downstream token efficiency
+    const iterEvaluation = await convertJsonFileToTOON(iterEvaluationJsonPath, iterEvaluationPath);
 
     // 7. Record iteration results in optimization_history
     const iterResult = {

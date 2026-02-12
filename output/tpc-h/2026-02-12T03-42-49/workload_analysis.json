@@ -1,0 +1,285 @@
+{
+  "tables": {
+    "lineitem": {
+      "access_patterns": ["full_scan", "date_range_filter", "range_filter"],
+      "access_frequency": 3,
+      "hot_columns": [
+        "l_shipdate",
+        "l_orderkey",
+        "l_extendedprice",
+        "l_discount",
+        "l_quantity",
+        "l_returnflag",
+        "l_linestatus",
+        "l_tax"
+      ],
+      "estimated_cardinality": "6000000 (6M rows at SF1)",
+      "role": "fact",
+      "notes": "Largest table, always scanned. Date filters are highly selective. Price/discount/quantity frequently used in computations."
+    },
+    "orders": {
+      "access_patterns": ["index_lookup", "date_filter"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "o_orderkey",
+        "o_custkey",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "estimated_cardinality": "1500000 (1.5M rows at SF1)",
+      "role": "fact",
+      "notes": "Bridge table between customer and lineitem. PK-FK relationships enable hash join optimization."
+    },
+    "customer": {
+      "access_patterns": ["full_scan", "categorical_filter"],
+      "access_frequency": 1,
+      "hot_columns": [
+        "c_custkey",
+        "c_mktsegment"
+      ],
+      "estimated_cardinality": "150000 (150K rows at SF1)",
+      "role": "dimension",
+      "notes": "Market segment filter is low-cardinality (5 values), ~20% selectivity per value."
+    },
+    "nation": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "25",
+      "role": "dimension",
+      "notes": "Referenced by FK but not queried in this workload subset."
+    },
+    "region": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "5",
+      "role": "dimension",
+      "notes": "Not accessed in this workload subset."
+    },
+    "supplier": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "10000 (10K at SF1)",
+      "role": "dimension",
+      "notes": "Not accessed in this workload subset."
+    },
+    "part": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "200000 (200K at SF1)",
+      "role": "dimension",
+      "notes": "Not accessed in this workload subset."
+    },
+    "partsupp": {
+      "access_patterns": [],
+      "access_frequency": 0,
+      "hot_columns": [],
+      "estimated_cardinality": "800000 (800K at SF1)",
+      "role": "bridge",
+      "notes": "Not accessed in this workload subset."
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "frequency": 1,
+      "estimated_selectivity": "medium",
+      "notes": "Build hash table on filtered customers (~30K rows after mktsegment filter), probe with orders. Estimated output ~300K rows."
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "frequency": 1,
+      "estimated_selectivity": "high",
+      "notes": "Build on orders (filtered by date and customer join), probe with lineitem (filtered by shipdate). High selectivity due to date filters. Estimated output ~50K-100K rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1",
+      "notes": "Date threshold filter. ~98% of data passes (only excludes last 90 days). Low filtering power but enables partition pruning if data clustered by date."
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "medium",
+      "query": "Q3",
+      "notes": "Categorical equality on low-cardinality column (5 values). Selectivity ~20% (30K of 150K customers). Ideal for dictionary encoding."
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3",
+      "notes": "Date range filter. Selectivity depends on date distribution, estimated ~50-70% of orders."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "medium",
+      "query": "Q3",
+      "notes": "Date range filter complementary to orders filter. Estimated selectivity ~60-80%."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "BETWEEN",
+      "selectivity": "high",
+      "query": "Q6",
+      "notes": "1-year date range. Selectivity ~0.27% (1/365 days assuming 1 year of 7-year dataset). Highly selective."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "medium",
+      "query": "Q6",
+      "notes": "Range on discount (0.05 to 0.07). Estimated selectivity ~14% assuming uniform distribution over [0.00, 0.10]."
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6",
+      "notes": "Quantity < 24. Estimated selectivity ~48% assuming uniform distribution [1, 50]."
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM", "AVG", "COUNT"],
+      "query": "Q1",
+      "estimated_groups": "4",
+      "notes": "Very low cardinality GROUP BY. Both columns are CHAR(1) with ~2-3 distinct values each. Ideal for partial aggregation with thread-local hash tables. All aggregates are decomposable."
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM"],
+      "query": "Q3",
+      "estimated_groups": "50000-100000",
+      "notes": "Medium-high cardinality GROUP BY (one group per order in result set). Decomposable aggregate (SUM). Partial aggregation beneficial. Only top 10 needed due to LIMIT."
+    },
+    {
+      "group_by": [],
+      "functions": ["SUM"],
+      "query": "Q6",
+      "estimated_groups": "1",
+      "notes": "Scalar aggregation, single result. Highly parallelizable with thread-local accumulators."
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "has_limit": false,
+      "query": "Q1",
+      "notes": "Sorting only 4 groups — negligible cost. Can be fused with aggregation output."
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate"],
+      "has_limit": true,
+      "query": "Q3",
+      "notes": "Top-K query (LIMIT 10). Use min-heap to track top 10 during aggregation, avoid sorting full result set. Estimated 50K-100K groups but only 10 needed."
+    }
+  ],
+  "optimization_opportunities": [
+    "Push filters before joins in Q3: Apply c_mktsegment filter to customer, o_orderdate to orders, and l_shipdate to lineitem BEFORE joins to reduce intermediate result sizes",
+    "Partial aggregation for Q1: Use thread-local hash tables per thread during parallel scan, merge 4-group results at end. Expected near-linear speedup with 8 threads",
+    "Top-K optimization for Q3: Use min-heap (size 10) during aggregation instead of full sort. Saves sorting 50K-100K groups",
+    "Join ordering for Q3: Execute customer ⋈ orders first (30K × 1.5M → ~300K), then join with filtered lineitem. Minimize intermediate result size",
+    "Build-side selection in Q3: Build hash table on filtered customer table (smallest after filter), probe with orders. Then build on customer-orders join result, probe with lineitem",
+    "SIMD-optimized filtering for Q6: Four predicates on numeric columns (date, discount, quantity) are ideal for vectorized evaluation. Process 4-8 rows per instruction",
+    "Columnar storage layout: All queries scan few columns from lineitem (6M rows). Columnar format reduces I/O by 60-80% (reading 8 of 16 columns)",
+    "Dictionary encoding for low-cardinality columns: l_returnflag, l_linestatus, c_mktsegment are CHAR types with <10 distinct values. Reduces storage and speeds up GROUP BY",
+    "Date column clustering: All queries filter on dates (l_shipdate, o_orderdate). Clustering/sorting by date enables zone map pruning of entire data blocks",
+    "Bloom filters for hash joins in Q3: Build bloom filter on customer keys after mktsegment filter. Prune 80% of non-matching orders before hash table probe",
+    "Parallel hash join for Q3: Radix-partition both sides of joins by hash(join_key) so partitions fit in L3 cache. Each partition pair joins independently across threads",
+    "Expression pre-computation: l_extendedprice * (1 - l_discount) appears in Q1 and Q3. Could be materialized or computed once per row in vectorized batch",
+    "Zone maps on lineitem.l_shipdate: Q1 and Q6 have date range predicates. Min/max zone maps per 64K-row block can skip 70-99% of blocks",
+    "Morsel-driven parallelism: Lineitem (6M rows) should be divided into ~10K-row morsels. 8 threads processing in parallel → 7-8x speedup for scans and aggregations"
+  ],
+  "parallelism_opportunities": [
+    {
+      "table": "lineitem",
+      "operation": "scan",
+      "estimated_rows": "6000000",
+      "rationale": "Largest table, scanned in all 3 queries. Morsel-driven scan with 10K-row chunks across 8 threads. Expected speedup: 7-8x. Critical for Q1 and Q6 performance."
+    },
+    {
+      "table": "lineitem",
+      "operation": "aggregation",
+      "estimated_rows": "6000000",
+      "rationale": "Q1 aggregates 6M rows into 4 groups. Thread-local hash tables (one per thread) with parallel scan, then merge 8 × 4-group tables. Expected speedup: 7-8x."
+    },
+    {
+      "table": "lineitem",
+      "operation": "join",
+      "estimated_rows": "6000000",
+      "rationale": "Q3 joins lineitem (6M rows) with orders. Partition both sides by hash(l_orderkey) into 64-128 partitions. Join partition pairs in parallel across threads. Expected speedup: 6-7x."
+    },
+    {
+      "table": "orders",
+      "operation": "scan",
+      "estimated_rows": "1500000",
+      "rationale": "Q3 scans 1.5M orders with date filter. Parallel scan beneficial. Expected speedup: 6-7x with 8 threads."
+    },
+    {
+      "table": "orders",
+      "operation": "join",
+      "estimated_rows": "300000 (after join with customer)",
+      "rationale": "After customer ⋈ orders, result is ~300K rows. Partitioned join with lineitem parallelizes well. Expected speedup: 5-6x."
+    },
+    {
+      "table": "customer",
+      "operation": "scan",
+      "estimated_rows": "150000",
+      "rationale": "Q3 scans 150K customers with mktsegment filter. Moderate parallelism benefit (4-5x speedup). Lower priority than lineitem/orders due to smaller size."
+    }
+  ],
+  "column_co_access_patterns": {
+    "lineitem_pricing_group": ["l_extendedprice", "l_discount", "l_tax"],
+    "lineitem_dates_group": ["l_shipdate", "l_commitdate", "l_receiptdate"],
+    "lineitem_flags_group": ["l_returnflag", "l_linestatus"],
+    "lineitem_quantity_group": ["l_quantity", "l_extendedprice"],
+    "orders_core_group": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+    "customer_core_group": ["c_custkey", "c_mktsegment"],
+    "notes": "These column groups are accessed together and should be stored contiguously in columnar layout for better cache locality"
+  },
+  "query_complexity_ranking": [
+    {
+      "query": "Q3",
+      "complexity": "high",
+      "bottlenecks": ["3-way join with large intermediate results", "Multi-column GROUP BY with 50K-100K groups", "Two date filters requiring coordination"],
+      "critical_path": "lineitem scan → join with orders → aggregation",
+      "estimated_relative_cost": "100x"
+    },
+    {
+      "query": "Q1",
+      "complexity": "medium",
+      "bottlenecks": ["Full scan of 6M-row lineitem table", "Multiple aggregate computations (7 functions)"],
+      "critical_path": "lineitem scan → aggregation",
+      "estimated_relative_cost": "10x"
+    },
+    {
+      "query": "Q6",
+      "complexity": "low",
+      "bottlenecks": ["Lineitem scan (but highly selective filters reduce work)"],
+      "critical_path": "lineitem scan → filter → scalar aggregation",
+      "estimated_relative_cost": "1x (baseline - most selective)"
+    }
+  ],
+  "summary": "This TPC-H workload subset is dominated by lineitem table scans (6M rows) with varying selectivity. Q3 is the most complex query with a 3-way join and medium-cardinality aggregation, making it the primary optimization target. All queries are highly parallelizable: Q1 and Q6 benefit from morsel-driven parallel scans with thread-local aggregation (7-8x speedup expected), while Q3 benefits from partitioned parallel hash joins (6-7x speedup). Key optimizations include: (1) columnar storage to reduce I/O by 60-80%, (2) filter pushdown in Q3 to minimize join intermediates, (3) partial aggregation with thread-local hash tables, (4) top-K heap for Q3 LIMIT, (5) zone maps and bloom filters for date filtering, (6) SIMD-optimized predicate evaluation for Q6. The workload exhibits clear column co-access patterns (pricing columns, date columns, flag columns) that should inform storage layout. All aggregates are decomposable, enabling two-phase parallel aggregation. Expected overall speedup from parallelism + columnar + indexing: 20-50x on 8-core hardware."
+}

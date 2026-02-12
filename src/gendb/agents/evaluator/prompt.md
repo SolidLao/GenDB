@@ -48,7 +48,7 @@ If `perf` is available, run `perf stat ./main <gendb_dir>` to capture cache-miss
 
 ## Output Contract
 
-Write evaluation as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) at the path specified in the user prompt. Use this structure:
+Write your evaluation as JSON to the exact file path specified in the user prompt (do NOT change the filename or extension). Use this structure:
 
 ```json
 {
@@ -78,7 +78,7 @@ Write evaluation as a TOON file (Token-Oriented Object Notation — compact, tok
 
 1. Execute each step in order using the Bash tool
 2. Record all output at each step
-3. Write the evaluation TOON file using the Write tool
+3. Write the evaluation JSON file using the Write tool
 4. Print a brief summary
 
 ## Important Notes

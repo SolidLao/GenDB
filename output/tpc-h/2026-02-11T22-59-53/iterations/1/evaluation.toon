@@ -1,0 +1,38 @@
+overall_status: pass
+steps:
+  compile:
+    status: pass
+    output: "rm -f ingest main ingest.o storage/storage.o main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c ingest.cpp -o ingest.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c storage/storage.cpp -o storage/storage.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o ingest ingest.o storage/storage.o -lpthread\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c main.cpp -o main.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q1.cpp -o queries/q1.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q3.cpp -o queries/q3.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q6.cpp -o queries/q6.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o -lpthread\nCompilation successful with minor warning about snprintf format truncation in date_utils.h (non-critical)"
+  ingest:
+    status: pass
+    ingestion_time_ms: 255930
+    output: "Starting TPC-H data ingestion...\nData directory: /home/jl4492/GenDB/benchmarks/tpc-h/data/sf10\nOutput directory: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nregion: 5 rows in 0.00194758s\nnation: 25 rows in 0.0020846s\nsupplier: 100000 rows in 0.131621s\npart: 2000000 rows in 2.4893s\ncustomer: 1500000 rows in 1.78219s\npartsupp: 8000000 rows in 6.02577s\norders: 15000000 rows in 31.8127s\nlineitem: 59986052 rows in 203.682s\n\nIngestion complete!\nTotal time: 255.93s"
+    reused_existing: false
+  run_queries:
+    status: pass
+    output: "GenDB Query Execution\nGenDB directory: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nResults directory: /home/jl4492/GenDB/output/tpc-h/2026-02-11T22-59-53/iterations/1/query_results\n\nQ1: 4 rows in 0.0590236s\nQ3: 10 rows in 1.20308s\nQ6: 1 row in 0.145369s\n\nTotal query execution time: 1.55133s"
+  profiling:
+    available: false
+    cache_misses: null
+    branch_mispredictions: null
+    ipc: null
+query_results:
+  Q1:
+    status: pass
+    num_rows: "4"
+    timing_ms: "59.0236"
+    semantically_different: false
+    notes: Minor floating-point precision differences in 2 rows (last decimal place in aggregated sum columns). Expected vs actual differ by 0.01-0.02 in large aggregates (>1e11). This is acceptable floating-point precision variance.
+  Q3:
+    status: pass
+    num_rows: "10"
+    timing_ms: "1203.08"
+    semantically_different: false
+    notes: Perfect match with ground truth
+  Q6:
+    status: pass
+    num_rows: "1"
+    timing_ms: "145.369"
+    semantically_different: false
+    notes: Perfect match with ground truth
+summary: "All queries executed successfully. Q3 and Q6 match ground truth perfectly. Q1 has negligible floating-point precision differences (0.01-0.02 in aggregates >1e11) in the last decimal place, which is acceptable. Total query execution time: 1.55133s. Ingestion completed in 255.93s processing 86.6M rows across 8 tables."

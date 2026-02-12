@@ -1,0 +1,49 @@
+{
+  "overall_status": "partial",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "g++ -O2 -std=c++17 -Wall -pthread -c -o storage/storage.o storage/storage.cpp\ng++ -O2 -std=c++17 -Wall -pthread -o ingest ingest.cpp storage/storage.o -lpthread\ng++ -O2 -std=c++17 -Wall -pthread -c -o queries/q1.o queries/q1.cpp\ng++ -O2 -std=c++17 -Wall -pthread -c -o queries/q3.o queries/q3.cpp\ng++ -O2 -std=c++17 -Wall -pthread -c -o queries/q6.o queries/q6.cpp\ng++ -O2 -std=c++17 -Wall -pthread -o main main.cpp storage/storage.o queries/q1.o queries/q3.o queries/q6.o -lpthread\nWarnings: ingest.cpp:441:11 (system return value), queries/../utils/date_utils.h:69 (format truncation), main.cpp:16:15 (system return value)"
+    },
+    "ingest": {
+      "status": "skipped",
+      "ingestion_time_ms": null,
+      "output": "Persistent storage already exists at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb (9.7GB total)",
+      "reused_existing": true
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "Executing TPC-H queries on /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\n========================================\nQ1: 4 rows in 0.068 seconds\nQ3: 10 rows in 2.255 seconds\nQ6: 1 row in 0.157 seconds\n========================================\nAll queries completed successfully."
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "fail",
+      "num_rows": "4",
+      "timing_ms": "68",
+      "semantically_different": true,
+      "notes": "Result validation failed: 3 out of 4 rows differ significantly. Sample mismatch in row 0: actual quantity=5,673,165 vs expected=377,518,399 (off by ~66x). Aggregate values (sum_qty, sum_base_price, sum_disc_price, sum_charge) are all drastically lower than expected, suggesting incomplete data aggregation or incorrect filtering."
+    },
+    "Q3": {
+      "status": "fail",
+      "num_rows": "10",
+      "timing_ms": "2255",
+      "semantically_different": true,
+      "notes": "Result validation failed: 3 out of 10 rows differ. Sample mismatch in row 0: actual orderkey=1,477,255 vs expected=16,384,100, actual revenue=865.81 vs expected=421,478.73. Both orderkey and revenue values are incorrect, indicating either wrong join logic, aggregation error, or incorrect date filtering."
+    },
+    "Q6": {
+      "status": "pass",
+      "num_rows": "1",
+      "timing_ms": "157",
+      "semantically_different": false,
+      "notes": "Result validation passed. Single aggregate result matches ground truth exactly."
+    }
+  },
+  "summary": "Compilation successful with minor warnings. Query execution completed without crashes. Performance metrics: Q1=68ms, Q3=2255ms, Q6=157ms. However, correctness validation reveals critical failures in Q1 (3/4 rows incorrect with ~66x magnitude errors in aggregates) and Q3 (3/10 rows incorrect with wrong orderkey and revenue). Only Q6 produces correct results. The dramatic magnitude differences in Q1 suggest systematic data aggregation bugs (possibly missing data chunks, incorrect group-by logic, or predicate filtering errors). Q3 failures indicate potential join or date filtering issues. Overall status: PARTIAL - executes successfully but produces incorrect results for 2 out of 3 queries."
+}

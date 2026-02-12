@@ -1,0 +1,49 @@
+{
+  "overall_status": "pass",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "g++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c ingest.cpp -o ingest.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c storage/storage.cpp -o storage/storage.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o ingest ingest.o storage/storage.o -lpthread\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c main.cpp -o main.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q1.cpp -o queries/q1.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q3.cpp -o queries/q3.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -c queries/q6.cpp -o queries/q6.o\ng++ -O3 -std=c++17 -Wall -I. -mavx2 -mfma -march=native -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o -lpthread\nWarnings: format-truncation in date_utils.h, unused variables in q6.cpp (non-critical)"
+    },
+    "ingest": {
+      "status": "skipped",
+      "ingestion_time_ms": null,
+      "output": "Persistent storage already exists at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+      "reused_existing": true
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "GenDB Query Execution\nGenDB directory: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nResults directory: /home/jl4492/GenDB/output/tpc-h/2026-02-11T22-59-53/iterations/3/query_results\n\nQ1: 4 rows in 0.157039s\nQ3: 10 rows in 0.331474s\nQ6: 1 row in 0.0123915s\n\nTotal query execution time: 0.505865s"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "pass",
+      "num_rows": "4",
+      "timing_ms": "157.039",
+      "semantically_different": false,
+      "notes": "Minor floating-point precision differences in last decimal place (acceptable). 2 rows differ by 0.01 in extended_price and charge fields due to rounding."
+    },
+    "Q3": {
+      "status": "pass",
+      "num_rows": "10",
+      "timing_ms": "331.474",
+      "semantically_different": false,
+      "notes": "Perfect match with ground truth"
+    },
+    "Q6": {
+      "status": "pass",
+      "num_rows": "1",
+      "timing_ms": "12.3915",
+      "semantically_different": false,
+      "notes": "Perfect match with ground truth"
+    }
+  },
+  "summary": "All queries executed successfully. Total execution time: 505.865ms. Q1 shows minor floating-point rounding differences (±0.01 in aggregated decimal fields) which are acceptable for large-scale aggregations. Q3 and Q6 match ground truth perfectly. Compilation succeeded with only non-critical warnings. Code is correct and performant."
+}

@@ -1,0 +1,128 @@
+tables:
+  lineitem:
+    access_patterns[3]: full_scan,filtered_scan,aggregation_source
+    access_frequency: 3
+    hot_columns[8]: l_shipdate,l_extendedprice,l_discount,l_quantity,l_returnflag,l_linestatus,l_orderkey,l_tax
+    estimated_cardinality: "6000000"
+    role: fact
+    notes: "Largest table in TPC-H, accessed in all 3 queries. Heavy aggregation workload. Date range filters dominant."
+  customer:
+    access_patterns[2]: index_lookup,filtered_scan
+    access_frequency: 1
+    hot_columns[2]: c_custkey,c_mktsegment
+    estimated_cardinality: "150000"
+    role: dimension
+    notes: "Filtered by c_mktsegment in Q3, then joined to orders"
+  orders:
+    access_patterns[2]: index_lookup,filtered_scan
+    access_frequency: 1
+    hot_columns[4]: o_orderkey,o_custkey,o_orderdate,o_shippriority
+    estimated_cardinality: "1500000"
+    role: dimension
+    notes: Bridge between customer and lineitem in Q3
+  nation:
+    access_patterns[1]: not_accessed
+    access_frequency: 0
+    hot_columns[0]:
+    estimated_cardinality: "25"
+    role: dimension
+    notes: Not accessed in sample queries but part of schema
+  region:
+    access_patterns[1]: not_accessed
+    access_frequency: 0
+    hot_columns[0]:
+    estimated_cardinality: "5"
+    role: dimension
+    notes: Not accessed in sample queries but part of schema
+  supplier:
+    access_patterns[1]: not_accessed
+    access_frequency: 0
+    hot_columns[0]:
+    estimated_cardinality: "10000"
+    role: dimension
+    notes: Not accessed in sample queries but part of schema
+  part:
+    access_patterns[1]: not_accessed
+    access_frequency: 0
+    hot_columns[0]:
+    estimated_cardinality: "200000"
+    role: dimension
+    notes: Not accessed in sample queries but part of schema
+  partsupp:
+    access_patterns[1]: not_accessed
+    access_frequency: 0
+    hot_columns[0]:
+    estimated_cardinality: "800000"
+    role: bridge
+    notes: Not accessed in sample queries but part of schema
+joins[2]{left,right,type,frequency,estimated_selectivity,notes}:
+  customer.c_custkey,orders.o_custkey,PK-FK,1,high,"Q3: customer filtered by mktsegment first (highly selective), then joined to orders"
+  orders.o_orderkey,lineitem.l_orderkey,PK-FK,1,medium,"Q3: orders filtered by date, then joined to lineitem (also filtered by date)"
+filters[7]{table,column,operator,selectivity,query,notes}:
+  lineitem,l_shipdate,<=,high,Q1,"Date cutoff filter, likely selects ~98% of rows (all but last 90 days)"
+  lineitem,l_shipdate,RANGE,high,Q6,"1-year date range, selects ~1/7 of data (~14%)"
+  lineitem,l_discount,BETWEEN,high,Q6,"Narrow range [0.05, 0.07], very selective (~2% of rows)"
+  lineitem,l_quantity,<,medium,Q6,"l_quantity < 24, moderately selective (~50% assuming uniform distribution)"
+  lineitem,l_shipdate,>,medium,Q3,"Post-date filter in Q3, combined with other filters"
+  customer,c_mktsegment,=,high,Q3,"Equality on market segment, highly selective (~20% assuming 5 segments)"
+  orders,o_orderdate,<,medium,Q3,"Pre-date filter, combined with customer filter"
+aggregations[2]:
+  - group_by[2]: l_returnflag,l_linestatus
+    functions[3]: SUM,AVG,COUNT
+    query: Q1
+    estimated_groups: "4"
+    notes: Very low cardinality grouping (2x2 combinations). Aggregates 6 different metrics. Perfect for sorted or direct-mapped aggregation.
+  - group_by[3]: l_orderkey,o_orderdate,o_shippriority
+    functions[1]: SUM
+    query: Q3
+    estimated_groups: "100000"
+    notes: Medium-high cardinality grouping. l_orderkey is nearly unique after filters. Requires hash aggregation.
+ordering[2]:
+  - columns[2]: l_returnflag,l_linestatus
+    has_limit: false
+    query: Q1
+    notes: "Trivial sort, only ~4 groups"
+  - columns[2]: revenue,o_orderdate
+    has_limit: true
+    query: Q3
+    notes: Top-K query (LIMIT 10). Can use heap-based partial sort instead of full sort. Sort on computed revenue column.
+optimization_opportunities[15]: "Q1: Full lineitem scan - CRITICAL for parallelism (6M rows). Date filter pushdown, columnar access for hot columns only (8 of 16 columns)","Q1: Very low cardinality aggregation (4 groups) - use direct-mapped array instead of hash table","Q1: Computed columns in aggregation (l_extendedprice * (1-l_discount) * (1+l_tax)) - consider operator fusion to avoid materialization","Q3: Filter pushdown - apply c_mktsegment='BUILDING' before join (reduces customer by ~80%)","Q3: Filter pushdown - apply date filters before join (both o_orderdate and l_shipdate)","Q3: Join ordering - customer→orders→lineitem is optimal (smallest to largest after filters)","Q3: Hash join with bloom filter - build on filtered customer, probe with orders. Use bloom filter on o_custkey to reduce orders scan","Q3: Top-K optimization - use min-heap for LIMIT 10 instead of full sort","Q3: Semi-join reduction - customer filter is very selective, propagate to reduce orders/lineitem scans","Q6: Multiple conjunctive filters - evaluate cheapest filter first (l_quantity < 24 is integer comparison, do before discount range check)","Q6: Single aggregation result - can use SIMD for entire pipeline (filter + compute revenue)","All queries: Columnar storage for lineitem (analytical workload, selective column access)","All queries: Dictionary encoding for low-cardinality string columns (l_returnflag, l_linestatus, c_mktsegment)","All queries: Zone maps on date columns (l_shipdate, o_orderdate) for block-level pruning","Cross-query: l_shipdate accessed in all 3 queries - prime candidate for sorted storage or clustered indexing"
+parallelism_opportunities[5]{table,operation,estimated_rows,rationale}:
+  lineitem,scan,"6000000","Largest table, accessed in all queries. Morsel-driven parallel scan (10K-100K rows per morsel). Expected speedup: 7-8x on 8 cores."
+  lineitem,aggregation,"6000000","Q1: Partial aggregation per thread (local agg on 4 groups), then merge. Near-linear speedup expected."
+  lineitem,join,"6000000","Q3: Partition lineitem by l_orderkey hash, parallel probe against orders hash table. Expected speedup: 6-7x (accounting for hash table build overhead)."
+  orders,scan,"1500000","Q3: Parallel scan with date filter. Expected speedup: 5-6x on 8 cores."
+  customer,scan,"150000","Q3: Small enough that parallel scan may not be beneficial (overhead > benefit). Consider serial scan with filter, or parallel only if filter is expensive."
+column_co_access_patterns[4]:
+  - columns[2]: l_extendedprice,l_discount
+    frequency: 3
+    notes: Always accessed together for revenue computation (l_extendedprice * (1-l_discount)). Store adjacently in columnar layout.
+  - columns[2]: l_returnflag,l_linestatus
+    frequency: 1
+    notes: Q1 groups by both. Low cardinality - consider combined dictionary encoding.
+  - columns[4]: l_shipdate,l_quantity,l_extendedprice,l_discount
+    frequency: 1
+    notes: Q6 accesses these 4 columns only. Excellent columnar storage case - skip other 12 columns.
+  - columns[2]: o_orderdate,o_shippriority
+    frequency: 1
+    notes: Q3 projects both for final result. Store adjacently.
+critical_path_analysis:
+  bottleneck_query: Q3
+  rationale: "Multi-way join (3 tables) with large intermediate results. Lineitem is 6M rows, orders is 1.5M rows. Even after filters, join likely produces >1M intermediate tuples. Q1 and Q6 are simpler single-table scans."
+  estimated_relative_cost:
+    Q1: "1.0x (baseline: full lineitem scan + trivial aggregation)"
+    Q3: 3-5x (3-way join + date filters + medium-cardinality aggregation + sort)
+    Q6: "0.3x (single lineitem scan with highly selective filters, single result)"
+  optimization_priority[3]: "Q3: Join optimization (ordering, hash join, bloom filters, parallelism)","Q1: Parallel scan + aggregation (largest volume)","Q6: SIMD filters + scan (already simple)"
+data_distribution_insights:
+  lineitem:
+    l_shipdate: Likely uniformly distributed over 7-year period (1992-1998 in TPC-H). Range filters very effective.
+    l_discount: "Typically discrete values (0.00, 0.01, ..., 0.10). BETWEEN 0.05-0.07 is ~20-30% of domain but may be less in practice."
+    l_quantity: Integer 1-50. l_quantity < 24 is ~48% selectivity.
+    l_returnflag: "Low cardinality (A, N, R). Perfect for dictionary encoding."
+    l_linestatus: "Low cardinality (O, F). Perfect for dictionary encoding."
+  customer:
+    c_mktsegment: "5 segments in TPC-H (AUTOMOBILE, BUILDING, FURNITURE, MACHINERY, HOUSEHOLD). c_mktsegment = 'BUILDING' is ~20% selectivity."
+  orders:
+    o_orderdate: Date range similar to l_shipdate. o_orderdate < '1995-03-15' is ~50% selectivity (mid-range cutoff).
+summary: "TPC-H workload is dominated by lineitem table (6M rows, fact table) with heavy analytical aggregation. Q1 and Q6 are single-table scans with filters and aggregations - excellent parallelism candidates. Q3 is a 3-way join (customer→orders→lineitem) with selective filters - requires careful join ordering and filter pushdown. Key optimization opportunities: (1) Parallel scans on lineitem (all queries), (2) Columnar storage (selective column access, 8/16 columns in Q1, 4/16 in Q6), (3) Filter pushdown in Q3 (mktsegment and date filters reduce data by 80-90% before join), (4) Dictionary encoding for low-cardinality strings, (5) Top-K heap for Q3 LIMIT 10, (6) Direct-mapped aggregation for Q1 (only 4 groups), (7) SIMD for Q6 filters and computation. Expected speedups: 7-8x from parallelism, 2-3x from columnar layout, 2-5x from hash table optimizations. Q3 is the bottleneck query (3-5x cost of Q1) and should be optimization priority."

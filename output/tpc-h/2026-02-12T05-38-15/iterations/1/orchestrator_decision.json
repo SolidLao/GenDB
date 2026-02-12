@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "MUST continue - Q3 has critical correctness bug producing wrong results (3/10 rows incorrect). Additionally, Q3 is 38x slower than DuckDB (3634ms vs 94ms) due to single-threaded join probe over 60M rows, representing 93% of total execution time. Clear path to 12-20x speedup via parallelization. Q1 and Q6 already outperform DuckDB.",
+  "selected_recommendations": [0, 1],
+  "focus_areas": [
+    "Fix Q3 correctness bug (wrong orderkeys/revenues) by debugging join/aggregation logic and hash collision issues",
+    "Parallelize Q3 hash join probe phase to utilize 64-core CPU (currently single-threaded)",
+    "Add MADV_WILLNEED prefetching for Q3 column mmaps to reduce I/O wait on HDD",
+    "Fix Q1 floating-point precision with Kahan summation (lower priority, semantically correct already)"
+  ],
+  "strategy_notes": "Correctness FIRST: Both critical fixes (Q3 logic bug + Q1 floating-point) are automatically included. For performance, selecting the two highest-impact optimizations: (1) Parallel hash join probe (12-20x speedup expected, bringing Q3 from 3634ms to ~180-300ms), (2) I/O prefetching (20-30% additional speedup on HDD). These are low-risk changes that copy proven parallel_scan patterns from Q1/Q6. After this iteration, Q3 should be competitive with DuckDB (~200ms vs 94ms). Save more advanced optimizations (compact hash tables, SIMD) for iteration 2 if needed.",
+  "notes": "The Learner correctly identified that the 64-core Xeon with AVX-512 is severely underutilized. Q1/Q6 demonstrate effective parallel scanning, so applying the same pattern to Q3's join probe is a proven, low-risk approach. Prioritizing correctness fixes + parallelization over SIMD/algorithmic changes because we have rollback capability and 2 iterations remaining to refine."
+}

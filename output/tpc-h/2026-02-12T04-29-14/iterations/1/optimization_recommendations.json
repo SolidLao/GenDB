@@ -1,0 +1,141 @@
+{
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q1": {
+        "current_time_ms": 68,
+        "status": "fail",
+        "bottleneck": "Incorrect aggregation merge",
+        "root_cause": "Hash aggregation merge function (hash_agg.h line 198) uses 'target = source' instead of accumulating values. Parallel threads each compute correct local aggregates, but the merge overwrites instead of summing, causing aggregate values to be ~66x too small (only the last thread's results are kept)."
+      },
+      "Q3": {
+        "current_time_ms": 2255,
+        "status": "fail",
+        "bottleneck": "Missing customer filter and column",
+        "root_cause": "Two bugs: (1) q3.cpp line 91-97 builds customer hash set but accepts ALL customers instead of filtering by c_mktsegment='BUILDING', causing 5x more data in joins. (2) c_mktsegment column is never loaded from storage, so the filter cannot be applied. This results in wrong orderkeys and revenues."
+      },
+      "Q6": {
+        "current_time_ms": 157,
+        "status": "pass",
+        "bottleneck": "Single-threaded-equivalent performance despite parallel scan",
+        "root_cause": "Q6 uses parallel scan but achieves only 157ms on 60M rows when DuckDB achieves 19.5ms. Gap suggests: (1) parallel scan may have contention on revenue accumulation (line 55 in q6.cpp - threads compete for single shared variable), (2) no SIMD vectorization for the 4-way filter + multiply-accumulate, (3) possible zone map skipping not implemented or ineffective."
+      }
+    },
+    "overall": "Two queries produce incorrect results due to critical bugs. Q1's parallel aggregation merge is broken (overwrites instead of accumulates). Q3 is missing the customer market segment filter entirely. Q6 is correct but 8-10x slower than DuckDB, indicating performance opportunities in parallelism, SIMD, and zone map usage. All three queries are single-threaded or have serialization bottlenecks despite 64 available cores."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q1",
+      "issue": "Parallel hash aggregation merge overwrites instead of accumulating",
+      "fix": "Fix merge_default function in operators/hash_agg.h",
+      "description": "In hash_agg.h line 195-199, the merge_default function does 'target = source' which overwrites the target aggregate with source instead of merging them. For Q1Agg structure (sum_qty, sum_base_price, etc.), change to: target.sum_qty += source.sum_qty; target.sum_base_price += source.sum_base_price; target.sum_disc_price += source.sum_disc_price; target.sum_charge += source.sum_charge; target.sum_discount += source.sum_discount; target.count += source.count;",
+      "risk": "low"
+    },
+    {
+      "target": "Q3",
+      "issue": "Missing customer market segment filter and column load",
+      "fix": "Load c_mktsegment column and apply filter in customer hash table build",
+      "description": "In q3.cpp: (1) Add line after line 72 to load c_mktsegment: 'auto c_mktsegment = mmap_column<uint8_t>(gendb_dir, \"customer\", \"c_mktsegment\", c_row_count);' (2) Replace lines 91-97 customer hash table build with proper filter: instead of accepting all customers, filter by 'c_mktsegment[i] == mktsegment_code' where mktsegment_code is the dictionary-encoded value for 'BUILDING'. The code needs to either hard-code the expected value (typically 0-4) or load the dictionary mapping.",
+      "risk": "medium"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "operator": "scan",
+      "technique": "Lock-free parallel aggregation",
+      "description": "Q6 currently uses parallel_scan_with_local which likely has lock contention on the final merge (line 55 in q6.cpp where all threads update a shared 'revenue' variable). This serializes the parallel work. Fix: Each thread should accumulate to a thread-local double, then sum all thread-local values at the end without locking during the scan phase. Expected improvement: 4-8x speedup by eliminating false sharing and lock contention.",
+      "expected_improvement": "157ms -> 20-40ms (4-8x speedup) by removing serialization bottleneck during parallel scan",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 2,
+      "target": "Q1",
+      "bottleneck_category": "cpu_bound",
+      "operator": "aggregation",
+      "technique": "SIMD vectorization for revenue calculations",
+      "description": "Q1 computes l_extendedprice * (1 - l_discount) * (1 + l_tax) and similar expressions for every row. Currently done scalar (one row at a time). With AVX2, process 4 doubles per instruction. In q1.cpp update_agg lambda (lines 85-96), vectorize the calculation loop to process 4 rows per iteration using _mm256_load_pd, _mm256_mul_pd, _mm256_fmadd_pd intrinsics. Since aggregation is already parallel and very low cardinality (4 groups), the bottleneck is the arithmetic, not hash table contention.",
+      "expected_improvement": "68ms -> 20-30ms (2-3x speedup) from SIMD on 60M arithmetic operations",
+      "risk": "medium",
+      "requires_reingest": false
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "join_order",
+      "operator": "join",
+      "technique": "Parallel hash join with partitioning",
+      "description": "Q3 currently builds customer hash table, then probes it from orders, then builds orders hash table and probes from lineitem - all sequentially. After fixing the customer filter, the filtered customer set will be ~30K rows, orders ~200K, lineitem ~3M. Opportunity: (1) Parallelize the lineitem probe loop (currently sequential at line 124 in q3.cpp). Split lineitem into 64 morsels, each thread probes the orders hash table independently and maintains thread-local aggregation map, then merge. (2) Consider hash-partitioning both orders and lineitem by l_orderkey into 64 partitions, then join partitions in parallel - this is better for cache locality.",
+      "expected_improvement": "2255ms -> 300-500ms (4-8x speedup) from parallelizing the largest join and aggregation",
+      "risk": "medium",
+      "requires_reingest": false
+    },
+    {
+      "priority": 4,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "operator": "scan",
+      "technique": "Zone map block skipping on sorted data",
+      "description": "Q6 filters by l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01', which should skip ~85% of blocks since lineitem is sorted by l_shipdate. However, current implementation mmaps the entire column and scans all 60M rows. Implement zone maps: (1) During ingestion, record min/max l_shipdate per 100K-row block. (2) During scan, check zone map before processing each block - skip blocks where max < '1994-01-01' or min >= '1995-01-01'. This requires modifying the storage layer to write zone map metadata and the scan operator to consult it.",
+      "expected_improvement": "157ms -> 20-25ms (6-8x speedup) by scanning only 8-10M qualifying rows instead of 60M",
+      "risk": "high",
+      "requires_reingest": true
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "operator": "filter",
+      "technique": "SIMD vectorized filtering",
+      "description": "Q6 applies 4 predicates per row (2 date compares, 2 discount compares, 1 quantity compare) then computes revenue for matching rows. Vectorize the filter with AVX2: load 4 l_shipdate values with _mm256_load_si256, compare with _mm256_cmpgt_epi32, combine predicates with _mm256_and_si256 to get 4-element mask, use mask to conditionally load and multiply extendedprice * discount. This is a standard SIMD scan pattern used by DuckDB.",
+      "expected_improvement": "157ms -> 100ms (1.5x speedup) when combined with parallel aggregation fix (total 60-70ms when both applied)",
+      "risk": "high",
+      "requires_reingest": false
+    },
+    {
+      "priority": 6,
+      "target": "Q1",
+      "bottleneck_category": "cpu_bound",
+      "operator": "scan",
+      "technique": "Operator fusion: scan + filter + aggregation",
+      "description": "Q1 currently uses parallel hash aggregation which internally does morsel-driven scan. However, each morsel processes rows individually: filter check (line 98-100), then key extraction (line 81-83), then aggregation update (line 85-96). This is effectively interpreted execution with function call overhead. Fuse these into a single tight loop per morsel: manually inline all three operations in the worker lambda, unroll 4x, and enable compiler auto-vectorization with -O3 -march=native. This reduces instruction count and improves branch prediction.",
+      "expected_improvement": "68ms -> 40-50ms (1.3-1.7x speedup) after fixing merge bug and applying SIMD, total improvement 10-15ms",
+      "risk": "low",
+      "requires_reingest": false
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "bottleneck_category": "algorithm",
+      "operator": "aggregation",
+      "technique": "Top-K heap optimization",
+      "description": "Q3 currently aggregates all ~150K qualifying order groups into a hash table, then uses a heap to extract top 10 (lines 139-158 in q3.cpp). The heap implementation looks correct, but there's opportunity: maintain the top-K heap DURING aggregation instead of after. As each revenue value is computed, immediately test if it belongs in top-10 and update heap on the fly. This saves memory (heap of 10 elements vs hash table of 150K groups) and improves cache locality. However, this requires deduplicating by orderkey, so may need a hybrid approach: use hash table for deduplication within top candidates.",
+      "expected_improvement": "2255ms -> 2100ms (small improvement, ~7% of total time is sort/heap) - low priority",
+      "risk": "medium",
+      "requires_reingest": false
+    },
+    {
+      "priority": 8,
+      "target": "ALL",
+      "bottleneck_category": "cpu_bound",
+      "operator": "io",
+      "technique": "madvise MADV_WILLNEED for prefetching",
+      "description": "Currently queries mmap columns with MADV_SEQUENTIAL (storage.cpp line 181), which provides sequential read-ahead but still causes page faults on first access. For queries that access multiple columns (Q1 accesses 7 columns, Q3 accesses 10), issue MADV_WILLNEED immediately after mmap to prefetch all needed columns in parallel. The kernel will start async I/O for all columns at once, overlapping disk latency. This is especially beneficial if running from HDD (storage design notes HDD).",
+      "expected_improvement": "Q1: 68ms -> 50-60ms, Q3: 2255ms -> 2000ms (10-20% speedup) from overlapping I/O latency on HDD",
+      "risk": "low",
+      "requires_reingest": false
+    }
+  ],
+  "storage_changes": [
+    {
+      "table": "lineitem",
+      "change": "Add zone map metadata file with min/max per 100K-row block for l_shipdate, l_discount, l_quantity",
+      "rationale": "Enable block-level pruning for Q6 which filters on all three columns. Since data is already sorted by l_shipdate, zone maps on that column will be highly effective (skip 50+ out of 60 blocks for 1-year filter). Zone maps on l_discount and l_quantity provide moderate additional pruning.",
+      "requires_reingest": true
+    }
+  ],
+  "summary": "Iteration 1 has two critical correctness bugs (Q1 merge, Q3 filter) and significant performance gaps. After fixing bugs, focus on parallelism (Q3 join, Q6 contention), SIMD vectorization (Q1/Q6 arithmetic), and zone maps (Q6 I/O). Target post-fix performance: Q1 ~50ms (vs 56ms GenDB baseline, 83ms DuckDB), Q3 ~300-500ms (vs 325ms GenDB baseline, 77ms DuckDB), Q6 ~20-30ms (vs 13ms GenDB baseline, 19.5ms DuckDB)."
+}

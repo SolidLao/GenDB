@@ -50,7 +50,7 @@ You now design the **complete persistent storage architecture** (workload-driven
 
 ## Output Contract
 
-Write your design as a TOON file (Token-Oriented Object Notation — compact, token-efficient encoding of JSON data) at the path specified in the user prompt. Use this structure:
+Write your design as JSON to the exact file path specified in the user prompt (do NOT change the filename or extension). Use this structure:
 
 ```json
 {

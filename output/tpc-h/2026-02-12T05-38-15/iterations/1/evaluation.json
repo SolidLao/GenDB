@@ -1,0 +1,49 @@
+{
+  "overall_status": "pass",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "rm -f ingest main *.o storage/*.o queries/*.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o ingest.o ingest.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o storage/storage.o storage/storage.cpp\ng++ -pthread -o ingest ingest.o storage/storage.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o main.o main.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q1.o queries/q1.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q3.o queries/q3.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q6.o queries/q6.cpp\ng++ -pthread -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o\nCompiled successfully with some warnings (unused fread return value, format-truncation)"
+    },
+    "ingest": {
+      "status": "skipped",
+      "ingestion_time_ms": null,
+      "output": "Persistent storage already exists at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+      "reused_existing": true
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "Running TPC-H queries on: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nWriting results to: /home/jl4492/GenDB/output/tpc-h/2026-02-12T05-38-15/iterations/1/query_results\n\nQ1: 4 rows in 0.134s\nQ3: 10 rows in 1.199s\nQ6: 1 row in 0.041s\n\nTotal query time: 1.484s"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "pass",
+      "num_rows": "4",
+      "timing_ms": "134",
+      "semantically_different": false,
+      "notes": "Query executed successfully and matches ground truth exactly"
+    },
+    "Q3": {
+      "status": "pass",
+      "num_rows": "10",
+      "timing_ms": "1199",
+      "semantically_different": false,
+      "notes": "Query executed successfully and matches ground truth exactly"
+    },
+    "Q6": {
+      "status": "pass",
+      "num_rows": "1",
+      "timing_ms": "41",
+      "semantically_different": false,
+      "notes": "Query executed successfully and matches ground truth exactly"
+    }
+  },
+  "summary": "All queries passed successfully. Total query execution time: 1.484s (Q1: 134ms, Q3: 1199ms, Q6: 41ms). All results match ground truth exactly. Compilation succeeded with minor warnings that do not affect correctness."
+}

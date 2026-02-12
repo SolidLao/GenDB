@@ -1,0 +1,85 @@
+{
+  "overall_status": "partial",
+  "optimization_target": "execution_time",
+  "steps": {
+    "compile": {
+      "status": "pass",
+      "output": "rm -f ingest main *.o storage/*.o queries/*.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o ingest.o ingest.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o storage/storage.o storage/storage.cpp\ng++ -pthread -o ingest ingest.o storage/storage.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o main.o main.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q1.o queries/q1.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q3.o queries/q3.cpp\ng++ -O2 -std=c++17 -Wall -pthread -I. -c -o queries/q6.o queries/q6.cpp\ng++ -pthread -o main main.o storage/storage.o queries/q1.o queries/q3.o queries/q6.o\nWarnings: queries/q3.cpp:34:14: unused fread result, format-truncation in date_utils.h"
+    },
+    "ingest": {
+      "status": "skipped",
+      "ingestion_time_ms": null,
+      "output": "Skipped - persistent storage already exists at /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb (9.7GB)",
+      "reused_existing": true
+    },
+    "run_queries": {
+      "status": "pass",
+      "output": "Running TPC-H queries on: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\nWriting results to: /home/jl4492/GenDB/output/tpc-h/2026-02-12T05-38-15/query_results\n\nQ1: 4 rows in 0.128s\nQ3: 10 rows in 3.634s\nQ6: 1 row in 0.047s\n\nTotal query time: 3.922s"
+    },
+    "validate_correctness": {
+      "status": "partial",
+      "output": "Q1: 2 row(s) differ (minor floating-point precision differences in aggregates)\nQ3: 3 row(s) differ (significantly different results - logic error)\nQ6: match",
+      "comparison_json": {
+        "match": false,
+        "queries": {
+          "Q1": {
+            "rows_expected": 4,
+            "rows_actual": 4,
+            "match": false,
+            "error": "2 row(s) differ"
+          },
+          "Q3": {
+            "rows_expected": 10,
+            "rows_actual": 10,
+            "match": false,
+            "error": "3 row(s) differ"
+          },
+          "Q6": {
+            "rows_expected": 1,
+            "rows_actual": 1,
+            "match": true
+          }
+        }
+      }
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "branch_mispredictions": null,
+      "ipc": null
+    }
+  },
+  "query_results": {
+    "Q1": {
+      "status": "partial",
+      "num_rows": 4,
+      "timing_ms": 128,
+      "semantically_different": false,
+      "notes": "Minor floating-point precision differences in 2 rows. Differences in 9th-10th decimal place for sum_charge and sum_disc_price fields. Semantically equivalent but numerically slightly off due to floating-point rounding."
+    },
+    "Q3": {
+      "status": "fail",
+      "num_rows": 10,
+      "timing_ms": 3634,
+      "semantically_different": true,
+      "notes": "Significant result mismatch - 3 out of 10 rows differ with completely different values for orderkey, revenue, and o_orderdate. This indicates a logic error in the join, filter, or grouping logic. The query executed but produced incorrect results."
+    },
+    "Q6": {
+      "status": "pass",
+      "num_rows": 1,
+      "timing_ms": 47,
+      "semantically_different": false,
+      "notes": "Perfect match with ground truth"
+    }
+  },
+  "performance_metrics": {
+    "total_query_time_ms": 3922,
+    "query_breakdown": {
+      "Q1": 128,
+      "Q3": 3634,
+      "Q6": 47
+    },
+    "notes": "Query execution completed quickly. Q3 is the slowest query (93% of total time). Q6 is very fast (47ms) and Q1 is also efficient (128ms)."
+  },
+  "summary": "Compilation and execution succeeded. Q6 passed perfectly. Q1 has minor floating-point precision issues (semantically correct). Q3 has significant correctness issues with wrong orderkeys, revenues, and dates in the output - indicates a logic bug in the join/filter/aggregation implementation. Performance: Total 3.922s for all queries on SF10 data."
+}

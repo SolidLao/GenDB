@@ -1,0 +1,535 @@
+persistent_storage:
+  format: binary_columnar
+  base_dir_name: tpch.gendb
+tables:
+  lineitem:
+    columns[16]:
+      - name: l_orderkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[2]: join,group_by
+        index: hash
+        encoding: none
+      - name: l_partkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: none
+        encoding: none
+      - name: l_suppkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: none
+        encoding: none
+      - name: l_linenumber
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: primary_key
+        index: none
+        encoding: none
+      - name: l_quantity
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[2]: filter,aggregation
+        index: none
+        encoding: none
+      - name: l_extendedprice
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[1]: aggregation
+        index: none
+        encoding: none
+      - name: l_discount
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[2]: filter,aggregation
+        index: none
+        encoding: none
+      - name: l_tax
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[1]: aggregation
+        index: none
+        encoding: none
+      - name: l_returnflag
+        sql_type: CHAR
+        cpp_type: uint8_t
+        used_in[2]: group_by,projection
+        index: none
+        encoding: dictionary
+      - name: l_linestatus
+        sql_type: CHAR
+        cpp_type: uint8_t
+        used_in[2]: group_by,projection
+        index: none
+        encoding: dictionary
+      - name: l_shipdate
+        sql_type: DATE
+        cpp_type: int32_t
+        used_in[2]: filter,projection
+        index: sorted
+        encoding: none
+      - name: l_commitdate
+        sql_type: DATE
+        cpp_type: int32_t
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: l_receiptdate
+        sql_type: DATE
+        cpp_type: int32_t
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: l_shipinstruct
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: l_shipmode
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: l_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: lineitem.tbl
+      delimiter: |
+      column_order[16]: l_orderkey,l_partkey,l_suppkey,l_linenumber,l_quantity,l_extendedprice,l_discount,l_tax,l_returnflag,l_linestatus,l_shipdate,l_commitdate,l_receiptdate,l_shipinstruct,l_shipmode,l_comment
+    sort_order[1]: l_shipdate
+    block_size: 65536
+    estimated_rows: 6000000
+    indexes[3]:
+      - name: idx_lineitem_shipdate
+        type: zone_map
+        columns[1]: l_shipdate
+      - name: idx_lineitem_orderkey
+        type: hash
+        columns[1]: l_orderkey
+      - name: idx_lineitem_returnflag_linestatus
+        type: composite
+        columns[2]: l_returnflag,l_linestatus
+  orders:
+    columns[9]:
+      - name: o_orderkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[3]: primary_key,join,group_by
+        index: hash
+        encoding: none
+      - name: o_custkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: hash
+        encoding: none
+      - name: o_orderstatus
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: o_totalprice
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: o_orderdate
+        sql_type: DATE
+        cpp_type: int32_t
+        used_in[3]: filter,group_by,projection
+        index: sorted
+        encoding: none
+      - name: o_orderpriority
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: o_clerk
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: o_shippriority
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[2]: group_by,projection
+        index: none
+        encoding: none
+      - name: o_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: orders.tbl
+      delimiter: |
+      column_order[9]: o_orderkey,o_custkey,o_orderstatus,o_totalprice,o_orderdate,o_orderpriority,o_clerk,o_shippriority,o_comment
+    sort_order[1]: o_orderdate
+    block_size: 32768
+    estimated_rows: 1500000
+    indexes[3]:
+      - name: idx_orders_orderkey_pk
+        type: hash
+        columns[1]: o_orderkey
+      - name: idx_orders_custkey_fk
+        type: hash
+        columns[1]: o_custkey
+      - name: idx_orders_orderdate
+        type: zone_map
+        columns[1]: o_orderdate
+  customer:
+    columns[8]:
+      - name: c_custkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[2]: primary_key,join
+        index: hash
+        encoding: none
+      - name: c_name
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: c_address
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: c_nationkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: none
+        encoding: none
+      - name: c_phone
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: c_acctbal
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: c_mktsegment
+        sql_type: CHAR
+        cpp_type: uint8_t
+        used_in[1]: filter
+        index: none
+        encoding: dictionary
+      - name: c_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: customer.tbl
+      delimiter: |
+      column_order[8]: c_custkey,c_name,c_address,c_nationkey,c_phone,c_acctbal,c_mktsegment,c_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 150000
+    indexes[1]:
+      - name: idx_customer_custkey_pk
+        type: hash
+        columns[1]: c_custkey
+  nation:
+    columns[4]:
+      - name: n_nationkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: primary_key
+        index: hash
+        encoding: none
+      - name: n_name
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: n_regionkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: none
+        encoding: none
+      - name: n_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: nation.tbl
+      delimiter: |
+      column_order[4]: n_nationkey,n_name,n_regionkey,n_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 25
+    indexes[1]:
+      - name: idx_nation_nationkey_pk
+        type: hash
+        columns[1]: n_nationkey
+  region:
+    columns[3]:
+      - name: r_regionkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: primary_key
+        index: hash
+        encoding: none
+      - name: r_name
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: r_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: region.tbl
+      delimiter: |
+      column_order[3]: r_regionkey,r_name,r_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 5
+    indexes[1]:
+      - name: idx_region_regionkey_pk
+        type: hash
+        columns[1]: r_regionkey
+  supplier:
+    columns[7]:
+      - name: s_suppkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: primary_key
+        index: hash
+        encoding: none
+      - name: s_name
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: s_address
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: s_nationkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: join
+        index: none
+        encoding: none
+      - name: s_phone
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: s_acctbal
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: s_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: supplier.tbl
+      delimiter: |
+      column_order[7]: s_suppkey,s_name,s_address,s_nationkey,s_phone,s_acctbal,s_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 10000
+    indexes[1]:
+      - name: idx_supplier_suppkey_pk
+        type: hash
+        columns[1]: s_suppkey
+  part:
+    columns[9]:
+      - name: p_partkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[1]: primary_key
+        index: hash
+        encoding: none
+      - name: p_name
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: p_mfgr
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: p_brand
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: p_type
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: p_size
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: p_container
+        sql_type: CHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: dictionary
+      - name: p_retailprice
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: p_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: part.tbl
+      delimiter: |
+      column_order[9]: p_partkey,p_name,p_mfgr,p_brand,p_type,p_size,p_container,p_retailprice,p_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 200000
+    indexes[1]:
+      - name: idx_part_partkey_pk
+        type: hash
+        columns[1]: p_partkey
+  partsupp:
+    columns[5]:
+      - name: ps_partkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[2]: primary_key,join
+        index: hash
+        encoding: none
+      - name: ps_suppkey
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[2]: primary_key,join
+        index: hash
+        encoding: none
+      - name: ps_availqty
+        sql_type: INTEGER
+        cpp_type: int32_t
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: ps_supplycost
+        sql_type: DECIMAL
+        cpp_type: double
+        used_in[0]:
+        index: none
+        encoding: none
+      - name: ps_comment
+        sql_type: VARCHAR
+        cpp_type: "std::string"
+        used_in[0]:
+        index: none
+        encoding: none
+    file_format:
+      filename: partsupp.tbl
+      delimiter: |
+      column_order[5]: ps_partkey,ps_suppkey,ps_availqty,ps_supplycost,ps_comment
+    sort_order: null
+    block_size: null
+    estimated_rows: 800000
+    indexes[1]:
+      - name: idx_partsupp_composite_pk
+        type: composite
+        columns[2]: ps_partkey,ps_suppkey
+io_strategies:
+  Q1:
+    tables_accessed[1]: lineitem
+    columns_needed[7]: l_shipdate,l_quantity,l_extendedprice,l_discount,l_tax,l_returnflag,l_linestatus
+    index_usage[1]{index,operation}:
+      idx_lineitem_shipdate,block_skip
+    predicate_pushdown[1]: l_shipdate <= '1998-09-02'
+    parallel_scan: true
+  Q3:
+    tables_accessed[3]: customer,orders,lineitem
+    columns_needed[10]: c_custkey,c_mktsegment,o_orderkey,o_custkey,o_orderdate,o_shippriority,l_orderkey,l_extendedprice,l_discount,l_shipdate
+    index_usage[5]{index,operation}:
+      idx_customer_custkey_pk,point_lookup
+      idx_orders_custkey_fk,range_scan
+      idx_orders_orderdate,block_skip
+      idx_lineitem_orderkey,point_lookup
+      idx_lineitem_shipdate,block_skip
+    predicate_pushdown[3]: c_mktsegment = 'BUILDING',o_orderdate < '1995-03-15',l_shipdate > '1995-03-15'
+    parallel_scan: true
+  Q6:
+    tables_accessed[1]: lineitem
+    columns_needed[4]: l_shipdate,l_discount,l_quantity,l_extendedprice
+    index_usage[1]{index,operation}:
+      idx_lineitem_shipdate,block_skip
+    predicate_pushdown[5]: l_shipdate >= '1994-01-01',l_shipdate < '1995-01-01',l_discount >= 0.05,l_discount <= 0.07,l_quantity < 24
+    parallel_scan: true
+ingestion:
+  parallel_tables: true
+  parallel_columns: false
+  parallel_chunks: true
+  build_indexes_during_ingest: true
+  mmap_input: true
+  pre_allocation: true
+  buffer_size_mb: 2
+  chunk_size_rows: 100000
+type_mappings:
+  INTEGER: int32_t
+  DECIMAL: double
+  DATE: int32_t
+  CHAR: "std::string"
+  VARCHAR: "std::string"
+date_encoding: days_since_epoch_1970
+hardware_config:
+  cpu_cores: 64
+  l3_cache_mb: 44
+  disk_type: hdd
+  total_memory_gb: 376
+design_rationale: "This design optimizes for the TPC-H analytical workload with the following key decisions:\n\n1. BINARY COLUMNAR STORAGE: All tables use binary columnar format for fast mmap-based access and selective column reads. Q1 reads only 7/16 columns, Q6 reads 4/16 columns - column pruning saves 56-75% I/O.\n\n2. SORT BY l_shipdate: Lineitem is sorted by l_shipdate (the most critical filter column appearing in all 3 queries). This enables zone map pruning: Q1's date cutoff can skip ~2% of blocks, Q6's 1-year range can skip ~85% of blocks.\n\n3. DICTIONARY ENCODING: Low-cardinality columns (l_returnflag, l_linestatus with ~3 unique values each; c_mktsegment with 5 values) are dictionary-encoded to reduce memory footprint and enable faster integer comparisons during aggregation.\n\n4. ZONE MAPS ON DATE COLUMNS: Both l_shipdate and o_orderdate have zone maps with 64K row blocks. On HDD storage, this minimizes sequential reads by skipping irrelevant blocks.\n\n5. HASH INDEXES ON JOIN KEYS: Primary keys (c_custkey, o_orderkey) and foreign keys (o_custkey, l_orderkey) have hash indexes for O(1) lookups during hash joins in Q3.\n\n6. BLOCK SIZE TUNING: Lineitem uses 64K rows/block (~22MB per block for 16 columns) fitting in L3 cache. Orders uses 32K rows/block. Small dimension tables (nation, region, customer, supplier) have no blocking as they fit entirely in cache.\n\n7. PARALLEL INGESTION: With 64 CPU cores, ingest nation/region/supplier/part/customer in parallel (independent tables), then chunk-parse lineitem and orders into 100K-row chunks processed by separate threads. Target: <5s for SF1 (6M lineitem rows).\n\n8. PER-QUERY COLUMN PRUNING: Each query specifies exact columns to mmap. Q1 loads 7 columns, Q6 loads 4 columns, Q3 loads 10 columns across 3 tables. This minimizes memory footprint and enables parallel queries.\n\n9. PREDICATE PUSHDOWN: Date filters and equality filters are pushed to scan operators to reduce data early. Q3 filters customer by mktsegment before join, reducing join input by ~80%.\n\n10. HDD-OPTIMIZED LAYOUT: Sort order and zone maps maximize sequential reads and block skipping on HDD. Block sizes are large enough to amortize seek costs (64K rows = ~10-20MB sequential read per block)."
+summary: "Binary columnar storage with lineitem sorted by l_shipdate, zone maps on date columns for block-level pruning, dictionary encoding for low-cardinality strings, hash indexes on join keys, and aggressive parallel ingestion using 64 cores. Optimized for selective column access (Q1: 7/16 columns, Q6: 4/16 columns) and range-filter-heavy queries on dates. Expected performance: <5s ingestion for SF1, 85%+ block skipping in Q6, 7-8x parallelism speedup on lineitem scans."
