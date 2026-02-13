@@ -3,13 +3,6 @@
 ## What It Is
 Partial aggregation performs aggregation in multiple phases: local pre-aggregation on partitioned data, followed by global aggregation merging partial results. Reduces data volume early, enables parallelism, and improves cache locality in distributed and multi-threaded environments.
 
-## When To Use
-- Parallel aggregation across multiple threads or cores
-- Distributed aggregation across network nodes (reduce shuffle volume)
-- High reduction factor: pre-aggregation eliminates 80%+ of rows
-- Decomposable aggregates (SUM, COUNT, MIN, MAX, AVG) that support partial/merge
-- OLAP queries processing billions of rows where early reduction is critical
-
 ## Key Implementation Ideas
 - **Two-phase aggregation pattern**: Phase 1 aggregates locally per thread/partition; Phase 2 merges partial results into a global result
 - **Thread-local hash tables**: Each thread maintains its own hash table, avoiding synchronization overhead during the local phase
@@ -21,13 +14,3 @@ Partial aggregation performs aggregation in multiple phases: local pre-aggregati
 - **Data-skew-aware partitioning**: Use fine-grained partitioning or sampling to handle hot keys and avoid load imbalance
 - **Non-decomposable aggregate detection**: Identify aggregates like MEDIAN/PERCENTILE that cannot be partially aggregated and require full data
 - **Memory-aware spilling**: Thread-local tables multiply memory footprint; spill partitions to disk when necessary
-
-## Performance Characteristics
-- Reduction factor: 10-1000x for low-to-medium cardinality; linear scaling to 8-16 threads
-- Network savings: 80-99% reduction in shuffle volume for distributed queries
-- Worst case: 1.3x slowdown when cardinality equals input size (no reduction possible)
-
-## Pitfalls
-- **High cardinality without reduction**: When groups approximate rows, partial aggregation adds overhead without benefit
-- **Contention in merge phase**: Global hash table becomes bottleneck; use partitioned merge with disjoint keys
-- **Non-decomposable aggregates**: MEDIAN, PERCENTILE cannot be partially aggregated and require full data access

@@ -1,0 +1,12 @@
+{
+  "action": "stop",
+  "reasoning": "Q1 has reached iteration 3/3 with a persistent, unfixed critical correctness bug (CUTOFF_DATE=1998 should be 1997). Iteration 2 regressed without addressing this semantic issue. With 0 iterations remaining, optimization cannot continue. The trivial fix (one-line change) must be applied, but is now out of iteration budget. System should escalate to development team.",
+  "selected_recommendations": [0],
+  "focus_areas": [
+    "Apply critical fix: Change CUTOFF_DATE from 1998 to 1997 in q1.cpp line 32",
+    "Re-evaluate Q1 after correctness fix to establish valid performance baseline",
+    "Prevent iteration waste: Verify critical fixes are applied before optimizations in next cycle"
+  ],
+  "strategy_notes": "ESCALATION REQUIRED: The semantic date filtering bug has persisted through all 3 iterations without resolution. This indicates either: (1) The Learner did not select the critical_fix recommendation, or (2) The optimization system did not apply it. The bug is trivial to fix (CUTOFF_DATE=1997 instead of 1998) and low-risk. After fix, Q1 will produce correct results, and performance can be evaluated against a valid baseline. Current performance metrics (80ms vs 60ms baseline) are meaningless while correctness is broken.",
+  "notes": "CRITICAL FIX MANDATORY: All critical_fixes must be applied FIRST, before any performance optimizations. The Learner's recommendations included this fix in iter_1_evaluation.json and iter_2_evaluation.json critical_fixes[0]. Ensure the optimization pipeline honors the priority rule: Correctness > Performance. Without this fix, Q1 cannot be considered a valid optimization target."
+}

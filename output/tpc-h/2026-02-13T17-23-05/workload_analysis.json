@@ -1,0 +1,171 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L3: 44 MiB (2x), L2: 32 MiB (32x), L1d: 1 MiB (32x)",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd_support": "avx2, avx512f, avx512dq, avx512cd, avx512bw, avx512vl"
+  },
+  "tables": {
+    "lineitem": {
+      "access_frequency": 3,
+      "role": "fact",
+      "estimated_cardinality": "6M-60M (SF1-SF10)",
+      "hot_columns": ["l_shipdate", "l_extendedprice", "l_discount", "l_quantity", "l_orderkey", "l_returnflag", "l_linestatus"],
+      "access_patterns": ["full_scan", "filtered_scan", "parallel_scan"]
+    },
+    "orders": {
+      "access_frequency": 2,
+      "role": "bridge",
+      "estimated_cardinality": "1.5M-15M (SF1-SF10)",
+      "hot_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+      "access_patterns": ["hash_join_probe", "filtered_scan"]
+    },
+    "customer": {
+      "access_frequency": 1,
+      "role": "dimension",
+      "estimated_cardinality": "150K-1.5M (SF1-SF10)",
+      "hot_columns": ["c_custkey", "c_mktsegment", "c_nationkey"],
+      "access_patterns": ["filtered_scan", "hash_join_build"]
+    },
+    "nation": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "25",
+      "hot_columns": ["n_nationkey", "n_name"],
+      "access_patterns": []
+    },
+    "region": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "5",
+      "hot_columns": ["r_regionkey"],
+      "access_patterns": []
+    },
+    "supplier": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "10K-100K (SF1-SF10)",
+      "hot_columns": ["s_suppkey"],
+      "access_patterns": []
+    },
+    "part": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "200K-2M (SF1-SF10)",
+      "hot_columns": ["p_partkey"],
+      "access_patterns": []
+    },
+    "partsupp": {
+      "access_frequency": 0,
+      "role": "bridge",
+      "estimated_cardinality": "800K-8M (SF1-SF10)",
+      "hot_columns": ["ps_partkey", "ps_suppkey"],
+      "access_patterns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "high"
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "high"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1"
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "BETWEEN",
+      "selectivity": "medium",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "medium",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "high",
+      "query": "Q6"
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM(l_quantity)", "SUM(l_extendedprice)", "SUM(l_extendedprice*(1-l_discount))", "SUM(l_extendedprice*(1-l_discount)*(1+l_tax))", "AVG(l_quantity)", "AVG(l_extendedprice)", "AVG(l_discount)", "COUNT(*)"],
+      "query": "Q1",
+      "estimated_groups": "4"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM(l_extendedprice*(1-l_discount))"],
+      "query": "Q3",
+      "estimated_groups": "10000"
+    },
+    {
+      "group_by": [],
+      "functions": ["SUM(l_extendedprice*l_discount)"],
+      "query": "Q6",
+      "estimated_groups": "1"
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag ASC", "l_linestatus ASC"],
+      "query": "Q1"
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate ASC"],
+      "limit": 10,
+      "query": "Q3"
+    }
+  ],
+  "optimization_hints": [
+    "Q1: Parallel scan of lineitem with SIMD-accelerated date filtering; hash aggregation with 4 groups fits in L3 cache; use partial pre-agg per thread to reduce contention",
+    "Q3: Filter customer early on c_mktsegment (reduce to ~25%), hash join to orders, then partition lineitem by o_orderkey for parallel hash join; use bloom filter on customer for semi-join reduction",
+    "Q6: Parallel scan of lineitem with SIMD evaluation of BETWEEN predicates (discount, shipdate) and < predicate (quantity); single global SUM aggregation; morsel-driven execution with 64 threads"
+  ],
+  "summary": "TPC-H workload is dominated by lineitem scans (6M-60M rows) with selective date and range predicates. Q1 is a pure aggregation scan (bottleneck: full table scan + 8 aggregate functions); Q3 is a 3-way join with medium selectivity filters (bottleneck: lineitem hash join); Q6 is a filtered scan with complex predicates (bottleneck: SIMD-friendly multi-predicate evaluation). With 64 cores, 44 MiB L3 cache, and AVX512 support, primary optimization levers are: (1) morsel-driven parallel scan+filter with SIMD for Q1/Q6, (2) parallel hash join with early filtering and bloom filters for Q3, (3) partial aggregation to reduce synchronization overhead. HDD storage argues for columnar layout with compression on low-cardinality columns (l_returnflag, l_linestatus, c_mktsegment)."
+}

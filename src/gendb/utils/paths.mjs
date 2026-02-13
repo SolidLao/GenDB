@@ -46,6 +46,16 @@ export async function createIterationDir(runDir, iteration) {
   return iterDir;
 }
 
+/**
+ * Creates `queries/<queryId>/` inside the run directory.
+ * Returns the absolute path to the query directory.
+ */
+export async function createQueryDir(runDir, queryId) {
+  const queryDir = resolve(runDir, "queries", queryId);
+  await mkdir(queryDir, { recursive: true });
+  return queryDir;
+}
+
 /** Updates (or creates) the `output/<workload>/latest` symlink to point at `<runId>`. */
 export async function updateLatestSymlink(workload, runId) {
   const linkPath = resolve(OUTPUT_DIR, workload, "latest");

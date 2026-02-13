@@ -1,0 +1,32 @@
+Perfect! Analysis complete. Here's a summary of findings:
+
+## TPC-H Workload Analysis Summary
+
+**Hardware Context:**
+- 64 CPU cores (2 sockets × 16 cores, 2 threads/core), 376 GB RAM, HDD storage
+- Strong SIMD: AVX2 + full AVX512 (F/DQ/CD/BW/VL)
+- L3: 44 MiB, L2: 32 MiB per core → morsel size ~64-128K rows at 64 threads
+
+**Key Findings:**
+
+1. **Dominant Table:** `lineitem` (fact table, 6M-60M rows depending on scale)
+   - Accessed in all 3 queries
+   - Bottleneck: full scans with selective date/range filters
+   - Opportunity: parallel scan with SIMD filtering (AVX512 excellent for multi-predicate evaluation)
+
+2. **Query Characteristics:**
+   - **Q1 (Pricing):** Pure scan + aggregation; only 4 group-by values → fits in L3 cache; benefits from partial pre-aggregation per thread
+   - **Q3 (Shipping):** 3-way join (customer → orders → lineitem); medium selectivity; hash join bottleneck on lineitem
+   - **Q6 (Forecasting):** Single scan with complex range predicates (BETWEEN discount, BETWEEN shipdate, < quantity); perfect for SIMD evaluation
+
+3. **Parallelism Opportunities (64 cores = potential 50-60x speedup for scans):**
+   - Morsel-driven parallel scans with vectorized predicates
+   - Parallel hash join with partitioning on l_orderkey (Q3)
+   - Bloom filter semi-joins to reduce customer filtering cost
+
+4. **Storage Optimization:**
+   - HDD argues for columnar layout + compression
+   - Low-cardinality columns (l_returnflag, l_linestatus, c_mktsegment) → dictionary encoding
+   - Hot columns: l_shipdate, l_extendedprice, l_discount → co-locate for cache efficiency
+
+✅ **Analysis written to:** `/home/jl4492/GenDB/output/tpc-h/2026-02-13T17-23-05/workload_analysis.json`

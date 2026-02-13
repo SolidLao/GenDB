@@ -3,12 +3,6 @@
 ## What It Is
 High-performance I/O techniques for loading data into memory: mmap (memory-mapped files), io_uring (async I/O), readahead hints, and direct I/O. These avoid expensive syscalls and buffer copies.
 
-## When To Use
-- Loading large datasets from disk (>1GB)
-- Bulk data ingestion (CSV, Parquet, JSON)
-- Avoiding page cache pollution for sequential scans
-- Overlapping I/O with computation (async I/O)
-
 ## Key Implementation Ideas
 - **mmap for zero-copy reads**: Map files into virtual memory with mmap(); parse data directly without read() syscalls
 - **madvise hints**: Use MADV_SEQUENTIAL for sequential scans, MADV_WILLNEED to prefetch, MADV_DONTNEED to release after scan
@@ -22,13 +16,3 @@ High-performance I/O techniques for loading data into memory: mmap (memory-mappe
 - **MAP_POPULATE prefaulting**: Prefault all pages at mmap time to avoid page faults during data access
 - **Overlapped I/O + compute**: Use double/quad buffering with io_uring to process one buffer while loading the next
 - **pread for random access**: Use pread() instead of mmap for random access patterns or NFS-mounted files
-
-## Performance Characteristics
-- **mmap speedup**: 2-5x faster than read() for sequential scans (zero-copy, no syscall per read)
-- **io_uring latency**: ~1us per operation vs ~10us for traditional read/pread
-- **Huge pages**: Reduces TLB misses by 50-90% for large mmap regions
-
-## Pitfalls
-- **mmap SIGBUS**: I/O errors on mapped files deliver SIGBUS instead of returning an error code; must install signal handler
-- **O_DIRECT constraints**: Buffer, offset, and size must all be block-aligned; cannot mix O_DIRECT and mmap on the same file
-- **Page cache eviction**: Large mmap scans can evict useful cached data; use MADV_DONTNEED or O_DIRECT for one-shot scans

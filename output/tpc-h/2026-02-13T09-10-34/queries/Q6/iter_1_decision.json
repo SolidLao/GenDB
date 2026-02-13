@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "GenDB Q6 is competitive (25.4ms vs DuckDB 20.2ms, only 1.26x gap) but has concrete, low-risk optimization opportunities. Zone maps are available in storage but unused (8-12x potential speedup). Recommend aggressive multi-pronged approach: zone map block skipping (priority 1, low risk) + SIMD filtering (priority 2, medium risk) + prefetching (priority 3, low risk). Combined, these could achieve 5-8x speedup (25ms → 3-5ms), beating DuckDB and fully utilizing available hardware (64-core Xeon with AVX-512).",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Zone map block skipping for l_shipdate (skip 60-90% of blocks)",
+    "SIMD vectorized filtering on discount + quantity predicates",
+    "Prefetch & I/O hint optimization (L1/L2 cache-friendly morsel sizing)"
+  ],
+  "strategy_notes": "Aggressive strategy: implement all three recommendations in parallel (or sequentially 0→1→2). Zone maps are proven low-risk with high reward; SIMD adds significant complexity but should compound gains; prefetching is insurance against TLB/cache issues. If iter 1 regresses, fallback to zone maps only in iter 2. Remaining iteration (iter 3) reserved for fine-tuning or SIMD refinement.",
+  "notes": "Zone map file (l_shipdate.zonemap, 4.7KB) already exists in storage_design.json — this is a high-confidence optimization. Expected final performance: 3-8ms (3-8x improvement), competitive with or beating DuckDB. All recommendations are marked low-to-medium risk; system rollback capability mitigates implementation risk."
+}

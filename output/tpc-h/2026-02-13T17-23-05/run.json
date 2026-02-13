@@ -1,0 +1,64 @@
+{
+  "runId": "2026-02-13T17-23-05",
+  "workload": "tpc-h",
+  "startedAt": "2026-02-13T17:23:05.997Z",
+  "status": "completed",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10",
+  "gendbDir": "/home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+  "scaleFactor": 10,
+  "maxIterations": 3,
+  "model": "haiku",
+  "optimizationTarget": "execution_time",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-02-13T17:23:06.764Z",
+        "completedAt": "2026-02-13T17:23:42.154Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-02-13T17:23:42.155Z",
+        "completedAt": "2026-02-13T17:28:24.338Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-02-13T17:28:24.338Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-02-13T17:28:24.338Z"
+      }
+    },
+    "completedAt": "2026-02-13T17:28:24.339Z"
+  },
+  "phase2": {
+    "status": "completed",
+    "queries": [
+      "Q1",
+      "Q3",
+      "Q6"
+    ],
+    "maxConcurrent": 5,
+    "pipelines": {
+      "Q1": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-13T17-23-05/queries/Q1/q1_iter2.cpp",
+        "iterations": 3
+      },
+      "Q3": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-13T17-23-05/queries/Q3/q3_iter2.cpp",
+        "iterations": 2
+      },
+      "Q6": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-13T17-23-05/queries/Q6/q6.cpp",
+        "iterations": 2
+      }
+    },
+    "completedAt": "2026-02-13T17:55:53.457Z"
+  },
+  "completedAt": "2026-02-13T17:55:57.941Z"
+}

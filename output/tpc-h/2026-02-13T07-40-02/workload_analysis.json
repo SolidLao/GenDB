@@ -1,0 +1,172 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d: 1 MiB, L1i: 1 MiB, L2: 32 MiB, L3: 44 MiB",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd_support": "avx512"
+  },
+  "tables": {
+    "lineitem": {
+      "access_frequency": 3,
+      "role": "fact",
+      "estimated_cardinality": "6M-6B",
+      "hot_columns": ["l_shipdate", "l_extendedprice", "l_discount", "l_quantity", "l_returnflag", "l_linestatus", "l_orderkey", "l_tax"],
+      "access_patterns": ["full_scan", "filtered_scan"]
+    },
+    "orders": {
+      "access_frequency": 1,
+      "role": "dimension",
+      "estimated_cardinality": "1.5M-1.5B",
+      "hot_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+      "access_patterns": ["filtered_scan", "index_lookup"]
+    },
+    "customer": {
+      "access_frequency": 1,
+      "role": "dimension",
+      "estimated_cardinality": "150K-150M",
+      "hot_columns": ["c_custkey", "c_mktsegment"],
+      "access_patterns": ["filtered_scan"]
+    },
+    "nation": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "25",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "region": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "5",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "supplier": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "10K-10M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "part": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "200K-200M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "partsupp": {
+      "access_frequency": 0,
+      "role": "bridge",
+      "estimated_cardinality": "800K-800M",
+      "hot_columns": [],
+      "access_patterns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "high"
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "medium"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1"
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "high",
+      "query": "Q3"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "medium",
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">=",
+      "selectivity": "medium",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "high",
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6"
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM(l_quantity)", "SUM(l_extendedprice)", "SUM(l_extendedprice * (1 - l_discount))", "SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax))", "AVG(l_quantity)", "AVG(l_extendedprice)", "AVG(l_discount)", "COUNT(*)"],
+      "query": "Q1",
+      "estimated_groups": "4"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM(l_extendedprice * (1 - l_discount))"],
+      "query": "Q3",
+      "estimated_groups": "100K-10M"
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "query": "Q1"
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate"],
+      "limit": 10,
+      "query": "Q3"
+    }
+  ],
+  "optimization_hints": [
+    "Q1: Parallel scan with morsel-driven execution (64 threads), columnar layout for 8 accessed columns, partial aggregation per thread then merge (4 groups), SIMD for arithmetic",
+    "Q3: Build hash table on filtered customer (c_mktsegment='BUILDING'), probe with orders (o_orderdate filter), then join lineitem (l_shipdate filter), parallel hash aggregation, top-K heap for limit",
+    "Q6: Parallel scan with 4-way filter fusion (l_shipdate range, l_discount BETWEEN, l_quantity), columnar storage for 3 columns, SIMD for filters and SUM, highest parallelism opportunity (64 threads, near-linear speedup)"
+  ],
+  "summary": "Lineitem-dominated workload with scan-heavy queries (Q1, Q6) offering near-linear parallelism across 64 cores. Q6 is most selective and parallelizable (4 filters, no joins). Q3 is the bottleneck with 3-way join but filters push selectivity early. Key optimizations: columnar layout for lineitem (8 hot columns), parallel morsel-driven scans (target 100K rows/morsel), zone maps on l_shipdate/o_orderdate, hash joins with build-side filtering, partial aggregation."
+}

@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 has a critical 62x performance gap vs DuckDB (6183ms vs 99ms) with clear root cause: single-threaded execution on 32-core hardware. Bottleneck analysis identifies 30-32x parallelism opportunity as primary blocker. First iteration with no prior failures; aggressive optimization is warranted given low-risk, high-impact recommendations and 2 remaining iterations for refinement.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Implement morsel-driven thread parallelism across 32 cores to break single-threaded bottleneck (expected 30-32x speedup)",
+    "Restructure join ordering with early filtering to reduce intermediate materialization (20-30% data reduction)",
+    "Replace std::unordered_map with compact hash table (Robin Hood or Swiss Table) for 2-5x faster hash operations"
+  ],
+  "strategy_notes": "These three optimizations are synergistic and non-interfering. Morsel-driven parallelism alone should bring 6183ms → ~190-200ms. Combined with join reordering and compact hash tables, target is ~80-120ms (approaching DuckDB's 99ms). Remaining iteration 3 can address Bloom filters or other refinements if needed.",
+  "notes": "Be aggressive: the gap is severe, root cause is clear, and risk is low on all three techniques. Thread parallelism is the critical unlock (Priority 1). Do not defer parallelism to later iterations—it must be the foundation. Join reordering (Priority 2) synergizes with parallelism to further reduce work. Compact hash tables (Priority 3) amplify all improvements through better cache locality."
+}

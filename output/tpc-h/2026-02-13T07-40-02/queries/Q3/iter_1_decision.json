@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "MUST fix critical revenue precision error first (validation fails). Current 760ms is 2.3x from baseline 325ms target. With 2 iterations remaining, aggressively apply high-impact optimizations: zone maps (150-250ms), Bloom filters (150-250ms), and flat hash maps (130-200ms) could reach ~300-400ms target range.",
+  "selected_recommendations": [0, 1, 2, 6],
+  "focus_areas": [
+    "Fix revenue precision to preserve 4 decimal places (CRITICAL)",
+    "Implement zone map pruning on sorted l_shipdate and o_orderdate (I/O bound)",
+    "Add Bloom filters for join reduction on customer and order hash tables (CPU bound)",
+    "Replace std::unordered_map with flat_hash_map for 3x faster lookups (CPU bound)"
+  ],
+  "strategy_notes": "Correctness first, then compound high-impact optimizations. Zone maps + Bloom filters + flat hash maps attack different bottlenecks (I/O, probe reduction, data structure efficiency) and should stack multiplicatively. Expected combined improvement: 760ms -> 300-400ms, meeting baseline target. Save SIMD/partitioning for iteration 2 if needed to reach DuckDB's 77ms.",
+  "notes": "Agent selection: critical_fix[0] → Query Rewriter (semantic fix), optimizations[1] → I/O Optimizer (zone maps), [2] → Execution Optimizer (Bloom filters), [6] → Execution Optimizer (hash map replacement). Be aggressive with implementation - rollback capability protects correctness."
+}

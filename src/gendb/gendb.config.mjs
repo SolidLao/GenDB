@@ -7,6 +7,7 @@ export const defaults = {
   maxOptimizationIterations: 3,
   scaleFactor: 10,
   targetBenchmark: "tpc-h",
-  model: "sonnet",
+  model: "haiku",
   optimizationTarget: "execution_time",
+  maxConcurrentQueries: 5,
 };

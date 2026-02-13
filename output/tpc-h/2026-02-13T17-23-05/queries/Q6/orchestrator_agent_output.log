@@ -1,0 +1,19 @@
+## Summary
+
+**Q6 Optimization Decision: STOP**
+
+**Status:** Iteration budget exhausted (0 remaining). Both prior optimization attempts (iterations 1 & 2) regressed performance (~30-31 ms) despite targeting identified bottlenecks.
+
+**Current Performance:**
+- Baseline: 29.3 ms (correct)
+- After iter 1-2: ~30-31 ms (regressed ~2%)
+- Target: 14.19-19 ms (GenDB), 19.2-22.1 ms (DuckDB)
+- **Gap to target: 82%**
+
+**Root Cause Analysis:**
+Iterations 1 and 2 correctly identified the critical bottleneck (zone map filtering could yield 40-50% improvement) and low-risk optimizations (thread count increase, prefetch), but implementations failed to deliver gains. This indicates:
+1. Zone map metadata may not be accessible or correctly formatted in storage
+2. Thread scaling introduced unexpected contention
+3. Compiler auto-vectorization may be insufficient; explicit SIMD intrinsics too complex to implement correctly
+
+**Outcome:** Decision written to `/home/jl4492/GenDB/output/tpc-h/2026-02-13T17-23-05/queries/Q6/iter_3_decision.json`

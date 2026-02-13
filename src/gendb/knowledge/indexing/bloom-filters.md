@@ -3,13 +3,6 @@
 ## What It Is
 Bloom filters are probabilistic data structures that test set membership with no false negatives but controlled false positives. Hash-based bit arrays enable space-efficient filtering for join reduction and existence checks.
 
-## When To Use
-- Semi-join reduction (filter probe side before expensive hash join)
-- Existence checks on large datasets (avoid disk I/O for non-existent keys)
-- Distributed joins (broadcast small bloom filter, filter before network shuffle)
-- Multi-column predicates (combine bloom filters with AND/OR)
-- NOT for: exact membership (use hash table) or deletions (use counting bloom filter)
-
 ## Key Implementation Ideas
 - **Classic Bloom Filter**: k hash functions set k bits per element in a bit array; query returns "definitely not" or "probably yes"
 - **Optimal Sizing Formula**: m = -n * ln(fpr) / (ln2)^2 bits; optimal k = (m/n) * ln2 hash functions
@@ -21,13 +14,3 @@ Bloom filters are probabilistic data structures that test set membership with no
 - **Runtime Bloom Filters**: Build during hash join build phase; push down to scan operators for early filtering
 - **Hash Function Selection**: Use XXHash or MurmurHash; derive k hashes from two base hashes (Kirsch-Mitzenmacker optimization)
 - **Bloom Filter Composition**: AND of two filters reduces false positives; OR accumulates them
-
-## Performance Characteristics
-- 5-100x speedup on semi-joins (filter 90-99% of non-matching rows)
-- Blocked filters: 1 cache miss per lookup vs k misses for classic (k typically 4-7)
-- Memory: 8-20 bits/element (vs 32-64 bytes for hash table equivalent)
-
-## Pitfalls
-- Under-sizing causes high false positive rates that negate filtering benefit; over-sizing wastes cache
-- Classic design incurs k cache misses per lookup; use blocked variant for performance
-- Cannot resize without full rebuild; pre-allocate for expected cardinality

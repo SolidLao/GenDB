@@ -1,0 +1,11 @@
+{
+  "action": "optimize",
+  "reasoning": "Critical semantic bug (year-only date encoding) blocks correctness validation. Fixing cutoff from CUTOFF_DATE=1998 to CUTOFF_DATE=1997 is mandatory and low-risk. After fix, apply SIMD vectorization (15-25% speedup) to close 2x gap with DuckDB (160ms → target ~84ms). Remaining iteration budget allows exactly this: correctness fix + one high-impact optimization.",
+  "selected_recommendations": [0, 1],
+  "focus_areas": [
+    "Fix date filtering cutoff (CUTOFF_DATE=1997) to resolve semantic correctness bug",
+    "Apply AVX2/AVX-512 SIMD vectorization to arithmetic hot loop (1.0 - discount, extendedprice * one_minus_discount, disc_price * (1.0 + tax))"
+  ],
+  "strategy_notes": "CORRECTNESS FIRST: The critical fix must be applied before performance validation. SIMD vectorization targets the computation-heavy phase (estimated 15-25% of execution time). Current 160ms with wrong results must become correct first, then fast. Avoid dictionary lookup and morsel sizing optimizations in this iteration—save them if needed in future runs. Focus on high-confidence, high-impact techniques.",
+  "notes": "Iteration 1 regressed due to semantic bug persistence, not implementation failure. The generated code structure is sound (64-thread parallel aggregation, good CPU utilization ~27 cores). After cutoff fix, results should be correct. SIMD is conservative and well-understood; expected to deliver 15-25% speedup based on similar workload profiles. Target: 160ms × (1 - 0.20) = 128ms, bringing GenDB closer to DuckDB's 84ms."
+}

@@ -3,13 +3,6 @@
 ## What It Is
 High-performance hash table implementations from Google (Abseil flat_hash_map/flat_hash_set) and Facebook (Folly F14FastMap/F14NodeMap). Both use Swiss Tables design with SIMD-accelerated lookups and open addressing.
 
-## When To Use
-- Hash joins and GROUP BY aggregations in query execution
-- Symbol tables, metadata caches, deduplication
-- Replacing std::unordered_map for 2-5x speedup
-- When profiling shows hash table operations as bottleneck
-- Large working sets where memory overhead of std::unordered_map is unacceptable
-
 ## Key Implementation Ideas
 - **Drop-in replacement**: absl::flat_hash_map and folly::F14FastMap are API-compatible with std::unordered_map
 - **Swiss Tables internals**: Uses 16-byte control byte groups; each byte stores empty/deleted/hash-prefix metadata
@@ -22,13 +15,3 @@ High-performance hash table implementations from Google (Abseil flat_hash_map/fl
 - **Fibonacci hashing**: Multiply keys by golden ratio constant for better hash distribution with integer keys
 - **Load factor tuning**: Swiss Tables operate optimally at 87.5% load factor (7/8 full) before automatic resize
 - **Custom hash functions**: Use absl::Hash or XXH3 instead of identity/poor hashes to maintain performance
-
-## Performance Characteristics
-- **Lookup speed**: 2-5x faster than std::unordered_map; SIMD adds ~15-25% on top
-- **Memory overhead**: ~12-15% vs ~100-200% for std::unordered_map (chaining + per-node allocation)
-- **Load factor**: Optimal at 87.5%; automatic resizing doubles capacity
-
-## Pitfalls
-- **Iterator invalidation**: Insertions invalidate all iterators (unlike std::unordered_map)
-- **Pointer stability**: Use F14NodeMap or absl::node_hash_map if stable pointers/references are required
-- **Hash function quality**: Poor hash functions (e.g., identity) kill performance; always use a good hash

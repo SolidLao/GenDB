@@ -1,0 +1,64 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Compiled successfully with g++ -O2 -std=c++17 -Wall -lpthread"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query executed successfully, produced output within time limits"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "Results do not match ground truth. 3 out of 10 rows differ. All output dates show 1995-01-01 when they should vary (expected: 1995-01-02, 1995-01-27, 1995-03-14, 1995-03-09, etc.). The top order key is 30417318 (actual) vs 4791171 (expected), indicating incorrect sorting and aggregation."
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "fail",
+        "num_rows": 10,
+        "timing_ms": 1570,
+        "notes": "Query produces 10 rows but with incorrect values. Root cause: DATE encoding loss in storage layer (year-only, missing month/day), causing all output dates to format as YYYY-01-01. This is a critical correctness bug."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 1570,
+        "status": "fail",
+        "bottleneck": "Semantic correctness - date encoding lossy",
+        "root_cause": "GenDB storage encodes dates as year-only integers (int32_t with values like 1992, 1993, ..., 1998), losing month/day precision. The format_date() function then outputs 'YYYY-01-01', producing identical dates for all results. Original TPC-H data contains full dates (e.g., '1995-01-02', '1995-03-14'). The storage design specification says 'date_encoding: days_since_epoch_1970' but actual implementation stores year-only values. This causes: (1) Incorrect date comparisons in filter logic (o_orderdate <= 1995 treats entire year 1995 the same), (2) Incorrect sorting by o_orderdate (all dates format identically), (3) Incorrect GROUP BY results (date becomes meaningless key component)."
+      }
+    },
+    "overall": "CRITICAL FAILURE: Query results are factually incorrect due to date encoding loss in the storage layer. The query code (q3_iter1.cpp) is actually correct - it properly reads year-only integers and formats them. The bug is in GenDB's storage ingestion/encoding: dates should be stored as days since epoch (or full YYYY-MM-DD), not year-only. This must be fixed before optimization work can proceed. Current execution time of 1.57s is reasonable for 60M lineitem rows with 64-thread parallelism, but performance optimization is secondary to correctness."
+  },
+  "critical_fixes": [
+    {
+      "target": "ALL",
+      "issue": "Date columns (o_orderdate, l_shipdate) stored as year-only integers, losing month/day information. Query results show 1995-01-01 for all rows when expected to vary.",
+      "fix": "Fix GenDB storage layer to encode dates as days since epoch (1970-01-01) or as full YYYY-MM-DD strings, preserving month/day precision.",
+      "description": "The storage design specifies 'date_encoding: days_since_epoch_1970' but the actual storage implementation encodes dates as year-only int32_t values (1992, 1993, ..., 1998). This happens during TPC-H data ingestion. Three options: (1) Store dates as int32_t days-since-epoch (40MB per 150M rows, good compatibility), (2) Store dates as string 'YYYY-MM-DD' (higher I/O cost, better debuggability), (3) Store as (year, month, day) triplet (3× int16_t). Recommend option 1 for efficiency. The query code must then be updated to convert epoch days to calendar dates for formatting. This fix is in the storage/ingestion layer, not the query code.",
+      "bottleneck_category": "semantic",
+      "risk": "high"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "semantic",
+      "technique": "Fix date encoding in storage layer before optimization",
+      "description": "After storage layer fix, measure actual execution time. Current 1.57s is on HDD with 64-core parallelism reading 60M lineitem rows + two hash joins. Estimated breakdown: ~800ms lineitem sequential scan + prefetching, ~400ms join operations, ~300ms aggregation and sorting. Do not optimize until correctness is restored.",
+      "expected_improvement": "Correctness first; performance baseline will be re-measured after fix.",
+      "risk": "high"
+    }
+  ],
+  "summary": "Q3 iteration 1 FAILS validation due to critical date encoding loss in GenDB storage layer. The generated C++ code is functionally correct (it properly reads year-only integers and formats them), but the underlying storage is lossy—dates stored as years 1992-1998 instead of full YYYY-MM-DD or days-since-epoch. This causes all output dates to format as 'YYYY-01-01', breaking date-dependent sorting and GROUP BY semantics. The storage design specification claims 'days_since_epoch_1970' encoding but actual implementation uses year-only integers. Must fix storage ingestion before optimization work. Current execution time (1.57s) suggests parallelization strategy is sound for HDD workloads, but performance optimization is secondary to correctness."
+}

@@ -1,0 +1,90 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation succeeded with -O2 -std=c++17"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query executed successfully. Loaded 1.5M customers, 15M orders, 59.9M lineitems"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Q3: 10 rows match ground truth exactly"
+    },
+    "profiling": {
+      "available": false,
+      "notes": "perf not available in execution environment"
+    },
+    "query_results": {
+      "Q3": {
+        "status": "pass",
+        "num_rows": 10,
+        "timing_ms": 6183,
+        "notes": "Results are correct but execution time is 6.2 seconds, which is 16.7x slower than GenDB baseline (370ms) and 62x slower than DuckDB (99ms). Major performance issues present."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 6183,
+        "status": "pass",
+        "bottleneck": "Single-threaded execution on 32-core hardware (wasting 96.9% of CPU capacity)",
+        "root_cause": "Q3 code is entirely sequential: filters 1.5M customers → builds 7.3M orders hash map → probes with customer keys → builds 32.3M lineitem hash map → probes with filtered orders. No thread parallelism, suboptimal join ordering, and inefficient std::unordered_map with poor cache locality."
+      }
+    },
+    "overall": "Query is functionally correct but has severe performance issues. The baseline implementation is non-parallelized and uses inefficient join ordering. Primary opportunity: parallelize the execution with morsel-driven parallelism (should yield ~30-32x speedup alone). Secondary: restructure join order to reduce intermediate materialization (filter customer → probe orders directly → probe lineitem on filtered results). Tertiary: replace std::unordered_map with compact hash tables."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Morsel-Driven Thread Parallelism",
+      "description": "Parallelize query execution across 32 cores using morsel-driven approach (similar to DuckDB/HyPer). Divide lineitem table into ~100K-row morsels. Create thread pool with 32 worker threads. Each thread: (1) scans its morsels of lineitem, (2) filters on l_shipdate > 1995-03-15, (3) probes customer hash table for matching orders, (4) updates thread-local hash aggregation table. After all threads complete, merge thread-local aggregation tables in final step. Expected: near-linear 30-32x speedup from single-threaded baseline, bringing 6183ms down to ~190-200ms.",
+      "expected_improvement": "30-32x speedup (6183ms → ~190-200ms). This single optimization alone should approach DuckDB performance (99ms) when combined with other fixes.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Optimized Join Ordering with Early Filtering",
+      "description": "Restructure join sequence to minimize intermediate materialization. Current: filter customer (300K) → build orders map with all 7.3M matching rows → probe with customer. Better: (1) Filter customer on c_mktsegment='BUILDING' → 300K rows (do this first, already done). (2) Probe orders table with filtered customer set, filtering on o_orderdate < 1995-03-15 simultaneously. This produces ~1.5M intermediate rows instead of 7.3M. (3) Probe lineitem with the 1.5M orders, filtering on l_shipdate > 1995-03-15 simultaneously. This avoids building the 32.3M lineitem hash map upfront. Use vector<OrdersResult> for step 2 result, then directly probe lineitem during step 3 with early filter. Replace unordered_multimap with simple vector scan or compact hash table.",
+      "expected_improvement": "20-30% reduction in memory usage and intermediate data materialization. Reduces peak memory from 1.5GB+ to ~500MB. Combined with parallelism: brings theoretical time from ~190ms to ~150-170ms.",
+      "risk": "medium"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Replace std::unordered_map with Compact Hash Table (Robin Hood or Swiss Table)",
+      "description": "std::unordered_map has poor cache locality and high per-entry overhead. For the 32.3M lineitem_by_orderkey map, use a compact hash table with open addressing and linear probing. Implement or use library (e.g., Abseil's flat_hash_map, folly::F14NodeMap, or simple robin hood). For the aggregation hash table (114K groups), pre-size to 150K entries at 75% load factor and use compact hash table. Store hash values inline to avoid recomputation. Expected: 2-5x faster hash table operations. Combined with other optimizations, this brings ~150ms down to ~80-120ms.",
+      "expected_improvement": "2-5x faster hash table operations. Combined with parallelism and join reordering: brings time from ~190ms to ~80-120ms, approaching DuckDB's 99ms.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Partial Aggregation with Thread-Local Merge",
+      "description": "Currently, aggregation uses a single global hash table, which would require locking or atomic operations in parallel code. Instead, implement two-phase aggregation: (1) Filtering phase: each thread maintains thread-local aggregate hash table for its morsels. (2) Merge phase: serially merge all thread-local tables into final result. This eliminates synchronization overhead in the hot loop. Pre-size each thread-local table to ~10K entries (estimated 114K groups / 32 threads) to fit in L2 cache. Use thread_local storage or pass pre-allocated local tables to each worker. Expected: 2-3x faster aggregation due to no lock contention.",
+      "expected_improvement": "2-3x faster aggregation when parallelized. Reduces merging overhead from potential 200+ ms (with lock contention) to ~60-80ms.",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Bloom Filter for Semi-Join Reduction (Optional)",
+      "description": "After filtering customer to 300K BUILDING segment keys, build a small Bloom filter (4-8 bytes per key). During lineitem scan, probe the Bloom filter before expensive hash table lookup. Bloom filter is ~4-8MB, fits entirely in L3 cache. Expected reduction: skip 80-90% of non-matching lineitem-to-customer probes without hash table lookup. This is a secondary optimization (after parallelism/join reordering are complete). Use libboost bloom_filter or simple bitset-based implementation.",
+      "expected_improvement": "10-15% faster lineitem filtering due to Bloom filter cache hits avoiding expensive hash table lookups. Combined with all other optimizations: brings time from ~80-120ms toward 60-80ms range.",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q3 baseline is functionally correct (10 rows match ground truth) but severely under-optimized. Executes in 6.2 seconds vs GenDB baseline 370ms (16.7x slower) and DuckDB 99ms (62x slower). Hardware has 32 cores and 44MiB L3 cache but code is entirely single-threaded. Root causes: (1) No thread parallelism [PRIMARY - 30-32x opportunity], (2) Suboptimal join ordering with massive intermediate maps [SECONDARY - 20-30% data reduction], (3) Inefficient std::unordered_map [TERTIARY - 2-5x speedup]. Implementation roadmap: Priority 1 is morsel-driven parallelism across 32 cores (should yield ~190-200ms). Priority 2 is restructure join order to avoid building 32M lineitem map upfront. Priority 3 is replace hash tables with compact variants. Combining all optimizations should achieve ~80-120ms execution time, matching or exceeding DuckDB's performance. No critical correctness issues; all fixes are performance-oriented."
+}

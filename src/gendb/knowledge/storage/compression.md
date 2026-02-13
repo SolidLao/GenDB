@@ -3,13 +3,6 @@
 ## What It Is
 Fast compression schemes that reduce memory footprint and increase effective memory bandwidth without heavy CPU cost. Unlike general-purpose compression (gzip), these allow direct querying on compressed data.
 
-## When To Use
-- **High Cardinality Strings**: Dictionary encoding
-- **Sorted/Sequential Data**: Delta encoding, RLE
-- **Small Integer Ranges**: Bit packing, Frame-of-Reference
-- **Memory-Bound Queries**: Compression speeds up queries by reducing data movement
-- **Cold Storage**: Heavier compression (LZ4, Zstd) for archival data
-
 ## Key Implementation Ideas
 - **Dictionary encoding**: Map unique values to integer codes; queries compare small integers instead of full strings
 - **Run-length encoding (RLE)**: Store (value, count) pairs for consecutive repeated values; aggregations operate on runs directly without expanding
@@ -20,13 +13,3 @@ Fast compression schemes that reduce memory footprint and increase effective mem
 - **Adaptive compression selection**: Automatically choose scheme based on column statistics (cardinality, sortedness, value range)
 - **Per-column-chunk compression**: Compress each chunk independently so different chunks can use different schemes
 - **Operating directly on compressed data**: Perform filters and aggregations without decompressing (e.g., RLE sum = value * count)
-
-## Performance Characteristics
-- **Dictionary encoding**: 10-100x compression for low-cardinality columns
-- **RLE**: 1000x+ for highly sorted data with many repeated values
-- **CPU cost**: <10% overhead for lightweight schemes vs 50%+ for LZ4/Zstd
-
-## Pitfalls
-- **High-cardinality dictionaries**: Dictionary grows unbounded, becoming larger than original data
-- **Wrong scheme selection**: Bit-packing unsorted data with large range adds CPU cost with no benefit
-- **Over-compression of hot data**: LZ4/Zstd too slow for frequently accessed columns; use lightweight schemes

@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Critical semantic bug detected: l_shipdate column is encoded as YEAR ONLY (1992-1998) instead of days-since-epoch, causing incorrect data filtering and wrong query results. Must fix data generation/ingest phase before any performance optimization. Selected the critical fix to enable proper date arithmetic evaluation.",
+  "selected_recommendations": [0],
+  "focus_areas": [
+    "Fix l_shipdate encoding in data generation layer to days-since-epoch",
+    "Re-ingest lineitem table with corrected date values",
+    "Re-evaluate Q1 correctness and performance after data fix"
+  ],
+  "strategy_notes": "Correctness is prerequisite for performance. The 162ms execution time is excellent but meaningless on wrong data (includes 59.9M rows instead of ~45M). After data fix, plan SIMD vectorization (2-4x speedup on filter/arithmetic) and zone-map block skipping (5-15% I/O savings) as post-fix optimizations. We have 2 remaining iterations to fix and optimize.",
+  "notes": "The root cause is in the ingest layer, not query execution. q1.cpp lines 22-28 already acknowledge this bug. Locate TPC-H lineitem.tbl parsing code and encode dates properly as (days since 1970-01-01). Example: 1992-01-04 = 8038 days. Once corrected, re-run evaluation to measure actual execution time on correct data."
+}
