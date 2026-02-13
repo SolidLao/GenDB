@@ -444,6 +444,117 @@ def gendb_benchmark_combined(main_bin: Path, gendb_dir: Path, num_runs: int) -> 
     return {q: times for q, times in results.items() if times}
 
 
+def gendb_benchmark_from_json(run_dir: Path) -> dict:
+    """Read GenDB benchmark results from evaluation JSON files.
+
+    Reads timing data from queries/QN/iter_N_evaluation.json files.
+
+    Returns:
+    {
+      "baseline": {"Q1": [times], "Q3": [times], ...},
+      "iterations": [
+        {"iteration": 1, "Q1": [times], ...},
+        ...
+      ],
+      "best": {"Q1": [times], ...}
+    }
+    """
+    history = {"baseline": {}, "iterations": [], "best": {}}
+    queries_dir = run_dir / "queries"
+
+    if not queries_dir.exists():
+        print("  No queries directory found.")
+        return history
+
+    # Collect all available queries and iterations
+    available_queries = []
+    for qdir in sorted(queries_dir.iterdir()):
+        if qdir.is_dir() and qdir.name.startswith("Q"):
+            available_queries.append(qdir.name)
+
+    if not available_queries:
+        print("  No query directories found.")
+        return history
+
+    print(f"  Found query directories: {', '.join(available_queries)}")
+
+    # Collect all iteration numbers
+    all_iter_nums = set()
+    for qname in available_queries:
+        qdir = queries_dir / qname
+        for json_file in qdir.glob("iter_*_evaluation.json"):
+            match = re.match(r"iter_(\d+)_evaluation\.json", json_file.name)
+            if match:
+                all_iter_nums.add(int(match.group(1)))
+
+    all_iter_nums = sorted(all_iter_nums)
+    if not all_iter_nums:
+        print("  No iteration evaluation files found.")
+        return history
+
+    print(f"  Found iterations: {all_iter_nums}")
+
+    # Read baseline (iter_0)
+    print("  Reading baseline (iteration 0)...")
+    for qname in sorted(available_queries):
+        json_path = queries_dir / qname / "iter_0_evaluation.json"
+        if json_path.exists():
+            try:
+                with open(json_path, "r") as f:
+                    data = json.load(f)
+                    timing_ms = data.get("evaluation", {}).get("query_results", {}).get(qname, {}).get("timing_ms")
+                    if timing_ms is not None:
+                        # Store as list with single value (mimicking num_runs=1)
+                        history["baseline"][qname] = [timing_ms]
+                        print(f"    Baseline {qname}: {timing_ms:.1f} ms")
+            except Exception as e:
+                print(f"    Warning: Could not read {json_path}: {e}")
+
+    # Read iterations (iter_1, iter_2, ...)
+    for iter_num in all_iter_nums:
+        if iter_num == 0:
+            continue  # Skip baseline, already processed
+        print(f"  Reading iteration {iter_num}...")
+        iter_entry = {"iteration": iter_num}
+        for qname in sorted(available_queries):
+            json_path = queries_dir / qname / f"iter_{iter_num}_evaluation.json"
+            if json_path.exists():
+                try:
+                    with open(json_path, "r") as f:
+                        data = json.load(f)
+                        timing_ms = data.get("evaluation", {}).get("query_results", {}).get(qname, {}).get("timing_ms")
+                        if timing_ms is not None:
+                            iter_entry[qname] = [timing_ms]
+                            print(f"    Iteration {iter_num} {qname}: {timing_ms:.1f} ms")
+                except Exception as e:
+                    print(f"    Warning: Could not read {json_path}: {e}")
+        history["iterations"].append(iter_entry)
+
+    # Best per-query: cherry-pick across baseline and iterations
+    all_candidates = [history["baseline"]] + history["iterations"]
+    for qname in available_queries:
+        best_avg = None
+        best_times_list = None
+        for result in all_candidates:
+            if qname in result and isinstance(result[qname], list) and len(result[qname]) > 0:
+                avg = sum(result[qname]) / len(result[qname])
+                if best_avg is None or avg < best_avg:
+                    best_avg = avg
+                    best_times_list = result[qname]
+        if best_times_list:
+            history["best"][qname] = best_times_list
+
+    # Summary of best results
+    if history["best"]:
+        print(f"\n  Best per-query performance (cherry-picked across iterations):")
+        for qname in sorted(history["best"].keys()):
+            times = history["best"][qname]
+            avg_time = sum(times) / len(times) if times else 0
+            print(f"    {qname}: {avg_time:.1f} ms")
+
+    return history
+
+
 def gendb_benchmark_all(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
     """Run all GenDB per-query binaries (baseline + iterations).
 
@@ -742,25 +853,10 @@ def main():
     # --- GenDB ---
     if args.gendb_run and args.gendb_run.exists():
         print(f"=== GenDB Benchmark ({args.gendb_run}) ===")
-        if not args.gendb_dir.exists():
-            print(f"  Error: GenDB storage not found at {args.gendb_dir}")
-            print(f"  Run ingestion first or provide --gendb-dir path.")
-        else:
-            print(f"  (Using existing storage — no re-ingestion)")
-            gendb_history = gendb_benchmark_all(args.gendb_run, args.gendb_dir, args.runs)
-            if gendb_history and gendb_history["best"]:
-                all_results["GenDB"] = gendb_history["best"]
-                print(f"\n  Best per-query performance (cherry-picked across iterations):")
-                for qname in QUERIES:
-                    if qname in gendb_history["best"]:
-                        times = gendb_history['best'][qname]
-                        avg_time = sum(times) / len(times) if times else 0
-                        print(f"    {qname}: {avg_time:.1f} ms (avg)")
-                total_best = sum(
-                    sum(gendb_history["best"].get(q, [0])) / max(len(gendb_history["best"].get(q, [1])), 1)
-                    for q in QUERIES
-                )
-                print(f"    Total (best per-query): {total_best:.1f} ms")
+        print(f"  Reading results from evaluation JSON files...")
+        gendb_history = gendb_benchmark_from_json(args.gendb_run)
+        if gendb_history and gendb_history["best"]:
+            all_results["GenDB"] = gendb_history["best"]
     else:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 
