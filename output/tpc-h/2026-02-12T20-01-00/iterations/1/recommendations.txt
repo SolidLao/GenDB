@@ -1,0 +1,134 @@
+# Query Implementation Strategies (Iteration 1)
+
+## Per-Query Strategy
+
+### Q1: Pricing Summary Report (Single-table aggregation with date filter)
+**Operators:** ScanWithDateFilter → HashAgg → Sort
+**Parquet Pushdown:**
+  - Use ScanWithDateFilter on l_shipdate with max_date = 1998-09-02 (DATE '1998-12-01' - 90 days)
+  - Data is sorted by l_shipdate (confirmed: first RG 1992-01-02 to 1992-02-01, last RG 1998-11-03 to 1998-12-01)
+  - Row group pruning will skip ~1 month of data (last ~30 row groups out of 600)
+  - Expected I/O reduction: ~5% (30/600 row groups eliminated)
+**Column Projection:**
+  - Read only: l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax, l_shipdate (7 of 16 columns)
+  - I/O reduction: ~56% (9 columns eliminated)
+**Filter Strategy:**
+  - Parquet predicate pushdown: l_shipdate <= '1998-09-02' → row group pruning via statistics
+  - Arrow compute filtering: apply exact date filter on remaining rows within selected row groups
+**Aggregation:**
+  - GROUP BY l_returnflag, l_linestatus (expected ~4 groups: low cardinality, hash table fits in L1 cache)
+  - Aggregates: SUM(l_quantity), SUM(l_extendedprice), SUM(l_extendedprice * (1-l_discount)), SUM(l_extendedprice * (1-l_discount) * (1+l_tax)), AVG(l_quantity), AVG(l_extendedprice), AVG(l_discount), COUNT(*)
+  - Use single-pass hash aggregation (HashAgg operator)
+**Arrow Compute:**
+  - Use arrow::compute::multiply for (1-l_discount), (1+l_tax) expressions
+  - Use arrow::compute::filter for date predicate after row group selection
+  - Consider fusing expression evaluation into aggregation loop to avoid materializing intermediate arrays
+
+### Q3: Shipping Priority (3-way join with filters)
+**Operators:** ScanWithDateFilter (orders, lineitem) → Scan (customer) → HashJoin × 2 → HashAgg → Sort → Limit
+**Join Order:**
+  1. First join: customer ⋈ orders (small × medium)
+     - Build: customer (15K rows filtered to ~3K by c_mktsegment='BUILDING')
+     - Probe: orders (15M rows filtered to ~6M by o_orderdate < '1995-03-15')
+  2. Second join: (customer ⋈ orders) ⋈ lineitem (medium × large)
+     - Build: result from step 1 (~600K joined rows estimated)
+     - Probe: lineitem (60M rows filtered to ~36M by l_shipdate > '1995-03-15')
+**Parquet Pushdown:**
+  - customer: Apply c_mktsegment='BUILDING' as Arrow compute filter (no Parquet benefit, not sorted)
+  - orders: Use ScanWithDateFilter on o_orderdate with max_date='1995-03-15' (upper bound only)
+    - If orders is sorted by o_orderdate, skip row groups after cutoff (~60% reduction)
+    - If NOT sorted, no row group pruning benefit
+  - lineitem: Use ScanWithDateFilter on l_shipdate with min_date='1995-03-15' (lower bound only)
+    - Data is sorted, skip row groups before cutoff (1992-01 to 1995-03: ~38% of row groups eliminated)
+    - Expected I/O reduction: ~38% (skip first ~228 row groups out of 600)
+**Column Projection:**
+  - customer: c_custkey, c_mktsegment (2 of 8 columns) → 75% reduction
+  - orders: o_orderkey, o_custkey, o_orderdate, o_shippriority (4 of 9 columns) → 56% reduction
+  - lineitem: l_orderkey, l_extendedprice, l_discount, l_shipdate (4 of 16 columns) → 75% reduction
+**Filter Strategy:**
+  - customer: Arrow compute filter c_mktsegment = 'BUILDING' after scan (string equality)
+  - orders: Parquet row group pruning + Arrow compute filter o_orderdate < '1995-03-15'
+  - lineitem: Parquet row group pruning + Arrow compute filter l_shipdate > '1995-03-15'
+**Aggregation:**
+  - GROUP BY l_orderkey, o_orderdate, o_shippriority (high cardinality: ~600K groups estimated)
+  - Aggregate: SUM(l_extendedprice * (1 - l_discount))
+  - Hash table size: ~600K entries (needs ~50MB for keys + aggregates)
+**Post-Aggregation:**
+  - Sort by revenue DESC, o_orderdate
+  - LIMIT 10 (only materialize top 10 rows)
+**Arrow Compute:**
+  - Use arrow::compute::equal for c_mktsegment, greater/less for date comparisons
+  - Use arrow::compute::multiply for (1-l_discount) expression
+
+### Q6: Forecasting Revenue Change (Single-table scan with multiple filters)
+**Operators:** ScanWithDateFilter → Filter → Aggregate (scalar, no GROUP BY)
+**Parquet Pushdown:**
+  - Use ScanWithDateFilter on l_shipdate with min_date='1994-01-01', max_date='1994-12-31' (1-year range)
+  - Data is sorted by l_shipdate: row groups cover monthly ranges
+  - Expected row groups to read: ~12 out of 600 (only row groups overlapping 1994)
+  - Expected I/O reduction: 98% (588/600 row groups eliminated)
+**Column Projection:**
+  - Read only: l_shipdate, l_quantity, l_extendedprice, l_discount (4 of 16 columns)
+  - I/O reduction: 75% (12 columns eliminated)
+**Filter Strategy:**
+  - Parquet predicate pushdown: l_shipdate BETWEEN '1994-01-01' AND '1994-12-31' → row group pruning
+  - Arrow compute filtering (apply after row group selection):
+    1. l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' (exact date range)
+    2. l_discount BETWEEN 0.05 AND 0.07 (numeric range)
+    3. l_quantity < 24 (numeric comparison)
+  - Filter selectivity: 14% (date) × 20% (discount) × 48% (quantity) ≈ 1.3% of total data
+  - Expected result: ~780K rows from ~60M total
+**Aggregation:**
+  - Scalar aggregate (no GROUP BY): SUM(l_extendedprice * l_discount)
+  - Single accumulator, very efficient
+**Arrow Compute:**
+  - Use arrow::compute::and_kleene to combine three filter predicates into single mask
+  - Use arrow::compute::filter to apply combined mask
+  - Use arrow::compute::multiply for l_extendedprice * l_discount
+  - Use arrow::compute::sum to compute final aggregate
+  - Consider fusing multiply+sum to avoid materializing product array
+
+## Shared Observations
+
+### Parquet File Layout (verified)
+- **lineitem.parquet**: 600 row groups, ~100K rows/group, SORTED by l_shipdate (1992-01 to 1998-12)
+  - Row group statistics enable effective pruning for all three queries
+  - First RG: 1992-01-02 to 1992-02-01
+  - Last RG: 1998-11-03 to 1998-12-01
+  - Monthly granularity in row groups aligns well with TPC-H date filters
+- **orders.parquet**: 150 row groups, ~100K rows/group
+  - Not confirmed if sorted by o_orderdate (needs verification)
+  - If sorted, Q3 benefits from row group pruning
+- **customer.parquet**: Small table (~120MB), row group structure less critical
+
+### Cross-Query I/O Patterns
+- All three queries benefit from column projection (50-75% I/O reduction)
+- Q1 and Q6 have excellent row group pruning potential (5% and 98% reduction respectively)
+- Q3 has moderate row group pruning on lineitem (38% reduction) if orders is sorted
+- Date filters are highly selective when combined with sorted Parquet data
+
+### Arrow Compute Kernel Usage
+- **Comparison functions**: greater_equal, less_equal, equal (all queries)
+- **Logical operations**: and, and_kleene for combining predicates (Q6)
+- **Arithmetic**: multiply for expression evaluation (all queries)
+- **Filtering**: filter function to apply boolean masks (all queries)
+- **Aggregation**: Use arrow::compute::sum where possible instead of manual loops
+
+### Critical Implementation Details
+1. **ScanWithDateFilter operator**: Already supports row group pruning via FilterRowGroupsByDate32
+   - Reads Parquet row group statistics (min/max for date columns)
+   - Skips row groups outside date range
+   - Applies exact filter on remaining rows
+2. **Column projection**: Already implemented in Scan and ScanWithDateFilter operators
+3. **Hash join build/probe order**: HashJoinInt32 builds on right, probes with left
+   - For Q3: ensure smaller table is on the right (build side)
+4. **Expression evaluation timing**: Consider materializing computed columns (e.g., l_extendedprice * (1-l_discount)) during scan vs during aggregation
+   - Trade-off: materialize early = larger intermediate tables, materialize late = recompute for each aggregate function
+
+### Potential Bottlenecks (to monitor in iteration 2)
+- **Q1**: Single-threaded aggregation on 98% of lineitem table (~59M rows)
+- **Q3**: Two hash joins + high-cardinality aggregation, large hash table (~600K groups)
+- **Q6**: Should be very fast due to extreme row group pruning (98%), main cost is filter evaluation
+
+## Summary
+Leverage Parquet row group pruning (lineitem sorted by l_shipdate), aggressive column projection (50-75% I/O reduction), and Arrow compute kernels for vectorized filtering; Q6 is the best-case scenario (98% row group pruning), Q1 processes most data but has simple aggregation, Q3 needs careful join ordering and will have the largest intermediate results.

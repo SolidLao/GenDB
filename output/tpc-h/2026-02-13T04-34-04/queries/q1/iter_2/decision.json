@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "Final iteration must fix correctness issue (Kahan summation) causing 0.01 precision error in sum_disc_price. Current implementation uses naive summation over 59M rows, accumulating catastrophic rounding errors. This is a CRITICAL correctness fix. Additionally apply low-risk row group pruning optimization. Avoid riskier SIMD refactoring given limited iterations and previous regression in iter 1.",
+  "optimizations": [
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q1"],
+      "guidance": "CRITICAL CORRECTNESS FIX: Implement Kahan compensated summation to fix floating-point precision error (0.01 error in sum_disc_price with 59M rows). Modify struct AggValues (lines 41-57) to add compensation terms for each sum field: double c_qty=0.0, c_base_price=0.0, c_disc_price=0.0, c_charge=0.0, c_discount=0.0. Replace all naive summation (agg.sum_X += value) with Kahan algorithm: {double y=value-agg.c_X; double t=agg.sum_X+y; agg.c_X=(t-agg.sum_X)-y; agg.sum_X=t;}. Update locations: SIMD path (lines 226-231), scalar path (lines 253-258), and merge() function (lines 49-56). This is mandatory for correctness - no performance change expected, pure precision fix.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["Q1"],
+      "guidance": "SECONDARY OPTIMIZATION: Improve row group pruning logic (lines 273-283). Current code only checks min_int <= date_threshold, keeping 98.6% of row groups. Add additional check to skip row groups where ALL rows fail filter (i.e., where min_int > date_threshold). Change pruning logic from 'if (s.min_int <= date_threshold) {relevant_rgs.push_back...}' to 'if (s.has_min_max && s.min_int > date_threshold) {continue;} relevant_rgs.push_back...'. This skips row groups with future dates. Expected modest improvement (1.1-1.2x) as most row groups span the threshold date, but eliminates unnecessary I/O for late-dated groups. Low risk, clear correctness.",
+      "can_parallel": true
+    }
+  ]
+}

@@ -1,0 +1,174 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q6 (1128ms, pass): Already well-optimized with row group pruning (84.7%), AVX2 SIMD, thread parallelism, and Kahan summation. Performance improvement of 16.6% from iter_0 (1353ms → 1128ms).
+
+## Critical Fixes
+None. Code compiles, executes correctly, and produces validated results.
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] Improve SIMD efficiency with better memory access patterns
+   Target: Q6 | Expected: 1.2-1.5x improvement | Risk: low
+
+   **Current bottleneck (lines 131-164):**
+   - SIMD loop processes only 4 doubles per iteration
+   - Date conversion from int32→double adds overhead (lines 133-134)
+   - Mask operations use _mm256_and_pd on revenue instead of blendv
+
+   **Guidance:**
+   a) Process 8 elements per iteration using dual AVX2 vectors:
+      ```cpp
+      for (; i + 7 < vec_end; i += 8) {
+          // Load 8 shipdates
+          __m128i dates_low = _mm_loadu_si128((__m128i*)&l_shipdate[i]);
+          __m128i dates_high = _mm_loadu_si128((__m128i*)&l_shipdate[i+4]);
+          __m256d vshipdate0 = _mm256_cvtepi32_pd(dates_low);
+          __m256d vshipdate1 = _mm256_cvtepi32_pd(dates_high);
+          // Process both vectors...
+      }
+      ```
+
+   b) Replace mask multiplication (line 157) with blendv for better performance:
+      ```cpp
+      // Instead of: vrevenue = _mm256_and_pd(vrevenue, final_mask);
+      __m256d vzero = _mm256_setzero_pd();
+      vrevenue = _mm256_blendv_pd(vzero, vrevenue, final_mask);
+      ```
+
+   c) Avoid int32→double conversion overhead by comparing dates as integers:
+      - Create int32 comparison path for shipdates
+      - Only convert matched elements to double for revenue calculation
+
+### 2. [cpu_bound] Reduce Kahan summation overhead with compensated block accumulation
+   Target: Q6 | Expected: 1.1-1.2x improvement | Risk: low
+
+   **Current bottleneck (lines 166-174):**
+   - Kahan summation applied to every 4-element SIMD result
+   - Creates tight dependency chain preventing instruction-level parallelism
+
+   **Guidance:**
+   a) Accumulate 64-128 SIMD iterations before applying Kahan compensation:
+      ```cpp
+      __m256d vsum = _mm256_setzero_pd();
+      const int KAHAN_BLOCK = 128;  // Apply Kahan every 128 iterations
+
+      for (int block = 0; block < (vec_end - start) / (4 * KAHAN_BLOCK); block++) {
+          __m256d vblock_sum = _mm256_setzero_pd();
+          for (int j = 0; j < KAHAN_BLOCK; j++) {
+              // ... filter and compute ...
+              vblock_sum = _mm256_add_pd(vblock_sum, vrevenue);
+          }
+          // Apply Kahan to block sum only
+          double block_sums[4];
+          _mm256_storeu_pd(block_sums, vblock_sum);
+          for (int k = 0; k < 4; k++) {
+              double y = block_sums[k] - c;
+              double t = sum + y;
+              c = (t - sum) - y;
+              sum = t;
+          }
+      }
+      ```
+
+   **Rationale:** Kahan is critical for correctness but can be applied less frequently during accumulation without losing precision.
+
+### 3. [cpu_bound] Optimize predicate evaluation order
+   Target: Q6 | Expected: 1.05-1.1x improvement | Risk: low
+
+   **Current evaluation order (lines 142-153):**
+   1. l_shipdate (selectivity: ~14%)
+   2. l_discount (selectivity: ~18%)
+   3. l_quantity (selectivity: ~48%)
+
+   **Guidance:**
+   Reorder predicates from most selective to least selective to fail fast:
+   ```cpp
+   // Evaluate l_shipdate first (most selective - 14%)
+   __m256d date_mask = _mm256_and_pd(
+       _mm256_cmp_pd(vshipdate, vdate_lo_d, _CMP_GE_OQ),
+       _mm256_cmp_pd(vshipdate, vdate_hi_d, _CMP_LT_OQ)
+   );
+
+   // Early exit if all dates fail
+   if (_mm256_testz_pd(date_mask, date_mask)) continue;
+
+   // Then l_discount (second most selective - 18%)
+   __m256d disc_mask = _mm256_and_pd(
+       _mm256_cmp_pd(vdiscount, vdiscount_lo, _CMP_GE_OQ),
+       _mm256_cmp_pd(vdiscount, vdiscount_hi, _CMP_LE_OQ)
+   );
+   date_mask = _mm256_and_pd(date_mask, disc_mask);
+
+   if (_mm256_testz_pd(date_mask, date_mask)) continue;
+
+   // Finally l_quantity (least selective - 48%)
+   __m256d qty_mask = _mm256_cmp_pd(vquantity, vquantity_max, _CMP_LT_OQ);
+   __m256d final_mask = _mm256_and_pd(date_mask, qty_mask);
+   ```
+
+   **Note:** Row group pruning already filters 84.7% by date, so within-group date selectivity may be higher than 14%.
+
+### 4. [io_bound] Multi-threaded Parquet I/O
+   Target: Q6 | Expected: 1.3-1.5x improvement | Risk: medium
+
+   **Current bottleneck (lines 78-82):**
+   - Single-threaded Parquet read of 183 row groups
+   - I/O happens serially before parallel processing starts
+
+   **Guidance:**
+   a) Partition valid_rgs across threads and read in parallel:
+      ```cpp
+      struct RowGroupBatch {
+          std::vector<int> rg_indices;
+          ParquetTable data;
+      };
+
+      std::vector<RowGroupBatch> batches(num_threads);
+      for (size_t i = 0; i < valid_rgs.size(); i++) {
+          batches[i % num_threads].rg_indices.push_back(valid_rgs[i]);
+      }
+
+      // Parallel read
+      std::vector<std::thread> readers;
+      for (unsigned t = 0; t < num_threads; t++) {
+          readers.emplace_back([&, t]() {
+              batches[t].data = read_parquet_row_groups(
+                  lineitem_path,
+                  {"l_shipdate", "l_discount", "l_quantity", "l_extendedprice"},
+                  batches[t].rg_indices
+              );
+          });
+      }
+      for (auto& th : readers) th.join();
+
+      // Process each batch in parallel
+      // Each thread works on its own batch to maintain memory locality
+      ```
+
+   **Risk assessment:** Medium - requires careful memory management and may not scale linearly if I/O is disk-bound rather than CPU-bound.
+
+### 5. [cpu_bound] Use FMA (Fused Multiply-Add) instructions
+   Target: Q6 | Expected: 1.05-1.1x improvement | Risk: low
+
+   **Current code (line 156):**
+   ```cpp
+   __m256d vrevenue = _mm256_mul_pd(vextendedprice, vdiscount);
+   ```
+
+   **Guidance:**
+   If accumulating into sum directly, use FMA to reduce instruction count:
+   ```cpp
+   // Instead of separate multiply + add:
+   // vrevenue = _mm256_mul_pd(vextendedprice, vdiscount);
+   // vsum = _mm256_add_pd(vsum, vrevenue);
+
+   // Use FMA:
+   vsum = _mm256_fmadd_pd(vextendedprice, vdiscount, vsum);
+   ```
+
+   Note: This requires AVX2 with FMA support. Add `#ifdef __FMA__` check and `-mfma` compiler flag.
+
+## Summary
+
+Q6 is already well-optimized (1128ms, 16.6% improvement from baseline). Top priority: improve SIMD efficiency with dual-vector processing and better masking (1.2-1.5x expected). Secondary optimizations: block-level Kahan summation, predicate reordering, and multi-threaded I/O could compound to 2-2.5x total improvement, targeting ~450-550ms.

@@ -1,0 +1,133 @@
+# Query Implementation Strategies (Iteration 1)
+
+## Per-Query Strategy
+
+### Q1: Lineitem Aggregation by Return Flag and Line Status
+**Operators**: scan_range → scan_filter_multi → hash_agg (single-key)
+**Filter Strategy**:
+  - Primary: Use scan_range on l_shipdate (sorted column) with range [date_min, date('1998-09-02')]
+  - This eliminates binary search overhead since 98% of data qualifies (just scan from start)
+**Column Access Pattern**:
+  - Load only: l_shipdate, l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax (7 of 16 columns)
+  - Skip: l_orderkey, l_partkey, l_suppkey, l_linenumber, l_commitdate, l_receiptdate, l_shipinstruct, l_shipmode, l_comment
+**Aggregation**:
+  - GROUP BY: Composite key (l_returnflag, l_linestatus) using 2-byte key (both uint8_t)
+  - Expected groups: 4 (very small hash table, cache-friendly)
+  - Aggregates: 7 expressions (sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc, count)
+  - Use HashAggregator with custom AggState tracking all 7 aggregates per group
+**Sort**: Trivial sort of 4 groups by (l_returnflag, l_linestatus)
+**Key Insight**: Low selectivity (98%) means scan cost dominates; optimize for throughput, not filtering
+
+### Q3: Customer-Orders-Lineitem Join with Top-10
+**Operators**:
+  1. scan_filter (customer on c_mktsegment)
+  2. hash_join (customer ⋈ orders on c_custkey = o_custkey)
+  3. scan_filter_multi (orders post-join on o_orderdate)
+  4. scan_range (lineitem on l_shipdate)
+  5. hash_join (filtered_orders ⋈ lineitem on o_orderkey = l_orderkey)
+  6. hash_agg (3-key aggregation with top-K heap)
+
+**Join Order**: (customer ⋈ orders) ⋈ lineitem
+  - Rationale: Filter customer first (20% selectivity), build small hash table (~30K rows)
+  - Join with orders (~1.5M rows) to get ~300K filtered orders
+  - Then join with lineitem (~6M rows, filtered by l_shipdate to ~1.5M rows)
+
+**Build/Probe Selection**:
+  - Join 1: Build on filtered_customer (~30K rows), probe with orders (~1.5M rows)
+  - Join 2: Build on filtered_orders (~300K rows), probe with filtered_lineitem (~1.5M rows)
+
+**Filter Pushdown**:
+  - c_mktsegment = 'BUILDING': Apply first, highest selectivity per row (20%)
+  - o_orderdate < '1995-03-15': Apply after customer join (in scan_filter_multi predicate)
+  - l_shipdate > '1995-03-15': Use scan_range on sorted column (binary search to start)
+
+**Column Access Pattern**:
+  - customer: c_custkey, c_mktsegment (2 of 8 columns)
+  - orders: o_orderkey, o_custkey, o_orderdate, o_shippriority (4 of 9 columns)
+  - lineitem: l_orderkey, l_shipdate, l_extendedprice, l_discount (4 of 16 columns)
+
+**Aggregation**:
+  - GROUP BY: (l_orderkey, o_orderdate, o_shippriority) using AggKey3<int32_t, int32_t, int32_t>
+  - Expected groups: 10K-50K (medium hash table)
+  - Aggregate: SUM(l_extendedprice * (1 - l_discount)) as revenue
+  - Use MultiKeyAggregator with 3-key support
+
+**Top-K Optimization**:
+  - ORDER BY revenue DESC, o_orderdate LIMIT 10
+  - Use TopKHeap<AggKey3, int64_t> with k=10 during aggregation
+  - Avoid sorting all groups; maintain min-heap of top 10 revenue values
+  - Final sort: Only 10 entries, trivial cost
+
+**Key Insight**: Join order matters; filtering dimension first reduces intermediate size by 5x
+
+### Q6: Highly Selective Lineitem Scan
+**Operators**: scan_range → scan_filter_multi → scalar aggregate
+**Filter Strategy**:
+  - Primary: Use scan_range on l_shipdate (sorted) with range [date('1994-01-01'), date('1995-01-01'))
+  - This reduces scan from 6M rows to ~857K rows (14% selectivity) via binary search
+  - Secondary: Fused multi-column predicate on remaining rows:
+    - l_discount BETWEEN 0.05 AND 0.07 (20% selectivity)
+    - l_quantity < 24 (50% selectivity)
+  - Combined selectivity after range scan: 14% × 20% × 50% = 1.4% final (~84K rows)
+
+**Column Access Pattern**:
+  - Load only: l_shipdate, l_discount, l_quantity, l_extendedprice (4 of 16 columns)
+  - Skip: l_orderkey, l_partkey, l_suppkey, l_linenumber, l_tax, l_returnflag, l_linestatus, l_commitdate, l_receiptdate, l_shipinstruct, l_shipmode, l_comment
+
+**Aggregation**:
+  - No GROUP BY: Single scalar aggregate
+  - Aggregate: SUM(l_extendedprice * l_discount)
+  - Use simple accumulator variable (int64_t revenue = 0)
+  - Fuse filter and aggregation: if (predicate(i)) revenue += l_extendedprice[i] * l_discount[i]
+
+**Key Insight**: Exploit sorted l_shipdate to skip 86% of table immediately; fuse remaining filters into tight loop
+
+## Shared Observations
+
+### Cross-Query Patterns
+1. **l_shipdate dominates all queries**: All 3 queries filter on this column
+   - Q1: <= threshold (98% selectivity, scan from start)
+   - Q3: > threshold (75% selectivity, scan from midpoint)
+   - Q6: range (14% selectivity, binary search both ends)
+   - Storage sorted by l_shipdate enables scan_range optimization for all
+
+2. **Lineitem column projection critical**: Queries use 4-7 columns of 16 total
+   - Q1 uses 7 columns → skip 56% of data
+   - Q3 uses 4 columns → skip 75% of data
+   - Q6 uses 4 columns → skip 75% of data
+   - Columnar storage pays off immediately; avoid loading unused columns
+
+3. **Dictionary encoding reduces memory bandwidth**:
+   - l_returnflag, l_linestatus: 1 byte each vs 4+ bytes for strings
+   - Enables efficient grouping in Q1 using 2-byte composite key
+   - c_mktsegment, o_orderstatus similarly benefit Q3
+
+4. **Early filtering is critical for Q3**:
+   - Filter customer on c_mktsegment BEFORE joining with orders
+   - Filter lineitem on l_shipdate BEFORE joining with orders
+   - Reduces join input size by 5x (customer) and 4x (lineitem)
+   - Hash table for orders join: 300K rows vs 1.5M rows without pushdown
+
+### Operator Fusion Opportunities
+- **Q1**: Fuse date filter + aggregation into single pass over l_shipdate
+- **Q6**: Fuse all 3 filters + revenue calculation into single tight loop (scan_filter_multi with inline accumulation)
+- **Q3**: Fuse o_orderdate filter into join probe phase (check predicate before emitting join result)
+
+### Zone-Map Potential (Future Optimization)
+- Storage design supports 4096-row blocks
+- If zone-maps (per-block min/max) were added for l_shipdate:
+  - Q6 could skip ~86% of blocks without reading (date range filter)
+  - Q3 could skip ~25% of blocks (l_shipdate > threshold)
+  - Q1 would skip ~2% of blocks (low selectivity, minimal benefit)
+- Current iteration: No zone-map implementation, rely on scan_range binary search
+
+### Parallelism Strategy (Not Implemented in Iteration 1)
+- All queries are embarrassingly parallel:
+  - Q1: Partition lineitem into chunks, per-thread aggregation, merge hash tables
+  - Q6: Partition lineitem into chunks, per-thread accumulation, sum partial results
+  - Q3: Broadcast filtered customer/orders, partition lineitem probe, merge aggregates
+- Iteration 1 focus: Correct single-threaded implementation with good operators
+- Future: Add morsel-driven parallelism with thread pool
+
+## Summary
+Use scan_range to exploit sorted l_shipdate in all queries; load only required columns via columnar storage; apply filters early (Q3 dimension filter, Q6 date range); use TopKHeap for Q3 LIMIT 10 to avoid full sort; fuse filters with aggregation where possible (Q6).

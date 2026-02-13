@@ -1,0 +1,12 @@
+{
+  "status": "partial",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 11955,
+      "rows": 4
+    }
+  },
+  "compile_output": "Success with warnings (ignoring nodiscard Status return)",
+  "notes": "Query completes but produces wrong results due to floating-point precision error. One row differs by 0.01 in sum_disc_price (1058580922144.96 expected vs 1058580922144.97 actual). Root cause: missing Kahan summation for compensated floating-point accumulation. Performance: 11,955ms for 59M rows with 4-group aggregation. Row group pruning only filters 1.4% of data (1183/1200 groups remain)."
+}

@@ -1,0 +1,152 @@
+# Workload Analysis
+
+## Optimization Target
+execution_time
+
+## Tables
+
+### Fact Tables (High Volume)
+- **lineitem**: ~6M rows (SF=1), PRIMARY fact table
+  - Hot columns: l_shipdate, l_quantity, l_discount, l_extendedprice, l_returnflag, l_linestatus, l_orderkey
+  - All three queries scan/filter this table — critical performance bottleneck
+
+- **orders**: ~1.5M rows (SF=1)
+  - Hot columns: o_orderkey, o_custkey, o_orderdate, o_shippriority
+  - Used in Q3 join and filter
+
+### Dimension Tables (Low Volume)
+- **customer**: ~150K rows
+  - Hot columns: c_custkey, c_mktsegment
+  - Used in Q3 for selective filter
+
+- **supplier**: ~10K rows
+- **part**: ~200K rows
+- **partsupp**: ~800K rows
+- **nation**: 25 rows
+- **region**: 5 rows
+
+Note: Q1 and Q6 touch only lineitem; Q3 requires 3-way join.
+
+## Joins
+
+### Q3 Join Graph
+- **customer.c_custkey = orders.o_custkey** (PK-FK)
+  - Selectivity: ~20% after c_mktsegment filter on customer
+
+- **orders.o_orderkey = lineitem.l_orderkey** (PK-FK)
+  - Selectivity: ~25% after o_orderdate filter, combined with l_shipdate filter
+
+- **Join Strategy Consideration**: Hash join recommended; dimension filter (customer) should be applied first to reduce orders intermediate size, then join with filtered lineitem.
+
+## Selective Filters
+
+### Date Range Filters (High Impact)
+- **Q1: l_shipdate <= '1998-09-02'** (~98% of data retained, LOW selectivity)
+- **Q3: o_orderdate < '1995-03-15'** AND **l_shipdate > '1995-03-15'** (~20-30% selectivity combined)
+- **Q6: l_shipdate in [1994-01-01, 1995-01-01)** (~14% selectivity — 1 year of ~7 years)
+
+### Categorical Filters
+- **Q3: c_mktsegment = 'BUILDING'** (~20% selectivity, 1 of ~5 market segments)
+
+### Numeric Range Filters
+- **Q6: l_discount BETWEEN 0.05 AND 0.07** (~20% selectivity, narrow range)
+- **Q6: l_quantity < 24** (~50% selectivity)
+
+### Combined Q6 Selectivity
+Date (14%) × discount (20%) × quantity (50%) ≈ 1.4% of lineitem rows qualify — highly selective!
+
+## Aggregations
+
+### Q1: Large Aggregation
+- **GROUP BY**: l_returnflag, l_linestatus
+- **Estimated groups**: ~4 groups (combinations of 'A'/'N'/'R' × 'O'/'F')
+- **Aggregates**: 7 SUM/AVG expressions over ~5.9M rows
+- **Opportunity**: Partial pre-aggregation beneficial; SIMD-friendly columnar scan
+
+### Q3: Medium Aggregation with LIMIT
+- **GROUP BY**: l_orderkey, o_orderdate, o_shippriority
+- **Estimated groups**: ~10K-50K groups (filtered orders)
+- **Aggregates**: 1 SUM expression (revenue calculation)
+- **Sort**: ORDER BY revenue DESC, o_orderdate → needs top-K optimization
+- **LIMIT 10**: Only top 10 results needed — use heap-based top-K, avoid full sort
+
+### Q6: Single Scalar Aggregate
+- **No GROUP BY**: Single result row
+- **Aggregate**: 1 SUM expression over ~84K filtered rows
+- **Opportunity**: Pure scan-and-reduce, minimal overhead
+
+## Sort/Limit Requirements
+
+- **Q1**: ORDER BY l_returnflag, l_linestatus (4 groups) — trivial sort cost
+- **Q3**: ORDER BY revenue DESC, o_orderdate LIMIT 10 — **use min-heap for top-K**, avoid sorting all groups
+- **Q6**: No sort required
+
+## Parallelism Opportunities
+
+### Highly Parallelizable Operations
+- **Q1: lineitem scan** — 6M rows, embarrassingly parallel
+  - Strategy: Partition scan into chunks, parallel aggregation with per-thread hash tables, final merge
+
+- **Q6: lineitem scan with filters** — 6M rows input, ~84K output
+  - Strategy: Partition scan, parallel filter + reduce, combine partial sums
+
+- **Q3: lineitem scan and join** — 6M rows
+  - Strategy: Parallel hash join (build hash table on filtered orders, probe with filtered lineitem in parallel partitions)
+
+### Degree of Parallelism
+- Recommend 4-16 threads depending on hardware; lineitem size justifies high parallelism
+
+## Key Optimization Opportunities
+
+### Storage Layout
+1. **Sort lineitem by l_shipdate** (clustered index or physical sort)
+   - Enables zone-map pruning for Q1, Q3, Q6 date filters
+   - Skip blocks outside date ranges without reading
+
+2. **Columnar storage for lineitem**
+   - Q1/Q6 access only 5-7 columns out of 16 — reduce I/O by ~60%
+   - Better compression and SIMD vectorization for aggregates
+
+3. **Dictionary encoding for low-cardinality columns**
+   - l_returnflag, l_linestatus, c_mktsegment, l_shipmode, l_shipinstruct
+   - Reduces memory footprint and speeds up filtering/grouping
+
+### Query-Specific Optimizations
+
+#### Q1
+- Push date filter before aggregation (already implicit)
+- Vectorize arithmetic (discount, tax calculations) using SIMD
+- Use columnar layout to skip unused columns (e.g., l_comment, l_shipinstruct)
+
+#### Q3
+- **Filter pushdown order**: customer (c_mktsegment) → orders (o_orderdate) → lineitem (l_shipdate)
+  - Reduces join cardinality early
+- **Join order**: (customer ⋈ orders) ⋈ lineitem or customer ⋈ (orders ⋈ lineitem)
+  - Recommend: build hash table on filtered customer+orders (~300K rows), probe with filtered lineitem
+- **Top-K optimization**: Maintain min-heap of size 10 during aggregation, avoid sorting all groups
+
+#### Q6
+- Highly selective filters (1.4% selectivity) — maximize filter fusion
+- Apply all filters (date, discount, quantity) simultaneously in tight loop
+- Vectorize the revenue calculation (l_extendedprice * l_discount)
+- No joins or sorts — pure scan workload, optimal for columnar + SIMD
+
+### Cross-Query Optimizations
+- **l_shipdate** appears in all 3 queries — strong candidate for zone-map indexing or clustering key
+- **lineitem** dominates cost in all queries — invest in optimal lineitem layout (columnar, sorted, compressed)
+
+## Summary
+
+This workload is dominated by **lineitem table scans** with varying selectivity. Key characteristics:
+
+- **Q1**: Low-selectivity scan (98% of rows), small aggregation (4 groups) → optimize for throughput
+- **Q6**: High-selectivity scan (1.4% of rows), single aggregate → optimize for filter efficiency
+- **Q3**: Medium-selectivity multi-table join with top-K → optimize join order and use heap for LIMIT
+
+**Critical path**: lineitem I/O and filtering. Columnar storage + date-based sorting + vectorized execution will yield largest performance gains.
+
+**Expected speedup from optimizations**: 5-10× over row-based full scans, primarily from:
+1. Columnar projection (skip 60% of columns)
+2. Zone-map pruning on l_shipdate (skip 30-80% of blocks depending on query)
+3. SIMD vectorization of arithmetic and filters (2-4× CPU throughput)
+4. Parallel execution (4-16× with sufficient cores)

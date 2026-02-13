@@ -1,0 +1,26 @@
+{
+  "status": "fail",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0,
+      "error": "Runtime error during execution"
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0,
+      "error": "Not executed due to Q1 failure"
+    },
+    "Q6": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0,
+      "error": "Not executed due to Q1 failure"
+    }
+  },
+  "compile_output": "Compilation successful - no errors or warnings",
+  "runtime_error": "terminate called after throwing an instance of 'std::runtime_error'\n  what():  Unsupported aggregate type: decimal128(15, 2)",
+  "notes": "Compilation succeeded but execution failed with runtime error. The generated code does not handle decimal128(15, 2) aggregate types, which are present in TPC-H schema (e.g., l_extendedprice, l_discount fields). No query results were produced. The code needs to implement proper handling for Arrow decimal128 types in aggregation operations."
+}

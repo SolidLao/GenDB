@@ -1,0 +1,149 @@
+# Optimization Analysis (Iteration 2)
+
+## Per-Query Assessment
+
+- **Q1** (71ms, FAIL): Correctness issues dominate - wrong output format (pipe vs comma), missing header, arithmetic errors (~100x magnitude in sum_disc_price and sum_charge). Performance is acceptable (71ms for ~5.8M row scan) but correctness must be fixed first.
+
+- **Q3** (6425ms, FAIL): Correctness issues (pipe vs comma, missing header, ~100x revenue errors) AND severe performance bottleneck. 6.4 seconds is 32-64x slower than target (100-200ms). Root cause: serial hash join implementation with materialized intermediate results causing excessive memory traffic.
+
+- **Q6** (22ms, FAIL): Correctness issues (missing header, precision error). Performance is excellent (22ms for 6M row scan with selective filters), very close to optimized target (20-50ms). Minor fixes only.
+
+## Critical Fixes (Must address before optimization)
+
+### [All Queries] Correctness Issues
+
+**Issue 1: Output format**
+- Current: Pipe delimiter (|), no header, lowercase filename (q1.csv)
+- Expected: Comma delimiter, header row, uppercase filename (Q1.csv)
+- Fix locations: q1.cpp lines 96-109, q3.cpp lines 143-151, q6.cpp lines 73-76
+
+**Issue 2: Arithmetic scaling errors in Q1**
+- Line 47: `disc_price = l_extendedprice[i] * (100 - l_discount[i]) / 100` is WRONG
+  - l_extendedprice is scaled by 100, l_discount is scaled by 100
+  - Correct: `disc_price = (l_extendedprice[i] * (10000 - l_discount[i])) / 10000`
+- Line 48: `charge = disc_price * (100 + l_tax[i]) / 100` is WRONG
+  - disc_price is scaled by 10000, l_tax is scaled by 100
+  - Correct: `charge = (disc_price * (100 + l_tax[i])) / 100` (result scaled by 10000)
+- Lines 103-104: Output scaling is inconsistent with computation errors above
+
+**Issue 3: Arithmetic scaling errors in Q3**
+- Line 99: `disc_price = l_extendedprice[i] * (100 - l_discount[i]) / 100` is WRONG
+  - Same issue as Q1, should be: `(l_extendedprice[i] * (10000 - l_discount[i])) / 10000`
+- Line 148: Output scaling `revenue / 10000.0` assumes disc_price is scaled by 10000, but current computation produces wrong scale
+
+**Issue 4: Row count mismatches**
+- Q1: Expected 4 rows, got 3 → likely missing one returnflag/linestatus combination due to filter or aggregation bug
+- Q3: Expected 10 rows, got 9 → TOP-10 extraction is off by 1 or revenue tie-breaking is wrong
+- Q6: Expected 1 row, got 0 → missing header row causes validator to see empty result
+
+## Recommended Optimizations
+
+### 1. [query_structure] Fix arithmetic correctness
+**Target:** Q1, Q3
+**Expected:** Fixes ~100x magnitude errors, enables accurate benchmark comparison
+**Risk:** Low (pure correctness fix, no performance impact)
+**Guidance:**
+- q1.cpp line 47: Change to `int64_t disc_price = (l_extendedprice[i] * (10000 - l_discount[i])) / 10000;`
+- q1.cpp line 48: Change to `int64_t charge = (disc_price * (100 + l_tax[i])) / 100;`
+- q1.cpp lines 101-108: Update output scaling to match:
+  - sum_qty: already correct (scaled 100)
+  - sum_base_price: already correct (scaled 100)
+  - sum_disc_price: change to `/ 100.0` (now scaled by 100 after fix)
+  - sum_charge: change to `/ 100.0` (now scaled by 100 after fix)
+  - avg_qty, avg_price: recalculate based on fixed sums
+  - avg_disc: already correct
+- q3.cpp line 99: Change to `int64_t disc_price = (l_extendedprice[i] * (10000 - l_discount[i])) / 10000;`
+- q3.cpp line 148: Change to `/ 100.0` (disc_price now scaled by 100)
+
+### 2. [query_structure] Fix output format
+**Target:** Q1, Q3, Q6
+**Expected:** Passes validation, enables correct benchmark comparison
+**Risk:** Low (pure formatting fix)
+**Guidance:**
+- All query files: Add header row as first line of CSV output
+  - Q1: `l_returnflag,l_linestatus,sum_qty,sum_base_price,sum_disc_price,sum_charge,avg_qty,avg_price,avg_disc,count_order`
+  - Q3: `l_orderkey,revenue,o_orderdate,o_shippriority`
+  - Q6: `revenue`
+- All query files: Replace pipe `|` with comma `,` in output lines
+- main.cpp line 16 or query files lines 96/143/73: Change filename from lowercase (q1.csv) to uppercase (Q1.csv)
+
+### 3. [cpu_bound] Optimize Q3 join execution
+**Target:** Q3 (6425ms → target 100-200ms, ~32x improvement needed)
+**Expected:** 10-20x speedup
+**Risk:** Medium (requires refactoring join strategy)
+**Guidance:**
+- **Root cause:** Q3 materializes all join pairs into vectors (line 53: cust_order_matches, line 89: build_keys/build_rows), causing excessive memory allocation and cache misses. With ~300K customer-order matches and ~600K order-lineitem matches, this creates 180M match pairs before aggregation.
+- **Solution 1 - Operator fusion (recommended):**
+  - Fuse customer→orders→lineitem joins into single pass with direct aggregation
+  - Eliminate materialization of intermediate join results
+  - Use hash table probe to directly update revenue aggregates
+  - Reference: q3.cpp lines 78-101 already use callback-based fusion for orders→lineitem, extend this pattern to include customer filter
+- **Solution 2 - Bloom filter for join reduction:**
+  - Build bloom filter on filtered customer custkeys
+  - Use bloom filter to pre-filter orders before hash join
+  - Expected: 80% reduction in orders hash table size (1.5M → 300K)
+- **Implementation notes:**
+  - Keep parallel execution (lines 92-101 already do per-thread aggregation)
+  - Hash table is read-only during probe, no contention
+  - Use std::unordered_map::reserve() for hash tables to avoid rehashing
+
+### 4. [io_bound] Add madvise hints for sequential scans
+**Target:** Q1, Q6 (I/O bound full table scans)
+**Expected:** 1.5-2x speedup on HDD, minimal benefit on SSD/RAM cache
+**Risk:** Low (non-invasive kernel hint)
+**Guidance:**
+- storage/storage.cpp: After mmap() call, add `madvise(addr, length, MADV_SEQUENTIAL | MADV_WILLNEED)`
+- Helps kernel prefetch sequential pages for full scans
+- Q1 scans 7 columns × ~6M rows × 8 bytes ≈ 336MB sequentially
+- Q6 scans 4 columns × ~6M rows × 8 bytes ≈ 192MB sequentially
+- **Caution:** Don't apply to random-access columns (join keys, filtered columns)
+
+### 5. [index] Zone-map metadata for block skipping (future iteration)
+**Target:** Q6 (could achieve 2-3x speedup), Q1/Q3 (10-30% speedup)
+**Expected:** 2-3x for Q6, 1.1-1.3x for Q1/Q3
+**Risk:** High (requires storage format change, but storage is never rebuilt per task constraints)
+**Guidance:**
+- **Note:** This optimization CANNOT be implemented in current iteration because storage is never rebuilt after initial ingestion
+- If storage rebuild becomes allowed:
+  - During ingest, compute min/max for l_shipdate, l_discount, l_quantity per 8192-row block
+  - Store zone-maps in separate metadata file (e.g., lineitem.l_shipdate.zonemap)
+  - During query execution, read zone-map and skip blocks where:
+    - Q6: l_shipdate block_max < DATE_1994_01_01 OR block_min >= DATE_1995_01_01
+    - Q6: l_discount block_max < 5 OR block_min > 7
+    - Q6: l_quantity block_min >= 2400
+  - Expected block skip rate for Q6: 70-85% (date range is 1/7 of data)
+- **Alternative without storage rebuild:** Build runtime zone-map on first query, cache in memory
+  - Scan l_shipdate once to build block min/max array
+  - Amortized over multiple queries in workload
+  - Risk: adds overhead to first query execution
+
+### 6. [cpu_bound] SIMD vectorization for Q6 filters
+**Target:** Q6 (currently 22ms, could reach ~10-15ms)
+**Expected:** 1.5-2x speedup
+**Risk:** Medium (requires AVX2/SSE intrinsics, compiler support)
+**Guidance:**
+- Q6 has 4 independent predicates on each row, ideal for SIMD
+- Current code (lines 43-47) processes 1 row per iteration
+- **Vectorized approach:**
+  - Process 4-8 rows per iteration using AVX2 (256-bit) or AVX-512 (512-bit)
+  - Use `_mm256_load_si256()` to load 4 int64_t values at once
+  - Use `_mm256_cmpgt_epi64()`, `_mm256_and_si256()` for parallel comparisons
+  - Use `_mm256_movemask_epi8()` to extract match mask
+  - Aggregate matches using `_mm256_add_epi64()`
+- **Implementation:**
+  - Add SIMD version in q6.cpp lines 43-52 with compiler flag check (`#ifdef __AVX2__`)
+  - Fall back to scalar loop for remainder rows (row_count % 4)
+  - Keep parallel threading (already implemented lines 37-55)
+- **Compiler flags:** Add `-mavx2` to Makefile CXXFLAGS
+
+## Summary
+
+**Priority 1 (MUST FIX):** Arithmetic correctness (#1) and output format (#2) to pass validation and enable meaningful benchmarking.
+
+**Priority 2 (HIGH IMPACT):** Q3 join optimization (#3) to achieve 10-20x speedup and reach target performance (100-200ms range).
+
+**Priority 3 (INCREMENTAL):** madvise hints (#4) for 1.5-2x I/O improvement on sequential scans, low-risk addition.
+
+**Future iterations:** Zone-maps (#5) and SIMD (#6) require more invasive changes; defer until correctness and join performance are resolved.
+
+**Overall recommendation:** Focus iteration 3 on correctness fixes (#1, #2) and Q3 optimization (#3). Once Q3 is within 2x of target, consider madvise (#4) and SIMD (#6) for final polish.

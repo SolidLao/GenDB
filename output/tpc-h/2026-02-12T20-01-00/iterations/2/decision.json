@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Iteration 1 failed to compile due to incorrect Arrow C++ API usage in Q3. The code uses ValueOrDie() directly on Result<shared_ptr<Scalar>> from arrow::MakeScalar() without extracting the value first, and fails to wrap shared_ptr<Array> in arrow::Datum constructors. This is a critical correctness issue that must be fixed before any performance optimizations can be evaluated. Since this is a query-structure issue affecting the Arrow API calls, query_rewriter is the appropriate optimizer to fix the API usage patterns.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["Q3"],
+      "guidance": "Fix Arrow C++ API misuse in Q3: (1) arrow::MakeScalar() returns Result<shared_ptr<Scalar>>, must call .ValueOrDie() on the Result to get the shared_ptr before using it. Change 'building_scalar.ValueOrDie()' to 'building_scalar.ValueOrDie()' where building_scalar is the Result. (2) When passing shared_ptr<Array> to vector<arrow::Datum>, must explicitly wrap in arrow::Datum constructor: change 'std::vector<arrow::Datum>{c_mktsegment_array, scalar}' to 'std::vector<arrow::Datum>{arrow::Datum(c_mktsegment_array), scalar}'. Apply these fixes to lines 37-46 (customer filter with 'BUILDING' scalar) and any similar patterns in the file. The pattern should be: auto scalar_result = arrow::MakeScalar(value); if (!scalar_result.ok()) throw error; auto scalar = scalar_result.ValueOrDie(); then use scalar in Datum vector.",
+      "can_parallel": false
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+# Optimization Analysis (Iteration 1)
+
+## Performance Summary
+- Q1: 11259ms (4 rows) - 57% faster than baseline (26541ms)
+- Q3: 6756ms (9 rows) - 60% faster than baseline (16924ms)
+- Q6: 1024ms (1 row) - 91% faster than baseline (11341ms)
+- Total: 19533.5ms
+
+## Per-Query Assessment
+
+### Q1 (11259ms, FAIL - output format issue)
+**Bottleneck**: CPU-bound - single-threaded row-by-row aggregation over ~59M rows (98% of lineitem after l_shipdate filter)
+- I/O phase uses Arrow dataset API with predicate pushdown (good)
+- Column projection reduces I/O to 6/16 columns (good)
+- **Problem**: Lines 160-185 iterate sequentially through 59M rows, performing hash lookups and arithmetic for each row
+- No use of Arrow compute kernels for vectorized aggregation
+- Only 3-4 groups (A/N/R × F/O), but aggregation is not vectorized
+
+### Q3 (6756ms, FAIL - missing 1 row)
+**Bottleneck**: CPU-bound - multiple single-threaded operations
+- Predicate pushdown working for orders and lineitem (good)
+- Column projection reduces I/O (good)
+- **Problems**:
+  1. Lines 136-156: Sequential hash join build/probe on customer→orders (~30K rows)
+  2. Lines 242-262: Sequential hash join build/probe on orders→lineitem (~300K rows after filters)
+  3. Lines 347-357: Sequential aggregation over join result
+  4. No parallelism across these stages
+- Missing row likely due to tie-breaking instability in sort (uses stable_sort but may still have edge case)
+
+### Q6 (1024ms, PASS)
+**Bottleneck**: I/O-bound for highly selective query
+- Dataset API with date predicate pushdown working well
+- Column projection to 4/16 columns (75% reduction) is effective
+- Sequential filtering on l_discount and l_quantity (lines 112-148) is acceptable given small result set
+- **Room for improvement**: Could fuse all three predicates (shipdate, discount, quantity) into single filter expression for better row group pruning
+
+## Critical Fixes (Correctness Issues)
+
+### [Q1] Output format mismatch
+- **Issue**: Lines 213-229 in q1.cpp write all numeric columns using `std::fixed`, but comparison tool expects separate CSV fields, not pipe-delimited string
+- **Fix**: Ensure CSV output writes each column as separate field, not concatenated into single string
+
+### [Q3] Missing 1 result row
+- **Issue**: Lines 383-395 use stable_sort with epsilon comparison, but getting 9 rows instead of 10
+- **Fix**: Review tie-breaking logic and ensure all 10 rows meeting threshold are included. May need to check floating-point precision in revenue calculation.
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] Morsel-driven parallelism for Q1 aggregation
+**Target**: Q1 | **Expected**: 3-5x improvement | **Risk**: low
+
+**Guidance**:
+- In `queries/q1.cpp`, replace lines 160-185 (single-threaded aggregation loop)
+- Split filtered table into chunks (morsels) of ~100K rows each
+- Process each morsel in parallel using thread pool (std::thread or arrow::internal::ThreadPool)
+- Each thread maintains local hash table for its morsel
+- Merge local hash tables at end (only 3-4 groups, merge is trivial)
+- Reference implementation: DuckDB's morsel-driven parallelism
+
+**Code location**: `queries/q1.cpp:160-185`
+
+### 2. [cpu_bound] Vectorized aggregation using Arrow compute kernels for Q1
+**Target**: Q1 | **Expected**: 2-3x improvement | **Risk**: low
+
+**Guidance**:
+- In `queries/q1.cpp`, replace manual loops with arrow::compute functions
+- Use `arrow::compute::group_by()` with aggregate functions (sum, count)
+- Lines 174-184 do arithmetic on scalars; instead use vectorized multiply/add on entire arrays
+- Compute disc_price and charge arrays using `arrow::compute::multiply()` and `arrow::compute::add()`
+- This leverages SIMD and avoids row-by-row iteration
+
+**Code location**: `queries/q1.cpp:160-185`
+
+### 3. [join_order] Parallelize hash join build for Q3
+**Target**: Q3 | **Expected**: 1.5-2x improvement | **Risk**: medium
+
+**Guidance**:
+- In `queries/q3.cpp`, the two hash joins (customer→orders, orders→lineitem) are sequential
+- Build hash tables in parallel since they're independent up to join point
+- Lines 136-156 build customer hash table, lines 242-262 build order hash table
+- Can pre-build order hash table while doing customer join probe
+- Use async/future pattern to overlap build and probe operations
+
+**Code location**: `queries/q3.cpp:136-262`
+
+### 4. [cpu_bound] Fuse filter predicates for Q6
+**Target**: Q6 | **Expected**: 1.2-1.5x improvement | **Risk**: low
+
+**Guidance**:
+- In `queries/q6.cpp`, combine all three filter predicates into single Arrow expression
+- Lines 36-39 create shipdate filter, but lines 112-148 apply discount and quantity filters separately
+- Create single compound filter: `(l_shipdate >= date_start AND l_shipdate < date_end) AND (l_discount >= 0.05 AND l_discount <= 0.07) AND (l_quantity < 24)`
+- Pass to scanner Filter() so Parquet reader can use row group statistics for all three predicates
+- Eliminates two separate arrow::compute::CallFunction("filter") operations
+
+**Code location**: `queries/q6.cpp:36-148`
+
+### 5. [io_bound] Parallel row group reading
+**Target**: Q1, Q6 (large table scans) | **Expected**: 1.5-2x improvement | **Risk**: low
+
+**Guidance**:
+- Arrow dataset scanner currently reads row groups sequentially
+- Lineitem table at SF=10 has multiple row groups
+- Configure scanner to use `arrow::dataset::ScanOptions` with `use_threads=true`
+- Set `scanner_builder->UseThreads(true)` before calling `Finish()`
+- This enables parallel decompression and column reading across row groups
+
+**Code location**:
+- `queries/q1.cpp:98-123` (scanner builder setup)
+- `queries/q6.cpp:81-103` (scanner builder setup)
+
+## Summary
+**Top priority**: Fix Q1 and Q3 correctness issues first. Then implement morsel-driven parallelism for Q1 (single largest bottleneck at 11259ms). Enable parallel row group reading for I/O-bound queries. Fuse predicates in Q6 for better predicate pushdown.

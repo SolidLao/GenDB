@@ -1,0 +1,83 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q3 (4376ms, pass): IO-bound with CPU inefficiencies. Primary bottlenecks are:
+  1. String trimming on every customer row (lines 50-54)
+  2. Sequential hash table probes during lineitem scan (line 150)
+  3. Thread-local aggregation uses inefficient hash map initialization (line 158)
+  4. Merge phase creates redundant hash map lookups (lines 189-198)
+
+## Critical Fixes
+None - code compiles and produces correct results.
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] Optimize customer filtering with SIMD string comparison
+   Target: Q3 | Expected: 1.2x improvement | Risk: low
+   Guidance:
+   - Current: Lines 48-59 loop with string trimming and comparison per row
+   - Replace with: vectorized byte-wise comparison for fixed-width CHAR(10) type
+   - Use memcmp on first 8 bytes ('BUILDING' fits in 8-byte word) to filter before full trim
+   - Only trim/compare remaining rows that match prefix
+   Code reference: q3.cpp lines 48-59
+
+### 2. [cpu_bound] Batch hash probes in lineitem scan
+   Target: Q3 | Expected: 1.3x improvement | Risk: low
+   Guidance:
+   - Current: Line 150 does hash probe per row inside tight loop
+   - Problem: Hash probes have cache-unfriendly random access pattern
+   - Replace with: Prefetch 8-16 orderkeys ahead using __builtin_prefetch()
+   - Add manual prefetch before hash probe: `__builtin_prefetch(&qualifying_orders.entries_[hash & mask_], 0, 1);`
+   Code reference: q3.cpp lines 145-167
+
+### 3. [cpu_bound] Eliminate thread map initialization overhead
+   Target: Q3 | Expected: 1.1x improvement | Risk: low
+   Guidance:
+   - Current: Lines 138-140 initialize each thread map with 100000 capacity
+   - Problem: Each map allocates ~1.6MB, initializes 200K+ entries with EMPTY sentinel
+   - Replace with: Lazy initialization - start with smaller capacity (1024) and let rehash grow dynamically
+   - Alternatively: Use thread-local flat arrays if result cardinality is known to be small (<10K)
+   Code reference: q3.cpp lines 138-140
+
+### 4. [query_structure] Use array aggregation instead of hash map merge
+   Target: Q3 | Expected: 1.5x improvement | Risk: medium
+   Guidance:
+   - Current: Lines 189-198 iterate all thread maps, perform hash lookups in final_results
+   - Problem: Each merge does 2 hash probes (find in source, insert/update in dest)
+   - Replace with: Since we only need top 10 results, use fixed-size array (size ~1000) per thread
+   - Sort local arrays, merge top-k from each thread using min-heap
+   - This avoids final hash map entirely
+   Code reference: q3.cpp lines 186-206
+
+### 5. [io_bound] Use sorted index on o_custkey for selective join
+   Target: Q3 | Expected: 2x improvement | Risk: medium
+   Guidance:
+   - Current: Lines 77-81 read ALL orders row groups that pass date filter (~25% selectivity)
+   - Problem: Only ~20% of those orders belong to BUILDING customers
+   - Replace with: Create sorted index on orders.parquet by o_custkey
+   - After building building_customers set, use index to identify row groups containing those custkeys
+   - Combine with date filter to read minimal set of row groups
+   - See parquet_reader.h for index creation utilities (likely lines 400+)
+   Note: This requires index file generation as preprocessing step
+
+### 6. [cpu_bound] Replace Kahan summation with direct addition
+   Target: Q3 | Expected: 1.05x improvement | Risk: low
+   Guidance:
+   - Current: Lines 24-28 define kahan_add but it's NOT USED in q3.cpp
+   - Line 165 uses direct addition: `group.revenue += revenue_contrib;`
+   - Action: Remove unused kahan_add function
+   - Rationale: TPC-H Q3 revenue values are bounded and don't require compensated summation
+   Code reference: q3.cpp lines 24-28 (dead code)
+
+### 7. [cpu_bound] Fuse revenue computation with aggregation
+   Target: Q3 | Expected: 1.1x improvement | Risk: low
+   Guidance:
+   - Current: Line 154 computes revenue, then lines 157-166 do conditional aggregation
+   - Problem: Branch misprediction on first-time-seen check (line 158)
+   - Replace with: Remove conditional - always update revenue, check if metadata needs init
+   - Pattern: `if (group.l_orderkey == 0) { /* init metadata */ }; group.revenue += value;`
+   - Ensures revenue update is on critical path without branch
+   Code reference: q3.cpp lines 154-166
+
+## Summary
+Primary bottleneck is CPU-bound hash operations during scan/aggregate phase. Implementing prefetching (#2), optimizing thread maps (#3), and using array-based merge (#4) should yield 1.5-2x speedup. For 3-5x improvement, add o_custkey index (#5) to reduce I/O volume.

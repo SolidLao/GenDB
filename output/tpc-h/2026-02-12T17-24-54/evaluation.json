@@ -1,0 +1,26 @@
+{
+  "status": "fail",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 71,
+      "rows": 4,
+      "error": "row count mismatch: expected 4, got 3. Output delimiter is pipe (|) instead of comma, missing header row, and numerical precision errors in aggregated columns (sum_disc_price, sum_charge values off by ~100x)."
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 6425,
+      "rows": 10,
+      "error": "row count mismatch: expected 10, got 9. Output delimiter is pipe (|) instead of comma, missing header row, and revenue values are off by ~100x (e.g., 4407.15 vs expected 440715.2185)."
+    },
+    "Q6": {
+      "status": "fail",
+      "time_ms": 22,
+      "rows": 1,
+      "error": "row count mismatch: expected 1, got 0. Missing header row, and revenue value has slight precision difference (1230113594.80 vs expected 1230113636.0101)."
+    }
+  },
+  "ingestion_time_ms": null,
+  "compile_output": "g++ -O2 -std=c++17 -Wall -pthread -I. -c ingest.cpp -o ingest.o\ningest.cpp: In function 'int main(int, char**)':\ningest.cpp:602:11: warning: ignoring return value of 'int system(const char*)' declared with attribute 'warn_unused_result' [-Wunused-result]\n  602 |     system((\"mkdir -p \" + gendb_dir).c_str());\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\ng++ -O2 -std=c++17 -Wall -pthread -I. -c storage/storage.cpp -o storage/storage.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -o ingest ingest.o storage/storage.o -pthread\ng++ -O2 -std=c++17 -Wall -pthread -I. -c main.cpp -o main.o\nmain.cpp: In function 'int main(int, char**)':\nmain.cpp:16:15: warning: ignoring return value of 'int system(const char*)' declared with attribute 'warn_unused_result' [-Wunused-result]\n   16 |         system((\"mkdir -p \" + results_dir).c_str());\n      |         ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\ng++ -O2 -std=c++17 -Wall -pthread -I. -c queries/q1.cpp -o queries/q1.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -c queries/q3.cpp -o queries/q3.o\nIn file included from queries/q3.cpp:5:\nqueries/../utils/date_utils.h: In function 'void gendb::execute_q3(const string&, const string&)':\nqueries/../utils/date_utils.h:32:37: warning: '-' directive output may be truncated writing 1 byte into a region of size between 0 and 7 [-Wformat-truncation=]\n   32 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\",\n      |                                     ^\nqueries/../utils/date_utils.h:32:32: note: directive argument in the range [-2147483647, 2147483647]\n   32 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\",\n      |                                ^~~~~~~~~~~~~~~~\ng++ -O2 -std=c++17 -Wall -pthread -I. -c queries/q6.cpp -o queries/q6.o\ng++ -O2 -std=c++17 -Wall -pthread -I. -o main main.o queries/q1.o queries/q3.o queries/q6.o storage/storage.o -pthread",
+  "notes": "Compilation succeeded with warnings. All queries executed but produced incorrect results. Major issues: (1) CSV output uses pipe delimiter instead of comma, (2) missing header rows in all outputs, (3) significant numerical errors in Q1 and Q3 aggregated columns (~100x magnitude errors), (4) Q6 has minor precision difference. Generated code also outputs lowercase filenames (q1.csv) instead of expected uppercase (Q1.csv). Query execution times: Q1=71ms, Q3=6425ms, Q6=22ms."
+}

@@ -1,0 +1,13 @@
+{
+  "status": "partial",
+  "queries": {
+    "Q3": {
+      "status": "fail",
+      "time_ms": 7656,
+      "rows": 9,
+      "error": "Missing CSV header row - outputs 9 data rows + no header instead of expected header + 10 data rows"
+    }
+  },
+  "compile_output": "Success with benign warnings (nodiscard Status, format-truncation)",
+  "notes": "Query executes in 7656ms but missing CSV header causes validation failure. Code uses thread parallelism and Kahan summation. No row group pruning implemented - reads entire tables."
+}

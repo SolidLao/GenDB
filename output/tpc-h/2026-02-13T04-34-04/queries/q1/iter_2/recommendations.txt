@@ -1,0 +1,40 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q1 (11,960ms, pass): Primary bottleneck is I/O-bound with secondary CPU bottlenecks. Reading 59M rows from 1183 row groups dominates execution time. Row group pruning is minimally effective (filters only 1.4% of data because filter is l_shipdate <= '1998-09-02' which matches 98.6% of rows). CPU bottlenecks include: (1) string vector access for returnflag/linestatus on every row (lines 127-128), (2) std::unordered_map lookups and inserts, (3) Kahan summation overhead.
+
+## Critical Fixes
+None - query produces correct results.
+
+## Recommended Optimizations
+
+1. [cpu_bound] Replace string vectors with raw char arrays
+   Target: Q1 | Expected: 1.3-1.5x improvement | Risk: low
+   Guidance: Lines 127-128 access returnflag[i] and linestatus[i] as std::string vectors, which requires bounds checking, indirection, and string object access. Since these are single-character flags, modify parquet_reader.h to extract them as raw char arrays (char* or std::vector<char>) during Parquet read. Update process_chunk signature to accept `const char* returnflag, const char* linestatus` and change lines 127-128 to `key.returnflag = returnflag[i]; key.linestatus = linestatus[i];`. This eliminates string object overhead on 59M rows.
+
+2. [cpu_bound] Use open-addressing hash table instead of std::unordered_map
+   Target: Q1 | Expected: 1.5-2x improvement | Risk: medium
+   Guidance: Line 105 defines AggMap as std::unordered_map which has poor cache locality and high per-operation overhead. Replace with a simple open-addressing hash table using linear probing or Robin Hood hashing. Since cardinality is only 4 groups, allocate a small fixed-size array (size 16 or 32 with tombstones) and use direct indexing via ((returnflag << 8) | linestatus) % table_size. This eliminates heap allocations, pointer chasing, and node overhead. See lines 131, 234-238 for all map usage.
+
+3. [cpu_bound] Simplify Kahan summation or remove for non-critical aggregates
+   Target: Q1 | Expected: 1.2-1.3x improvement | Risk: low
+   Guidance: Lines 60-93 implement Kahan summation for all five aggregates. While necessary for sum_disc_price precision (as shown in iter_1), the other aggregates may not need compensated summation. Profile to check if removing Kahan for sum_qty and sum_discount (which are less prone to catastrophic cancellation) improves performance. Alternatively, use a simpler summation (direct +=) for count and discount while keeping Kahan for prices. This reduces arithmetic ops from 5×5=25 extra ops per row to ~10.
+
+4. [cpu_bound] SIMD vectorization for filter + compute loop
+   Target: Q1 | Expected: 2-3x improvement | Risk: high
+   Guidance: Lines 121-148 process rows one-by-one with scalar operations. Vectorize using AVX2 or AVX-512: (1) Load 4-8 shipdate values at once and compare against date_threshold to generate mask, (2) Use masked gather for quantity/price/discount/tax arrays, (3) Vectorize disc_price and charge computations, (4) Scatter results into temporary buffers, (5) Final aggregation remains scalar (only 4 groups). This requires restructuring process_chunk to process in blocks of 4-8 rows. High risk due to complexity and need for alignment, but potential for large speedup on arithmetic-heavy workload.
+
+5. [io_bound] Reduce row group overhead by reading larger chunks
+   Target: Q1 | Expected: 1.1-1.2x improvement | Risk: low
+   Guidance: Currently reading 1183 row groups individually which incurs per-group overhead in Arrow/Parquet. Lines 191 calls read_parquet_row_groups() with a vector of 1183 indices. Modify parquet_reader.h to batch-read contiguous row groups in larger chunks (e.g., read groups 0-99 in one call, 100-199 in next). This reduces Arrow API overhead and improves I/O scheduling. Alternatively, if row groups are mostly contiguous, read full table (line 188) which is already optimized for bulk reads.
+
+6. [cpu_bound] Thread-local aggregation without Kahan compensators in merge
+   Target: Q1 | Expected: 1.05-1.1x improvement | Risk: low
+   Guidance: Lines 95-102 implement merge() which uses Kahan summation when combining thread-local results. Since only ~64 thread results are merged (vs 59M rows), the precision benefit is negligible. Replace merge() with direct summation: `sum_qty += other.sum_qty;` etc. This eliminates 25 extra arithmetic ops per merge × 64 threads = ~1600 ops, which is trivial but helps. Keep Kahan in add_*() methods for the main accumulation loop.
+
+7. [query_structure] Pre-allocate hash table capacity
+   Target: Q1 | Expected: 1.05x improvement | Risk: low
+   Guidance: Line 211 creates thread_maps with default capacity, causing rehashing during insertion. Since cardinality is exactly 4 groups, change line 211 to `std::vector<AggMap> thread_maps(num_threads); for (auto& m : thread_maps) m.reserve(8);` to pre-allocate sufficient capacity and avoid rehashing overhead. Similarly, line 234 should use `final_map.reserve(8);` before merging.
+
+## Summary
+Primary optimization is replacing string vectors with char arrays (lines 127-128) for 1.3-1.5x gain. Secondary optimization is replacing std::unordered_map with open-addressing hash table for another 1.5-2x gain. Combined expected improvement: 2-3x speedup targeting ~4000-6000ms. SIMD vectorization offers additional 2-3x but is high-risk and complex.

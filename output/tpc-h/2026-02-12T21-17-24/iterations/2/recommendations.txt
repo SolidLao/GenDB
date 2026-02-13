@@ -1,0 +1,242 @@
+# Optimization Analysis (Iteration 2)
+
+## Per-Query Assessment
+- Q1 (0ms, fail): Compilation failure - redefinition of date_to_days() in q1.cpp, q3.cpp, q6.cpp
+- Q3 (0ms, fail): Compilation failure - redefinition of date_to_days() in q1.cpp, q3.cpp, q6.cpp
+- Q6 (0ms, fail): Compilation failure - redefinition of date_to_days() in q1.cpp, q3.cpp, q6.cpp
+
+## Critical Fixes (blocking all execution)
+
+### [code_structure] Multiple definition of date_to_days() function
+Target: All queries | Expected: Enable compilation | Risk: low
+Guidance: The date_to_days() helper function is defined as `inline` in q1.cpp:16, q3.cpp:17, and q6.cpp:16. When main.cpp includes all three .cpp files (#include "queries/q1.cpp", "queries/q3.cpp", "queries/q6.cpp"), the inline function gets redefined multiple times, causing compilation errors.
+
+**Fix approach:**
+1. Move date_to_days() and days_to_date_str() to a shared header file (e.g., queries/utils.h)
+2. Add include guard (#pragma once or #ifndef/#define/#endif)
+3. Keep functions as `inline` in the header
+4. Replace #include directives in main.cpp with proper header inclusion
+
+**Specific changes:**
+- Create queries/utils.h with date_to_days() and days_to_date_str() (both inline)
+- Remove date conversion functions from q1.cpp (lines 16-22), q3.cpp (lines 17-32), q6.cpp (lines 16-22)
+- Add #include "queries/utils.h" to each query file
+- In main.cpp, change #include "queries/qN.cpp" to #include "queries/queries.h"
+- Update Makefile to compile each query as separate object file:
+  - main.o: main.cpp
+  - q1.o: queries/q1.cpp
+  - q3.o: queries/q3.cpp
+  - q6.o: queries/q6.cpp
+  - Link all object files together
+
+Alternative simpler fix (if generator cannot handle separate compilation):
+- Change `inline int32_t date_to_days(...)` to `static inline int32_t date_to_days(...)` in all three files
+- This gives each translation unit its own copy, avoiding linker errors
+- Note: q6.cpp incorrectly looks for /lineitem/ directory (line 40) instead of /lineitem.parquet file
+
+### [io_bound] Q6 incorrect Parquet file path
+Target: Q6 | Expected: Enable query execution | Risk: low
+Guidance: q6.cpp lines 40-51 attempt to read from directory "/lineitem/" with multiple parquet files, but the data layout uses single files ("/lineitem.parquet"). This will fail at runtime with "lineitem directory not found".
+
+**Fix:**
+- Change q6.cpp to read single lineitem.parquet file (like q1.cpp and q3.cpp do)
+- Remove directory iteration logic (lines 39-56)
+- Use: `std::string lineitem_path = parquet_dir + "/lineitem.parquet";`
+- Remove the outer loop over parquet_files (lines 62-169)
+- Process single file directly (similar to q1.cpp structure)
+
+## Recommended Optimizations (After Critical Fixes)
+
+### 1. [io_bound] Parquet predicate pushdown via row group filtering
+Target: Q1, Q3, Q6 | Expected: 2-3x improvement | Risk: medium
+Guidance: All queries filter on l_shipdate ranges. Use Parquet FileReader metadata API to read row group statistics and skip row groups that don't overlap the date range.
+
+**Implementation (before ReadTable call):**
+```cpp
+auto file_metadata = reader->parquet_reader()->metadata();
+int num_row_groups = file_metadata->num_row_groups();
+std::vector<int> row_groups_to_read;
+
+for (int rg = 0; rg < num_row_groups; ++rg) {
+    auto rg_metadata = file_metadata->RowGroup(rg);
+    int shipdate_col_idx = schema->GetFieldIndex("l_shipdate");
+    auto col_chunk = rg_metadata->ColumnChunk(shipdate_col_idx);
+
+    if (col_chunk->is_stats_set()) {
+        auto stats = col_chunk->statistics();
+        // Cast to Int32Statistics for date32 type
+        auto date_stats = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+        int32_t min_date = date_stats->min();
+        int32_t max_date = date_stats->max();
+
+        // Q1: keep if max_date <= cutoff_date
+        // Q3: keep if max_date > date_threshold
+        // Q6: keep if (min_date < date_end) && (max_date >= date_start)
+        if (passes_filter) {
+            row_groups_to_read.push_back(rg);
+        }
+    } else {
+        row_groups_to_read.push_back(rg); // no stats, must read
+    }
+}
+
+// Then read only selected row groups:
+reader->ReadRowGroups(row_groups_to_read, col_indices, &table);
+```
+
+Expected impact: Skip 15-30% of row groups per query (per workload analysis). Lineitem.parquet is 2.4GB, so this saves ~500MB-700MB of I/O per query.
+
+### 2. [cpu_bound] Eliminate row-by-row aggregation loop
+Target: Q1 | Expected: 3-5x improvement | Risk: low
+Guidance: Q1.cpp lines 142-167 iterate row-by-row through 588K rows doing scalar operations. Use Arrow compute kernels for vectorized aggregation.
+
+**Approach:**
+- Build masks for each (returnflag, linestatus) group
+- Use arrow::compute::filter to extract rows for each group
+- Use arrow::compute::sum on filtered arrays (vectorized, SIMD)
+- Example for group (returnflag='A', linestatus='F'):
+  ```cpp
+  auto rf_mask = arrow::compute::equal(returnflag_array, "A");
+  auto ls_mask = arrow::compute::equal(linestatus_array, "F");
+  auto group_mask = arrow::compute::and_kleene(rf_mask, ls_mask);
+  auto filtered_qty = arrow::compute::filter(quantity_array, group_mask);
+  auto sum_qty = arrow::compute::sum(filtered_qty);
+  ```
+- Since Q1 has only 3-4 groups (R/N/A × O/F), hardcode the combinations instead of hash table
+
+### 3. [cpu_bound] Fuse filter operations
+Target: Q6 | Expected: 1.5-2x improvement | Risk: low
+Guidance: Q6.cpp constructs 5 separate filter masks (lines 111-146) with intermediate materialization. Combine into single expression to enable Arrow's kernel fusion.
+
+**Instead of:**
+```cpp
+auto mask1 = greater_equal(shipdate, start);
+auto mask2 = less(shipdate, end);
+auto date_mask = and_kleene(mask1, mask2);
+// ... repeat for discount, quantity
+auto final_mask = and_kleene(and_kleene(date_mask, discount_mask), quantity_mask);
+```
+
+**Use combined expression:**
+```cpp
+auto final_mask = arrow::compute::CallFunction("and_kleene",
+    {and_kleene(greater_equal(shipdate, start), less(shipdate, end)),
+     and_kleene(and_kleene(greater_equal(disc, 0.05), less_equal(disc, 0.07)),
+                less(qty, 24.0))});
+```
+
+Or better: build single combined expression string and parse once.
+
+### 4. [join_order] Build hash table on smaller filtered side
+Target: Q3 | Expected: 1.2-1.5x improvement | Risk: low
+Guidance: Q3 currently builds on filtered_customer (~3000 rows after c_mktsegment filter) and probes with filtered_orders (~75K rows). This is correct. However, the second join (lines 194-224) builds on customer_orders result and probes with lineitem.
+
+**Optimization:**
+- After first join (customer × orders), the result has ~75K rows
+- filtered_lineitem has ~490K rows (after l_shipdate > '1995-03-15')
+- Current approach (build on 75K, probe with 490K) is correct
+- BUT: the hash table construction (lines 199-204) iterates sequentially
+- Consider: pre-size hash table with `co_ht.reserve(co_orderkey_arr->length())`
+
+**Additional join optimization:**
+- Use arrow::compute::hash_join (if available in Arrow version) instead of manual hash table
+- This enables multi-threaded hash join with pre-partitioning
+
+### 5. [io_bound] Parallel row group reading
+Target: Q1, Q6 | Expected: 2-3x improvement on multi-core | Risk: medium
+Guidance: Lineitem table scan dominates execution (2.4GB file). Use thread pool to read and process row groups in parallel.
+
+**Approach:**
+```cpp
+#include <thread>
+#include <future>
+
+int num_row_groups = reader->num_row_groups();
+std::vector<std::future<AggResult>> futures;
+
+for (int rg = 0; rg < num_row_groups; ++rg) {
+    futures.push_back(std::async(std::launch::async, [&, rg]() {
+        std::shared_ptr<arrow::Table> rg_table;
+        reader->ReadRowGroup(rg, col_indices, &rg_table);
+        // Filter and aggregate this row group
+        return local_aggregate(rg_table);
+    }));
+}
+
+// Merge results from all threads
+AggResult final_result;
+for (auto& fut : futures) {
+    merge(final_result, fut.get());
+}
+```
+
+Expected: Near-linear speedup with CPU core count (4-8 cores typical).
+
+### 6. [cpu_bound] Avoid decimal-to-double casts in hot loop
+Target: Q1, Q3, Q6 | Expected: 1.2-1.5x improvement | Risk: low
+Guidance: All queries cast DECIMAL columns to DOUBLE for arithmetic (q1.cpp lines 98-131, q3.cpp lines 249-258, q6.cpp lines 94-107). This happens AFTER reading full table.
+
+**Optimization:**
+- Push cast into Parquet read by specifying target schema
+- Or: process decimals natively using arrow::Decimal128 arithmetic (faster than cast + double)
+- Best: use Arrow compute kernels on Decimal arrays directly (multiply, add support Decimal)
+
+**Example for Q6:**
+```cpp
+// Instead of: cast(price) * cast(discount)
+// Use: multiply(price_decimal, discount_decimal) → returns Decimal
+// Then: sum(revenue_decimal) → cast to double only once at end
+```
+
+Saves repeated casts for 588K rows → single cast of 1 scalar result.
+
+### 7. [cpu_bound] Reduce memory copies via Concatenate
+Target: Q1, Q3, Q6 | Expected: 1.3-1.7x improvement | Risk: low
+Guidance: All queries call `arrow::Concatenate(chunked_array->chunks())` to merge chunks before processing (e.g., q1.cpp lines 85-91). For single-file Parquet, chunks are typically minimal (or single chunk).
+
+**Optimization:**
+```cpp
+// Check if chunked array has single chunk
+auto chunked = table->GetColumnByName("l_shipdate");
+std::shared_ptr<arrow::Array> array;
+if (chunked->num_chunks() == 1) {
+    array = chunked->chunk(0);  // Zero-copy
+} else {
+    array = arrow::Concatenate(chunked->chunks()).ValueOrDie();  // Fallback
+}
+```
+
+Or process chunks independently in parallel (morsel-driven parallelism):
+```cpp
+for (int i = 0; i < chunked->num_chunks(); ++i) {
+    process_chunk(chunked->chunk(i));  // No concatenation needed
+}
+```
+
+### 8. [query_structure] Q3 unnecessary filter on customer
+Target: Q3 | Expected: 1.1-1.2x improvement | Risk: low
+Guidance: Q3 filters customer by c_mktsegment, then joins with orders, then lineitem. Since customer join cardinality is 1:N (one customer → many orders), filtering customer early is correct. However, the join result is not filtered further.
+
+**Optimization:**
+- Consider pushing c_mktsegment filter into the join condition
+- Or: use semi-join (only check existence, don't materialize customer columns)
+- Since only c_custkey is needed for join, and result doesn't use c_mktsegment, this is already optimal
+
+**Better optimization:** Reorder joins
+- Current: (customer ⋈ orders) ⋈ lineitem
+- Alternative: (orders ⋈ lineitem) ⋈ customer
+  - orders filter (o_orderdate < '1995-03-15') has ~50% selectivity → 75K rows
+  - lineitem filter (l_shipdate > '1995-03-15') has ~80% selectivity → 490K rows
+  - Join orders ⋈ lineitem first → ~490K result rows
+  - Then filter by c_mktsegment (semi-join with customer) → ~100K final rows
+
+**BUT:** Current order is likely better because:
+- customer ⋈ orders: 3K × 75K → ~3K distinct customers × ~10 orders each = 30K rows
+- 30K ⋈ 490K → final result
+This is smaller intermediate than 75K ⋈ 490K → filter.
+
+## Summary
+**Critical:** Fix date_to_days() redefinition (use static inline or shared header) and Q6 file path. These block all execution.
+**High-impact:** Add Parquet row group pruning (2-3x), vectorize Q1 aggregation (3-5x), parallelize row group reads (2-3x).
+**Medium-impact:** Fuse Q6 filters (1.5-2x), optimize decimal handling (1.2-1.5x), reduce copies (1.3-1.7x).
+**Expected combined speedup (after all optimizations):** 10-20x over baseline (assuming baseline compiles and runs).

@@ -1,0 +1,323 @@
+# Optimization Analysis (Baseline Iteration)
+
+## Execution Summary
+- **Q1**: 26.5s (4 rows) - FAIL (output format bug)
+- **Q3**: 16.9s (9 rows) - FAIL (missing 1 row)
+- **Q6**: 11.3s (1 row) - PASS
+- **Total**: 56.4s
+
+## Per-Query Assessment
+
+### Q1 (26.5s, 60M row scan + filter + group)
+**Bottleneck**: io_bound + cpu_bound
+- Reading ALL 60M lineitem rows into memory via `ReadTable()` (lines 84)
+- No Parquet predicate pushdown for `l_shipdate <= 1998-09-02` filter
+- Row-by-row filtering/aggregation loop (lines 117-146) instead of vectorized execution
+- Concatenating all chunks upfront (lines 87-112) wastes memory bandwidth
+- Manual hash aggregation with std::unordered_map instead of Arrow compute kernels
+
+**Root Cause**:
+1. I/O: Reading 60M rows when filter eliminates ~2% (only need rows with shipdate <= 1998-09-02)
+2. CPU: Sequential aggregation instead of SIMD-friendly Arrow compute
+
+### Q3 (16.9s, 3-table join with filters)
+**Bottleneck**: io_bound + cpu_bound
+- Reading full tables without Parquet predicate pushdown (lines 42, 69, 145)
+- Date filter `o_orderdate < '1995-03-15'` applied post-read instead of at Parquet level
+- Shipdate filter `l_shipdate > '1995-03-15'` applied post-read (misses row group pruning opportunity)
+- Manual nested loop joins (lines 110-119, 184-193) instead of vectorized hash joins
+- Concatenating all chunks before filtering (lines 56, 85, 161) increases memory pressure
+
+**Root Cause**:
+1. I/O: Reading 60M lineitem + 15M orders + 1.5M customer rows fully, then filtering
+2. CPU: Scalar join loops with manual index building
+3. Logic: Missing row in output suggests floating-point comparison issue in sort (line 310-313)
+
+### Q6 (11.3s, 60M row scan + 3 filters + sum)
+**Bottleneck**: io_bound
+- Reading 60M lineitem rows when date filter `1994-01-01 <= shipdate < 1995-01-01` selects ~14%
+- No Parquet predicate pushdown for shipdate range (lines 58-67)
+- Sequential filtering in 3 separate passes (date, discount, quantity) instead of fused scan+filter
+- Already using Arrow compute kernels for filtering (good!), but still loading all data first
+
+**Root Cause**:
+I/O: Reading full lineitem table (60M rows) when only ~8.4M rows match date filter
+
+## Critical Fixes (Correctness Issues)
+
+### [Q1] Output formatting bug
+**Issue**: Line 163-180 writes all columns as single pipe-delimited string to first CSV column
+**Fix**: Remove `std::fixed` stream manipulator before writing strings, or write each column separately
+**Impact**: Validation failure
+
+### [Q1] Numeric precision
+**Issue**: Aggregated sums differ by small amounts (e.g., 0.05 difference in billions)
+**Fix**: Use higher precision for intermediate calculations or switch to decimal128
+**Impact**: Validation failure (borderline - may be acceptable for approximate queries)
+
+### [Q3] Missing result row
+**Issue**: Returns 9 rows instead of 10 (line 316-318 limits to 10 but only 9 present)
+**Fix**: Investigate floating-point comparison in revenue sorting (line 311) - ties may be breaking inconsistently
+**Impact**: Validation failure
+
+## Recommended Optimizations
+
+### 1. [io_bound] Parquet Predicate Pushdown for Date Filters
+**Target**: Q1, Q3, Q6 | **Expected**: 3-7x improvement | **Risk**: low
+
+**Current behavior**:
+- All queries use `ReadTable(col_indices, &table)` which reads ALL rows, then filter in-memory
+- Example Q6 lines 45-46: reads 60M rows, filters to ~8.4M (14% selectivity)
+
+**Optimization**:
+Use `arrow::dataset` API with predicate pushdown to leverage Parquet row group statistics:
+
+```cpp
+// Replace ReadTable() with dataset scan + filter pushdown
+#include <arrow/dataset/api.h>
+
+// Q6 example: push date filter to Parquet reader
+auto format = std::make_shared<arrow::dataset::ParquetFileFormat>();
+auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
+auto dataset = arrow::dataset::FileSystemDatasetFactory::Make(
+    fs, {lineitem_path}, format, {}
+).ValueOrDie()->Finish().ValueOrDie();
+
+// Build filter expression: l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01'
+auto shipdate_field = arrow::field("l_shipdate", arrow::date32());
+auto filter_expr = arrow::compute::and_(
+    arrow::compute::greater_equal(
+        arrow::compute::field_ref("l_shipdate"),
+        arrow::compute::literal(date_start)
+    ),
+    arrow::compute::less(
+        arrow::compute::field_ref("l_shipdate"),
+        arrow::compute::literal(date_end)
+    )
+);
+
+// Scan with filter pushed to Parquet reader
+arrow::dataset::ScannerBuilder builder(dataset);
+builder.Filter(filter_expr);
+builder.Project({"l_shipdate", "l_discount", "l_extendedprice", "l_quantity"});
+auto scanner = builder.Finish().ValueOrDie();
+auto table = scanner->ToTable().ValueOrDie();
+```
+
+**Why it works**:
+- Parquet row groups store min/max statistics for each column
+- With 600 row groups @ 100K rows each, date filter can skip entire row groups
+- Q6 date filter (1 year window) likely skips 500+ of 600 row groups
+- Only reads matching row groups from disk → massive I/O reduction
+
+**Files to modify**:
+- `queries/q1.cpp` lines 58-84
+- `queries/q3.cpp` lines 36-91, 139-165
+- `queries/q6.cpp` lines 24-67
+
+**Expected speedup**:
+- Q6: 11.3s → 2-3s (reading 14% of data instead of 100%)
+- Q1: 26.5s → 8-10s (reading 98% of data, but skipping decompression/parsing for 2%)
+- Q3: 16.9s → 8-10s (date filters on both orders and lineitem)
+
+### 2. [cpu_bound] Vectorized Aggregation with Arrow Compute Kernels
+**Target**: Q1, Q3 | **Expected**: 2-3x improvement | **Risk**: medium
+
+**Current behavior**:
+- Q1 uses manual hash aggregation loop (lines 115-146): row-by-row value extraction and accumulation
+- Processes 60M rows sequentially without SIMD
+
+**Optimization**:
+Replace manual aggregation with Arrow compute group_by + hash_aggregate:
+
+```cpp
+// Replace lines 115-146 in q1.cpp with Arrow compute aggregation
+#include <arrow/compute/exec/exec_plan.h>
+
+// After filtering for shipdate (use predicate pushdown from Opt #1)
+// Build aggregation expressions
+std::vector<arrow::compute::Aggregate> aggregates = {
+    {"hash_sum", nullptr, "sum_qty", "l_quantity"},
+    {"hash_sum", nullptr, "sum_base_price", "l_extendedprice"},
+    {"hash_sum", nullptr, "sum_disc_price", "disc_price"},  // pre-compute derived column
+    {"hash_sum", nullptr, "sum_charge", "charge"},
+    {"hash_sum", nullptr, "sum_discount", "l_discount"},
+    {"hash_count", nullptr, "count_order", "l_quantity"}
+};
+
+std::vector<arrow::FieldRef> keys = {"l_returnflag", "l_linestatus"};
+
+auto result = arrow::compute::CallFunction(
+    "group_by",
+    {arrow::Datum(filtered_table)},
+    arrow::compute::GroupByOptions(keys, aggregates)
+).ValueOrDie().table();
+```
+
+**Why it works**:
+- Arrow compute kernels use SIMD instructions (AVX2/AVX512) for parallel aggregation
+- Hash table optimized for Arrow array layouts (cache-friendly)
+- Avoids row-by-row virtual function calls and data extraction
+
+**Files to modify**:
+- `queries/q1.cpp` lines 114-156
+- `queries/q3.cpp` lines 255-288 (group by aggregation)
+
+**Expected speedup**:
+- Q1: 8-10s → 3-4s (after combining with predicate pushdown)
+- Q3: 8-10s → 5-6s
+
+### 3. [io_bound] Fuse Scan + Filter + Project
+**Target**: Q6 | **Expected**: 1.5-2x improvement | **Risk**: low
+
+**Current behavior**:
+- Q6 applies 3 filters sequentially (lines 58-105): date → discount → quantity
+- Each filter creates intermediate filtered table, copying data
+- Multiple passes over same data
+
+**Optimization**:
+Combine all filters into single expression and push to dataset scan:
+
+```cpp
+// Combine all filter predicates into one expression
+auto combined_filter = arrow::compute::and_kleene(
+    arrow::compute::and_kleene(
+        arrow::compute::and_kleene(
+            arrow::compute::greater_equal(field_ref("l_shipdate"), literal(date_start)),
+            arrow::compute::less(field_ref("l_shipdate"), literal(date_end))
+        ),
+        arrow::compute::and_kleene(
+            arrow::compute::greater_equal(field_ref("l_discount"), literal(0.05)),
+            arrow::compute::less_equal(field_ref("l_discount"), literal(0.07))
+        )
+    ),
+    arrow::compute::less(field_ref("l_quantity"), literal(24.0))
+);
+
+// Single scan with all filters + projection
+builder.Filter(combined_filter);
+builder.Project({"l_extendedprice", "l_discount"});  // only 2 columns needed for result
+auto scanner = builder.Finish().ValueOrDie();
+```
+
+**Why it works**:
+- Parquet reader can evaluate multiple predicates while decoding
+- Avoids materializing intermediate tables
+- Reduces memory allocation/deallocation overhead
+
+**Files to modify**:
+- `queries/q6.cpp` lines 48-105
+
+**Expected speedup**:
+- Q6: 2-3s → 1-2s (after predicate pushdown)
+
+### 4. [cpu_bound] Parallel Row Group Processing
+**Target**: Q1, Q6 | **Expected**: 2-4x improvement on multi-core | **Risk**: medium
+
+**Current behavior**:
+- Single-threaded execution
+- Parquet file has 600 row groups but reads sequentially
+
+**Optimization**:
+Use Arrow dataset scanner with thread pool to read/process row groups in parallel:
+
+```cpp
+// Configure scanner for parallel execution
+arrow::dataset::ScannerBuilder builder(dataset);
+builder.Filter(filter_expr);
+builder.Project(columns);
+builder.BatchSize(100000);  // match row group size
+builder.UseThreads(true);   // enable parallel scanning
+
+// Process batches in parallel using thread pool
+auto batch_reader = scanner->ToRecordBatchReader().ValueOrDie();
+std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+while (true) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    batch_reader->ReadNext(&batch).ok();
+    if (!batch) break;
+    batches.push_back(batch);
+}
+
+// Parallel aggregation across batches
+#pragma omp parallel for reduction(+:total_revenue)
+for (size_t i = 0; i < batches.size(); i++) {
+    // Compute partial aggregate for each batch
+}
+```
+
+**Why it works**:
+- SF10 lineitem has 600 row groups → excellent parallel decomposition
+- Modern servers have 16+ cores sitting idle in current single-threaded code
+- Arrow's parallel scanner overlaps I/O and CPU
+
+**Files to modify**:
+- `queries/q1.cpp` - add parallel aggregation
+- `queries/q6.cpp` - parallel batch processing
+- `Makefile` - add `-fopenmp` flag
+
+**Expected speedup**:
+- Q1: 3-4s → 1-2s on 8-core machine
+- Q6: 1-2s → 0.5-1s
+
+### 5. [join_order] Optimize Join Build/Probe Sides
+**Target**: Q3 | **Expected**: 1.2-1.5x improvement | **Risk**: low
+
+**Current behavior**:
+- Q3 builds hash table on filtered_customer (lines 94-103), probes with filtered_orders
+- Second join builds on cust_order_joined (lines 169-177), probes with filtered_lineitem
+
+**Issue**:
+After filters, lineitem is likely SMALLER than cust_order_joined:
+- filtered_customer: ~300K rows (20% of 1.5M)
+- filtered_orders: ~6M rows (40% of 15M)
+- cust_order_joined after join: possibly 5-8M rows
+- filtered_lineitem: ~30M rows (50% of 60M)
+
+**Optimization**:
+Second join should build on filtered_lineitem (smaller after date filter), probe with cust_order_joined:
+
+```cpp
+// Reverse join order for second join
+// Build hash table on cust_order_joined (smaller)
+auto o_orderkey = ...;  // from cust_order_joined
+
+std::unordered_map<int32_t, std::vector<int64_t>> order_ht;
+for (int64_t i = 0; i < o_orderkey->length(); ++i) {
+    order_ht[o_orderkey->Value(i)].push_back(i);
+}
+
+// Probe with filtered_lineitem (larger)
+auto l_orderkey = ...;  // from filtered_lineitem
+```
+
+Wait, re-reading the code - the current implementation already does this correctly (builds on cust_order_joined, probes with lineitem). The issue is that we should verify cardinalities after filtering. If lineitem is smaller post-filter, flip it.
+
+**Files to modify**:
+- `queries/q3.cpp` lines 167-198 (add cardinality check, conditionally swap build/probe)
+
+**Expected speedup**:
+- Q3: 5-6s → 4-5s (modest, depends on actual cardinalities)
+
+## Summary
+
+**Priority 1 (Must-fix for correctness)**:
+- Fix Q1 output formatting bug
+- Fix Q3 missing row issue (floating-point sorting)
+- Fix Q1 numeric precision
+
+**Priority 2 (Highest performance impact)**:
+1. Parquet predicate pushdown (io_bound) - 3-7x per query, affects all queries
+2. Vectorized aggregation (cpu_bound) - 2-3x for Q1, Q3
+3. Parallel row group processing (cpu_bound) - 2-4x for Q1, Q6 on multi-core
+
+**Priority 3 (Incremental gains)**:
+4. Fused scan+filter+project (io_bound) - 1.5-2x for Q6
+5. Join order optimization (join_order) - 1.2-1.5x for Q3
+
+**Overall expected improvement**:
+- Best case: 56s → 5-8s (7-11x speedup) with all optimizations
+- Realistic: 56s → 10-15s (3.7-5.6x speedup) with Priority 2 optimizations
+
+**Next iteration recommendation**:
+Start with Parquet predicate pushdown (Opt #1) - lowest risk, highest impact, affects all 3 queries. This will also make it easier to measure CPU-bound optimizations in isolation.

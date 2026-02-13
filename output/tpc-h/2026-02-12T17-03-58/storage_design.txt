@@ -1,0 +1,454 @@
+# Storage Design for TPC-H Workload
+
+## Hardware Profile
+- **CPU**: 64 cores (32 physical, 64 with hyperthreading)
+- **L1 Cache**: 1 MiB data + 1 MiB instruction (32 instances)
+- **L2 Cache**: 32 MiB (32 instances, ~1 MiB per core)
+- **L3 Cache**: 44 MiB (2 instances, shared)
+- **Memory**: 376 GiB total, 309 GiB available
+- **Disk**: HDD (rotational)
+
+## Format Decisions
+
+### Binary Columnar Storage
+- **One file per column** (e.g., `lineitem/l_shipdate.bin`, `lineitem/l_quantity.bin`)
+- **Memory-mapped access** via mmap for zero-copy reads
+- **Rationale**: Q1 and Q6 touch only 7/16 lineitem columns; columnar reduces I/O by ~55%
+
+### Storage Built Once (No Rebuilding During Optimization)
+- Data sorted during initial ingestion
+- Indexes built during ingestion (one-time cost)
+- Zone maps computed during ingestion
+- No re-encoding or re-sorting after initial load
+
+### Block-Based Organization
+- **Block size formula**: L3_cache / (num_threads * num_hot_columns) rows
+  - With 16 threads, 44 MiB L3, ~5 hot columns: 44 MB / (16 * 5) = ~550 KB per column-block
+  - For 8-byte values: ~65K rows per block
+- **Zone maps per block**: Store min/max for range-filterable columns
+- **Benefits**: Cache-friendly scans, enables block skipping for date/range predicates
+
+---
+
+## Per-Table Storage Design
+
+### lineitem (~6M rows, FACT TABLE)
+
+**Sort Order**: l_shipdate ASC, then l_orderkey ASC
+- **Rationale**: All 3 queries filter on l_shipdate (Q1: <=, Q3: >, Q6: BETWEEN)
+- Sorting by l_shipdate enables zone-map block skipping for date range predicates
+- Secondary sort by l_orderkey improves join locality with orders table (Q3)
+- **Impact**: Q6 scans only ~14% of blocks (1 year of 7); Q3 skips early date blocks
+
+**Block Size**: 65536 rows
+- Calculated from L3 cache sizing: 44 MB / (16 threads * 5 hot columns) ≈ 550 KB per column-block
+- With 8-byte values (scaled decimals, dates, integers): 65536 * 8 = 512 KB per block
+- Fits in L2 cache (1 MB per core) for single-threaded processing
+
+**Zone Maps** (min/max per block):
+- l_shipdate (DATE): Primary pruning key for all queries
+- l_quantity (DECIMAL): Range filter in Q6 (< 24)
+- l_discount (DECIMAL): Range filter in Q6 (BETWEEN 0.05 AND 0.07)
+- l_extendedprice (DECIMAL): Not for filtering, but for aggregation bounds estimation
+
+**Dictionary Encoding** (low-cardinality → uint8_t):
+- **l_returnflag** (CHAR(1)): 3 unique values ('A', 'N', 'R') → uint8_t (1 byte vs 1 byte, but enables SIMD)
+- **l_linestatus** (CHAR(1)): 2 unique values ('O', 'F') → uint8_t (1 byte vs 1 byte, enables SIMD)
+- **l_shipmode** (CHAR(10)): ~7 unique values (AIR, SHIP, TRUCK, etc.) → uint8_t
+- **l_shipinstruct** (CHAR(25)): ~4 unique values → uint8_t
+- **Rationale**: Q1 groups by l_returnflag and l_linestatus; integer comparisons are faster than string comparisons and SIMD-friendly
+
+**Scaled Integer Encoding** (avoid floating-point):
+- **l_quantity** (DECIMAL(15,2)): → int64_t, scale by 100 (2 decimal places)
+- **l_extendedprice** (DECIMAL(15,2)): → int64_t, scale by 100
+- **l_discount** (DECIMAL(15,2)): → int64_t, scale by 100
+- **l_tax** (DECIMAL(15,2)): → int64_t, scale by 100
+- **Rationale**: Integer arithmetic is faster; SIMD-friendly; avoids floating-point precision issues
+
+**Date Encoding**:
+- **l_shipdate, l_commitdate, l_receiptdate** (DATE): → int32_t (days since epoch 1970-01-01)
+- **Rationale**: 4-byte integers enable SIMD comparisons; simple arithmetic for date ranges
+
+**Indexes**:
+- **Sorted index on l_shipdate**: (value, row_id) pairs, sorted by value
+  - Used for range scans: binary search to find start/end blocks for date ranges
+  - Size: 6M * (4 bytes date + 4 bytes row_id) = 48 MB (fits in L3)
+- **Hash index on l_orderkey**: For Q3 join probing
+  - Size: 6M * (4 bytes key + 4 bytes row_id) = 48 MB
+  - Open-addressing hash table for cache efficiency
+
+---
+
+### orders (~1.5M rows, FACT TABLE)
+
+**Sort Order**: o_orderdate ASC, then o_orderkey ASC
+- **Rationale**: Q3 filters on o_orderdate (< '1995-03-15')
+- Secondary sort by o_orderkey (PK) improves hash join build order
+
+**Block Size**: 65536 rows
+
+**Zone Maps**:
+- o_orderdate (DATE): For Q3 date filtering
+
+**Dictionary Encoding**:
+- **o_orderstatus** (CHAR(1)): 3 values ('O', 'F', 'P') → uint8_t
+- **o_orderpriority** (CHAR(15)): 5 values ('1-URGENT', '2-HIGH', etc.) → uint8_t
+
+**Scaled Integer Encoding**:
+- **o_totalprice** (DECIMAL(15,2)): → int64_t, scale by 100
+
+**Date Encoding**:
+- **o_orderdate** (DATE): → int32_t
+
+**Indexes**:
+- **Hash index on o_orderkey** (PK): For Q3 join with lineitem
+- **Hash index on o_custkey** (FK): For Q3 join with customer
+
+---
+
+### customer (~150K rows, DIMENSION TABLE)
+
+**Sort Order**: c_custkey ASC (PK order, natural)
+- No special sort needed; small enough to fit in L3 cache entirely
+
+**Block Size**: 32768 rows (entire table fits in ~3 blocks)
+
+**Dictionary Encoding**:
+- **c_mktsegment** (CHAR(10)): 5 values (AUTOMOBILE, BUILDING, FURNITURE, MACHINERY, HOUSEHOLD) → uint8_t
+- **Rationale**: Q3 filters on c_mktsegment = 'BUILDING' (~20% selectivity); SIMD-friendly integer comparison
+
+**Scaled Integer Encoding**:
+- **c_acctbal** (DECIMAL(15,2)): → int64_t, scale by 100
+
+**Indexes**:
+- **Hash index on c_custkey** (PK): For Q3 join with orders
+
+---
+
+### supplier (~10K rows, DIMENSION TABLE)
+
+**Sort Order**: s_suppkey ASC (PK order)
+
+**Scaled Integer Encoding**:
+- **s_acctbal** (DECIMAL(15,2)): → int64_t, scale by 100
+
+**Indexes**:
+- **Hash index on s_suppkey** (PK): For potential joins (not used in Q1/Q3/Q6 but general-purpose)
+
+---
+
+### part (~200K rows, DIMENSION TABLE)
+
+**Sort Order**: p_partkey ASC (PK order)
+
+**Dictionary Encoding**:
+- **p_brand** (CHAR(10)): ~25 unique values → uint8_t
+- **p_type** (VARCHAR(25)): ~150 unique values → uint16_t (if >255 values; otherwise uint8_t)
+- **p_container** (CHAR(10)): ~40 unique values → uint8_t
+
+**Scaled Integer Encoding**:
+- **p_retailprice** (DECIMAL(15,2)): → int64_t, scale by 100
+
+**Indexes**:
+- **Hash index on p_partkey** (PK)
+
+---
+
+### partsupp (~800K rows, DIMENSION TABLE)
+
+**Sort Order**: ps_partkey ASC, then ps_suppkey ASC (composite PK order)
+
+**Scaled Integer Encoding**:
+- **ps_supplycost** (DECIMAL(15,2)): → int64_t, scale by 100
+
+**Indexes**:
+- **Hash index on (ps_partkey, ps_suppkey)** (composite PK)
+
+---
+
+### nation (25 rows, REFERENCE TABLE)
+
+**Sort Order**: n_nationkey ASC (PK order)
+- **Note**: Entire table fits in L1 cache (~2 KB); no special optimizations needed
+
+**Indexes**:
+- **Hash index on n_nationkey** (PK): For joins with customer/supplier
+
+---
+
+### region (5 rows, REFERENCE TABLE)
+
+**Sort Order**: r_regionkey ASC (PK order)
+- **Note**: Entire table fits in L1 cache (~500 bytes); no special optimizations needed
+
+**Indexes**:
+- **Hash index on r_regionkey** (PK): For joins with nation
+
+---
+
+## Type Mappings (for Code Generator)
+
+### Integer Types
+- **INTEGER** → `int32_t` (4 bytes)
+- **BIGINT** (if used) → `int64_t` (8 bytes)
+
+### Decimal/Numeric Types
+- **DECIMAL(x, y)** → `int64_t` (scaled by 10^y to avoid floating-point)
+  - Example: DECIMAL(15,2) with value 123.45 → stored as 12345 (int64_t)
+  - Multiplication: (a * b) / scale (requires 128-bit intermediate for overflow safety)
+  - Division: (a * scale) / b
+
+### Date/Time Types
+- **DATE** → `int32_t` (days since Unix epoch 1970-01-01)
+  - Range: -24,855 (1902-01-01) to 24,855 (2038-01-19) for typical dates
+  - Comparisons: simple integer comparison
+  - Interval arithmetic: date1 - date2 = integer (days)
+
+### String Types
+- **CHAR(n)** → `std::string` (or `char[n+1]` if fixed-size preferred, but std::string for simplicity)
+- **VARCHAR(n)** → `std::string`
+- **Dictionary-encoded strings** → `uint8_t` (index into dictionary array)
+  - Dictionary stored as `std::vector<std::string>` (shared across all rows)
+  - Column stored as `std::vector<uint8_t>` (one byte per row)
+
+### Boolean (if used)
+- **BOOLEAN** → `bool` (1 byte in C++)
+
+---
+
+## Ingestion Parallelism Strategy
+
+### High-Level Approach
+- **All tables ingested concurrently** (multi-table parallelism)
+- Large tables (lineitem, orders) use **chunk-based parallel parsing**
+- Small tables (nation, region, customer, supplier, part, partsupp) use **single-threaded parsing** (overhead not worth it)
+
+### Lineitem Ingestion (6M rows, ~1 GB CSV)
+
+**Parallel Parsing**:
+1. **mmap the input CSV file** (zero-copy, OS handles I/O buffering)
+2. **Split by newlines into ~64 chunks** (one per core, ~100K rows each)
+   - Scan for '\n' boundaries to align chunks
+3. **Parse in parallel** (64 threads):
+   - Each thread parses its chunk into thread-local column vectors
+   - Convert strings to integers/dates/decimals inline
+   - Apply dictionary encoding (build thread-local dictionaries, merge later)
+4. **Merge phase**:
+   - Concatenate column vectors from all threads
+   - Merge dictionaries (assign global IDs)
+   - **Sort by l_shipdate, then l_orderkey** (parallel merge-sort using GNU parallel std::sort)
+5. **Build indexes and zone maps**:
+   - Sorted index on l_shipdate: Extract (value, row_id) pairs after sort
+   - Hash index on l_orderkey: Build open-addressing hash table
+   - Zone maps: Scan sorted data, compute min/max every 65536 rows
+
+**Pre-Allocation**:
+- Estimate row count from file size: file_size / avg_row_size
+- For TPC-H SF=1, lineitem.tbl is ~725 MB, avg row ~120 bytes → ~6M rows
+- Reserve vectors: `vector.reserve(estimated_rows)` to avoid reallocation
+
+**Estimated Ingestion Time** (HDD, 64 cores):
+- Parsing: ~1 GB at 200 MB/s (HDD sequential read) = 5 seconds
+- Sorting: 6M rows, 16 columns, parallel merge-sort = ~10 seconds
+- Index building: Hash table (6M inserts) = ~2 seconds
+- **Total**: ~20 seconds for lineitem
+
+---
+
+### Orders Ingestion (1.5M rows, ~170 MB CSV)
+
+**Parallel Parsing**:
+- Same strategy as lineitem: mmap, split into ~32 chunks, parse in parallel
+- Sort by o_orderdate, then o_orderkey
+- Build hash indexes on o_orderkey (PK) and o_custkey (FK)
+- Build zone maps on o_orderdate
+
+**Estimated Time**: ~5 seconds
+
+---
+
+### Small Tables (customer, supplier, part, partsupp, nation, region)
+
+**Single-Threaded Parsing**:
+- Total size < 100 MB; parallelism overhead not worth it
+- Parse sequentially, apply encodings, build hash indexes
+- **Estimated Time**: ~2 seconds total for all small tables
+
+---
+
+### Total Ingestion Time
+- **Lineitem**: 20 seconds (dominates)
+- **Orders**: 5 seconds (concurrent with lineitem)
+- **Small tables**: 2 seconds (concurrent with lineitem/orders)
+- **Wall-clock time**: ~20 seconds (all concurrent)
+
+---
+
+## File Layout on Disk
+
+### Directory Structure
+```
+data/
+  lineitem/
+    l_orderkey.bin          (6M * 4 bytes = 24 MB)
+    l_partkey.bin           (6M * 4 bytes = 24 MB)
+    l_suppkey.bin           (6M * 4 bytes = 24 MB)
+    l_linenumber.bin        (6M * 4 bytes = 24 MB)
+    l_quantity.bin          (6M * 8 bytes = 48 MB, scaled int64_t)
+    l_extendedprice.bin     (6M * 8 bytes = 48 MB, scaled int64_t)
+    l_discount.bin          (6M * 8 bytes = 48 MB, scaled int64_t)
+    l_tax.bin               (6M * 8 bytes = 48 MB, scaled int64_t)
+    l_returnflag.bin        (6M * 1 byte = 6 MB, dict-encoded uint8_t)
+    l_linestatus.bin        (6M * 1 byte = 6 MB, dict-encoded uint8_t)
+    l_shipdate.bin          (6M * 4 bytes = 24 MB, date as int32_t)
+    l_commitdate.bin        (6M * 4 bytes = 24 MB, date as int32_t)
+    l_receiptdate.bin       (6M * 4 bytes = 24 MB, date as int32_t)
+    l_shipinstruct.bin      (6M * 1 byte = 6 MB, dict-encoded uint8_t)
+    l_shipmode.bin          (6M * 1 byte = 6 MB, dict-encoded uint8_t)
+    l_comment.bin           (6M * ~30 bytes avg = 180 MB, std::string via offset array)
+    metadata.bin            (zone maps, dictionaries, row count)
+    index_l_shipdate.bin    (sorted index: 48 MB)
+    index_l_orderkey.bin    (hash index: 48 MB)
+  orders/
+    o_orderkey.bin
+    o_custkey.bin
+    o_orderstatus.bin       (dict-encoded)
+    o_totalprice.bin        (scaled int64_t)
+    o_orderdate.bin         (date as int32_t)
+    o_orderpriority.bin     (dict-encoded)
+    ...
+    metadata.bin
+    index_o_orderkey.bin
+    index_o_custkey.bin
+  customer/
+    ...
+  [other tables similarly]
+```
+
+### Metadata File Format (per table)
+```
+Header:
+  - row_count (uint64_t)
+  - block_size (uint32_t)
+  - num_blocks (uint32_t)
+  - sorted_column_id (uint8_t, e.g., column 10 = l_shipdate)
+  - secondary_sort_column_id (uint8_t, e.g., column 0 = l_orderkey)
+
+Zone Maps (per block, per zone-mapped column):
+  - Block 0: [min_value, max_value]
+  - Block 1: [min_value, max_value]
+  - ...
+
+Dictionaries (per dictionary-encoded column):
+  - num_entries (uint32_t)
+  - Entry 0: [string_length (uint16_t), string_data]
+  - Entry 1: [string_length, string_data]
+  - ...
+```
+
+---
+
+## Memory-Mapped Access Pattern (Runtime)
+
+### Loading a Column
+```cpp
+// Example: Load l_shipdate column
+int fd = open("data/lineitem/l_shipdate.bin", O_RDONLY);
+size_t file_size = 6'000'000 * sizeof(int32_t);  // 24 MB
+int32_t* l_shipdate = (int32_t*)mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+madvise(l_shipdate, file_size, MADV_SEQUENTIAL);  // Hint: sequential access
+```
+
+### Block-Skipping with Zone Maps
+```cpp
+// Q6: l_shipdate BETWEEN '1994-01-01' AND '1995-01-01'
+int32_t date_min = date_to_int32("1994-01-01");  // e.g., 8766
+int32_t date_max = date_to_int32("1995-01-01");  // e.g., 9131
+
+for (uint32_t block_id = 0; block_id < num_blocks; ++block_id) {
+    auto [block_min, block_max] = zone_map[block_id];
+    if (block_max < date_min || block_min > date_max) {
+        // Skip entire block (65536 rows)
+        continue;
+    }
+    // Scan block
+    uint32_t start_row = block_id * 65536;
+    uint32_t end_row = std::min(start_row + 65536, row_count);
+    for (uint32_t row = start_row; row < end_row; ++row) {
+        if (l_shipdate[row] >= date_min && l_shipdate[row] < date_max) {
+            // Process row
+        }
+    }
+}
+```
+
+---
+
+## Alignment and SIMD Considerations
+
+### Alignment for AVX2/AVX-512
+- **Column data alignment**: Allocate mmap regions with 64-byte alignment (cache line)
+- **Array of Structures → Structure of Arrays (SoA)**: Columnar storage already SoA-friendly
+- **Padding**: Add padding to block sizes to align to 64-byte boundaries if needed
+
+### SIMD-Friendly Operations
+- **Integer comparisons**: AVX2 can compare 8 int32_t or 4 int64_t per instruction
+- **Arithmetic**: Vectorized multiply/add for `l_extendedprice * (1 - l_discount)` in Q1, Q6
+- **Masked loads**: Use AVX2 masked loads to skip rows filtered out by predicates
+
+---
+
+## Storage Size Estimates (Scale Factor 1)
+
+| Table      | Rows    | Uncompressed | With Encoding | Compression Ratio |
+|------------|---------|--------------|---------------|-------------------|
+| lineitem   | 6M      | 720 MB       | 550 MB        | 1.3x              |
+| orders     | 1.5M    | 170 MB       | 140 MB        | 1.2x              |
+| partsupp   | 800K    | 120 MB       | 110 MB        | 1.1x              |
+| customer   | 150K    | 25 MB        | 22 MB         | 1.1x              |
+| part       | 200K    | 35 MB        | 30 MB         | 1.2x              |
+| supplier   | 10K     | 2 MB         | 2 MB          | 1.0x              |
+| nation     | 25      | 2 KB         | 2 KB          | 1.0x              |
+| region     | 5       | 500 B        | 500 B         | 1.0x              |
+| **Total**  |         | **1072 MB**  | **854 MB**    | **1.25x**         |
+
+**Indexes**: ~200 MB (hash indexes + sorted indexes)
+
+**Total Storage**: ~1.05 GB (fits entirely in RAM with 309 GB available)
+
+---
+
+## Key Design Decisions Summary
+
+1. **Sort lineitem by l_shipdate**: Enables zone-map block skipping for all 3 queries (Q1, Q3, Q6 filter on l_shipdate)
+2. **Sort orders by o_orderdate**: Enables zone-map block skipping for Q3
+3. **Dictionary encode low-cardinality strings**: Reduces storage by 20-30% and enables SIMD integer comparisons
+4. **Scale decimals to int64_t**: Avoids floating-point errors and enables SIMD arithmetic
+5. **Encode dates as int32_t**: Compact, SIMD-friendly, simple arithmetic
+6. **Block size = 65536 rows**: Fits in L2 cache (512 KB per column-block), good granularity for zone maps
+7. **Zone maps on date/range columns**: Prunes up to 86% of blocks for selective queries (Q6)
+8. **Hash indexes on PKs and FKs**: Fast joins (O(1) lookups)
+9. **Sorted index on l_shipdate**: Fast range scans with binary search
+10. **Parallel ingestion**: 64-way parallelism for lineitem/orders, ~20 seconds total ingestion time
+11. **Memory-mapped I/O**: Zero-copy access, OS manages caching
+12. **All optimizations built once**: No re-sorting or re-encoding needed during query optimization
+
+---
+
+## Future-Proofing for Optimization Phase
+
+This storage design does NOT block any runtime optimizations:
+
+- **Zone maps**: Already built, executor can use for block skipping
+- **SIMD**: Aligned data, integer types, SoA layout ready for AVX2/AVX-512
+- **Parallel scans**: Sorted order doesn't prevent partitioning (just partition by row ranges)
+- **Index pushdown**: Indexes available for optimizer to choose
+- **Column pruning**: Columnar format supports reading only needed columns
+- **Filter pushdown**: Zone maps enable early pruning without data access
+- **Adaptive execution**: Storage doesn't impose fixed execution strategy
+
+The executor has full flexibility to:
+- Choose hash join vs. merge join (both supported by this storage)
+- Parallelize at any level (block-level, table-level, operator-level)
+- Reorder joins (storage sort order doesn't constrain join order)
+- Apply filters in any order (zone maps support any predicate ordering)

@@ -1,0 +1,25 @@
+{
+  "status": "fail",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 1432,
+      "rows": 3,
+      "error": "Row count mismatch (expected 4, got 3) and incorrect CSV format (uses pipe delimiter instead of comma)"
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 5773,
+      "rows": 10,
+      "error": "Incorrect CSV format (uses pipe delimiter instead of comma); 3 row(s) differ from expected results"
+    },
+    "Q6": {
+      "status": "pass",
+      "time_ms": 82,
+      "rows": 1
+    }
+  },
+  "ingestion_time_ms": null,
+  "compile_output": "Compilation succeeded with warnings about unused fread return values. No compilation errors.",
+  "notes": "Partial failure: Q6 passed validation. Q1 and Q3 failed due to incorrect CSV delimiter (pipe '|' instead of comma ',') causing format mismatch. Q1 also has incorrect row count (3 instead of 4). Query execution times: Q1=1432ms, Q3=5773ms, Q6=82ms, total=7732ms. The generated code executes without runtime errors but produces incorrectly formatted output for Q1 and Q3."
+}

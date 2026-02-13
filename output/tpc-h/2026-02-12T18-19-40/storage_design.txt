@@ -1,0 +1,61 @@
+# Storage Design
+
+## Hardware
+CPU: 64 cores, L3: 44MB, HDD, 376 GB RAM
+
+## Format
+Binary columnar. One file per column. mmap access. Block size: 4096 rows.
+
+## Table Designs
+
+### lineitem (~6M rows, primary fact table)
+Sort by: l_shipdate (all 3 queries filter on date ranges — enables zone map pruning)
+Dictionary encode: l_returnflag (3 values → uint8_t), l_linestatus (2 values → uint8_t),
+                   l_shipmode (7 values → uint8_t), l_shipinstruct (4 values → uint8_t)
+Scaled: l_quantity, l_extendedprice, l_discount, l_tax → int64_t (× 100)
+Date: l_shipdate, l_commitdate, l_receiptdate → int32_t (days since epoch)
+PK index: (l_orderkey, l_linenumber) composite
+
+### orders (~1.5M rows, fact table)
+Sort by: o_orderdate (Q3 filters by date, improves join locality with lineitem)
+Dictionary encode: o_orderstatus (3 values → uint8_t)
+Scaled: o_totalprice → int64_t (× 100)
+Date: o_orderdate → int32_t
+PK index: o_orderkey
+
+### customer (~150K rows, dimension)
+Dictionary encode: c_mktsegment (5 values → uint8_t)
+Scaled: c_acctbal → int64_t (× 100)
+PK index: c_custkey
+
+### part (~200K rows, dimension)
+Dictionary encode: p_brand (~25 values → uint8_t), p_container (~40 values → uint8_t)
+Scaled: p_retailprice → int64_t (× 100)
+PK index: p_partkey
+
+### partsupp (~800K rows, dimension)
+Scaled: ps_supplycost → int64_t (× 100)
+PK index: (ps_partkey, ps_suppkey) composite
+
+### supplier (~10K rows, dimension)
+Scaled: s_acctbal → int64_t (× 100)
+PK index: s_suppkey
+
+### nation (25 rows), region (5 rows)
+No special encoding needed (tiny lookup tables)
+
+## Type Mappings
+INTEGER → int32_t, DECIMAL(x,y) → int64_t (scaled × 100), DATE → int32_t,
+CHAR/VARCHAR → std::string (dictionary encoded if ≤10 unique values)
+
+## Parallel Ingestion Strategy
+- All 8 tables ingested concurrently via std::thread (one thread per table minimum)
+- lineitem (6M rows): mmap input .tbl file, split into 64 chunks by newline boundaries,
+  parse each chunk in parallel thread into thread-local column vectors, merge vectors,
+  sort by l_shipdate using parallel sort (std::sort with execution::par)
+- orders (1.5M rows): mmap input, split into 32 chunks, parallel parse, merge, sort by o_orderdate
+- customer, part, partsupp: mmap input, split into 16 chunks, parallel parse, merge
+- Small tables (supplier, nation, region): single-threaded parse (not worth overhead)
+- Pre-allocate all vectors: estimate row count = file_size / 150 bytes (lineitem avg row)
+- Write columns in parallel: each column written by separate thread as single fwrite() call
+- Build PK indexes during merge phase in parallel with sort operation

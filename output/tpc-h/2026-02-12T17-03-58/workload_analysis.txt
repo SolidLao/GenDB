@@ -1,0 +1,152 @@
+# Workload Analysis
+
+## Tables
+
+### Fact Tables
+- **lineitem**: ~6M rows (scale factor 1)
+  - Hot columns: l_shipdate, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus
+  - Primary access pattern: full/partial scans with date filters
+  - Composite PK: (l_orderkey, l_linenumber)
+
+- **orders**: ~1.5M rows (scale factor 1)
+  - Hot columns: o_orderkey (PK), o_custkey, o_orderdate, o_shippriority
+  - Join target for lineitem and customer
+
+### Dimension Tables
+- **customer**: ~150K rows
+  - Hot columns: c_custkey (PK), c_mktsegment
+  - Low cardinality: c_mktsegment (~5 values)
+
+- **nation**: 25 rows (reference data)
+- **region**: 5 rows (reference data)
+- **supplier**: ~10K rows
+- **part**: ~200K rows
+- **partsupp**: ~800K rows
+
+## Joins
+
+### Q3 Join Chain
+- customer.c_custkey = orders.o_custkey (PK-FK, 1:N)
+  - After c_mktsegment filter: ~30K customers → ~300K orders (~20% selectivity)
+- lineitem.l_orderkey = orders.o_orderkey (PK-FK, 1:N)
+  - With date filters: further reduces to ~150K lineitem rows
+
+### Join Strategy Implications
+- All joins are PK-FK relationships (lossless, predictable cardinality)
+- Q3 benefits from filter pushdown: apply c_mktsegment and date filters before joins
+
+## Selective Filters
+
+### Date Ranges (High Impact)
+- **Q1**: l_shipdate <= '1998-09-02' (~98% of data passes, minimal selectivity)
+- **Q3**: o_orderdate < '1995-03-15' AND l_shipdate > '1995-03-15' (~25% selectivity combined)
+- **Q6**: l_shipdate in ['1994-01-01', '1995-01-01') (~14% selectivity, 1 year of 7 years)
+
+### Categorical Filters
+- **Q3**: c_mktsegment = 'BUILDING' (~20% selectivity, 1 of 5 segments)
+
+### Range Filters
+- **Q6**: l_discount BETWEEN 0.05 AND 0.07 (~10% selectivity, narrow range)
+- **Q6**: l_quantity < 24 (~50% selectivity)
+
+### Combined Q6 Selectivity
+- Date × discount × quantity: 0.14 × 0.10 × 0.50 = ~0.7% (highly selective, ~42K rows)
+
+## Aggregations
+
+### Q1: Simple Grouping
+- GROUP BY l_returnflag, l_linestatus
+- Expected groups: ~4 (2 flags × 2 statuses typical in TPC-H)
+- Large input (~5.9M rows) → tiny output (4 rows)
+- High reduction ratio: excellent candidate for parallel partial aggregation
+
+### Q3: Multi-Column Grouping with LIMIT
+- GROUP BY l_orderkey, o_orderdate, o_shippriority
+- Expected groups: ~50K-100K (one per filtered order)
+- Moderate reduction ratio (150K → 50K)
+- TOP-10 with ORDER BY revenue DESC → early termination opportunity
+
+## Sort/Limit Requirements
+
+### Q1
+- ORDER BY l_returnflag, l_linestatus
+- Only 4 rows to sort (negligible cost)
+
+### Q3
+- ORDER BY revenue DESC, o_orderdate
+- LIMIT 10
+- **Key optimization**: Use min-heap or partial sort to avoid full sort of ~50K groups
+
+## Parallelism Opportunities
+
+### Scan-Heavy Operations
+- **Q1 lineitem scan**: 6M rows, embarrassingly parallel
+  - Partition by l_shipdate ranges or hash(l_orderkey)
+  - Partial aggregation in each thread, merge at end
+
+- **Q6 lineitem scan**: 6M rows → 42K after filters, highly parallel
+  - Each thread computes partial sum, final reduction trivial
+
+### Q3 Multi-Table Join
+- **Phase 1**: Parallel scan + filter customer (c_mktsegment)
+- **Phase 2**: Parallel scan + filter orders (o_orderdate), hash join with customer
+- **Phase 3**: Parallel scan + filter lineitem (l_shipdate), hash join with orders
+- **Phase 4**: Parallel partial aggregation, merge, top-K selection
+
+### Recommended Parallelism
+- Use thread count = min(CPU cores, 8-16) for scans
+- Hash table builds for joins should be single-threaded (smaller dimension tables)
+- Probe phase can be parallelized (partition lineitem/orders)
+
+## Key Optimization Opportunities
+
+### Storage Layout
+1. **Sort lineitem by l_shipdate**
+   - Enables zone-map pruning for Q1, Q3, Q6 (all use l_shipdate filters)
+   - Secondary sort by l_orderkey for better join locality
+
+2. **Dictionary encoding for low-cardinality columns**
+   - l_returnflag, l_linestatus, l_shipmode, l_shipinstruct (Q1 GROUP BY)
+   - c_mktsegment, o_orderstatus (Q3 filter)
+   - Reduces memory bandwidth and comparison costs
+
+3. **Columnar storage**
+   - Q1, Q6 touch only subset of lineitem columns (~7 of 16)
+   - Column pruning reduces I/O by >50%
+
+### Execution Strategies
+1. **Filter pushdown before joins (Q3)**
+   - Apply c_mktsegment, o_orderdate, l_shipdate filters first
+   - Reduces join input sizes by 75-80%
+
+2. **Parallel partial aggregation (Q1, Q3)**
+   - Thread-local hash tables for aggregation
+   - Merge phase is cheap (4 groups in Q1, ~50K in Q3)
+
+3. **SIMD vectorization**
+   - Q1, Q6 arithmetic expressions (sum, multiply)
+   - Date comparisons (all queries)
+   - Filter evaluation (AND/OR chains in Q6)
+
+4. **Early TOP-K termination (Q3)**
+   - Use priority queue (max-heap of size 10)
+   - Avoid sorting full 50K groups
+
+5. **Bloom filters for joins (Q3)**
+   - Build Bloom filter on filtered customer keys
+   - Probe during orders scan to skip non-matching orders early
+
+### Code Generation Targets
+- **Tight scan loops**: Fuse filter + projection + aggregation (Q1, Q6)
+- **Specialized hash join**: Monomorphic key types (INTEGER PKs)
+- **Branchless filters**: Convert predicates to arithmetic for SIMD
+- **Cache-conscious aggregation**: Array-based aggregation for tiny group counts (Q1)
+
+## Workload Characteristics Summary
+
+- **Scan-dominated**: 2 of 3 queries are lineitem-only scans
+- **Date-centric**: All queries filter on date columns (high temporal locality)
+- **High aggregation reduction**: Q1 has 1.5M:1 reduction ratio
+- **Simple join topology**: Star-like, PK-FK only, no circular dependencies
+- **Limited result sets**: Q1 (4 rows), Q3 (10 rows), Q6 (1 row)
+- **Parallelism-friendly**: Large independent scans, partial aggregation, no ORDER BY dependencies before aggregation

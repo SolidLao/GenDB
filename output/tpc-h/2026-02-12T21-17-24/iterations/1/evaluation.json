@@ -1,0 +1,22 @@
+{
+  "status": "fail",
+  "queries": {
+    "q1": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0
+    },
+    "q3": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0
+    },
+    "q6": {
+      "status": "fail",
+      "time_ms": 0,
+      "rows": 0
+    }
+  },
+  "compile_output": "In file included from main.cpp:5:\nqueries/q3.cpp:17:16: error: redefinition of 'int32_t date_to_days(int, int, int)'\n   17 | inline int32_t date_to_days(int year, int month, int day) {\n      |                ^~~~~~~~~~~~\nIn file included from main.cpp:4:\nqueries/q1.cpp:16:16: note: 'int32_t date_to_days(int, int, int)' previously defined here\n   16 | inline int32_t date_to_days(int year, int month, int day) {\n      |                ^~~~~~~~~~~~\n...\nqueries/q6.cpp:16:16: error: redefinition of 'int32_t date_to_days(int, int, int)'\n   16 | inline int32_t date_to_days(int year, int month, int day) {\n      |                ^~~~~~~~~~~~\nmake: *** [Makefile:17: main] Error 1",
+  "notes": "Compilation failed due to multiple definitions of date_to_days() function in q1.cpp, q3.cpp, and q6.cpp. When these files are included in main.cpp, the inline function is redefined multiple times causing compilation errors. The function should either be moved to a shared header file, use include guards, or be declared static inline."
+}

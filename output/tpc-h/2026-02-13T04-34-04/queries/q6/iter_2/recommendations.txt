@@ -1,0 +1,32 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q6 (1182ms, pass): Performance regressed from iter_1 (1128ms). Current bottleneck is SIMD overhead from dual-vector processing with excessive early-exit checks and redundant Kahan summation at multiple levels.
+
+## Critical Fixes
+None - query produces correct results.
+
+## Recommended Optimizations
+
+1. [cpu_bound] Simplify SIMD processing to remove dual-vector complexity
+   Target: Q6 | Expected: 1.1-1.15x improvement (back to ~1050ms) | Risk: low
+   Guidance: Lines 137-239 process two 4-element vectors with duplicate logic and early-exit checks (_mm256_testz_pd) that add overhead. Simplify to single 4-element vector per iteration (remove lines 189-238). The dual-vector approach was intended to improve throughput but the early-exit checks (lines 150, 164, 201, 215) add more overhead than they save when filters have moderate selectivity (14% × 18% × 48% = 1.2% final selectivity).
+
+2. [cpu_bound] Remove unnecessary Kahan summation in SIMD path
+   Target: Q6 | Expected: 1.05x improvement | Risk: low
+   Guidance: Lines 241-249 apply Kahan summation when extracting SIMD results, but this is unnecessary - the SIMD accumulator already has sufficient precision for 4 intermediate sums. Keep Kahan only for final merge (lines 283-293) and scalar fallback (lines 261-265). Remove the Kahan loop at lines 244-249 and replace with simple sum += sums[j].
+
+3. [cpu_bound] Reduce early-exit check frequency
+   Target: Q6 | Expected: 1.03x improvement | Risk: low
+   Guidance: The _mm256_testz_pd checks at lines 150, 164 add branching overhead. Given the filter cascade (14% → 2.5% → 1.2%), the second check (line 164) rarely triggers an early exit. Remove the discount check (lines 163-187) and only keep the shipdate early exit (line 150). This reduces branches while still skipping 86% of work.
+
+4. [cpu_bound] Optimize thread chunk distribution
+   Target: Q6 | Expected: 1.02x improvement | Risk: low
+   Guidance: Line 106 computes static chunk_size which may create imbalance when N=9150000 and num_threads=64. The last thread gets a smaller chunk. Use dynamic work-stealing or atomic counter-based chunking for better load balance. Replace static chunking (lines 106-108) with: `int64_t chunk = 8192; while ((int64_t i = __atomic_fetch_add(&global_offset, chunk, __ATOMIC_RELAXED)) < N)`.
+
+5. [query_structure] Eliminate FMA conditional compilation deadcode
+   Target: Q6 | Expected: Negligible performance, cleaner code | Risk: none
+   Guidance: Lines 172-176 and 222-227 have #ifdef __FMA__ blocks but both branches execute identical code (_mm256_mul_pd). The comment mentions FMA but it's not actually used (FMA would be _mm256_fmadd_pd). Either remove the #ifdef (preferred) or actually use FMA to fuse multiply-add into revenue computation, though this particular case doesn't have an add to fuse with.
+
+## Summary
+Primary recommendation: Simplify SIMD to single-vector processing (remove dual-vector overhead) and eliminate redundant Kahan summation in SIMD path. Expected combined improvement: 1.15-1.20x (target ~1000ms).

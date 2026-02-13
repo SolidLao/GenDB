@@ -1,0 +1,45 @@
+# Optimization Analysis (Iteration 2)
+
+## Per-Query Assessment
+- Q1: NOT EXECUTED (blocked by compilation failure)
+- Q3: NOT EXECUTED (blocked by compilation failure)
+- Q6: NOT EXECUTED (blocked by compilation failure)
+
+## Critical Fixes (Compilation Errors)
+
+### query_structure: Arrow C++ API Misuse (Q3)
+
+**Issue 1**: Lines 41, 54, 116 in q3.cpp use `ValueOrDie()` on `shared_ptr<arrow::Scalar>`
+```cpp
+// INCORRECT (line 41, 116):
+auto building_scalar = arrow::MakeScalar("BUILDING");
+std::vector<arrow::Datum>{c_mktsegment_array, building_scalar.ValueOrDie()}
+
+// CORRECT:
+auto building_scalar = arrow::MakeScalar("BUILDING");
+if (!building_scalar.ok()) { throw ... }
+std::vector<arrow::Datum>{c_mktsegment_array, building_scalar.ValueOrDie()}
+```
+
+**Issue 2**: Lines 41, 54 attempt to initialize `vector<arrow::Datum>` with raw `shared_ptr<arrow::Array>`
+```cpp
+// INCORRECT:
+std::vector<arrow::Datum>{c_mktsegment_array, building_scalar.ValueOrDie()}
+
+// CORRECT:
+std::vector<arrow::Datum>{arrow::Datum(c_mktsegment_array), building_scalar.ValueOrDie()}
+```
+
+**Root Cause**:
+- `arrow::MakeScalar()` returns `Result<shared_ptr<Scalar>>`, not `shared_ptr<Scalar>`
+- Must check `.ok()` before calling `.ValueOrDie()` on Result objects
+- `arrow::Datum` constructor requires explicit wrapping for arrays
+
+**Applies to**: Q3 lines 37-46 (customer filter), lines 113-122 (one_scalar computation)
+
+## Recommended Optimizations
+
+NONE — compilation must succeed before performance optimizations can be evaluated.
+
+## Summary
+Fix Arrow API usage: check Result<T>.ok() before calling ValueOrDie(), wrap arrays in arrow::Datum constructor.

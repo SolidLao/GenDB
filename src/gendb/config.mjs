@@ -26,3 +26,8 @@ export function getDataDir(benchmark, scaleFactor) {
 export function getGendbDir(benchmark, scaleFactor) {
   return resolve(BENCHMARKS_DIR, benchmark, "gendb", `tpch_sf${scaleFactor}.gendb`);
 }
+
+/** Resolve the Parquet data directory for a given benchmark and scale factor. */
+export function getParquetDir(benchmark, scaleFactor) {
+  return resolve(BENCHMARKS_DIR, benchmark, "data", `sf${scaleFactor}`, "parquet");
+}

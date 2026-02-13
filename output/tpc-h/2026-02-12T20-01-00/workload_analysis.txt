@@ -1,0 +1,93 @@
+# Workload Analysis
+
+## Tables
+
+### Fact Tables
+- **lineitem**: ~600K rows at SF=10 (largest table, ~6M rows per SF=1 × 10)
+  - Hot columns: l_shipdate, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus, l_orderkey
+  - All queries use this table
+
+- **orders**: ~150K rows at SF=10
+  - Hot columns: o_orderkey, o_custkey, o_orderdate, o_shippriority
+  - Used in Q3
+
+### Dimension Tables
+- **customer**: ~15K rows at SF=10
+  - Hot columns: c_custkey, c_mktsegment
+  - Used in Q3
+
+- **nation, region, supplier, part, partsupp**: Not used in these queries
+
+## Joins
+
+- **lineitem.l_orderkey = orders.o_orderkey** (FK-PK join, Q3)
+  - Expected selectivity: high (typical 1:4 ratio, each order has ~4 line items)
+
+- **orders.o_custkey = customer.c_custkey** (FK-PK join, Q3)
+  - Expected selectivity: high (1:many relationship)
+
+## Selective Filters
+
+### High-Impact Filters (enable row group pruning)
+- **l_shipdate range filters** (Q1, Q3, Q6):
+  - Q1: l_shipdate <= '1998-09-02' (~98% of data)
+  - Q3: l_shipdate > '1995-03-15' (~60% selectivity)
+  - Q6: l_shipdate in 1994 (~14% selectivity, 1 year out of ~7 years)
+  - **Optimization**: Sort lineitem by l_shipdate to enable row group pruning
+
+- **o_orderdate filter** (Q3): o_orderdate < '1995-03-15'
+  - ~40% selectivity
+  - **Optimization**: Sort orders by o_orderdate for row group pruning
+
+### Medium-Impact Filters
+- **c_mktsegment = 'BUILDING'** (Q3): ~20% selectivity (1 of 5 segments)
+  - **Optimization**: Dictionary encode for fast equality comparison
+
+- **l_discount BETWEEN 0.05 AND 0.07** (Q6): ~20% selectivity
+  - No sort benefit, but benefits from columnar layout
+
+- **l_quantity < 24** (Q6): ~48% selectivity (assuming uniform 1-50 range)
+  - No sort benefit, but benefits from columnar layout
+
+## Aggregations
+
+- **Q1**: GROUP BY l_returnflag, l_linestatus
+  - Expected groups: ~4 (2 flags × 2 statuses)
+  - Low cardinality, efficient hash aggregation
+
+- **Q3**: GROUP BY l_orderkey, o_orderdate, o_shippriority
+  - Expected groups: high (many distinct orders)
+  - LIMIT 10 reduces final output
+
+## Column Projection
+
+- **Q1**: Uses 8 of 16 lineitem columns (50% pruning)
+- **Q3**: Uses 3 of 16 lineitem columns, 4 of 9 orders columns, 2 of 8 customer columns (significant pruning)
+- **Q6**: Uses 4 of 16 lineitem columns (75% pruning) — best projection benefit
+
+## Parallelism Opportunities
+
+- **Q1**: Full table scan of lineitem — can parallelize across row groups
+- **Q6**: Filtered scan of lineitem — can parallelize across row groups
+- **Q3**: Join + aggregation — can parallelize probe phase and partial aggregations
+
+## Key Optimization Opportunities
+
+1. **Sort lineitem by l_shipdate**: Enables row group pruning for date filters in all 3 queries
+   - Q1: Skip row groups after cutoff date
+   - Q3: Skip row groups before cutoff date
+   - Q6: Skip row groups outside 1994 date range (highest benefit)
+
+2. **Sort orders by o_orderdate**: Enables row group pruning for Q3
+
+3. **Dictionary encoding for low-cardinality strings**:
+   - lineitem: l_returnflag, l_linestatus, l_shipinstruct, l_shipmode
+   - orders: o_orderstatus, o_orderpriority
+   - customer: c_mktsegment
+   - Reduces storage and enables faster equality/group-by operations
+
+4. **Smaller row groups for lineitem**: Use 100K rows/group to enable fine-grained pruning on date filters
+
+5. **Column projection**: Parquet format automatically provides this benefit
+
+6. **Compression**: Use snappy for balanced CPU/I-O trade-off at SF=10

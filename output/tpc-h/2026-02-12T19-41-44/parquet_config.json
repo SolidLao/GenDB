@@ -1,0 +1,97 @@
+{
+  "default_row_group_size": 100000,
+  "default_compression": "snappy",
+  "tables": {
+    "lineitem": {
+      "sort_by": ["l_shipdate"],
+      "row_group_size": 75000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "l_returnflag",
+        "l_linestatus",
+        "l_shipinstruct",
+        "l_shipmode"
+      ],
+      "no_dictionary_columns": [
+        "l_comment"
+      ]
+    },
+    "orders": {
+      "sort_by": ["o_orderdate"],
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "o_orderstatus",
+        "o_orderpriority"
+      ],
+      "no_dictionary_columns": [
+        "o_clerk",
+        "o_comment"
+      ]
+    },
+    "customer": {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "c_mktsegment"
+      ],
+      "no_dictionary_columns": [
+        "c_name",
+        "c_address",
+        "c_phone",
+        "c_comment"
+      ]
+    },
+    "part": {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "p_brand",
+        "p_container"
+      ],
+      "no_dictionary_columns": [
+        "p_name",
+        "p_mfgr",
+        "p_type",
+        "p_comment"
+      ]
+    },
+    "partsupp": {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "no_dictionary_columns": [
+        "ps_comment"
+      ]
+    },
+    "supplier": {
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "no_dictionary_columns": [
+        "s_name",
+        "s_address",
+        "s_phone",
+        "s_comment"
+      ]
+    },
+    "nation": {
+      "row_group_size": 25,
+      "compression": "zstd",
+      "dictionary_columns": [
+        "n_name"
+      ],
+      "no_dictionary_columns": [
+        "n_comment"
+      ]
+    },
+    "region": {
+      "row_group_size": 5,
+      "compression": "zstd",
+      "dictionary_columns": [
+        "r_name"
+      ],
+      "no_dictionary_columns": [
+        "r_comment"
+      ]
+    }
+  }
+}

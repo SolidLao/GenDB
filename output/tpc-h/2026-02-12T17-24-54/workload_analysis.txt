@@ -1,0 +1,204 @@
+# Workload Analysis
+
+## Tables
+
+### Fact Tables (Large, High Row Count)
+- **lineitem**: ~6,000,000 rows (SF=1 TPC-H)
+  - Hot columns: l_shipdate, l_quantity, l_discount, l_extendedprice, l_returnflag, l_linestatus, l_orderkey
+  - Most critical table for all queries in this workload
+
+- **orders**: ~1,500,000 rows (SF=1 TPC-H)
+  - Hot columns: o_orderkey, o_custkey, o_orderdate, o_shippriority
+  - Used in Q3 only
+
+### Dimension Tables (Small, Low Row Count)
+- **customer**: ~150,000 rows
+  - Hot columns: c_custkey, c_mktsegment
+  - Used in Q3 only
+
+- **nation**: ~25 rows (static reference data)
+- **region**: ~5 rows (static reference data)
+- **supplier**: ~10,000 rows
+- **part**: ~200,000 rows
+- **partsupp**: ~800,000 rows
+
+## Joins
+
+### Q3: Three-way join chain
+- customer.c_custkey = orders.o_custkey (PK-FK, 1:N)
+  - After c_mktsegment filter: ~30,000 customers × orders → ~300,000 orders
+- lineitem.l_orderkey = orders.o_orderkey (PK-FK, 1:N)
+  - After o_orderdate filter: ~150,000 orders × ~4 lineitems/order → ~600,000 lineitems
+  - Additional l_shipdate filter reduces further
+
+### Join Strategy Recommendation
+- Start with customer filter (highest selectivity)
+- Use hash join for customer→orders
+- Use hash join for orders→lineitem
+
+## Selective Filters
+
+### Q1 Filters (on lineitem, ~6M rows)
+- l_shipdate <= '1998-09-02': **~98% of data** (very low selectivity)
+  - Eliminates only recent 90 days from ~7 years of data
+  - Expected rows: ~5,850,000
+
+### Q3 Filters
+- c_mktsegment = 'BUILDING': **~20% selectivity** (1 of 5 market segments)
+  - Reduces customer from 150K → 30K
+- o_orderdate < '1995-03-15': **~35% selectivity**
+  - Reduces orders from 1.5M → ~525K
+- l_shipdate > '1995-03-15': **~75% selectivity**
+  - Keeps most lineitem rows after join
+- **Combined selectivity after joins**: ~10,000 result rows before aggregation
+
+### Q6 Filters (on lineitem, ~6M rows)
+- l_shipdate >= '1994-01-01' AND < '1995-01-01': **~14% selectivity** (1 year of ~7 years)
+  - Reduces to ~860,000 rows
+- l_discount BETWEEN 0.05 AND 0.07: **~20% selectivity** (narrow range)
+  - Further reduces to ~172,000 rows
+- l_quantity < 24: **~50% selectivity**
+  - Final scan set: ~86,000 rows
+- **Combined selectivity**: ~1.4% (highly selective)
+
+## Aggregations
+
+### Q1: GROUP BY l_returnflag, l_linestatus
+- **Estimated groups**: 3-4 (combinations like 'A'/'F', 'N'/'O')
+- Very low cardinality aggregation over ~5.8M rows
+- Aggregates: 7 SUM operations, 3 AVG operations, 1 COUNT
+- **Optimization**: Can use SIMD for parallel aggregation, minimal hash table overhead
+
+### Q3: GROUP BY l_orderkey, o_orderdate, o_shippriority
+- **Estimated groups**: ~10,000 (after filters, before LIMIT 10)
+- Medium cardinality aggregation
+- Aggregates: 1 SUM operation per group
+- Requires TOP-K heap for ORDER BY revenue DESC LIMIT 10
+- **Optimization**: Partial aggregation before final sort
+
+## Sort/Limit Requirements
+
+### Q1: ORDER BY l_returnflag, l_linestatus
+- Only 3-4 rows to sort (trivial overhead)
+- Can use simple comparison sort
+
+### Q3: ORDER BY revenue DESC, o_orderdate LIMIT 10
+- ~10,000 groups before LIMIT
+- **Optimization**: Use min-heap of size 10 during aggregation to avoid full sort
+- Secondary sort on o_orderdate for ties (rare)
+
+### Q6: No sort required
+- Single scalar aggregate result
+
+## Parallelism Opportunities
+
+### Q1: Highly Parallelizable
+- Full lineitem scan of 5.8M rows
+- **Strategy**: Partition-based parallelism
+  - Split lineitem into chunks (e.g., 8-16 partitions)
+  - Each thread: scan + local aggregation (3-4 groups)
+  - Merge local hash tables in final phase
+- **Expected speedup**: Near-linear with core count (minimal contention)
+
+### Q3: Moderately Parallelizable
+- **Parallel customer filter**: 150K rows → 30K (trivial overhead)
+- **Parallel hash build**: Build hash table on filtered customers
+- **Parallel orders probe**: 1.5M rows, can partition by hash(o_custkey)
+- **Parallel lineitem probe**: 6M rows, can partition by hash(l_orderkey)
+- **Parallel partial aggregation**: Each thread maintains local hash table
+- **Serial merge**: Final TOP-10 merge is fast (<10K groups)
+- **Expected speedup**: 4-8x with proper partitioning
+
+### Q6: Highly Parallelizable
+- Full lineitem scan of 6M rows
+- Independent row filtering (no joins)
+- **Strategy**: Partition-based parallelism
+  - Each thread: scan + local sum accumulation
+  - Final phase: sum reduction (trivial)
+- **Expected speedup**: Near-linear with core count
+
+## Key Optimization Opportunities
+
+### 1. Storage Layout for lineitem (Most Critical)
+- **Sort by l_shipdate**: Enables zone-map filtering for Q1, Q3, Q6 (all use date ranges)
+  - Q1: Skip blocks after '1998-09-02'
+  - Q3: Skip blocks before '1995-03-15'
+  - Q6: Skip blocks outside '1994-01-01' to '1995-01-01'
+- **Secondary sort by l_quantity**: Further improves Q6 block skipping
+- **Expected benefit**: 50-85% block elimination for Q6, 2-25% for Q1/Q3
+
+### 2. Columnar Storage
+- All queries are column-subset scans (not SELECT *)
+- Q1: 7 columns out of 16
+- Q3: 4 columns from lineitem
+- Q6: 4 columns from lineitem
+- **Expected benefit**: 2-4x I/O reduction
+
+### 3. Dictionary Encoding
+- **l_returnflag**: 3 distinct values ('A', 'N', 'R') → 2-bit encoding
+- **l_linestatus**: 2 distinct values ('O', 'F') → 1-bit encoding
+- **l_shipmode**: ~7 distinct values → 3-bit encoding
+- **l_shipinstruct**: ~4 distinct values → 2-bit encoding
+- **c_mktsegment**: 5 distinct values → 3-bit encoding
+- **Expected benefit**: 8-16x compression + faster comparisons for Q3 filter
+
+### 4. Filter Pushdown and Reordering (Q3)
+- **Order of execution**:
+  1. Filter customer on c_mktsegment first (150K → 30K, 80% reduction)
+  2. Filter orders on o_orderdate (1.5M → 525K, 65% reduction)
+  3. Join customer → orders (hash join on 30K build side)
+  4. Join result → lineitem with l_shipdate filter (6M → selective probe)
+- **Avoid**: Building hash table on unfiltered tables
+
+### 5. Partial Aggregation (Q1, Q3)
+- Q1: Each thread aggregates into local 4-group hash table
+- Q3: Each thread aggregates into local hash table, merge for final TOP-10
+- **Expected benefit**: Reduce memory traffic, better cache locality
+
+### 6. SIMD Vectorization
+- Q1: Vectorize arithmetic (l_extendedprice * (1 - l_discount) * (1 + l_tax))
+  - Process 4-8 rows per instruction with AVX2/AVX-512
+- Q6: Vectorize range checks and arithmetic
+- **Expected benefit**: 2-4x speedup on compute-bound operations
+
+### 7. Zone Maps / Min-Max Indexes
+- Build min/max statistics per block (e.g., 64K rows) for:
+  - l_shipdate (all queries)
+  - l_quantity (Q6)
+  - l_discount (Q6)
+- **Expected benefit**: Skip 50-90% of blocks in Q6, 10-30% in Q1/Q3
+
+### 8. Late Materialization
+- For lineitem scans, first filter on l_shipdate using lightweight column
+- Only read l_extendedprice, l_discount, l_tax for passing rows
+- **Expected benefit**: Reduce wasted I/O on filtered rows
+
+## Execution Time Bottlenecks
+
+### Q1: I/O Bound
+- **Bottleneck**: Scanning 5.8M rows from lineitem
+- **Mitigation**: Columnar storage + zone maps + parallelism + SIMD
+- **Expected baseline**: ~500ms (unoptimized), ~50-100ms (optimized)
+
+### Q3: Join Bound
+- **Bottleneck**: Probing 6M lineitem rows against orders hash table
+- **Mitigation**: Filter pushdown + parallel hash join + columnar storage
+- **Expected baseline**: ~800ms (unoptimized), ~100-200ms (optimized)
+
+### Q6: I/O and Filter Bound
+- **Bottleneck**: Scanning 6M rows with multiple predicates
+- **Mitigation**: Zone maps (highly effective) + SIMD + parallelism
+- **Expected baseline**: ~300ms (unoptimized), ~20-50ms (optimized with zone maps)
+
+## Summary
+
+This workload is **read-heavy, scan-intensive, and highly parallelizable**. The lineitem table dominates all queries. Key optimizations:
+
+1. **Columnar storage** with **l_shipdate-sorted layout**
+2. **Zone maps** for aggressive block skipping (especially Q6)
+3. **Dictionary encoding** for low-cardinality string columns
+4. **Parallel execution** with partition-based parallelism (8-16 threads)
+5. **SIMD vectorization** for arithmetic and filtering
+6. **Hash joins** with filter pushdown for Q3
+
+Target: **Sub-200ms execution time for all queries** with optimized storage and parallel execution.

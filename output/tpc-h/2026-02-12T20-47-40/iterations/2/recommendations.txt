@@ -1,0 +1,107 @@
+# Optimization Analysis (Iteration 2)
+
+## Per-Query Assessment
+- Q1 (0ms, fail): Runtime crash in hash aggregation due to unsupported decimal128(15,2) type
+- Q3 (0ms, fail): Not executed due to Q1 failure (likely same decimal128 issue in aggregation)
+- Q6 (0ms, fail): Not executed due to Q1 failure (likely same decimal128 issue)
+
+## Critical Fixes (Blocking All Execution)
+
+### [CRITICAL] decimal128 Type Handling
+**Issue:** hash_agg.h:203 throws "Unsupported aggregate type: decimal128(15, 2)" because ArrayValueToDouble() only handles INT32, INT64, DOUBLE, FLOAT types. TPC-H schema uses decimal128(15,2) for l_quantity, l_extendedprice, l_discount, l_tax columns.
+
+**Fix:** Add DECIMAL128 case to hash_agg.h ArrayValueToDouble() function:
+```cpp
+case arrow::Type::DECIMAL128: {
+    auto decimal_array = std::static_pointer_cast<arrow::Decimal128Array>(array);
+    auto decimal_type = std::static_pointer_cast<arrow::Decimal128Type>(array->type());
+    int32_t scale = decimal_type->scale();
+    arrow::Decimal128 decimal_val = decimal_array->Value(index);
+    // Convert decimal128 to double: divide raw value by 10^scale
+    double divisor = std::pow(10.0, scale);
+    return static_cast<double>(decimal_val.low_bits()) / divisor;
+}
+```
+
+**Also fix:** Q1, Q3, Q6 use arrow::compute::CallFunction("multiply", "subtract", "add") on decimal128 arrays. Arrow compute functions may preserve decimal128 types. The code assumes results are float64, but they may be decimal128. Need to:
+1. Cast decimal128 columns to float64 BEFORE arithmetic operations
+2. OR handle decimal128 in ArrayValueToString() for group-by keys (Q1 groups by l_returnflag, l_linestatus which are strings, so this is OK)
+
+**Recommended approach:** In scan.h or query code, immediately cast decimal128 columns to float64 after reading from Parquet:
+```cpp
+auto price_arr = arrow::Concatenate(table->GetColumnByName("l_extendedprice")->chunks()).ValueOrDie();
+auto cast_result = arrow::compute::CallFunction("cast", {arrow::Datum(price_arr)},
+    arrow::compute::CastOptions::Safe(arrow::float64()));
+auto price_float64 = cast_result.ValueOrDie().make_array();
+```
+
+## Recommended Optimizations
+
+### 1. [query_structure] Add decimal128 to float64 casting
+   Target: Q1, Q3, Q6 | Expected: Enable execution | Risk: low
+   Guidance:
+   - Modify hash_agg.h lines 191-204 to add DECIMAL128 case (see critical fix above)
+   - Alternative: Cast decimal columns to float64 immediately after scan in q1.cpp (lines 31-34), q3.cpp (lines 56-59), q6.cpp (lines 79-84)
+   - Prefer fixing hash_agg.h to handle decimal128 natively (more robust, handles all queries)
+
+### 2. [io_bound] Enable Parquet column projection
+   Target: Q6 | Expected: 4x I/O reduction | Risk: low
+   Guidance:
+   - Q6 already uses .Project() correctly (q6.cpp line 21: only 4 of 16 columns)
+   - Verify ParquetReader::ReadColumnsByName() is working (arrow_helpers.h lines 63-73)
+   - Once decimal128 issue is fixed, Q6 should see significant speedup from column pruning (75% I/O reduction)
+
+### 3. [io_bound] Enable Parquet row group pruning on date filters
+   Target: Q1, Q3, Q6 | Expected: 2-5x speedup | Risk: low
+   Guidance:
+   - All queries use ScanWithDateFilter with date range predicates
+   - Q6 has highly selective date filter (1994 only, ~17% of data) → should skip 83% of row groups
+   - Q1 has low selectivity filter (l_shipdate <= 1998-09-02, ~97% of data) but still helps
+   - Verify FilterRowGroupsByDate32() is working (arrow_helpers.h lines 95-123)
+   - Depends on lineitem.parquet being sorted by l_shipdate (check Parquet metadata)
+
+### 4. [cpu_bound] Use Arrow compute kernels for arithmetic
+   Target: Q1, Q3, Q6 | Expected: 1.2-1.5x speedup | Risk: low
+   Guidance:
+   - Q1 already uses arrow::compute for disc_price and charge calculations (q1.cpp lines 42-54)
+   - Q3 already uses arrow::compute for revenue calculation (q3.cpp lines 62-70)
+   - Q6 already uses arrow::compute for revenue calculation (q6.cpp lines 86-88)
+   - No changes needed here — code already vectorized
+
+### 5. [cpu_bound] Optimize hash aggregation with pre-sized hash tables
+   Target: Q1 | Expected: 1.1-1.2x speedup | Risk: low
+   Guidance:
+   - Q1 has only 4 expected groups (l_returnflag × l_linestatus)
+   - hash_agg.h line 72: agg_map uses default unordered_map constructor
+   - Add: agg_map.reserve(expected_groups) before processing rows
+   - For Q1: reserve(4), Q3: reserve(10000)
+
+### 6. [join_order] Verify hash join build/probe side selection
+   Target: Q3 | Expected: No change (already optimal) | Risk: none
+   Guidance:
+   - Q3 join order already optimal:
+     - Join 1: customer_filtered (30K rows) BUILD, orders (500K rows) PROBE ✓
+     - Join 2: customer_orders (~100K rows) BUILD, lineitem (4M rows) PROBE ✓
+   - No changes needed
+
+### 7. [cpu_bound] Single-threaded execution (no parallelism)
+   Target: Q1, Q6 | Expected: 4-8x speedup on multi-core | Risk: medium
+   Guidance:
+   - Current code is single-threaded (no parallelism in scan or aggregation)
+   - Opportunity: Parquet row group parallelism (read multiple row groups in parallel)
+   - Implementation: Use std::thread or OpenMP to parallelize ScanWithDateFilter (scan.h lines 99-117)
+   - Risk: Requires thread-safe aggregation (hash_agg.h would need per-thread accumulators + merge)
+   - Defer to later iteration (requires significant refactoring)
+
+### 8. [io_bound] Verify Parquet file is sorted by l_shipdate
+   Target: Q1, Q3, Q6 | Expected: Enable row group pruning | Risk: none
+   Guidance:
+   - Row group pruning only effective if lineitem.parquet is sorted by l_shipdate
+   - Check Parquet metadata: `pyarrow.parquet.read_metadata('lineitem.parquet').row_group(0).column(10).statistics`
+   - If NOT sorted: row group pruning will be ineffective (all groups will have overlapping date ranges)
+   - Note: "Parquet files are never regenerated" — if not sorted, cannot fix this
+   - Recommendation: Verify sorting, inform user if not sorted
+
+## Summary
+
+**CRITICAL:** Fix decimal128(15,2) type handling in hash_agg.h ArrayValueToDouble() to enable execution. All queries will crash without this fix. Once fixed, expect column projection (Q6: 4x I/O reduction) and row group pruning (Q6: 5x speedup, Q1: 1.1x) to provide significant performance gains.

@@ -1,0 +1,91 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q1 (252ms, FAIL): **CRITICAL CORRECTNESS BUG** - row group pruning logic inverted, producing wrong results (1 group instead of 4)
+
+## Critical Fixes (must be addressed before any optimizations)
+
+### **[BLOCKER] query_structure** Row group pruning logic inverted
+**File**: queries/q1.cpp, line 165
+**Issue**: For filter `l_shipdate <= date_threshold`, the code checks `s.max_int >= date_threshold` which is backwards
+**Fix**: Change line 165 from:
+```cpp
+if (s.max_int >= date_threshold) {
+```
+to:
+```cpp
+if (s.min_int <= date_threshold) {
+```
+**Rationale**: To find rows where `shipdate <= threshold`, we need row groups where the minimum shipdate is <= threshold. Current logic keeps row groups with future dates (max >= threshold) and discards historical ones, producing only 1 output group (N,O) instead of all 4 (A,F; N,F; N,O; R,F).
+
+## Recommended Optimizations (after fixing the critical bug)
+
+### 1. [cpu_bound] Replace std::unordered_map with open-addressing hash table
+**Target**: Q1
+**Expected**: 1.3-1.5x improvement
+**Risk**: low
+**Guidance**: Lines 105, 131, 232-236. The current code uses `std::unordered_map<GroupKey, AggValues>` which has poor cache locality due to separate chaining. Replace with a flat open-addressing hash table (e.g., robin hood hashing or simple linear probing). With only 4 groups, the hash table will be tiny (~256 bytes) and fit in L1 cache. Thread-local aggregation already splits work well, but merge phase (lines 232-236) would benefit from faster hash table iteration.
+
+### 2. [cpu_bound] SIMD vectorization for filter + compute
+**Target**: Q1
+**Expected**: 1.5-2x improvement
+**Risk**: medium
+**Guidance**: Lines 121-148 (process_chunk function). The inner loop performs:
+  - Scalar comparison: `shipdate[i] > date_threshold`
+  - Scalar arithmetic: `disc_price = price * (1.0 - disc)` and `charge = disc_price * (1.0 + tx)`
+  - Scalar hash table updates
+
+Vectorize using AVX2 (256-bit) or AVX-512 (512-bit):
+  - Process 4-8 rows per iteration with SIMD comparison (generate mask)
+  - Compute disc_price and charge for all lanes in parallel
+  - Use mask to conditionally accumulate into SIMD accumulators
+  - After processing chunk, reduce SIMD accumulators to scalars and insert into hash table
+
+This requires splitting the loop into:
+  - SIMD processing with temporary accumulators per group
+  - Final reduction to hash table
+
+Since there are only 4 groups, maintain 4 sets of SIMD accumulators (16 total for qty, base_price, disc_price, charge).
+
+### 3. [io_bound] Increase row group pruning effectiveness
+**Target**: Q1
+**Expected**: 1.1-1.2x improvement (after bug fix)
+**Risk**: low
+**Guidance**: Lines 159-175. Currently reads 18 of 1200 row groups (98.5% pruned). After fixing the bug, the code should read row groups with `min_shipdate <= 1998-09-02`. According to workload analysis, this should prune ~95% of row groups (Q1 note says "filters out ~5% of late shipments" but this is backwards - it keeps ~95% of early shipments). Verify that Parquet row groups are sorted by l_shipdate. If not sorted, pruning cannot help much. If sorted, 18 row groups seems correct for SF=10 with ~1.5% selectivity (886K/60M rows).
+
+Current pruning is working efficiently (1200 → 18 row groups). No changes needed beyond the critical bug fix.
+
+### 4. [cpu_bound] Optimize thread count based on workload size
+**Target**: Q1
+**Expected**: 1.1-1.2x improvement
+**Risk**: low
+**Guidance**: Lines 205-206. Code uses `std::thread::hardware_concurrency()` which returns 64 on the target machine. For 886K rows (after pruning), this creates 64 threads with ~13.8K rows each. Thread creation overhead + cache contention + merge overhead may outweigh parallelism benefits.
+
+Calculate optimal thread count based on rows loaded:
+```cpp
+unsigned int num_threads = std::min(
+    std::thread::hardware_concurrency(),
+    static_cast<unsigned int>((N + 32768 - 1) / 32768)  // 32K rows per thread minimum
+);
+num_threads = std::max(num_threads, 1u);
+```
+
+For 886K rows, this would use ~27 threads instead of 64, reducing thread overhead while maintaining good parallelism. The 32K threshold should be tuned based on L3 cache size and typical aggregation key cardinality.
+
+### 5. [cpu_bound] Eliminate Kahan summation overhead
+**Target**: Q1
+**Expected**: 1.1-1.15x improvement
+**Risk**: medium (precision trade-off)
+**Guidance**: Lines 60-93, 142-146. The code uses Kahan summation for numerical precision, which adds 3 extra floating-point operations per addition (5 FLOPs vs 1 FLOP). With 886K rows and 5 sums per row, this is 4.4M extra operations vs 880K.
+
+For TPC-H Q1 at SF=10, the aggregates are in the range of 10^11 (hundreds of billions). Modern IEEE-754 double precision (53-bit mantissa) can represent integers up to 2^53 ≈ 9×10^15 exactly. The maximum error from simple summation of 886K values averaging ~10^6 each would be O(sqrt(N) × epsilon × sum) ≈ 940 × 2.2×10^-16 × 10^11 ≈ 0.02, which is negligible compared to the 2 decimal places in output format.
+
+**Recommendation**: Replace Kahan summation with simple `+=` for this workload. Keep Kahan for datasets with extreme numeric ranges or if validation requires bit-exact matching. Ground truth comparison should use tolerance (±0.01 for 2 decimal places).
+
+Lines to change:
+- Replace `agg.add_qty(qty)` with `agg.sum_qty += qty` (and similar for other accumulators)
+- Remove Kahan compensators from AggValues struct
+- Simplify merge() method to use `+=`
+
+## Summary
+**CRITICAL**: Fix inverted row group pruning logic first (line 165). After fixing correctness, apply CPU optimizations (SIMD + better hash table + remove Kahan) for 2-3x total speedup, targeting ~80-120ms execution time.

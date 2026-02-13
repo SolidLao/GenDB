@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Iteration 1 failed compilation due to multiple definition errors. All three queries define date_to_days() as inline, causing redefinition errors when included in main.cpp. Must fix this critical compilation blocker before any performance optimization is possible. Using query_rewriter to apply correctness fixes: (1) change inline to static inline for date_to_days() and days_to_date_str() in all queries, (2) fix Q6 incorrect file path from /lineitem/ directory to /lineitem.parquet file. These are low-risk structural fixes that unblock execution for iteration 3.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["ALL"],
+      "guidance": "CRITICAL COMPILATION FIXES (blocking all execution):\n\n1. Fix date_to_days() multiple definition error:\n   - In q1.cpp line 16: Change 'inline int32_t date_to_days' to 'static inline int32_t date_to_days'\n   - In q1.cpp line 20: Change 'inline std::string days_to_date_str' to 'static inline std::string days_to_date_str'\n   - In q3.cpp line 17: Change 'inline int32_t date_to_days' to 'static inline int32_t date_to_days'\n   - In q3.cpp line 28: Change 'inline std::string days_to_date_str' to 'static inline std::string days_to_date_str'\n   - In q6.cpp line 16: Change 'inline int32_t date_to_days' to 'static inline int32_t date_to_days'\n   - In q6.cpp line 20: Change 'inline std::string days_to_date_str' to 'static inline std::string days_to_date_str'\n   \n   The 'static' keyword gives each translation unit its own copy, avoiding linker redefinition errors.\n\n2. Fix Q6 incorrect Parquet file path:\n   - In q6.cpp around lines 39-56: Remove directory iteration logic that looks for '/lineitem/' directory\n   - Replace with single file read: std::string lineitem_path = parquet_dir + \"/lineitem.parquet\";\n   - Remove the outer loop over parquet_files vector (lines 62-169 need restructuring)\n   - Process the single lineitem.parquet file directly, similar to how q1.cpp and q3.cpp handle it\n   - Ensure the file reading logic matches the pattern: open file, create reader, read table with column projection\n\nThese are CORRECTNESS fixes with zero performance risk. Do not apply any performance optimizations yet - save those for iteration 3 after compilation succeeds.",
+      "can_parallel": false
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "status": "fail",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 75,
+      "rows": 4,
+      "error": "3 row(s) differ - incorrect calculation of sum_disc_price and sum_charge aggregates"
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 2689,
+      "rows": 10,
+      "error": "3 row(s) differ - incorrect revenue calculation and/or ordering"
+    },
+    "Q6": {
+      "status": "fail",
+      "time_ms": 19,
+      "rows": 1,
+      "error": "1 row(s) differ - incorrect revenue calculation (expected: 1230113636.01, actual: 1230113594.80)"
+    }
+  },
+  "ingestion_time_ms": null,
+  "compile_output": "Compilation successful with warnings:\n- ingest.cpp:672:11: ignoring return value of system()\n- main.cpp:16:15: ignoring return value of system()\n- queries/q3.cpp: format-truncation warning in date_utils.h",
+  "notes": "All queries compiled and executed but failed validation. Q1 has incorrect sum_disc_price and sum_charge calculations (orders of magnitude off). Q3 has incorrect revenue values and possibly wrong ordering. Q6 revenue calculation is off by ~41.21. Zone map optimization working (84.83% blocks skipped in Q6). Execution times: Q1=75ms, Q3=2689ms, Q6=19ms."
+}

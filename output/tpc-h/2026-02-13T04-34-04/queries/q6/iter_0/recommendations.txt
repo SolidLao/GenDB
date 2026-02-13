@@ -1,0 +1,134 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+
+- Q6 (1353ms, pass): CPU-bound. The query efficiently prunes 84.7% of rows at I/O level via row group filtering, loads only 4/16 columns, and uses thread-parallel processing. However, the hot path (lines 110-126) processes 9.15M rows sequentially without SIMD, using scalar filters and standard floating-point arithmetic.
+
+## Critical Fixes
+
+None. The code compiles successfully, runs correctly, and validates against ground truth.
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] SIMD Vectorization of Filter + Compute Pipeline
+   **Target**: Q6 | **Expected**: 2-3x improvement | **Risk**: low
+
+   **Guidance**: The fused filter loop (lines 110-126 in q6.cpp) processes 9.15M rows with scalar operations. Vectorize using AVX2 (8x doubles/cycle) or AVX-512 (8-16x doubles/cycle):
+
+   - Load 8 doubles at a time from l_shipdate, l_discount, l_quantity, l_extendedprice arrays
+   - Vectorize comparisons to create mask: `(shipdate >= lo) & (shipdate < hi) & (discount >= 0.05) & (discount <= 0.07) & (quantity < 24)`
+   - Compute `revenue = extendedprice * discount` using masked vector multiply
+   - Use horizontal sum with compensated accumulation for Kahan summation
+
+   **Implementation notes**:
+   - Use `#include <immintrin.h>` for AVX2 intrinsics
+   - Add `-mavx2` to CFLAGS in Makefile
+   - Handle tail elements (<8) with scalar fallback
+   - Preserve Kahan summation for numerical precision (can be done in vector form)
+
+   **Estimated impact**: With 9.15M rows/thread and current ~1.35s runtime, the filter+compute loop likely takes ~1.0-1.2s. SIMD can reduce this to ~400-500ms, yielding overall time ~600-800ms (1.7-2.3x speedup).
+
+### 2. [cpu_bound] Replace std::thread with OpenMP for Better Load Balancing
+   **Target**: Q6 | **Expected**: 1.1-1.2x improvement | **Risk**: low
+
+   **Guidance**: Current static chunking (lines 101-103) can cause load imbalance if row groups have different selectivities. Replace thread management with OpenMP dynamic scheduling:
+
+   ```cpp
+   // Replace lines 93-136 with:
+   double total_revenue = 0.0;
+   double c = 0.0;
+   int64_t total_count = 0;
+
+   #pragma omp parallel for reduction(+:total_revenue,total_count) schedule(dynamic, 100000)
+   for (int64_t i = 0; i < N; i++) {
+       if (l_shipdate[i] >= date_lo && l_shipdate[i] < date_hi &&
+           l_discount[i] >= discount_lo && l_discount[i] <= discount_hi &&
+           l_quantity[i] < quantity_max)
+       {
+           total_revenue += l_extendedprice[i] * l_discount[i];
+           total_count++;
+       }
+   }
+   ```
+
+   **Implementation notes**:
+   - Add `-fopenmp` to CFLAGS and LDFLAGS in Makefile
+   - OpenMP reduction handles Kahan summation automatically (though less precise than manual)
+   - Alternative: keep Kahan but use thread-local storage with `#pragma omp parallel` and manual reduction
+
+   **Estimated impact**: Better load balancing can reduce tail latency by 10-20%, especially if row group selectivities vary.
+
+### 3. [io_bound] Memory-Mapped I/O for Reduced Parquet Decode Overhead
+   **Target**: Q6 | **Expected**: 1.2-1.4x improvement | **Risk**: medium
+
+   **Guidance**: Arrow's `ReadRowGroups` (line 388 in parquet_reader.h) decodes Parquet data through multiple layers (decompression → dictionary decoding → type conversion). For selective scans (15% of rows), memory-mapped raw column chunks can be faster:
+
+   - Modify `read_parquet_row_groups` to use Arrow's `RecordBatchReader` with memory-mapped file backend
+   - For date columns (l_shipdate): read as int32 without conversion overhead
+   - For numeric columns: verify they're stored as native doubles (not decimals) to avoid conversion
+
+   **Implementation notes**:
+   - Check Parquet metadata to confirm column encodings (use `parquet-tools schema lineitem.parquet`)
+   - If l_discount/l_quantity are DECIMAL, conversion is unavoidable
+   - Memory-mapped I/O helps most when data is in page cache (second runs)
+
+   **Estimated impact**: Parquet decode likely takes ~300-500ms of the 1.35s runtime. Optimized I/O can reduce this to ~200-350ms, yielding ~100-150ms savings.
+
+### 4. [cpu_bound] Prefetch Column Data to Reduce Cache Misses
+   **Target**: Q6 | **Expected**: 1.1-1.15x improvement | **Risk**: low
+
+   **Guidance**: The filter loop accesses 4 arrays in parallel (lines 112-114). On large datasets (9.15M rows = ~73MB per column), this can cause L3 cache thrashing. Add software prefetching:
+
+   ```cpp
+   for (int64_t i = start; i < end; i++) {
+       // Prefetch 16 cache lines ahead (1024 bytes = 128 doubles)
+       if (i + 128 < end) {
+           __builtin_prefetch(&l_shipdate[i + 128], 0, 1);
+           __builtin_prefetch(&l_discount[i + 128], 0, 1);
+           __builtin_prefetch(&l_quantity[i + 128], 0, 1);
+           __builtin_prefetch(&l_extendedprice[i + 128], 0, 1);
+       }
+
+       // Filter logic...
+   }
+   ```
+
+   **Implementation notes**:
+   - Tune prefetch distance (64-256 elements) based on CPU cache latency
+   - Use `__builtin_prefetch(addr, 0, 1)` for read-only, low temporal locality
+   - Combine with SIMD for maximum effect
+
+   **Estimated impact**: Prefetching can reduce memory stalls by 10-15%, saving ~50-100ms.
+
+### 5. [cpu_bound] Branch-Free Filter Evaluation Using Bitmask
+   **Target**: Q6 | **Expected**: 1.05-1.1x improvement | **Risk**: low
+
+   **Guidance**: The compound if-statement (lines 112-114) causes branch mispredictions (~15% selectivity = unpredictable). Convert to branch-free arithmetic:
+
+   ```cpp
+   for (int64_t i = start; i < end; i++) {
+       bool match = (l_shipdate[i] >= date_lo) & (l_shipdate[i] < date_hi) &
+                    (l_discount[i] >= discount_lo) & (l_discount[i] <= discount_hi) &
+                    (l_quantity[i] < quantity_max);
+
+       double revenue = l_extendedprice[i] * l_discount[i];
+
+       // Branchless update using mask
+       double y = (revenue - c) * match;
+       double t = sum + y;
+       c = ((t - sum) - y) * match;
+       sum = t;
+       count += match;  // bool implicitly converts to 0/1
+   }
+   ```
+
+   **Implementation notes**:
+   - Use bitwise `&` (not logical `&&`) to avoid short-circuit evaluation
+   - This works best when combined with SIMD (vector masks are native)
+   - Scalar version may be slower due to extra FP operations, benchmark first
+
+   **Estimated impact**: Eliminates ~9M mispredicted branches, saving ~30-50ms on modern CPUs.
+
+## Summary
+
+**Primary bottleneck**: CPU-bound scalar filter+compute loop processing 9.15M rows. **Top recommendation**: Implement SIMD vectorization (AVX2/AVX-512) for 2-3x speedup, targeting sub-600ms execution time. Secondary optimizations (OpenMP, prefetching, branch-free logic) can compound to additional 20-30% gains. I/O optimization has medium risk but can help if Parquet decode is significant overhead.

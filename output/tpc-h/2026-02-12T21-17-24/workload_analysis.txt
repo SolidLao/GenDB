@@ -1,0 +1,92 @@
+# Workload Analysis — TPC-H Q1, Q3, Q6 (SF=10)
+
+## Tables (Estimated Row Counts at SF=10)
+- lineitem: ~600,000 rows (fact table, largest)
+  Hot columns: l_shipdate, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus
+- orders: ~150,000 rows (fact table)
+  Hot columns: o_orderkey, o_custkey, o_orderdate, o_shippriority
+- customer: ~15,000 rows (dimension table)
+  Hot columns: c_custkey, c_mktsegment
+- part: ~20,000 rows (dimension, not used in selected queries)
+- partsupp: ~80,000 rows (junction table, not used in selected queries)
+- supplier: ~1,000 rows (dimension, not used in selected queries)
+- nation: ~25 rows (dimension, not used in selected queries)
+- region: ~5 rows (dimension, not used in selected queries)
+
+## Joins
+- customer.c_custkey = orders.o_custkey (PK-FK, used in Q3)
+  Cardinality: 1:N (one customer → multiple orders)
+  Estimated selectivity after c_mktsegment filter: ~20% of customers
+- lineitem.l_orderkey = orders.o_orderkey (PK-FK, used in Q3)
+  Cardinality: 1:N (one order → multiple line items, avg ~4 lines/order)
+  Estimated selectivity: high (most orders have line items)
+
+## Selective Filters
+- l_shipdate range predicates (Q1, Q3, Q6): **CRITICAL**
+  Q1: l_shipdate <= '1998-09-02' (~98% of data, but boundary-selective)
+  Q3: l_shipdate > '1995-03-15' (date range filtering)
+  Q6: l_shipdate >= '1994-01-01' AND < '1995-01-01' (1-year window, ~17% selectivity)
+  → l_shipdate appears in ALL queries → strong candidate for sort key
+- l_discount BETWEEN 0.05 AND 0.07 (Q6): ~20% selectivity (narrow range)
+- l_quantity < 24 (Q6): ~50% selectivity
+- o_orderdate < '1995-03-15' (Q3): date-based filtering
+- c_mktsegment = 'BUILDING' (Q3): ~20% selectivity (5 market segments in TPC-H)
+
+## Aggregations
+- Q1: GROUP BY l_returnflag, l_linestatus
+  Expected groups: ~3-4 groups (very low cardinality: R/N/A × O/F)
+  Aggregates: SUM/AVG on l_quantity, l_extendedprice, l_discount, l_tax, COUNT(*)
+- Q3: GROUP BY l_orderkey, o_orderdate, o_shippriority
+  Expected groups: thousands (one per qualifying order)
+  Aggregates: SUM(l_extendedprice * (1 - l_discount))
+- Q6: No grouping, single aggregate result
+
+## Column Projection Opportunities
+- Q6: Uses only 4 of 16 lineitem columns (l_shipdate, l_discount, l_quantity, l_extendedprice)
+  → 75% column pruning via Parquet column projection
+- Q1: Uses 8 of 16 lineitem columns → 50% column pruning
+- Q3: Uses subset of columns from all 3 tables → moderate projection benefit
+
+## Sort/Limit Requirements
+- Q1: ORDER BY l_returnflag, l_linestatus (on 3-4 groups, trivial sort)
+- Q3: ORDER BY revenue DESC, o_orderdate LIMIT 10 (top-K, requires full aggregation first)
+- Q6: No sort required
+
+## Parallelism Opportunities
+- Q1: Full table scan of lineitem → parallelize by row groups
+- Q3: Hash join build phases (customer, orders) can be pipelined; lineitem scan parallelizable
+- Q6: Full table scan of lineitem → parallelize by row groups
+- Large table (lineitem) dominates execution time → multi-threaded row group scanning critical
+
+## Key Optimization Opportunities
+1. **Sort lineitem by l_shipdate**: Enables row group pruning via min/max statistics for ALL queries
+   - Q1: prune row groups with max(l_shipdate) > '1998-09-02'
+   - Q3: prune row groups with max(l_shipdate) <= '1995-03-15'
+   - Q6: prune row groups outside ['1994-01-01', '1995-01-01') range
+   - Expected pruning rate: 15-30% of row groups per query
+
+2. **Dictionary encode low-cardinality string columns**:
+   - lineitem: l_returnflag, l_linestatus (2-3 distinct values each), l_shipmode, l_shipinstruct (~7-10 values)
+   - customer: c_mktsegment (5 distinct values)
+   - orders: o_orderstatus (3 values), o_orderpriority (~5 values)
+   - Benefits: 50-90% storage reduction, faster equality comparisons
+
+3. **Avoid dictionary encoding high-cardinality columns**:
+   - Comments (l_comment, o_comment, c_comment): nearly unique values
+   - Names/addresses (c_name, c_address): high cardinality
+   - Dictionary overhead would exceed benefits
+
+4. **Row group size tuning**:
+   - lineitem: Use 100K rows/group → ~6 row groups at SF=10
+   - Smaller groups enable finer-grained l_shipdate pruning
+   - Trade-off: more metadata overhead vs. better selectivity
+
+5. **Compression**:
+   - Use Snappy (fast decompression) for lineitem (scan-heavy queries)
+   - Optimize for execution time over storage size (per target metric)
+
+## Expected Performance Impact
+- l_shipdate sorting + row group pruning: 15-30% reduction in rows scanned
+- Dictionary encoding: 10-20% faster predicate evaluation on categorical columns
+- Column projection (Q6): 75% reduction in I/O bandwidth
+- Compression: 2-3x storage reduction, ~10% CPU overhead for decompression

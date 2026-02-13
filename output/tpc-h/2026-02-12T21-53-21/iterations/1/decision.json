@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "Baseline has critical correctness failures (Q1 output format bug, Q3 missing row, Q1 precision errors) and severe performance issues (56.4s total). Priority: fix correctness first, then apply highest-impact optimization (Parquet predicate pushdown) which affects all 3 queries and provides 3-7x expected speedup. With only 1 iteration remaining, focus on correctness + single most impactful optimization rather than spreading effort across multiple optimizers.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["Q1", "Q3"],
+      "guidance": "Fix critical correctness issues: (1) Q1 lines 163-180: Fix output formatting - write each column separately to CSV instead of concatenating all as pipe-delimited string in first column. Remove std::fixed before writing string columns. (2) Q1: Use higher precision for intermediate aggregations (double or decimal128) to fix numeric precision errors (0.05 difference in billions). (3) Q3 line 310-313: Fix floating-point comparison in revenue sorting - use stable_sort or add tie-breaker (e.g., o_orderdate, o_orderkey) to ensure deterministic ordering and return all 10 rows.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["ALL"],
+      "guidance": "Implement Parquet predicate pushdown using arrow::dataset API for date filters. Replace ReadTable() calls with dataset scanner + filter expressions: (1) Q6 lines 45-67: Push l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' to Parquet reader using arrow::dataset::ScannerBuilder with Filter(). Project only l_extendedprice and l_discount. (2) Q1 lines 58-84: Push l_shipdate <= '1998-09-02' filter to Parquet. (3) Q3 lines 36-165: Push o_orderdate < '1995-03-15' for orders table and l_shipdate > '1995-03-15' for lineitem table. Combine all filters per table into single expression. This leverages Parquet row group statistics to skip entire row groups at read time, expected 3-7x improvement per query.",
+      "can_parallel": false
+    }
+  ]
+}

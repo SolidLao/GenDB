@@ -1,0 +1,24 @@
+{
+  "status": "partial",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 26541,
+      "rows": 4,
+      "error": "Output format mismatch: all columns concatenated into single pipe-delimited string; numeric precision errors (e.g., 566065727797.20 vs expected 566065727797.25)"
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 16924,
+      "rows": 9,
+      "error": "Row count mismatch: expected 10 rows, got 9 (missing one result row)"
+    },
+    "Q6": {
+      "status": "pass",
+      "time_ms": 11341,
+      "rows": 1
+    }
+  },
+  "compile_output": "Compiled successfully with deprecation warnings (OpenFile API). No blocking errors.",
+  "notes": "Q6 passes validation. Q1 has output formatting bug (writing all columns as single pipe-delimited string instead of separate columns) and numeric precision issues. Q3 missing one result row, likely due to floating-point equality comparison in sorting (revenue DESC ordering). Total execution time: 56.4s for SF10 workload."
+}

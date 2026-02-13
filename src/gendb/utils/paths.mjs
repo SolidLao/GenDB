@@ -37,6 +37,16 @@ export async function createRunDir(workload, runId) {
 }
 
 /**
+ * Creates `baseline/generated/` inside the run directory.
+ * Returns the absolute path to the baseline directory.
+ */
+export async function createBaselineDir(runDir) {
+  const baseDir = resolve(runDir, "baseline");
+  await mkdir(resolve(baseDir, "generated"), { recursive: true });
+  return baseDir;
+}
+
+/**
  * Creates `iterations/<i>/generated/` inside the run directory.
  * Returns the absolute path to the iteration directory.
  */

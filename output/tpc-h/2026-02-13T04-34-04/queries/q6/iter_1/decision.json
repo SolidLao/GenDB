@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q6 at 1353ms has significant optimization headroom. The primary bottleneck is CPU-bound scalar processing of 9.15M rows (lines 110-126). With only 1 iteration remaining, prioritizing SIMD vectorization offers the highest ROI: 2-3x expected speedup with low risk. The query already has excellent I/O optimization (84.7% row pruning, 4/16 column projection) and thread parallelism, so the scalar filter+compute loop is the clear target. AVX2 vectorization can process 8 doubles/cycle, reducing the hot path from ~1s to ~400-500ms, yielding total execution time of 600-800ms.",
+  "optimizations": [
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q6"],
+      "guidance": "Implement AVX2 SIMD vectorization for the fused filter+compute loop (lines 110-126 in q6.cpp). Vectorize the hot path processing 9.15M rows:\n\n1. Add #include <immintrin.h> at top of file\n2. Update Makefile to add -mavx2 flag to CFLAGS\n3. In the worker lambda, replace the scalar loop with AVX2 vectorized version:\n   - Process 8 doubles at a time using __m256d vectors\n   - Load: _mm256_loadu_pd for l_discount, l_quantity, l_extendedprice\n   - Load dates as __m256i using _mm256_loadu_si256, compare with _mm256_cmpgt_epi32\n   - Create filter mask combining all conditions: (shipdate >= lo) & (shipdate < hi) & (discount >= 0.05) & (discount <= 0.07) & (quantity < 24)\n   - Compute revenue = extendedprice * discount using _mm256_mul_pd\n   - Accumulate using masked horizontal sum with Kahan summation\n   - Handle tail elements (<8) with scalar fallback\n4. Optionally add software prefetching (__builtin_prefetch) 128 elements ahead for all 4 arrays to reduce cache misses\n5. Preserve Kahan summation for numerical precision\n\nExpected impact: Reduce execution time from 1353ms to 600-800ms (1.7-2.3x speedup). Primary savings from vectorizing 9.15M row processing (~1s → ~400ms).",
+      "can_parallel": false
+    }
+  ]
+}

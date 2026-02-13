@@ -1,0 +1,24 @@
+{
+  "status": "partial",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 11259,
+      "rows": 4,
+      "error": "Output format mismatch - all columns concatenated into single field with pipe delimiters"
+    },
+    "Q3": {
+      "status": "fail",
+      "time_ms": 6756,
+      "rows": 9,
+      "error": "Row count mismatch: expected 10, got 9. Missing one result row."
+    },
+    "Q6": {
+      "status": "pass",
+      "time_ms": 1024,
+      "rows": 1
+    }
+  },
+  "compile_output": "Compiled successfully with warnings (deprecated API usage, format truncation warning)",
+  "notes": "Iteration 1 shows significant performance improvement vs baseline (Q1: 11259ms vs 26541ms, Q3: 6756ms vs 16924ms, Q6: 1024ms vs 11341ms). However, Q1 and Q3 have correctness issues: Q1 outputs all columns as single pipe-delimited string instead of separate CSV fields; Q3 missing 1 row (9 vs 10 expected). Q6 passes validation. All queries use Arrow dataset API for predicate pushdown and column projection, which is working well. Main bottleneck is single-threaded row-by-row aggregation."
+}

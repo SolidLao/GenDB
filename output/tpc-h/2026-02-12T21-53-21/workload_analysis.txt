@@ -1,0 +1,103 @@
+# Workload Analysis
+
+## Tables
+
+### Fact Tables
+- **lineitem**: ~600K rows (SF=10 → ~6M rows per SF), largest table
+  - Hot columns: l_shipdate, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus, l_orderkey
+  - Used in all 3 queries (Q1, Q3, Q6)
+
+- **orders**: ~150K rows (SF=10 → ~1.5M rows per SF)
+  - Hot columns: o_orderkey, o_custkey, o_orderdate, o_shippriority
+  - Used in Q3 only
+
+### Dimension Tables
+- **customer**: ~15K rows (SF=10 → ~150K rows)
+  - Hot columns: c_custkey, c_mktsegment
+  - Used in Q3 only
+
+- **nation**, **region**, **supplier**, **part**, **partsupp**: Not used in current workload
+
+## Joins
+
+- **lineitem.l_orderkey = orders.o_orderkey** (FK-PK join, Q3)
+  - High selectivity due to upstream filters on both tables
+
+- **orders.o_custkey = customer.c_custkey** (FK-PK join, Q3)
+  - Moderate selectivity (~20% after c_mktsegment filter)
+
+## Selective Filters
+
+### Highly Selective (critical for optimization)
+- **l_shipdate range predicates** (Q1, Q3, Q6):
+  - Q1: `<= 1998-09-02` (~98% of data)
+  - Q3: `> 1995-03-15` (~50% selectivity)
+  - Q6: `>= 1994-01-01 AND < 1995-01-01` (~14% selectivity, 1 year window)
+  - **Optimization**: Sort lineitem by l_shipdate enables row group pruning
+
+- **l_discount range** (Q6): `BETWEEN 0.05 AND 0.07` (~10% selectivity)
+  - Moderate selectivity, applied after date filter
+
+- **l_quantity < 24** (Q6): ~50% selectivity
+  - Moderate selectivity
+
+- **c_mktsegment = 'BUILDING'** (Q3): ~20% selectivity (1 of 5 segments)
+  - Good candidate for dictionary encoding
+
+- **o_orderdate < '1995-03-15'** (Q3): ~40% selectivity
+  - Complements l_shipdate filter in Q3
+
+## Aggregations
+
+- **Q1**: GROUP BY l_returnflag, l_linestatus
+  - Very low cardinality: 3-4 groups expected (A/N/R × F/O)
+  - Dictionary encoding beneficial
+
+- **Q3**: GROUP BY l_orderkey, o_orderdate, o_shippriority
+  - High cardinality (thousands of groups after filters)
+  - Requires hash aggregation
+
+## Column Projection Opportunities
+
+- **Q1**: Uses 9 of 16 lineitem columns → 44% projection reduction
+- **Q3**: Uses 3 lineitem + 4 orders + 2 customer columns
+- **Q6**: Uses only 4 of 16 lineitem columns → **75% projection reduction**
+
+## Sort/Limit Requirements
+
+- **Q1**: ORDER BY l_returnflag, l_linestatus (tiny result set, trivial)
+- **Q3**: ORDER BY revenue DESC, o_orderdate + LIMIT 10 (top-K optimization opportunity)
+- **Q6**: No sort required (scalar aggregation)
+
+## Parallelism Opportunities
+
+- **Q1**: Full scan of lineitem → excellent parallelism (scan row groups independently)
+- **Q6**: Full scan of lineitem → excellent parallelism
+- **Q3**: Multi-table join → hash join with broadcast of customer/orders after filtering
+
+## Key Optimization Opportunities
+
+### 1. Sort lineitem by l_shipdate
+- **Impact**: All 3 queries filter on l_shipdate
+- **Benefit**: Row group min/max statistics enable skipping entire row groups
+- **Expected speedup**: 2-10x depending on selectivity
+
+### 2. Dictionary encode low-cardinality string columns
+- **lineitem**: l_returnflag, l_linestatus, l_shipinstruct, l_shipmode (cardinality: 3, 2, 4, 7)
+- **orders**: o_orderstatus, o_orderpriority (cardinality: 3, 5)
+- **customer**: c_mktsegment (cardinality: 5)
+- **Benefit**: Reduced storage, faster equality comparisons
+
+### 3. Row group sizing for lineitem
+- **Recommendation**: 100K rows per row group
+- **Rationale**: Balance between metadata overhead and predicate pushdown granularity
+- **With SF=10**: 600K rows → 6 row groups, allows fine-grained pruning
+
+### 4. Column pruning via Parquet columnar layout
+- **Q6 benefit**: Read only 4/16 columns → 4x I/O reduction
+- **Critical for**: l_comment (VARCHAR(44), never used in these queries)
+
+### 5. Compression strategy
+- **lineitem**: Use snappy (fast decompression, moderate ratio) — query latency critical
+- **orders, customer**: Use zstd (better compression) — smaller tables, compression overhead acceptable
+- **Tradeoff**: Optimizing for execution_time → prefer snappy for hot tables

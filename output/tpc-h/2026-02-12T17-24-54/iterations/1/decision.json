@@ -1,0 +1,30 @@
+{
+  "action": "optimize",
+  "reasoning": "All queries are failing with correctness issues (wrong delimiter, missing headers, arithmetic errors). Must fix these first before performance optimization. Q3 is critically slow at 6425ms due to sequential hash join. Schedule correctness fixes (query_rewriter), Q3 parallelization (execution_optimizer), and Q6 zone-map skipping (io_optimizer + index_optimizer) in parallel since they target different file sets.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["ALL"],
+      "guidance": "Fix critical correctness issues: (1) Change pipe delimiter to comma in CSV output for all queries. (2) Add header rows before data in q1.cpp line 96, q3.cpp line 133, q6.cpp line 73. (3) Fix filename casing in main.cpp to Q1.csv, Q3.csv, Q6.csv. (4) Fix arithmetic scaling errors: In q1.cpp line 47-48 change disc_price from 'extendedprice * (100 - discount) / 100' to '(extendedprice / 100) * (100 - discount / 100)'. In q1.cpp line 103-104 change sum_disc_price divisor from 10000.0 to 100.0 and sum_charge from 1000000.0 to 10000.0. (5) Apply same disc_price fix to q3.cpp line 97 and change revenue divisor from 10000.0 to 100.0 in q3.cpp line 138. These are blocking issues that prevent any query from passing.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q3"],
+      "guidance": "Parallelize the hash join probe phase in queries/q3.cpp lines 77-99. Current sequential scan of 6M lineitem rows is the bottleneck (6425ms). Implement partition-based parallel probing in operators/hash_join.h: split filtered_lineitems into num_threads chunks, each thread probes independently into the shared (read-only) hash table, then merge results. Use the same parallel pattern as q1.cpp lines 37-59. Also implement per-thread local revenue aggregation (like Q1's local_aggs pattern) to avoid hash table contention during parallel execution. Expected speedup: 5-10x (6425ms → 600-1200ms).",
+      "can_parallel": true
+    },
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["Q6"],
+      "guidance": "Add zone-map block skipping for Q6's l_shipdate filter. Since lineitem is sorted by l_shipdate, blocks outside the range [1994-01-01, 1995-01-01) can be skipped entirely. Create zone-map metadata file (lineitem.l_shipdate.zonemap) with per-block min/max values for 8192-row blocks. In storage/storage.cpp add zone-map generation during ingestion. In q6.cpp before the parallel loop at line 37, pre-filter chunks using zone-map to only process blocks where max >= DATE_1994_01_01 AND min < DATE_1995_01_01. This should skip ~86% of blocks (6 out of 7 years). Expected speedup: 3-5x (22ms → 5-10ms).",
+      "can_parallel": true
+    },
+    {
+      "optimizer": "index_optimizer",
+      "targets": ["Q6"],
+      "guidance": "Build zone-map infrastructure for block-level skipping. Create index/zone_map.h with ZoneMap class that stores per-column, per-block min/max statistics. Integrate with storage layer to populate zone maps during ingestion. Modify queries/q6.cpp to use zone map for l_shipdate filtering before scanning blocks. For Q6, this enables skipping blocks where l_shipdate is completely outside [1994-01-01, 1995-01-01) range. Zone map format: vector of {block_id, min_value, max_value} tuples. Works in conjunction with io_optimizer's zone-map block skipping implementation.",
+      "can_parallel": true
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 is failing validation (missing CSV header) and has 6-12x speedup potential. Primary bottleneck is I/O-bound (no row group pruning). With only 1 iteration remaining, we must fix correctness AND apply high-impact optimizations. Applying row group pruning (3-4x expected) + open-addressing hash tables (1.5-2x expected) to achieve ~5-8x total speedup.",
+  "optimizations": [
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["Q3"],
+      "guidance": "CRITICAL FIX: Add CSV header at line 198 before output loop: `out << \"l_orderkey,revenue,o_orderdate,o_shippriority\\n\";`. THEN implement row group pruning: (1) For orders table (lines 67-70), use get_row_group_stats on o_orderdate and read_parquet_row_groups to skip row groups where max(o_orderdate) < 19950315 (date cutoff), eliminating ~75% of I/O. (2) For lineitem table (lines 97-100), use get_row_group_stats on l_shipdate and read_parquet_row_groups to skip row groups where min(l_shipdate) <= 19950315, eliminating ~25% of I/O on the 60M row table. Expected speedup: 3-4x from I/O reduction.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q3"],
+      "guidance": "Replace std::unordered containers with open-addressing hash tables for better cache locality: (1) Replace std::unordered_set building_customers (line 47) with robin_hood::unordered_flat_set or absl::flat_hash_set. (2) Replace std::unordered_map qualifying_orders (line 84), thread_maps (line 110), and final_results (line 162) with open-addressing alternatives (robin_hood::unordered_flat_map or absl::flat_hash_map). These are accessed in hot paths and open-addressing provides 2-3x better lookup performance. Expected speedup: 1.5-2x from improved cache efficiency.",
+      "can_parallel": false
+    }
+  ]
+}

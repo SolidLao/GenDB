@@ -1,0 +1,117 @@
+# Optimization Analysis (Iteration 2)
+
+## Per-Query Assessment
+- Q1 (1432ms, fail): CSV delimiter incorrect (pipe vs comma), missing 1 row
+- Q3 (5773ms, fail): CSV delimiter incorrect (pipe vs comma), 3 rows differ from expected
+- Q6 (82ms, pass): Correct output and good performance
+
+## Critical Fixes (correctness issues blocking validation)
+
+### Output Format
+Issue: Q1 and Q3 use pipe '|' delimiter instead of comma ','
+Fix: Change delimiter in CSV output to comma
+- q1.cpp:146 → Change `<<` separator from "|" to ","
+- q3.cpp:217 → Remove header line (contains pipe delimiters)
+- q3.cpp:220 → Change `<<` separator from "|" to ","
+
+### Q1 Row Count Mismatch
+Issue: Returns 3 rows instead of expected 4
+Root cause: Likely missing one returnflag/linestatus combination due to filter or data issue
+Investigation needed: Verify filter logic (l_shipdate <= '1998-09-02') and check if all 4 groups exist in filtered data
+
+### Q3 Result Accuracy
+Issue: 3 rows differ from expected (likely ordering or calculation)
+Root cause: May be related to revenue calculation precision or ORDER BY tie-breaking
+Investigation needed: Verify revenue calculation and ORDER BY logic (DESC revenue, ASC o_orderdate)
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] Morsel-driven parallelism for Q1 and Q3
+   Target: Q1, Q3 | Expected: 4-8x improvement | Risk: low
+   Guidance:
+   - Q1 (q1.cpp:123-128): Replace single-threaded scan loop with parallel chunks
+     * Split 6M rows into 64KB chunks (~1000-2000 rows each)
+     * Create per-thread hash aggregation tables (std::vector<std::unordered_map>)
+     * Merge thread-local hash tables at end (only ~4 groups, trivial cost)
+     * Use std::thread pool or OpenMP parallel for
+   - Q3 (q3.cpp:99-109): Parallelize lineitem scan_range and gather operations
+     * After identifying date range with binary search, split sequential scan into parallel chunks
+     * Parallelize gather operations (lines 107-109) using thread pool
+     * Merge filtered vectors from each thread
+   - Reference: operators/scan.h needs parallel version of scan_filter and gather
+
+### 2. [cpu_bound] SIMD vectorization for Q1 aggregation arithmetic
+   Target: Q1 | Expected: 2-3x improvement | Risk: medium
+   Guidance:
+   - q1.cpp:27-44: Vectorize the update() function using AVX2 intrinsics
+     * Process 4 rows at a time (256-bit SIMD = 4x int64_t)
+     * Use _mm256_load_si256 for aligned loads of qty, price, disc, tax
+     * Vectorize discount calculation: disc_price = price * (100 - disc) / 100
+     * Vectorize charge calculation: charge = disc_price * (100 + tax) / 100
+     * Accumulate partial sums, reduce at end
+   - Note: Requires data alignment and handling remainder rows (count % 4)
+
+### 3. [io_bound] Add madvise hints for sequential scans
+   Target: Q1, Q6 | Expected: 1.3-1.5x improvement | Risk: low
+   Guidance:
+   - storage/storage.h: After mmap() in MappedColumn::open(), add:
+     * madvise(data, file_size, MADV_SEQUENTIAL) for columns scanned sequentially
+     * madvise(data, file_size, MADV_WILLNEED) to prefetch data into page cache
+   - Q1: Apply to all 7 columns (l_shipdate, l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax)
+   - Q6: Apply to all 4 columns (l_shipdate, l_discount, l_quantity, l_extendedprice)
+   - This helps kernel optimize page cache and read-ahead for HDD
+
+### 4. [cpu_bound] Operator fusion for Q6 filter loop
+   Target: Q6 | Expected: 1.2-1.5x improvement | Risk: low
+   Guidance:
+   - q6.cpp:62-73: Already fuses filter and aggregation well, but can optimize further
+     * Current loop has 3 branch conditions (discount >= min, discount <= max, quantity < max)
+     * Reduce to 2 branches: combine discount range check → if (discount - min_discount <= (max_discount - min_discount))
+     * Use unsigned comparison trick to eliminate one bound check
+     * Consider loop unrolling (process 4 iterations per loop iteration)
+
+### 5. [cpu_bound] Partition-local aggregation for Q3
+   Target: Q3 | Expected: 2-3x improvement | Risk: low
+   Guidance:
+   - q3.cpp:142-162: Parallelize aggregation loop over final_matches
+     * Split final_matches into chunks, one per thread
+     * Each thread builds local hash table (std::unordered_map<AggKey, int64_t>)
+     * Merge local hash tables at end (simple addition for matching keys)
+     * Expected 10K-50K groups fits easily in L3 cache per thread
+
+### 6. [join_order] Optimize Q3 materialization strategy
+   Target: Q3 | Expected: 1.3-1.8x improvement | Risk: medium
+   Guidance:
+   - q3.cpp:79-109: Reduce intermediate materialization overhead
+     * Current approach: filter customer (38), join (59-63), filter orders (66-75), materialize (80-82), filter lineitem (99-109), materialize (107-109)
+     * Problem: Multiple gather() calls create large intermediate vectors (lines 107-109 create ~1.5M element vectors)
+     * Better: Use late materialization - keep indices until final aggregation, only gather what's needed
+     * Specifically: Don't gather filtered_l_extendedprice/discount until inside aggregation loop (avoid allocating 1.5M*16 bytes)
+     * Use indexed access: l_extendedprice[filtered_lineitem_indices[lineitem_idx]] instead of materialized vector
+
+### 7. [cpu_bound] Use heap-based Top-K for Q3 instead of full sort
+   Target: Q3 | Expected: 1.2-1.4x improvement | Risk: low
+   Guidance:
+   - q3.cpp:181-199: Replace std::sort + resize with std::partial_sort or min-heap
+     * Current: sorts all agg_table entries (potentially 10K-50K groups) then takes top 10
+     * Better: Use std::partial_sort(results.begin(), results.begin() + 10, results.end())
+     * Or maintain std::priority_queue (min-heap) of size 10 during aggregation
+     * Complexity: O(N log 10) instead of O(N log N) where N = number of groups
+
+### 8. [io_bound] Block-level processing for cache efficiency
+   Target: Q1, Q3, Q6 | Expected: 1.2-1.5x improvement | Risk: low
+   Guidance:
+   - All queries: Process data in blocks matching L2/L3 cache size
+     * Current scan loops process entire columns linearly
+     * Better: Process in 64KB-256KB blocks (fits in L2/L3 cache)
+     * Q1 (q1.cpp:123): for (size_t block = 0; block < row_count; block += BLOCK_SIZE)
+     * Q6 (q6.cpp:62): Same block-oriented loop over date_filtered indices
+     * Reduces cache misses when accessing multiple columns per row
+
+## Summary
+Priority 1 (Critical): Fix CSV delimiter (comma vs pipe) and investigate Q1 row count / Q3 result accuracy.
+Priority 2 (High Impact): Implement morsel-driven parallelism for Q1 and Q3 (4-8x expected speedup on 64-core machine).
+Priority 3 (Medium Impact): Add madvise hints, partition-local aggregation for Q3, late materialization, Top-K heap.
+Priority 4 (Low Impact): SIMD vectorization, operator fusion, block-level processing.
+
+Estimated total speedup after all optimizations: Q1: 8-15x, Q3: 10-20x, Q6: 1.5-2x (already efficient).

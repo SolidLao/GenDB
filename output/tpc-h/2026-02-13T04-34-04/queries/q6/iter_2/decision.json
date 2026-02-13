@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Final iteration: Q6 at 1128ms shows strong baseline but significant room for SIMD optimization. Combine three low-risk, high-impact CPU optimizations: (1) dual-vector SIMD processing for 2x throughput, (2) blendv masking instead of and_pd for better performance, (3) predicate reordering by selectivity for early exit. Expected compound improvement: 1.3-1.8x to reach ~630-870ms. Avoiding risky multi-threaded I/O for final iteration.",
+  "optimizations": [
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q6"],
+      "guidance": "Apply three SIMD optimizations to lines 131-164: (1) Process 8 elements per iteration with dual AVX2 vectors - load two __m128i for shipdates (i and i+4), convert each to __m256d, process both in parallel before loop increment by 8. (2) Replace _mm256_and_pd masking (line 157) with _mm256_blendv_pd(vzero, vrevenue, final_mask) for better throughput. (3) Reorder predicates by selectivity: evaluate l_shipdate first (most selective 14%), add _mm256_testz_pd early exit if all fail, then l_discount (18%) with second early exit, finally l_quantity (48%). Add FMA support with #ifdef __FMA__ and use _mm256_fmadd_pd instead of separate mul+add. Preserve Kahan summation correctness. Add -mfma compiler flag.",
+      "can_parallel": false
+    }
+  ]
+}

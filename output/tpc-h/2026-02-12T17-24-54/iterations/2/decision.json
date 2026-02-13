@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "CRITICAL: All queries failing validation due to correctness bugs. Must fix arithmetic scaling errors (~100x magnitude) and output format issues before any meaningful benchmarking. Q3 also has severe performance bottleneck (6425ms vs 100-200ms target). With only 1 iteration remaining, this is last chance to fix correctness AND achieve competitive performance. Scheduling query_rewriter for correctness fixes and io_optimizer for sequential scan optimization in parallel (different file sets).",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["ALL"],
+      "guidance": "CORRECTNESS FIXES (BLOCKING): (1) Fix arithmetic scaling in Q1 line 47: disc_price = (l_extendedprice[i] * (10000 - l_discount[i])) / 10000 (both inputs scaled by 100); line 48: charge = (disc_price * (100 + l_tax[i])) / 100; update output scaling lines 103-104 to / 100.0 for sum_disc_price and sum_charge. (2) Fix Q3 line 99: disc_price = (l_extendedprice[i] * (10000 - l_discount[i])) / 10000; line 148 output scaling to / 100.0. (3) Fix output format ALL queries: add header row (Q1: l_returnflag,l_linestatus,sum_qty,sum_base_price,sum_disc_price,sum_charge,avg_qty,avg_price,avg_disc,count_order; Q3: l_orderkey,revenue,o_orderdate,o_shippriority; Q6: revenue), replace pipe | with comma, uppercase filenames Q1.csv/Q3.csv/Q6.csv. (4) PERFORMANCE: Optimize Q3 join - fuse customer->orders->lineitem joins into single pass, eliminate materialized intermediate vectors (cust_order_matches, build_keys/build_rows), use hash table probe to directly update revenue aggregates, add reserve() to hash tables to avoid rehashing.",
+      "can_parallel": true
+    },
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["Q1", "Q6"],
+      "guidance": "Add madvise(MADV_SEQUENTIAL | MADV_WILLNEED) hints in storage/storage.cpp after mmap() for columns accessed sequentially. Q1 scans 336MB sequentially (7 columns × 6M rows), Q6 scans 192MB (4 columns × 6M rows). Expected 1.5-2x speedup on disk I/O. Apply to full table scans only, not random-access join columns.",
+      "can_parallel": true
+    }
+  ]
+}

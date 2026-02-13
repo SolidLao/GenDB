@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Iteration 1 failed completely due to a critical correctness bug: hash_agg.h cannot handle decimal128(15,2) types used in TPC-H schema (l_extendedprice, l_discount, etc.). This blocks all query execution. Fix this first to enable any execution, then existing I/O optimizations (column projection, row group pruning) will automatically provide performance gains.",
+  "optimizations": [
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["ALL"],
+      "guidance": "Fix CRITICAL bug in operators/hash_agg.h ArrayValueToDouble() function (lines 191-204). Add case for arrow::Type::DECIMAL128 to convert decimal128(15,2) to double. Implementation: (1) Cast to Decimal128Array, (2) Get Decimal128Type to extract scale, (3) Get decimal value via Value(index), (4) Convert to double by dividing low_bits by 10^scale. Example code in recommendations.txt lines 15-23. This is a correctness fix blocking all queries - without it, all aggregations on decimal columns crash.",
+      "can_parallel": true
+    }
+  ]
+}

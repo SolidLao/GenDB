@@ -1,0 +1,233 @@
+# Query Implementation Strategies (Iteration 1)
+
+## Data Characteristics (Critical for Optimization)
+
+### Parquet File Layout
+- **lineitem.parquet**: 60M rows, 800 row groups (~75K rows/group), SORTED by l_shipdate
+  - Row group 0: l_shipdate in [1992-01-02, 1992-01-28]
+  - Row group 1: l_shipdate in [1992-01-28, 1992-02-08]
+  - Sorted order enables row group pruning via min/max statistics
+
+- **orders.parquet**: 15M rows, 150 row groups (~100K rows/group), SORTED by o_orderdate
+  - Row group 0: o_orderdate in [1992-01-01, 1992-01-17]
+  - Row group 1: o_orderdate in [1992-01-17, 1992-02-02]
+  - Sorted order enables row group pruning via min/max statistics
+
+- **customer.parquet**: 1.5M rows, 15 row groups (~100K rows/group)
+
+### Available Operators
+- ParquetScan: supports column projection and date range filtering with row group pruning
+- HashJoin: inner join on int32 keys, builds hash table on right side
+- HashAggregate: supports SUM, COUNT, AVG with int32/string group keys
+
+## Per-Query Implementation Strategy
+
+### Q1: Pricing Summary Report (Scan + Aggregate)
+**SQL:**
+```
+SELECT l_returnflag, l_linestatus,
+       SUM(l_quantity), SUM(l_extendedprice),
+       SUM(l_extendedprice * (1 - l_discount)),
+       SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)),
+       AVG(l_quantity), AVG(l_extendedprice), AVG(l_discount), COUNT(*)
+FROM lineitem
+WHERE l_shipdate <= '1998-09-02'
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus
+```
+
+**Operator Plan:**
+1. **Scan**: ParquetScan.ExecuteWithDateComparison(date_column="l_shipdate", op="<=", date="1998-09-02")
+   - Column projection: l_shipdate, l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax (7 of 16 columns)
+   - Row group pruning: skip row groups where min(l_shipdate) > '1998-09-02'
+   - Expected: read ~784/800 row groups (98% of data since filter is very inclusive)
+
+2. **Compute**: For each row, calculate derived expressions before aggregation:
+   - disc_price = l_extendedprice * (1 - l_discount)
+   - charge = l_extendedprice * (1 - l_discount) * (1 + l_tax)
+   - Use Arrow compute kernels: arrow::compute::Multiply, arrow::compute::Subtract, arrow::compute::Add
+
+3. **Aggregate**: Use MultiKeyHashAggregate or StringKeyHashAggregate (since l_returnflag and l_linestatus are strings)
+   - Group keys: [l_returnflag, l_linestatus] (4 distinct groups expected: N/O, N/F, R/F, A/F)
+   - Aggregates: SUM(l_quantity), SUM(l_extendedprice), SUM(disc_price), SUM(charge), AVG(l_quantity), AVG(l_extendedprice), AVG(l_discount), COUNT(*)
+   - **Note**: Current operators expect int32 group keys, but l_returnflag/l_linestatus are strings → need StringKeyHashAggregate or dictionary encoding
+
+4. **Sort**: ORDER BY l_returnflag, l_linestatus (in-memory sort on 4 rows, trivial)
+
+**Optimization Opportunities:**
+- **Parquet pushdown**: Limited benefit (98% selectivity), but still skip ~16 row groups
+- **Column projection**: Read 7/16 columns → save ~44% I/O
+- **Vectorization**: Use Arrow compute kernels for expression evaluation instead of row-by-row loops
+- **Aggregation**: Tiny hash table (4 groups) fits in L1 cache
+
+### Q3: Shipping Priority (3-way Join + Aggregate)
+**SQL:**
+```
+SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate, o_shippriority
+FROM customer, orders, lineitem
+WHERE c_mktsegment = 'BUILDING'
+  AND c_custkey = o_custkey
+  AND l_orderkey = o_orderkey
+  AND o_orderdate < '1995-03-15'
+  AND l_shipdate > '1995-03-15'
+GROUP BY l_orderkey, o_orderdate, o_shippriority
+ORDER BY revenue DESC, o_orderdate
+LIMIT 10
+```
+
+**Operator Plan:**
+1. **Scan customer**: ParquetScan + FilterByStringEquality(c_mktsegment = 'BUILDING')
+   - Column projection: c_custkey, c_mktsegment (2 of 8 columns → 75% I/O reduction)
+   - No row group pruning (c_mktsegment not sorted)
+   - Expected output: ~300K rows (20% selectivity, 1.5M * 0.2)
+
+2. **Scan orders**: ParquetScan.ExecuteWithDateComparison(date_column="o_orderdate", op="<", date="1995-03-15")
+   - Column projection: o_custkey, o_orderkey, o_orderdate, o_shippriority (4 of 9 columns → 56% I/O reduction)
+   - Row group pruning: skip row groups where min(o_orderdate) >= '1995-03-15'
+   - Expected: read ~60/150 row groups (40% of data, since dates span 1992-1998 and cutoff is ~1995)
+   - Expected output: ~6M rows after filter (40% of 15M)
+
+3. **Join 1**: HashJoin(customer, orders) on c_custkey = o_custkey
+   - **Build side**: customer (300K rows after filter) ← smaller
+   - **Probe side**: orders (6M rows after filter)
+   - Expected output: ~6M rows (orders after date filter × 20% customer filter ≈ 6M * 1.0 = 6M, since FK relationship preserved)
+
+4. **Scan lineitem**: ParquetScan.ExecuteWithDateComparison(date_column="l_shipdate", op=">", date="1995-03-15")
+   - Column projection: l_orderkey, l_extendedprice, l_discount (3 of 16 columns → 81% I/O reduction!)
+   - Row group pruning: skip row groups where max(l_shipdate) <= '1995-03-15'
+   - Expected: read ~400/800 row groups (50% of data, since dates span 1992-1998 and cutoff is ~1995)
+   - Expected output: ~30M rows after filter (50% of 60M)
+
+5. **Join 2**: HashJoin(customer_orders, lineitem) on o_orderkey = l_orderkey
+   - **Build side**: customer_orders result (6M rows) ← smaller
+   - **Probe side**: lineitem (30M rows after filter)
+   - Expected output: ~9M rows (lineitem rows matching filtered orders)
+
+6. **Compute**: Calculate revenue expression BEFORE aggregation
+   - revenue = l_extendedprice * (1 - l_discount)
+   - Use Arrow compute kernels on the 9M row intermediate result
+
+7. **Aggregate**: MultiKeyHashAggregate on [l_orderkey, o_orderdate, o_shippriority]
+   - Expected groups: ~100K-500K distinct l_orderkey values
+   - Aggregate: SUM(revenue)
+
+8. **Sort + Limit**: ORDER BY revenue DESC, o_orderdate LIMIT 10
+   - Top-K optimization: use partial sort or heap structure (only need top 10 of 100K-500K groups)
+
+**Join Order Rationale:**
+- Join customer → orders FIRST (reduce orders cardinality early via c_mktsegment filter)
+- Then join result → lineitem (probe large lineitem with filtered orders)
+- Alternative: could join orders → lineitem first, but would probe 30M lineitem rows with 6M orders (more work)
+
+**Optimization Opportunities:**
+- **Parquet pushdown**: Massive savings on lineitem (read 400/800 row groups) and orders (read 60/150 row groups)
+- **Column projection**: Lineitem 81% I/O reduction (3/16 cols), customer 75% reduction (2/8 cols)
+- **Join order**: Filter customer first (20% selectivity) before joining to reduce intermediate cardinality
+- **Build side selection**: Build on smaller side (customer 300K, then customer_orders 6M)
+- **Top-K**: Only materialize top 10 results, avoid full sort of 100K-500K groups
+
+### Q6: Forecasting Revenue Change (Scan + Aggregate)
+**SQL:**
+```
+SELECT SUM(l_extendedprice * l_discount) AS revenue
+FROM lineitem
+WHERE l_shipdate >= '1994-01-01'
+  AND l_shipdate < '1995-01-01'
+  AND l_discount BETWEEN 0.05 AND 0.07
+  AND l_quantity < 24
+```
+
+**Operator Plan:**
+1. **Scan**: ParquetScan.ExecuteWithDateFilter(date_column="l_shipdate", min="1994-01-01", max="1994-12-31")
+   - Column projection: l_shipdate, l_discount, l_quantity, l_extendedprice (4 of 16 columns → 75% I/O reduction)
+   - Row group pruning: CRITICAL optimization, only read row groups overlapping [1994-01-01, 1994-12-31]
+   - Expected: read ~100/800 row groups (12.5% of data, since dates span 1992-1998 evenly)
+   - Expected rows after date filter: ~7.5M rows (60M × 12.5%)
+
+2. **Filter**: Apply l_discount and l_quantity filters IN-MEMORY after scan
+   - l_discount BETWEEN 0.05 AND 0.07: ~10% selectivity (narrow range)
+   - l_quantity < 24: ~48% selectivity (24/50)
+   - Combined: 7.5M × 0.10 × 0.48 ≈ 360K rows
+   - Use FilterByRange<arrow::DoubleType> for discount, FilterByRange<arrow::DoubleType> for quantity
+
+3. **Compute**: Calculate revenue expression
+   - revenue = l_extendedprice * l_discount
+   - Use Arrow compute kernels on ~360K rows
+
+4. **Aggregate**: Single SUM() across all rows (no GROUP BY)
+   - Trivial: accumulate into single double value
+   - Alternative: use arrow::compute::Sum() directly on the revenue array
+
+**Optimization Opportunities:**
+- **Parquet pushdown**: MASSIVE savings, read only 100/800 row groups (12.5% of file)
+- **Column projection**: 75% I/O reduction (4/16 columns)
+- **Filter order**: Apply date filter first (via Parquet), then discount (10% selective), then quantity
+- **Vectorization**: Use Arrow compute kernels for multiply and sum (avoid scalar loops)
+
+## Shared Observations
+
+### Parquet Predicate Pushdown (Row Group Pruning)
+All three queries benefit from sorted l_shipdate on lineitem:
+- Q1: Skip ~16 row groups (minor, 98% data needed)
+- Q3: Skip ~400 row groups (MAJOR, 50% data reduction)
+- Q6: Skip ~700 row groups (CRITICAL, 87.5% data reduction)
+
+Q3 also benefits from sorted o_orderdate on orders:
+- Skip ~90 row groups (40% data reduction)
+
+### Column Projection
+All queries access <50% of lineitem columns:
+- Q1: 7/16 columns (44% reduction)
+- Q3: 3/16 columns (81% reduction!) ← biggest win
+- Q6: 4/16 columns (75% reduction)
+
+Parquet's columnar format makes this essentially free (only read needed columns from disk).
+
+### Arrow Compute Kernel Opportunities
+All queries have expression evaluation:
+- Q1: l_extendedprice * (1 - l_discount) * (1 + l_tax)
+- Q3: l_extendedprice * (1 - l_discount)
+- Q6: l_extendedprice * l_discount
+
+Currently implemented as scalar loops → should use arrow::compute::Multiply, Subtract, Add for vectorization.
+
+### Hash Table Sizing
+- Q1: 4 groups (tiny, L1 cache resident)
+- Q3: 100K-500K groups (fits in L3 on most CPUs)
+- Q6: no hash table (single aggregate)
+
+### Join Strategy (Q3 only)
+- Two hash joins, both with int32 keys (efficient)
+- Build on smaller side (customer 300K, then result 6M vs lineitem 30M)
+- No need for multi-column joins (single key per join)
+
+## Implementation Priority for Code Generation
+
+### Critical Path (Must Have for Correctness)
+1. **String group key support** for Q1 aggregation (l_returnflag, l_linestatus are strings)
+   - Either use StringKeyHashAggregate OR dictionary-encode strings to int32
+2. **Multi-key aggregation** for Q3 (group by 3 columns: l_orderkey, o_orderdate, o_shippriority)
+3. **Top-K sorting** for Q3 (ORDER BY revenue DESC LIMIT 10)
+4. **Expression evaluation** for computed columns (disc_price, charge, revenue)
+
+### Performance Critical (Must Have for Speed)
+1. **Parquet row group pruning** on date columns (already implemented in ParquetScan)
+   - Q6 improvement: 8x I/O reduction (read 100 vs 800 row groups)
+   - Q3 improvement: 2x I/O reduction on lineitem (read 400 vs 800 row groups)
+2. **Column projection** (already implemented in ParquetScan)
+   - Q3 lineitem: 81% I/O reduction (3/16 columns)
+   - Q6 lineitem: 75% I/O reduction (4/16 columns)
+3. **Arrow compute kernels** for vectorized expression evaluation
+   - Replace scalar loops with arrow::compute:: functions
+4. **Hash join build side selection** (already builds on right side)
+   - Q3: ensure customer is right/build side (300K vs 6M orders)
+
+### Nice to Have (Incremental Gains)
+1. **Parallel row group reading** (lineitem has 800 row groups → read in parallel)
+2. **Morsel-driven parallelism** for scans and aggregation
+3. **Operator fusion** (scan + filter + project in one pass)
+4. **SIMD for filter evaluation** (date/numeric comparisons)
+
+## Summary
+Implement Q1 with string aggregation, Q3 with proper join ordering (customer→orders→lineitem) and multi-key aggregation, Q6 with aggressive Parquet pruning. Critical optimizations: row group pruning (Q6: 8x I/O reduction), column projection (Q3: 81% I/O reduction on lineitem), and Arrow compute kernels for expression evaluation. All three queries already benefit from sorted Parquet data.

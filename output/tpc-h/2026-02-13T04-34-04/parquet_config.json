@@ -1,0 +1,137 @@
+{
+  "default_row_group_size": 100000,
+  "default_compression": "snappy",
+  "tables": {
+    "lineitem": {
+      "sort_by": ["l_shipdate"],
+      "row_group_size": 50000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "l_returnflag",
+        "l_linestatus",
+        "l_shipinstruct",
+        "l_shipmode"
+      ],
+      "no_dictionary_columns": [
+        "l_comment"
+      ]
+    },
+    "orders": {
+      "sort_by": ["o_orderdate"],
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "o_orderstatus",
+        "o_orderpriority",
+        "o_clerk"
+      ],
+      "no_dictionary_columns": [
+        "o_comment"
+      ]
+    },
+    "customer": {
+      "sort_by": ["c_custkey"],
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "c_mktsegment"
+      ],
+      "no_dictionary_columns": [
+        "c_name",
+        "c_address",
+        "c_comment"
+      ]
+    },
+    "part": {
+      "sort_by": ["p_partkey"],
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [
+        "p_mfgr",
+        "p_brand",
+        "p_type",
+        "p_container"
+      ],
+      "no_dictionary_columns": [
+        "p_name",
+        "p_comment"
+      ]
+    },
+    "partsupp": {
+      "sort_by": ["ps_partkey", "ps_suppkey"],
+      "row_group_size": 100000,
+      "compression": "snappy",
+      "dictionary_columns": [],
+      "no_dictionary_columns": [
+        "ps_comment"
+      ]
+    },
+    "supplier": {
+      "sort_by": ["s_suppkey"],
+      "row_group_size": 100000,
+      "compression": "zstd",
+      "dictionary_columns": [],
+      "no_dictionary_columns": [
+        "s_name",
+        "s_address",
+        "s_comment"
+      ]
+    },
+    "nation": {
+      "sort_by": ["n_nationkey"],
+      "row_group_size": 25,
+      "compression": "zstd",
+      "dictionary_columns": [
+        "n_name"
+      ],
+      "no_dictionary_columns": [
+        "n_comment"
+      ]
+    },
+    "region": {
+      "sort_by": ["r_regionkey"],
+      "row_group_size": 5,
+      "compression": "zstd",
+      "dictionary_columns": [
+        "r_name"
+      ],
+      "no_dictionary_columns": [
+        "r_comment"
+      ]
+    }
+  },
+  "indexes": {
+    "lineitem": [
+      "l_orderkey",
+      "l_shipdate",
+      "l_partkey",
+      "l_suppkey"
+    ],
+    "orders": [
+      "o_orderkey",
+      "o_custkey",
+      "o_orderdate"
+    ],
+    "customer": [
+      "c_custkey",
+      "c_mktsegment"
+    ],
+    "part": [
+      "p_partkey"
+    ],
+    "partsupp": [
+      "ps_partkey",
+      "ps_suppkey"
+    ],
+    "supplier": [
+      "s_suppkey",
+      "s_nationkey"
+    ],
+    "nation": [
+      "n_nationkey"
+    ],
+    "region": [
+      "r_regionkey"
+    ]
+  }
+}

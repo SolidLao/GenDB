@@ -1,0 +1,93 @@
+# Optimization Analysis (Iteration 1)
+
+## Per-Query Assessment
+
+- Q1 (71ms, FAIL): Correctness issues: (1) pipe delimiter instead of comma, (2) missing CSV header row, (3) arithmetic errors in disc_price/charge calculation (off by ~100x due to incorrect scaling math), (4) lowercase filename (q1.csv vs Q1.csv). Performance: Reasonable for parallel scan of 5.8M rows, but no SIMD, no zone-map skipping.
+
+- Q3 (6425ms, FAIL): Correctness issues: (1) pipe delimiter instead of comma, (2) missing CSV header row, (3) revenue calculation off by ~100x (same scaling error as Q1), (4) lowercase filename. Performance: Extremely slow (6.4 seconds) - bottleneck is sequential hash join implementation on 6M lineitem rows with no parallelism or optimization.
+
+- Q6 (22ms, FAIL): Correctness issues: (1) missing CSV header row, (2) minor precision error, (3) lowercase filename. Performance: Fast, parallel execution works well, but no zone-map skipping (could be 5-10x faster).
+
+## Critical Fixes (Must fix before performance optimization)
+
+- [ALL QUERIES] Output format: Use comma delimiter instead of pipe, add header row, use uppercase filenames (Q1.csv, Q3.csv, Q6.csv)
+
+- [Q1, Q3] Arithmetic scaling error: Lines q1.cpp:47-48 and q3.cpp:97 compute disc_price incorrectly. Current: `disc_price = extendedprice * (100 - discount) / 100` then `charge = disc_price * (100 + tax) / 100`. Problem: Both extendedprice and discount are already scaled by 100, so (100 - discount) is wrong when discount is 7 (scaled from 0.07). Correct formula: `disc_price = extendedprice * (10000 - discount) / 10000` (or equivalently divide both operands by 100 first, then multiply).
+
+- [Q1] Line q1.cpp:103-104: sum_disc_price is divided by 10000 but should be 100 (it's already the product of two x100 scaled values, so x10000 total). sum_charge divided by 1000000 should be 10000.
+
+## Recommended Optimizations
+
+1. [query_structure] Fix arithmetic precision and output format (Priority: CRITICAL)
+   Target: Q1, Q3, Q6 | Expected: Queries pass correctness checks | Risk: low
+   Guidance:
+   - q1.cpp line 99-109, q3.cpp line 137-141, q6.cpp line 73-76: Change pipe to comma in CSV output
+   - q1.cpp line 96, q3.cpp line 133, q6.cpp line 73: Add header row before data rows
+   - main.cpp line 96, 133, 73: Change "q1.csv" to "Q1.csv" (and q3, q6)
+   - q1.cpp line 47-48: Fix disc_price calculation from `extendedprice * (100 - discount) / 100` to `(extendedprice / 100) * (100 - discount / 100)` or use int64 intermediate `extendedprice * (10000 - discount * 100) / 10000`
+   - q1.cpp line 103-104: Change sum_disc_price divisor from 10000.0 to 100.0, sum_charge from 1000000.0 to 10000.0
+   - q3.cpp line 97: Same disc_price fix as Q1
+   - q3.cpp line 138: Change revenue divisor from 10000.0 to 100.0
+
+2. [cpu_bound] Parallelize Q3 hash join (Priority: HIGH)
+   Target: Q3 | Expected: 5-10x speedup (6425ms → 600-1200ms) | Risk: medium
+   Guidance:
+   - queries/q3.cpp lines 77-99: Current order_join.probe() is sequential scan of 6M lineitem rows
+   - Implement partition-based parallel probe in operators/hash_join.h: split filtered_lineitems into num_threads chunks, each thread probes independently into shared hash table (read-only), merge results
+   - Alternative: Use thread pool to process lineitem chunks in parallel, each building local revenue aggregates, then merge
+   - Reference q1.cpp lines 37-59 for parallel scan pattern
+
+3. [io_bound] Add zone-map block skipping for Q6 (Priority: HIGH)
+   Target: Q6 | Expected: 3-5x speedup (22ms → 5-10ms) | Risk: low
+   Guidance:
+   - Q6 filters are highly selective: l_shipdate in 1-year range (14% selectivity), l_discount 0.05-0.07 (20%), l_quantity < 24 (50%)
+   - Since lineitem is sorted by l_shipdate, blocks outside [1994-01-01, 1995-01-01) can be skipped entirely
+   - Add zone-map file: lineitem.l_shipdate.zonemap (per-block min/max for 8192-row blocks)
+   - In q6.cpp before line 37 parallel loop: pre-filter chunks using zone-map, only process blocks where max >= DATE_1994_01_01 AND min < DATE_1995_01_01
+   - Estimated blocks skipped: ~86% (6 of 7 years out of range)
+
+4. [io_bound] Add zone-map block skipping for Q1 (Priority: MEDIUM)
+   Target: Q1 | Expected: 1.5-2x speedup (71ms → 35-50ms) | Risk: low
+   Guidance:
+   - Q1 filters l_shipdate <= 1998-09-02 (keeps 98% of data, only skips last 90 days)
+   - With l_shipdate sorted storage, blocks with min > 1998-09-02 can be skipped
+   - Same implementation as Q6: add zone-map check in q1.cpp before line 39 parallel loop
+   - Estimated blocks skipped: ~2-5% (minimal benefit but easy to implement once zone-map infrastructure exists)
+
+5. [cpu_bound] SIMD vectorization for Q1 arithmetic (Priority: MEDIUM)
+   Target: Q1 | Expected: 2-3x speedup (71ms → 25-35ms after zone-maps) | Risk: high
+   Guidance:
+   - q1.cpp lines 44-52: Inner loop processes one row at a time with scalar arithmetic
+   - Use AVX2 intrinsics to process 4 int64 values per iteration (l_extendedprice, l_discount, l_tax all int64)
+   - Load 4 rows at once: __m256i, perform disc_price and charge calculations in parallel, accumulate to SIMD aggregators
+   - Requires per-thread SIMD accumulators for each returnflag/linestatus combination (only 3-4 groups, so feasible)
+   - Reference: ClickHouse's aggregate functions with SIMD (process 4-8 values per instruction)
+
+6. [cpu_bound] SIMD vectorization for Q6 filtering (Priority: MEDIUM)
+   Target: Q6 | Expected: 2x speedup (22ms → 10ms, or 5ms → 2.5ms after zone-maps) | Risk: high
+   Guidance:
+   - q6.cpp lines 43-52: Inner loop has 4 independent comparisons per row
+   - Use AVX2 to process 8 rows simultaneously: load 8 shipdate values, compare against DATE_1994_01_01/DATE_1995_01_01, create mask
+   - Similarly vectorize discount range check and quantity check
+   - Combine masks with AND operation, use _mm256_mask_i64gather_epi64 to gather matching extendedprice/discount values
+   - Compute revenue for 8 rows in parallel with _mm256_mullo_epi64
+
+7. [join_order] Optimize Q3 join order with better selectivity (Priority: LOW)
+   Target: Q3 | Expected: 10-20% additional speedup after parallelization | Risk: low
+   Guidance:
+   - Current: filter customer (150K→30K), filter orders (1.5M→525K), join them, then probe lineitem (6M)
+   - Better: filter customer (150K→30K), build hash table, filter orders and probe simultaneously (selectivity 35% × 20% = 7%), only ~105K orders pass, then join with lineitem
+   - Specifically in q3.cpp lines 40-53: combine o_orderdate filter with customer hash probe in single pass
+   - Reduces intermediate materialization from 525K to 105K orders
+
+8. [cpu_bound] Pre-aggregate in Q3 during lineitem scan (Priority: LOW)
+   Target: Q3 | Expected: 15-25% speedup from reduced hash table pressure | Risk: low
+   Guidance:
+   - q3.cpp lines 93-99: Each matching lineitem row inserts into revenue_by_order hash table
+   - With parallelization, this creates contention (multiple threads updating same orderkey)
+   - Instead: each thread maintains local revenue_by_order map, then merge at end (same pattern as Q1's local_aggs)
+   - Reduces cache thrashing and lock contention in parallel execution
+
+## Summary
+
+CRITICAL: Fix correctness issues (CSV format, scaling arithmetic) before iteration 2. Once passing, prioritize Q3 parallelization (6425ms is unacceptable) and Q6 zone-map skipping (easy 3-5x win). SIMD optimizations are high-reward but high-risk (implementation complexity).

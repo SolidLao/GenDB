@@ -1,0 +1,114 @@
+# Optimization Analysis
+
+## Per-Query Assessment
+- Q3 (5495ms, pass): CPU-bound bottleneck in lineitem aggregation with inefficient linear search within thread-local vectors
+
+## Root Cause Analysis
+
+The implementation already includes several optimizations:
+- ✓ Row group pruning on orders (date filter) and lineitem (shipdate filter)
+- ✓ Column projection (reads only needed columns)
+- ✓ Open hash tables for customer and orders filtering
+- ✓ Thread parallelism for lineitem scan
+- ✓ Partial sort (top-10 instead of full sort)
+
+**Primary Bottleneck: Lines 156-163 (thread-local aggregation)**
+Each thread uses a vector with linear search to aggregate by orderkey. This is O(n) per insertion when the vector grows large. The comment claims "efficient for small result sets" but after filters, Q3 typically has ~10K-50K distinct orderkeys in the result set, distributed across threads. Linear search becomes quadratic overhead.
+
+**Secondary Bottleneck: Lines 196-206 (merge phase)**
+Uses std::unordered_map for merging thread results instead of the already-included OpenHashMap, incurring unnecessary allocation overhead.
+
+**Opportunity: No index utilization**
+Q3 joins on o_custkey and l_orderkey, which are primary/foreign keys. Sorted index files could enable row group-level pruning for these joins.
+
+## Critical Fixes
+None - code compiles and produces correct results.
+
+## Recommended Optimizations
+
+### 1. [cpu_bound] Replace thread-local vectors with OpenHashMap for aggregation
+   Target: Q3 | Expected: 2-3x improvement | Risk: low
+
+   **Guidance:**
+   - Lines 133-140: Change thread_vectors type from `std::vector<std::vector<OrderGroup>>` to `std::vector<OpenHashMap<OrderGroup>>`
+   - Lines 138-139: Remove the reserve(2000) call, initialize each with `OpenHashMap<OrderGroup>(4096)` instead
+   - Lines 156-176: Replace the linear search loop (lines 156-163) with direct hash map operations:
+     ```cpp
+     auto* existing = local_map.find(orderkey);
+     if (existing) {
+         existing->revenue += revenue_contrib;
+     } else {
+         local_map[orderkey] = {orderkey, order_info->orderdate, order_info->shippriority, revenue_contrib};
+     }
+     ```
+   - Lines 196-206: Iterate over thread-local OpenHashMaps instead of vectors
+
+   **Rationale:** Linear search is O(n) per lookup. With ~10K distinct orderkeys split across threads, each thread has ~1K groups on average. This means ~500 comparisons per insert on average, leading to ~30M wasted comparisons for 60M lineitem rows. Hash lookup is O(1), reducing this to ~60M hash probes total.
+
+### 2. [cpu_bound] Use OpenHashMap for merge phase
+   Target: Q3 | Expected: 1.2x improvement | Risk: low
+
+   **Guidance:**
+   - Line 196: Replace `std::unordered_map<int32_t, OrderGroup> merged_map;` with `OpenHashMap<OrderGroup> merged_map(thread_vectors.size() * 4096);`
+   - Lines 197-206: Update iteration to work with OpenHashMap API
+   - Lines 209-213: Convert OpenHashMap to vector by iterating with `.data()` and `.capacity()` methods
+
+   **Rationale:** OpenHashMap is 2-3x faster than std::unordered_map for integer keys. The merge phase processes ~10K groups and is single-threaded, representing ~5-10% of total runtime.
+
+### 3. [io_bound] Use sorted index on o_custkey for selective orders scan
+   Target: Q3 | Expected: 1.5x improvement | Risk: medium
+
+   **Guidance:**
+   - Prerequisite: Ensure sorted index file exists at `/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10/parquet/orders_o_custkey.idx`
+   - After line 58 (building customer hash set), add index-based row group identification:
+     ```cpp
+     // Load o_custkey index to identify row groups containing building customers
+     auto custkey_index = load_index<int32_t>(parquet_dir + "/orders_o_custkey.idx");
+     std::vector<int> custkey_row_groups;
+     for (auto ckey : building_customers) {
+         auto rgs = custkey_index.get_row_groups(ckey);
+         custkey_row_groups.insert(custkey_row_groups.end(), rgs.begin(), rgs.end());
+     }
+     std::sort(custkey_row_groups.begin(), custkey_row_groups.end());
+     custkey_row_groups.erase(std::unique(custkey_row_groups.begin(), custkey_row_groups.end()), custkey_row_groups.end());
+     ```
+   - Line 74: Intersect `orders_row_groups` with `custkey_row_groups` before calling read_parquet_row_groups
+   - Note: Check parquet_reader.h for exact SortedIndex API (lines 411+)
+
+   **Rationale:** Only ~20% of customers have c_mktsegment='BUILDING'. If orders are clustered by o_custkey, index lookup can skip ~80% of orders row groups before reading. Combined with date pruning (~70% skip), this could reduce orders I/O by ~94% total.
+
+### 4. [cpu_bound] SIMD vectorization for revenue computation
+   Target: Q3 | Expected: 1.3x improvement | Risk: high
+
+   **Guidance:**
+   - Lines 145-176: Extract the filter+compute logic into batches of 8 rows using AVX2 intrinsics
+   - Process l_extendedprice and l_discount in SIMD registers:
+     ```cpp
+     #include <immintrin.h>
+     // Batch process 8 rows at a time
+     for (int64_t i = start; i < end - 7; i += 8) {
+         __m256d prices = _mm256_loadu_pd(&l_extendedprice[i]);
+         __m256d discounts = _mm256_loadu_pd(&l_discount[i]);
+         __m256d ones = _mm256_set1_pd(1.0);
+         __m256d factors = _mm256_sub_pd(ones, discounts);
+         __m256d revenues = _mm256_mul_pd(prices, factors);
+         // Store and process individually for hash map insertion
+     }
+     // Handle remainder rows
+     ```
+   - This requires interleaving SIMD computation with scalar hash map operations
+
+   **Rationale:** The revenue computation `l_extendedprice[i] * (1.0 - l_discount[i])` is repeated ~20M times after filters. SIMD can process 4 doubles per cycle with AVX2, or 8 with AVX-512. However, complexity is high because hash map operations are not vectorizable, requiring careful batch design.
+
+### 5. [query_structure] Fuse customer filter into orders scan
+   Target: Q3 | Expected: 1.1x improvement | Risk: low
+
+   **Guidance:**
+   - Lines 37-58: Instead of building a hash set of building_customers, extract the c_custkey values into a sorted vector
+   - Lines 96-102: During orders scan, use binary search on the sorted customer vector instead of hash set lookup
+   - Alternatively, if customer table is small (~1.5M rows), broadcast it to all threads and let each thread build thread-local customer filters
+
+   **Rationale:** OpenHashSet lookup is fast but not cache-friendly for small working sets. A sorted vector with binary search may be faster for ~300K entries (~20% of 1.5M customers). Binary search is log(N) but has better cache locality.
+
+## Summary
+Primary optimization: Replace thread-local vector linear search with OpenHashMap (lines 133-176) — expected 2-3x speedup, targeting ~2000-2500ms. Secondary gains from improved merge (1.2x) and potential index usage (1.5x) could bring total to ~1000-1500ms if indexes are available.

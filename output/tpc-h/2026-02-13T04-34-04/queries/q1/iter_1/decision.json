@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "CRITICAL: Correctness bug must be fixed first - inverted row group pruning logic (line 165) produces wrong results (1 row instead of 4). After fixing, apply highest-impact CPU optimizations: open-addressing hash table (1.3-1.5x), SIMD vectorization (1.5-2x), and eliminate Kahan summation overhead (1.1-1.15x). These are low-risk, well-defined changes targeting the cpu_bound bottleneck. Thread count optimization and I/O tuning are lower priority. With only 1 iteration remaining, prioritize correctness + proven CPU optimizations for 2-3x total speedup target.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["Q1"],
+      "guidance": "CRITICAL CORRECTNESS FIX: Line 165 in q1.cpp has inverted row group pruning logic. Change 'if (s.max_int >= date_threshold)' to 'if (s.min_int <= date_threshold)'. For filter l_shipdate <= threshold, we need row groups where minimum shipdate <= threshold, not maximum >= threshold. Current code keeps future-dated groups and discards historical ones, producing 1 output row instead of 4. This is a blocker - fix before any other changes.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q1"],
+      "guidance": "Apply 3 CPU optimizations: (1) Replace std::unordered_map<GroupKey, AggValues> with open-addressing hash table (robin hood or linear probing) at lines 105, 131, 232-236 for better cache locality. (2) SIMD vectorize the process_chunk loop (lines 121-148): use AVX2/AVX-512 to process 4-8 rows per iteration, vectorize shipdate comparison, disc_price/charge computation, and maintain SIMD accumulators per group (4 groups × 4 metrics), then reduce to hash table. (3) Eliminate Kahan summation (lines 60-93, 142-146): replace with simple += since double precision is sufficient for this workload scale. Expected combined speedup: 2-3x.",
+      "can_parallel": false
+    }
+  ]
+}

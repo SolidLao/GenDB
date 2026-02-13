@@ -1,73 +1,85 @@
 /**
- * GenDB Orchestrator
+ * GenDB Orchestrator (v7)
  *
- * Two-phase agentic system:
- *   Phase 1 (Baseline): Workload Analyzer → Storage/Index Designer → Code Generator → Physical Operator Agent → Evaluator
- *   Phase 2 (Optimization Loop): Learner → Orchestrator Agent → [Conditional Optimization Agent] → Evaluator
+ * Parquet storage + pure C++ code generation + per-query parallel optimization.
  *
- * Optimization agents (conditionally invoked based on bottleneck category):
- *   - Query Rewriter (query_structure): Rewrites SQL queries for better performance
- *   - Join Order Optimizer (join_order): Optimizes physical join order in C++ code
- *   - Execution Optimizer (cpu_bound): Adds thread parallelism and SIMD vectorization
- *   - I/O Optimizer (io_bound): Optimizes storage access (mmap hints, column pruning)
- *   - Physical Operator Agent (algorithm): Changes operator algorithms (hash vs sort)
- *   - Operator Specialist (general/fallback): Handles all optimizations when category unclear
+ * Phase 1 (Analysis + Data Preparation):
+ *   Workload Analyzer → convert_to_parquet.py → generate Makefile + copy parquet_reader.h
  *
- * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
- *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>] [--optimization-target <target>]
+ * Phase 2 (Per-Query Parallel Optimization):
+ *   For each query Qi (all in parallel via Promise.all):
+ *     Iter 0: Query Code Generator → Learner (compile, run, validate)
+ *     Iter 1..N: Orchestrator Agent → [Optimizers] → Learner
+ *   → Assemble main.cpp + queries.h → Final build + validation
+ *
+ * Key changes from v6:
+ *   - No Arrow compute — pure C++ with parquet_reader.h for I/O only
+ *   - No baseline phase — directly generate optimized code
+ *   - Per-query parallel optimization pipelines
+ *   - Each query independently iterated
+ *
+ * Usage: node src/gendb/orchestrator.mjs [--sf <N>] [--max-iterations <N>] [--model <name>]
  */
 
-import { spawn } from "child_process";
-import { readFile, writeFile, mkdir, cp } from "fs/promises";
+import { spawn, execSync } from "child_process";
+import { readFile, writeFile, mkdir, cp, copyFile } from "fs/promises";
 import { resolve, dirname } from "path";
-import { existsSync, readFileSync, rmSync } from "fs";
+import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import {
   DEFAULT_SCHEMA,
   DEFAULT_QUERIES,
   BENCHMARKS_DIR,
   getDataDir,
-  getGendbDir,
+  getParquetDir,
 } from "./config.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const KNOWLEDGE_BASE_PATH = resolve(__dirname, "knowledge");
 const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
+const CONVERT_SCRIPT = resolve(BENCHMARKS_DIR, "tpc-h", "convert_to_parquet.py");
+const PARQUET_READER_H = resolve(__dirname, "utils", "parquet_reader.h");
 import { defaults } from "./gendb.config.mjs";
+
+// Agent configs
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
-import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
-import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
-import { config as evaluatorConfig } from "./agents/evaluator/index.mjs";
+import { config as queryGeneratorConfig } from "./agents/query-generator/index.mjs";
 import { config as learnerConfig } from "./agents/learner/index.mjs";
-import { config as operatorSpecialistConfig } from "./agents/operator-specialist/index.mjs";
-import { config as physicalOperatorConfig } from "./agents/physical-operator-agent/index.mjs";
+import { config as orchestratorAgentConfig } from "./agents/orchestrator/index.mjs";
 import { config as queryRewriterConfig } from "./agents/query-rewriter/index.mjs";
 import { config as joinOrderOptimizerConfig } from "./agents/join-order-optimizer/index.mjs";
 import { config as executionOptimizerConfig } from "./agents/execution-optimizer/index.mjs";
 import { config as ioOptimizerConfig } from "./agents/io-optimizer/index.mjs";
-import { config as orchestratorAgentConfig } from "./agents/orchestrator/index.mjs";
+import { config as indexOptimizerConfig } from "./agents/index-optimizer/index.mjs";
+
 import {
   createRunId,
   getWorkloadName,
   createRunDir,
   updateLatestSymlink,
-  createIterationDir,
 } from "./utils/paths.mjs";
-import { readTOON, writeTOON } from "./utils/toon.mjs";
-import { encode as toonEncode } from "@toon-format/toon";
+
+const BUILD_INDEXES_SCRIPT = resolve(BENCHMARKS_DIR, "tpc-h", "build_indexes.py");
+
+// Optimizer name → agent config mapping (5 optimizers)
+const OPTIMIZER_MAP = {
+  execution_optimizer: executionOptimizerConfig,
+  io_optimizer: ioOptimizerConfig,
+  join_order_optimizer: joinOrderOptimizerConfig,
+  query_rewriter: queryRewriterConfig,
+  index_optimizer: indexOptimizerConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Parse CLI args, merging over gendb.config defaults. */
 function parseArgs(argv) {
   const args = {
     schema: DEFAULT_SCHEMA,
     queries: DEFAULT_QUERIES,
-    dataDir: null, // resolved below from --data-dir or --sf
-    gendbDir: null, // resolved below from --gendb-dir or --sf
+    dataDir: null,
+    parquetDir: null,
     scaleFactor: defaults.scaleFactor,
     maxIterations: defaults.maxOptimizationIterations,
     model: defaults.model,
@@ -77,27 +89,17 @@ function parseArgs(argv) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
     if (argv[i] === "--queries" && argv[i + 1]) args.queries = resolve(argv[++i]);
     if (argv[i] === "--data-dir" && argv[i + 1]) args.dataDir = resolve(argv[++i]);
-    if (argv[i] === "--gendb-dir" && argv[i + 1]) args.gendbDir = resolve(argv[++i]);
+    if (argv[i] === "--parquet-dir" && argv[i + 1]) args.parquetDir = resolve(argv[++i]);
     if (argv[i] === "--sf" && argv[i + 1]) args.scaleFactor = parseInt(argv[++i], 10);
     if (argv[i] === "--max-iterations" && argv[i + 1]) args.maxIterations = parseInt(argv[++i], 10);
     if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
   }
-  // If no explicit --data-dir, resolve from scale factor
-  if (!args.dataDir) {
-    args.dataDir = getDataDir(defaults.targetBenchmark, args.scaleFactor);
-  }
-  // If no explicit --gendb-dir, resolve from scale factor
-  if (!args.gendbDir) {
-    args.gendbDir = getGendbDir(defaults.targetBenchmark, args.scaleFactor);
-  }
+  if (!args.dataDir) args.dataDir = getDataDir(defaults.targetBenchmark, args.scaleFactor);
+  if (!args.parquetDir) args.parquetDir = getParquetDir(defaults.targetBenchmark, args.scaleFactor);
   return args;
 }
 
-/**
- * Read, update, and write run.json atomically.
- * `updater` receives the current run meta object and should mutate it.
- */
 async function updateRunMeta(runDir, updater) {
   const runMetaPath = resolve(runDir, "run.json");
   const runMeta = JSON.parse(await readFile(runMetaPath, "utf-8"));
@@ -116,19 +118,17 @@ const MODEL_PRICING = {
   opus: { input: 15, output: 75, cache_read: 1.50, cache_creation: 18.75 },
 };
 
-/** Estimate cost from token counts with cache-aware pricing. */
 function estimateCost(model, tokens) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.sonnet;
   const perM = 1_000_000;
-  const inputCost = (tokens.input * pricing.input) / perM;
-  const outputCost = (tokens.output * pricing.output) / perM;
-  const cacheReadCost = ((tokens.cache_read || 0) * pricing.cache_read) / perM;
-  const cacheCreationCost = ((tokens.cache_creation || 0) * pricing.cache_creation) / perM;
-  return inputCost + outputCost + cacheReadCost + cacheCreationCost;
+  return (tokens.input * pricing.input) / perM
+    + (tokens.output * pricing.output) / perM
+    + ((tokens.cache_read || 0) * pricing.cache_read) / perM
+    + ((tokens.cache_creation || 0) * pricing.cache_creation) / perM;
 }
 
 // ---------------------------------------------------------------------------
-// Telemetry tracking
+// Telemetry
 // ---------------------------------------------------------------------------
 
 const telemetryData = {
@@ -146,7 +146,6 @@ function recordAgentTelemetry(phase, agentName, durationMs, tokens, costUsd) {
   }
   const p = telemetryData.phases[phase];
   p.total_ms += durationMs;
-  if (!p.agents) p.agents = {};
   if (!p.agents[agentName]) {
     p.agents[agentName] = { duration_ms: 0, tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 }, cost_usd: 0 };
   }
@@ -172,10 +171,10 @@ function formatDuration(ms) {
   return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
 }
 
-/**
- * Invoke a Claude Code subprocess with the given system prompt and user prompt.
- * Returns { result, durationMs, tokens, costUsd }.
- */
+// ---------------------------------------------------------------------------
+// Agent runner
+// ---------------------------------------------------------------------------
+
 function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) {
   return new Promise((resolveP, rejectP) => {
     const args = [
@@ -202,14 +201,8 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
 
     let stdout = "";
     let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
     child.on("close", (code, signal) => {
       const durationMs = Date.now() - startTime;
@@ -219,7 +212,6 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
         if (stderr) console.error(`[stderr] ${stderr}`);
         rejectP(new Error(`Agent "${name}" failed (${exitInfo}): ${stderr}`));
       } else {
-        // Parse JSON output for telemetry
         let resultText = stdout;
         let tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
         let costUsd = 0;
@@ -233,13 +225,10 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
             cache_read: usage.cache_read_input_tokens || 0,
             cache_creation: usage.cache_creation_input_tokens || 0,
           };
-          // Calculate cost from token counts with cache-aware pricing
           costUsd = estimateCost(model || defaults.model, tokens);
         } catch {
-          // If JSON parsing fails, treat entire stdout as text
           resultText = stdout;
         }
-
         console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
         resolveP({ result: resultText, durationMs, tokens, costUsd });
       }
@@ -251,7 +240,6 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
   });
 }
 
-/** Safely read and parse a JSON file, returning null on failure. */
 async function readJSON(path) {
   try {
     return JSON.parse(await readFile(path, "utf-8"));
@@ -260,386 +248,257 @@ async function readJSON(path) {
   }
 }
 
-/**
- * Convert a JSON file written by an agent to TOON format in-place.
- * Agents write JSON (which LLMs produce reliably), and the orchestrator
- * converts to TOON post-hoc for token efficiency when downstream agents read the file.
- * Returns the parsed object, or null on failure.
- */
-async function convertJsonFileToTOON(jsonPath, toonPath) {
-  try {
-    const content = await readFile(jsonPath, "utf-8");
-    const obj = JSON.parse(content);
-    await writeFile(toonPath, toonEncode(obj));
-    return obj;
-  } catch (err) {
-    console.error(`[Orchestrator] Warning: could not convert ${jsonPath} to TOON: ${err.message}`);
-    return null;
-  }
-}
-
-/** Copy a directory recursively. */
 async function copyDir(src, dest) {
   await cp(src, dest, { recursive: true });
 }
 
-/** Format benchmark comparison results as a prompt section (or empty string if unavailable). */
-function formatBenchmarkContext(benchmarkResults) {
+function formatBenchmarkText(benchmarkResults) {
   if (!benchmarkResults) return "";
-  const lines = [
-    "",
-    "## Benchmark Comparison (reference targets)",
-    "Performance of other database systems on the same workload and scale factor.",
-    "Use these as optimization targets — the goal is to close the gap with the fastest system.",
-    "```toon",
-    toonEncode(benchmarkResults),
-    "```",
-  ];
-  return lines.join("\n");
+  let text = "\n## Benchmark Comparison (targets to beat)\n";
+  for (const [system, data] of Object.entries(benchmarkResults)) {
+    if (typeof data === "object" && data.queries) {
+      text += `${system}:`;
+      for (const [q, ms] of Object.entries(data.queries)) {
+        text += ` ${q}=${ms}ms`;
+      }
+      text += "\n";
+    }
+  }
+  return text;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: Baseline Pipeline
+// Query parsing
 // ---------------------------------------------------------------------------
 
-async function runBaseline(args, runDir, schema, queries) {
-  console.log("\n[Orchestrator] ========== PHASE 1: BASELINE ==========\n");
+function parseQueries(queriesContent) {
+  const queries = [];
+  const parts = queriesContent.split(/^-- (Q\d+)/m);
+  for (let i = 1; i < parts.length; i += 2) {
+    const id = parts[i].trim();
+    let body = parts[i + 1];
+    body = body.replace(/^[^\n]*\n/, "");
+    body = body.replace(/^--[^\n]*\n/gm, "");
+    const sql = body.trim();
+    const name = id.toLowerCase();
+    if (sql) {
+      queries.push({ id, name, sql });
+    }
+  }
+  return queries;
+}
 
-  // Initialize step tracking
+// ---------------------------------------------------------------------------
+// Generate main.cpp, queries.h, and Makefile
+// ---------------------------------------------------------------------------
+
+async function generateBuildFiles(generatedDir, queries) {
+  // queries.h
+  const declarations = queries.map(
+    (q) => `void run_${q.name}(const std::string& parquet_dir, const std::string& results_dir);`
+  ).join("\n");
+
+  const queriesH = `#pragma once
+#include <string>
+
+${declarations}
+`;
+  await writeFile(resolve(generatedDir, "queries", "queries.h"), queriesH);
+
+  // main.cpp
+  const calls = queries.map((q) => {
+    return `    run_${q.name}(parquet_dir, results_dir);`;
+  }).join("\n");
+
+  const mainCpp = `#include <iostream>
+#include <string>
+#include <chrono>
+#include "queries/queries.h"
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <parquet_dir> [results_dir]" << std::endl;
+        return 1;
+    }
+    std::string parquet_dir = argv[1];
+    std::string results_dir = (argc >= 3) ? argv[2] : "";
+
+    auto total_start = std::chrono::high_resolution_clock::now();
+
+${calls}
+
+    auto total_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+    std::cout << "Total execution time: " << total_ms << " ms" << std::endl;
+
+    return 0;
+}
+`;
+  await writeFile(resolve(generatedDir, "main.cpp"), mainCpp);
+
+  // Makefile — links Parquet/Arrow for I/O only, parquet_reader.h is header-only
+  const makefile = `PYARROW_DIR := $(shell python3 -c "import pyarrow; print(pyarrow.__path__[0])")
+ARROW_INCLUDE := -I$(PYARROW_DIR)/include
+ARROW_LIBS := -L$(PYARROW_DIR) -larrow -lparquet -Wl,-rpath,$(PYARROW_DIR)
+
+CXX = g++
+CXXFLAGS = -O2 -std=c++17 -Wall $(ARROW_INCLUDE) -I.
+LDFLAGS = $(ARROW_LIBS) -lpthread
+
+QUERY_SRCS := $(wildcard queries/*.cpp)
+QUERY_OBJS := $(QUERY_SRCS:.cpp=.o)
+
+.PHONY: all clean setup_symlinks
+
+all: main
+
+setup_symlinks:
+\t@cd $(PYARROW_DIR) && for f in *.so.*[0-9][0-9][0-9]; do base=$$(echo $$f | sed 's/\\.so\\..*/\\.so/'); [ ! -e $$base ] && ln -sf $$f $$base || true; done
+
+main: setup_symlinks main.o $(QUERY_OBJS)
+\t$(CXX) $(CXXFLAGS) -o main main.o $(QUERY_OBJS) $(LDFLAGS)
+
+main.o: main.cpp queries/queries.h
+\t$(CXX) $(CXXFLAGS) -c main.cpp -o main.o
+
+queries/%.o: queries/%.cpp parquet_reader.h
+\t$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+\trm -f main *.o queries/*.o
+`;
+  await writeFile(resolve(generatedDir, "Makefile"), makefile);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Analysis + Data Preparation
+// ---------------------------------------------------------------------------
+
+async function runPhase1(args, runDir, schema, queries) {
+  console.log("\n[Orchestrator] ========== PHASE 1: ANALYSIS + DATA PREPARATION ==========\n");
+
   await updateRunMeta(runDir, (meta) => {
     meta.dataDir = args.dataDir;
-    meta.gendbDir = args.gendbDir;
+    meta.parquetDir = args.parquetDir;
     meta.scaleFactor = args.scaleFactor;
     meta.maxIterations = args.maxIterations;
     meta.model = args.model;
     meta.optimizationTarget = args.optimizationTarget;
-    meta.phase1 = {
-      status: "running",
-      steps: {
-        workload_analysis: { status: "pending" },
-        storage_design: { status: "pending" },
-        code_generation: { status: "pending" },
-        operator_library: { status: "pending" },
-        evaluation: { status: "pending" },
-      },
-    };
+    meta.phase1 = { status: "running" };
   });
-
-  // Clear gendb storage from previous runs to avoid naming convention conflicts
-  // Each run generates code with potentially different file naming, so stale data must be removed
-  if (existsSync(args.gendbDir)) {
-    rmSync(args.gendbDir, { recursive: true, force: true });
-    console.log(`[Orchestrator] Cleared previous gendb storage at ${args.gendbDir}`);
-  }
 
   // --- Step 1: Workload Analysis ---
   console.log("\n[Orchestrator] === Step 1: Workload Analysis ===");
-
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.workload_analysis.status = "running";
-    meta.phase1.steps.workload_analysis.startedAt = new Date().toISOString();
-  });
-
-  const analyzerSystemPrompt = await readFile(workloadAnalyzerConfig.promptPath, "utf-8");
-  const workloadAnalysisJsonPath = resolve(runDir, "workload_analysis.json");
-  const workloadAnalysisPath = resolve(runDir, "workload_analysis.toon");
-
-  const analyzerUserPrompt = [
-    "Analyze the following TPC-H workload.",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    "",
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    `Read relevant knowledge files to inform your analysis.`,
-    "",
-    "## Schema",
-    "```sql",
-    schema.trim(),
-    "```",
-    "",
-    "## Queries",
-    "```sql",
-    queries.trim(),
-    "```",
-    "",
-    `IMPORTANT: You MUST use the Write tool to write your JSON analysis to EXACTLY this path: ${workloadAnalysisJsonPath}`,
-    `Use this EXACT file path — do NOT change the filename or extension. Do NOT just print it.`,
-  ].join("\n");
+  const workloadAnalysisPath = resolve(runDir, "workload_analysis.txt");
+  const parquetConfigPath = resolve(runDir, "parquet_config.json");
 
   const waResult = await runAgent(workloadAnalyzerConfig.name, {
-    systemPrompt: analyzerSystemPrompt,
-    userPrompt: analyzerUserPrompt,
+    systemPrompt: await readFile(workloadAnalyzerConfig.promptPath, "utf-8"),
+    userPrompt: [
+      "Analyze the following workload and design Parquet configuration.",
+      "",
+      `## Optimization Target: ${args.optimizationTarget}`,
+      `## Scale Factor: ${args.scaleFactor}`,
+      "",
+      "## Schema",
+      "```sql",
+      schema.trim(),
+      "```",
+      "",
+      "## Queries",
+      "```sql",
+      queries.trim(),
+      "```",
+      "",
+      `Write your workload analysis to: ${workloadAnalysisPath}`,
+      `Write your Parquet configuration JSON to: ${parquetConfigPath}`,
+    ].join("\n"),
     allowedTools: workloadAnalyzerConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
   recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
 
-  // Convert agent's JSON output to TOON for downstream token efficiency
-  const analysis = await convertJsonFileToTOON(workloadAnalysisJsonPath, workloadAnalysisPath);
-  if (!analysis) {
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase1.steps.workload_analysis.status = "failed";
-      meta.phase1.status = "failed";
-      meta.status = "failed";
-    });
-    throw new Error("Workload analysis failed — could not read/parse workload_analysis.toon.");
+  if (!existsSync(workloadAnalysisPath)) {
+    throw new Error("Workload analysis failed — analysis file not created.");
+  }
+  console.log("[Orchestrator] Workload analysis written.");
+
+  // --- Step 2: Convert .tbl → Parquet ---
+  console.log("\n[Orchestrator] === Step 2: Data Preparation (.tbl → Parquet) ===");
+  const convertStart = Date.now();
+
+  const convertArgs = [
+    "python3", CONVERT_SCRIPT,
+    "--data-dir", args.dataDir,
+    "--output-dir", args.parquetDir,
+  ];
+  if (existsSync(parquetConfigPath)) {
+    convertArgs.push("--config", parquetConfigPath);
   }
 
-  console.log("\n[Orchestrator] Workload analysis written successfully.");
-  console.log(`[Orchestrator] Tables analyzed: ${Object.keys(analysis.tables || {}).length}`);
-  console.log(`[Orchestrator] Joins found: ${(analysis.joins || []).length}`);
-  console.log(`[Orchestrator] Filters found: ${(analysis.filters || []).length}`);
-
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.workload_analysis.status = "completed";
-    meta.phase1.steps.workload_analysis.completedAt = new Date().toISOString();
-  });
-
-  // --- Step 2: Storage/Index Design ---
-  console.log("\n[Orchestrator] === Step 2: Storage/Index Design ===");
-
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.storage_design.status = "running";
-    meta.phase1.steps.storage_design.startedAt = new Date().toISOString();
-  });
-
-  const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
-  const storageDesignJsonPath = resolve(runDir, "storage_design.json");
-  const storageDesignPath = resolve(runDir, "storage_design.toon");
-
-  const designerUserPrompt = [
-    "Design the storage layout and index structures for this workload.",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    "",
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    `Read relevant knowledge files (especially storage/ and indexing/) to inform your design decisions.`,
-    "",
-    "## Workload Analysis",
-    `Read the workload analysis from: ${workloadAnalysisPath}`,
-    "",
-    "## Schema",
-    "```sql",
-    schema.trim(),
-    "```",
-    "",
-    `IMPORTANT: You MUST use the Write tool to write your JSON design to EXACTLY this path: ${storageDesignJsonPath}`,
-    `Use this EXACT file path — do NOT change the filename or extension. Do NOT just print it.`,
-  ].join("\n");
-
-  const sdResult = await runAgent(storageDesignerConfig.name, {
-    systemPrompt: designerSystemPrompt,
-    userPrompt: designerUserPrompt,
-    allowedTools: storageDesignerConfig.allowedTools,
-    model: args.model,
-    cwd: runDir,
-  });
-  recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
-
-  // Convert agent's JSON output to TOON for downstream token efficiency
-  const design = await convertJsonFileToTOON(storageDesignJsonPath, storageDesignPath);
-  if (!design) {
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase1.steps.storage_design.status = "failed";
-      meta.phase1.status = "failed";
-      meta.status = "failed";
+  try {
+    const output = execSync(convertArgs.join(" "), {
+      encoding: "utf-8",
+      timeout: 600_000,
     });
-    throw new Error("Storage design failed — could not read/parse storage_design.toon.");
+    console.log(output);
+  } catch (err) {
+    throw new Error(`Parquet conversion failed: ${err.message}`);
   }
 
-  console.log("\n[Orchestrator] Storage design written successfully.");
-  console.log(`[Orchestrator] Tables designed: ${Object.keys(design.tables || {}).length}`);
+  const convertMs = Date.now() - convertStart;
+  console.log(`[Orchestrator] Parquet conversion completed (${formatDuration(convertMs)})`);
 
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.storage_design.status = "completed";
-    meta.phase1.steps.storage_design.completedAt = new Date().toISOString();
-  });
+  // Validate Parquet files exist
+  const requiredParquet = ["lineitem.parquet", "orders.parquet", "customer.parquet", "nation.parquet"];
+  const missingParquet = requiredParquet.filter((f) => !existsSync(resolve(args.parquetDir, f)));
+  if (missingParquet.length > 0) {
+    throw new Error(`Parquet conversion incomplete — missing: ${missingParquet.join(", ")}`);
+  }
 
-  // --- Step 3: Code Generation ---
-  console.log("\n[Orchestrator] === Step 3: Code Generation ===");
+  // --- Step 3: Build indexes ---
+  console.log("\n[Orchestrator] === Step 3: Build Indexes ===");
+  const indexDir = resolve(args.parquetDir, "indexes");
+  if (existsSync(parquetConfigPath)) {
+    const indexStart = Date.now();
+    try {
+      const output = execSync(
+        `python3 ${BUILD_INDEXES_SCRIPT} --parquet-dir ${args.parquetDir} --output-dir ${indexDir} --config ${parquetConfigPath}`,
+        { encoding: "utf-8", timeout: 300_000 }
+      );
+      console.log(output);
+      const indexMs = Date.now() - indexStart;
+      console.log(`[Orchestrator] Index building completed (${formatDuration(indexMs)})`);
+    } catch (err) {
+      console.warn("[Orchestrator] Warning: index building failed: " + err.message);
+    }
+  } else {
+    console.log("[Orchestrator] No parquet config — skipping index building.");
+  }
 
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.code_generation.status = "running";
-    meta.phase1.steps.code_generation.startedAt = new Date().toISOString();
-  });
-
-  const generatorSystemPrompt = await readFile(codeGeneratorConfig.promptPath, "utf-8");
+  // --- Step 4: Prepare generated directory with infrastructure ---
+  console.log("\n[Orchestrator] === Step 4: Generate Infrastructure ===");
   const generatedDir = resolve(runDir, "generated");
   await mkdir(generatedDir, { recursive: true });
-  await mkdir(resolve(generatedDir, "utils"), { recursive: true });
-  await mkdir(resolve(generatedDir, "storage"), { recursive: true });
-  await mkdir(resolve(generatedDir, "index"), { recursive: true });
   await mkdir(resolve(generatedDir, "queries"), { recursive: true });
 
-  const generatorUserPrompt = [
-    "Generate C++ code for this workload (two-program architecture: ingest + main).",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    "",
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    `Consult relevant knowledge files for implementation patterns and optimization techniques.`,
-    `Read storage/persistent-storage.md for binary columnar storage and mmap patterns.`,
-    "",
-    "## Input Files",
-    `- Workload analysis: ${workloadAnalysisPath}`,
-    `- Storage design: ${storageDesignPath}`,
-    `- Schema: ${args.schema}`,
-    `- Queries: ${args.queries}`,
-    "",
-    `## Data Directory (source .tbl files)`,
-    `.tbl files are located at: ${args.dataDir}`,
-    "",
-    `## GenDB Storage Directory (persistent binary storage)`,
-    `The ingest program should write binary columnar data to: ${args.gendbDir}`,
-    `The main program should read from this directory.`,
-    "",
-    `## Output Directory`,
-    `Write all generated files to: ${generatedDir}`,
-    `Subdirectories already exist: utils/, storage/, index/, queries/`,
-    "",
-    `Files to produce (at minimum):`,
-    `- ${resolve(generatedDir, "utils/date_utils.h")}`,
-    `- ${resolve(generatedDir, "storage/storage.h")}`,
-    `- ${resolve(generatedDir, "storage/storage.cpp")}`,
-    `- ${resolve(generatedDir, "index/index.h")}`,
-    `- ${resolve(generatedDir, "queries/queries.h")} (plus one .cpp per query found in queries.sql)`,
-    `- ${resolve(generatedDir, "ingest.cpp")}`,
-    `- ${resolve(generatedDir, "main.cpp")}`,
-    `- ${resolve(generatedDir, "Makefile")}`,
-    "",
-    `IMPORTANT: Use the Write tool to create each file. The files must compile with g++ -O2 -std=c++17.`,
-    `After writing all files, compile AND run to verify correctness:`,
-    `  cd ${generatedDir} && make clean && make all`,
-    `  cd ${generatedDir} && ./ingest ${args.dataDir} ${args.gendbDir}`,
-    `  cd ${generatedDir} && ./main ${args.gendbDir}`,
-    `If it crashes or produces wrong results, fix the code and re-run (up to 2 fix attempts).`,
-  ].join("\n");
+  // Copy parquet_reader.h to generated directory
+  await copyFile(PARQUET_READER_H, resolve(generatedDir, "parquet_reader.h"));
+  console.log("[Orchestrator] parquet_reader.h copied.");
 
-  const cgResult = await runAgent(codeGeneratorConfig.name, {
-    systemPrompt: generatorSystemPrompt,
-    userPrompt: generatorUserPrompt,
-    allowedTools: codeGeneratorConfig.allowedTools,
-    model: args.model,
-    cwd: runDir,
-  });
-  recordAgentTelemetry("phase1", "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
-
-  // Verify generated files exist
-  const requiredFiles = [
-    "storage/storage.h",
-    "storage/storage.cpp",
-    "ingest.cpp",
-    "main.cpp",
-    "Makefile",
-  ];
-  const missingFiles = requiredFiles.filter((f) => !existsSync(resolve(generatedDir, f)));
-
-  if (missingFiles.length > 0) {
-    console.error(`[Orchestrator] Error: missing generated files: ${missingFiles.join(", ")}`);
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase1.steps.code_generation.status = "failed";
-      meta.phase1.steps.code_generation.error = `Missing files: ${missingFiles.join(", ")}`;
-      meta.phase1.status = "failed";
-      meta.status = "failed";
-    });
-    throw new Error(`Code generation incomplete — missing: ${missingFiles.join(", ")}`);
-  }
-
-  console.log("\n[Orchestrator] Code generation completed. All files present.");
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.code_generation.status = "completed";
-    meta.phase1.steps.code_generation.completedAt = new Date().toISOString();
-  });
-
-  // --- Step 4: Physical Operator Library Creation ---
-  console.log("\n[Orchestrator] === Step 4: Physical Operator Library ===");
-
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.operator_library.status = "running";
-    meta.phase1.steps.operator_library.startedAt = new Date().toISOString();
-  });
-
-  const physOpSystemPrompt = await readFile(physicalOperatorConfig.promptPath, "utf-8");
-  await mkdir(resolve(generatedDir, "operators"), { recursive: true });
-
-  const physOpUserPrompt = [
-    "Create a reusable operator library from the generated query code (Phase 1 - Baseline).",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    "",
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    `Read relevant knowledge files for operator implementation patterns.`,
-    "",
-    "## Input Files",
-    `- Workload analysis: ${workloadAnalysisPath}`,
-    `- Storage design: ${storageDesignPath}`,
-    `- Current generated code: ${generatedDir}`,
-    "",
-    "## Task",
-    "Extract common operator patterns (scans, hash joins, hash aggregations) from the query files",
-    "and create reusable operator implementations in the operators/ subdirectory.",
-    "Update query files to use these operators instead of inline implementations.",
-    "",
-    `## Output Directory`,
-    `Create operator library files in: ${resolve(generatedDir, "operators")}`,
-    `Examples: operators/scan.h, operators/hash_join.h, operators/hash_agg.h`,
-    `Update query files in: ${resolve(generatedDir, "queries")} to use these operators`,
-    "",
-    `## Verification`,
-    `After creating the operator library, compile and run to verify correctness:`,
-    `  cd ${generatedDir} && make clean && make all`,
-    `  cd ${generatedDir} && ./main ${args.gendbDir}`,
-    `Results must match the original implementation (same rows, same values).`,
-  ].join("\n");
-
-  const poResult = await runAgent(physicalOperatorConfig.name, {
-    systemPrompt: physOpSystemPrompt,
-    userPrompt: physOpUserPrompt,
-    allowedTools: physicalOperatorConfig.allowedTools,
-    model: args.model,
-    cwd: runDir,
-  });
-  recordAgentTelemetry("phase1", "physical_operator_agent", poResult.durationMs, poResult.tokens, poResult.costUsd);
-
-  console.log("\n[Orchestrator] Physical operator library creation completed.");
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.operator_library.status = "completed";
-    meta.phase1.steps.operator_library.completedAt = new Date().toISOString();
-  });
-
-  // --- Step 5: Evaluation ---
-  console.log("\n[Orchestrator] === Step 5: Evaluation ===");
-
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.evaluation.status = "running";
-    meta.phase1.steps.evaluation.startedAt = new Date().toISOString();
-  });
-
-  const evaluationJsonPath = resolve(runDir, "evaluation.json");
-  const evaluationPath = resolve(runDir, "evaluation.toon");
-  // Phase 1 evaluator: run ingest if gendb storage doesn't exist, then main
-  const evResult = await runEvaluator(args, runDir, generatedDir, evaluationJsonPath);
-  recordAgentTelemetry("phase1", "evaluator", evResult.durationMs, evResult.tokens, evResult.costUsd);
-
-  // Convert agent's JSON output to TOON for downstream token efficiency
-  const evaluation = await convertJsonFileToTOON(evaluationJsonPath, evaluationPath);
-  if (evaluation) {
-    console.log("\n[Orchestrator] Evaluation completed.");
-    console.log(`[Orchestrator] Overall status: ${evaluation.overall_status}`);
-    if (evaluation.summary) console.log(`[Orchestrator] Summary: ${evaluation.summary}`);
-
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase1.steps.evaluation.status = "completed";
-      meta.phase1.steps.evaluation.completedAt = new Date().toISOString();
-      meta.phase1.steps.evaluation.overall_status = evaluation.overall_status;
-    });
-  } else {
-    console.error("[Orchestrator] Warning: could not read/parse evaluation.toon");
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase1.steps.evaluation.status = "completed_with_warnings";
-      meta.phase1.steps.evaluation.warning = "Could not parse evaluation.toon";
-    });
+  // Setup symlinks for Arrow/Parquet shared libraries
+  try {
+    // Write a temporary Makefile just for symlinks
+    const tempMakefile = `PYARROW_DIR := $(shell python3 -c "import pyarrow; print(pyarrow.__path__[0])")
+.PHONY: setup_symlinks
+setup_symlinks:
+\t@cd $(PYARROW_DIR) && for f in *.so.*[0-9][0-9][0-9]; do base=$$(echo $$f | sed 's/\\.so\\..*/\\.so/'); [ ! -e $$base ] && ln -sf $$f $$base || true; done
+`;
+    await writeFile(resolve(generatedDir, "Makefile"), tempMakefile);
+    execSync("make setup_symlinks", { cwd: generatedDir, encoding: "utf-8", timeout: 30_000 });
+  } catch (err) {
+    console.warn("[Orchestrator] Warning: symlink setup issue: " + err.message);
   }
 
   await updateRunMeta(runDir, (meta) => {
@@ -647,481 +506,495 @@ async function runBaseline(args, runDir, schema, queries) {
     meta.phase1.completedAt = new Date().toISOString();
   });
 
-  return { generatedDir, evaluationPath };
+  return { generatedDir };
 }
 
 // ---------------------------------------------------------------------------
-// Shared: Evaluator runner
+// Per-Query Optimization Pipeline
 // ---------------------------------------------------------------------------
 
-async function runEvaluator(args, runDir, generatedDir, evaluationJsonPath, { skipIngest = false } = {}) {
-  const evaluatorSystemPrompt = await readFile(evaluatorConfig.promptPath, "utf-8");
+async function runQueryPipeline(query, args, runDir, templateGeneratedDir, groundTruthDir, parsedQueries) {
+  const maxIter = args.maxIterations;
+  const queryDir = resolve(runDir, "queries", query.name);
+  await mkdir(queryDir, { recursive: true });
 
-  const gendbDirExists = existsSync(args.gendbDir);
-  const shouldIngest = !skipIngest && !gendbDirExists;
+  console.log(`\n[Pipeline ${query.id}] Starting optimization pipeline (max ${maxIter} iterations)`);
 
-  // Set up results directory for file-based comparison
-  const resultsDir = resolve(dirname(evaluationJsonPath), "query_results");
-  await mkdir(resultsDir, { recursive: true });
+  // Per-query optimization history
+  const historyPath = resolve(queryDir, "optimization_history.txt");
+  let historyText = `# Optimization History for ${query.id}\n`;
+  await writeFile(historyPath, historyText);
 
-  // Ground truth directory
-  const groundTruthDir = resolve(
-    BENCHMARKS_DIR, defaults.targetBenchmark, "query_results"
-  );
   const hasGroundTruth = existsSync(groundTruthDir);
 
-  const evaluatorUserPrompt = [
-    "Evaluate the generated C++ code (two-program architecture: ingest + main).",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    "",
-    `## Generated code directory`,
-    `${generatedDir}`,
-    "",
-    `## Data directory (source .tbl files)`,
-    `${args.dataDir}`,
-    "",
-    `## GenDB storage directory (persistent binary storage)`,
-    `${args.gendbDir}`,
-    "",
-    `## Query results directory`,
-    `${resultsDir}`,
-    "",
-    `## Evaluation steps`,
-    `1. Compile: cd ${generatedDir} && make clean && make all`,
-    shouldIngest
-      ? `2. Ingest (one-time): cd ${generatedDir} && ./ingest ${args.dataDir} ${args.gendbDir}`
-      : `2. Ingest: SKIP — persistent storage already exists at ${args.gendbDir}`,
-    `3. Run queries with result output: cd ${generatedDir} && ./main ${args.gendbDir} ${resultsDir}`,
-    `   This writes CSV files to ${resultsDir}/Q<N>.csv and prints timing to terminal.`,
-    hasGroundTruth
-      ? `4. Validate correctness: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${resultsDir}`
-      : `4. Validate correctness: No ground truth available — check row counts and values manually from terminal output.`,
-    hasGroundTruth
-      ? `   The comparison tool outputs JSON with per-query match status. Use this for correctness validation.`
-      : "",
-    "",
-    `IMPORTANT: Write your evaluation report as JSON to EXACTLY this path: ${evaluationJsonPath}`,
-    `Use this EXACT file path — do NOT change the filename or extension.`,
-    `Use the Write tool to create this file. Do NOT write it inside generated/ — write it to the exact path above.`,
-    `Report ingestion_time_ms separately from query timing. The primary metric is query execution time from ./main.`,
-    `Do NOT read or compare full query result rows from terminal output — use the comparison tool instead.`,
-  ].join("\n");
+  // Track best result for this query
+  let bestIterDir = null;
+  let bestEvalPath = null;
+  let bestTimeMs = Infinity;
 
-  const evalResult = await runAgent(evaluatorConfig.name, {
-    systemPrompt: evaluatorSystemPrompt,
-    userPrompt: evaluatorUserPrompt,
-    allowedTools: evaluatorConfig.allowedTools,
+  // =========================================================================
+  // Iteration 0: Initial Code Generation
+  // =========================================================================
+  console.log(`\n[Pipeline ${query.id}] --- Iteration 0: Code Generation ---`);
+
+  const iter0Dir = resolve(queryDir, "iter_0");
+  const iter0GenDir = resolve(iter0Dir, "generated");
+  await mkdir(resolve(iter0GenDir, "queries"), { recursive: true });
+
+  // Copy infrastructure (Makefile, parquet_reader.h)
+  await copyDir(templateGeneratedDir, iter0GenDir);
+
+  const iter0EvalPath = resolve(iter0Dir, "evaluation.json");
+  const iter0RecsPath = resolve(iter0Dir, "recommendations.txt");
+  const iter0ResultsDir = resolve(iter0Dir, "query_results");
+  await mkdir(iter0ResultsDir, { recursive: true });
+
+  // --- Generate query code ---
+  const qgSystemPrompt = await readFile(queryGeneratorConfig.promptPath, "utf-8");
+  const qgResult = await runAgent(`${queryGeneratorConfig.name} (${query.id})`, {
+    systemPrompt: qgSystemPrompt,
+    userPrompt: [
+      `Generate a high-performance C++ implementation for query ${query.id}.`,
+      "",
+      `## SQL Query`,
+      "```sql",
+      query.sql,
+      "```",
+      "",
+      `## Schema: ${args.schema}`,
+      `## Parquet Data Directory: ${args.parquetDir}`,
+      `## Index Directory: ${resolve(args.parquetDir, "indexes")} (sorted index files for selective lookups)`,
+      `## Workload Analysis: ${resolve(runDir, "workload_analysis.txt")}`,
+      `## Output Directory: ${iter0GenDir}`,
+      "",
+      `Write the query implementation to: ${resolve(iter0GenDir, "queries", query.name + ".cpp")}`,
+      `The function MUST be named: run_${query.name}`,
+      `The function signature MUST be: void run_${query.name}(const std::string& parquet_dir, const std::string& results_dir)`,
+      "",
+      `IMPORTANT: The file must #include "parquet_reader.h" (already in the output directory).`,
+      `Use comma (,) delimiter for CSV output.`,
+      `Use std::fixed << std::setprecision(2) for decimal values.`,
+      `Index files (.idx) may be available in the index directory for selective lookups — check what exists.`,
+    ].join("\n"),
+    allowedTools: queryGeneratorConfig.allowedTools,
     model: args.model,
     cwd: runDir,
   });
-  return evalResult;
-}
+  recordAgentTelemetry(`${query.name}_iter0`, "query_generator", qgResult.durationMs, qgResult.tokens, qgResult.costUsd);
 
-/**
- * Check if any files in the generated directory that affect storage/ingestion were modified.
- * Used to detect when re-ingestion is needed after Operator Specialist changes.
- */
-function checkIngestFilesModified(iterGeneratedDir, bestGeneratedDir) {
-  const ingestRelatedFiles = ["ingest.cpp", "storage/storage.h", "storage/storage.cpp"];
-  for (const f of ingestRelatedFiles) {
-    const iterFile = resolve(iterGeneratedDir, f);
-    const bestFile = resolve(bestGeneratedDir, f);
-    if (!existsSync(iterFile) || !existsSync(bestFile)) continue;
-    try {
-      const iterContent = readFileSync(iterFile, "utf-8");
-      const bestContent = readFileSync(bestFile, "utf-8");
-      if (iterContent !== bestContent) return true;
-    } catch {
-      // If read fails, assume not modified
+  // Generate build files for this single query
+  await generateBuildFiles(iter0GenDir, [query]);
+
+  // --- Evaluate ---
+  console.log(`\n[Pipeline ${query.id}] --- Iteration 0: Learner (evaluate + analyze) ---`);
+
+  const evalInputs = [
+    `mode: evaluate_and_analyze`,
+    "",
+    `## Evaluation Steps`,
+    `1. Compile: cd ${iter0GenDir} && make clean && make all`,
+    `2. Run: cd ${iter0GenDir} && ./main ${args.parquetDir} ${iter0ResultsDir}`,
+    hasGroundTruth
+      ? `3. Validate: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iter0ResultsDir}`
+      : "3. Validate: no ground truth available",
+    "",
+    `## Write evaluation JSON to: ${iter0EvalPath}`,
+    "",
+    `## For optimization analysis:`,
+    `- Optimization Target: ${args.optimizationTarget}`,
+    `- Workload analysis: ${resolve(runDir, "workload_analysis.txt")}`,
+    `- Current code: ${iter0GenDir}/queries/${query.name}.cpp`,
+    `- Parquet data directory: ${args.parquetDir}`,
+    `- Optimization history: ${historyPath}`,
+    formatBenchmarkText(args.benchmarkResults),
+    `Write recommendations to: ${iter0RecsPath}`,
+  ];
+
+  const eval0Result = await runAgent(`Learner (${query.id} iter0)`, {
+    systemPrompt: await readFile(learnerConfig.promptPath, "utf-8"),
+    userPrompt: evalInputs.join("\n"),
+    allowedTools: learnerConfig.allowedTools,
+    model: args.model,
+    cwd: runDir,
+  });
+  recordAgentTelemetry(`${query.name}_iter0`, "learner", eval0Result.durationMs, eval0Result.tokens, eval0Result.costUsd);
+
+  const eval0 = await readJSON(iter0EvalPath);
+  bestIterDir = iter0GenDir;
+  bestEvalPath = iter0EvalPath;
+
+  // Record initial result
+  if (eval0?.queries) {
+    const qData = eval0.queries[query.id] || eval0.queries[query.name] || Object.values(eval0.queries)[0];
+    if (qData) {
+      bestTimeMs = parseFloat(qData.time_ms) || Infinity;
+      historyText += `\n## Iteration 0 (initial generation)\n`;
+      historyText += `  ${query.id}: ${qData.time_ms}ms (${qData.status})\n`;
     }
   }
-  return false;
-}
+  await writeFile(historyPath, historyText);
 
-// ---------------------------------------------------------------------------
-// Phase 2: Optimization Loop
-// ---------------------------------------------------------------------------
+  console.log(`[Pipeline ${query.id}] Iteration 0 complete — ${bestTimeMs}ms`);
 
-async function runOptimizationLoop(args, runDir, baselineGeneratedDir, baselineEvaluationPath) {
-  const maxIter = args.maxIterations;
-  if (maxIter <= 0) {
-    console.log("\n[Orchestrator] Optimization loop skipped (--max-iterations 0).");
-    return;
-  }
+  // =========================================================================
+  // Iterations 1..N: Optimization Loop
+  // =========================================================================
+  for (let iteration = 1; iteration < maxIter; iteration++) {
+    console.log(`\n[Pipeline ${query.id}] --- Optimization Iteration ${iteration}/${maxIter - 1} ---`);
 
-  console.log(`\n[Orchestrator] ========== PHASE 2: OPTIMIZATION LOOP (max ${maxIter} iterations) ==========\n`);
+    const iterDir = resolve(queryDir, `iter_${iteration}`);
+    const iterGenDir = resolve(iterDir, "generated");
+    const iterEvalPath = resolve(iterDir, "evaluation.json");
+    const iterRecsPath = resolve(iterDir, "recommendations.txt");
+    const iterDecisionPath = resolve(iterDir, "decision.json");
+    const iterResultsDir = resolve(iterDir, "query_results");
+    await mkdir(iterResultsDir, { recursive: true });
 
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase2 = { status: "running", iterations: [] };
-  });
+    // Copy best code to this iteration
+    await copyDir(bestIterDir, iterGenDir);
 
-  // Optimization history accumulates across iterations
-  const optimizationHistory = {
-    iterations: [],
-  };
-  const historyPath = resolve(runDir, "optimization_history.toon");
-  await writeTOON(historyPath, optimizationHistory);
-
-  // Track the "best so far" generated directory and its evaluation
-  let bestGeneratedDir = baselineGeneratedDir;
-  let bestEvaluationPath = baselineEvaluationPath;
-  let previousIterationOutcome = null; // Track whether previous iteration improved or regressed
-
-  for (let iteration = 1; iteration <= maxIter; iteration++) {
-    console.log(`\n[Orchestrator] --- Optimization Iteration ${iteration}/${maxIter} ---\n`);
-
-    const iterDir = await createIterationDir(runDir, iteration);
-    const iterGeneratedDir = resolve(iterDir, "generated");
-    const iterEvaluationJsonPath = resolve(iterDir, "evaluation.json");
-    const iterEvaluationPath = resolve(iterDir, "evaluation.toon");
-    const iterRecsJsonPath = resolve(iterDir, "optimization_recommendations.json");
-    const iterRecsPath = resolve(iterDir, "optimization_recommendations.toon");
-    const iterDecisionJsonPath = resolve(iterDir, "orchestrator_decision.json");
-    const iterDecisionPath = resolve(iterDir, "orchestrator_decision.toon");
-
-    const iterMeta = {
-      iteration,
-      status: "running",
-      startedAt: new Date().toISOString(),
-    };
-
-    await updateRunMeta(runDir, (meta) => {
-      meta.phase2.iterations.push(iterMeta);
-    });
-
-    // 1. Copy best-so-far code to this iteration
-    console.log(`[Orchestrator] Copying best code to iteration ${iteration}...`);
-    await copyDir(bestGeneratedDir, iterGeneratedDir);
-
-    // 2. Run Learner
-    console.log(`\n[Orchestrator] === Iteration ${iteration} Step 1: Learner ===`);
-    const learnerSystemPrompt = await readFile(learnerConfig.promptPath, "utf-8");
-
-    const learnerUserPrompt = [
-      `Analyze evaluation results and recommend optimizations for iteration ${iteration}.`,
-      "",
-      `## Optimization Target: ${args.optimizationTarget}`,
-      "",
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      `Read relevant knowledge files to inform your bottleneck analysis and optimization recommendations. You are encouraged to propose techniques beyond what's documented.`,
-      `Read storage/persistent-storage.md for I/O optimization patterns.`,
-      "",
-      previousIterationOutcome
-        ? `## Previous Iteration Outcome\n${previousIterationOutcome}`
-        : "",
-      "",
-      `## Storage Architecture`,
-      `Data is stored in persistent binary columnar format at: ${args.gendbDir}`,
-      `The main program reads from .gendb/ via mmap — no .tbl text parsing.`,
-      `If you recommend storage layout changes (re-sorting, new indexes, block size changes), note that re-ingestion is needed.`,
-      "",
-      "## Input Files",
-      `- Evaluation results: ${bestEvaluationPath}`,
-      `- Workload analysis: ${resolve(runDir, "workload_analysis.toon")}`,
-      `- Storage design: ${resolve(runDir, "storage_design.toon")}`,
-      `- Current C++ code directory: ${iterGeneratedDir}`,
-      `- Optimization history: ${historyPath}`,
-      formatBenchmarkContext(args.benchmarkResults),
-      "",
-      `## Output`,
-      `IMPORTANT: Write your recommendations as JSON to EXACTLY this path: ${iterRecsJsonPath}`,
-      `Use this EXACT file path — do NOT change the filename or extension.`,
-      `Use the Write tool to create this file.`,
-      `Set "iteration" to ${iteration} in the JSON output.`,
-    ].join("\n");
-
-    const iterPhase = `iteration_${iteration}`;
-    const lnResult = await runAgent(learnerConfig.name, {
-      systemPrompt: learnerSystemPrompt,
-      userPrompt: learnerUserPrompt,
-      allowedTools: learnerConfig.allowedTools,
-      model: args.model,
-      cwd: runDir,
-    });
-    recordAgentTelemetry(iterPhase, "learner", lnResult.durationMs, lnResult.tokens, lnResult.costUsd);
-
-    // Convert agent's JSON output to TOON for downstream token efficiency
-    const recommendations = await convertJsonFileToTOON(iterRecsJsonPath, iterRecsPath);
-    if (!recommendations) {
-      console.error(`[Orchestrator] Learner failed to produce recommendations for iteration ${iteration}. Stopping loop.`);
-      await updateIterationStatus(runDir, iteration, "failed", "Learner failed to produce recommendations");
+    // Read previous recommendations
+    const prevRecsPath = iteration === 1
+      ? iter0RecsPath
+      : resolve(queryDir, `iter_${iteration - 1}`, "recommendations.txt");
+    if (!existsSync(prevRecsPath)) {
+      console.log(`[Pipeline ${query.id}] No recommendations from previous iteration. Stopping.`);
       break;
     }
-    const criticalFixes = recommendations.critical_fixes || [];
-    const perfOptimizations = recommendations.performance_optimizations || recommendations.recommendations || [];
-    console.log(`[Orchestrator] Learner produced ${criticalFixes.length} critical fixes, ${perfOptimizations.length} performance optimizations.`);
 
-    // 3. Run Orchestrator Agent
-    console.log(`\n[Orchestrator] === Iteration ${iteration} Step 2: Orchestrator Agent ===`);
-    const orchAgentSystemPrompt = await readFile(orchestratorAgentConfig.promptPath, "utf-8");
-
-    const orchAgentUserPrompt = [
-      `Decide whether to continue optimizing or stop (iteration ${iteration}/${maxIter}).`,
+    // --- Orchestrator Agent ---
+    console.log(`[Pipeline ${query.id}] Orchestrator Agent deciding...`);
+    const oaInputs = [
+      `Decide optimization strategy for ${query.id}, iteration ${iteration}/${maxIter - 1}.`,
       "",
       `## Optimization Target: ${args.optimizationTarget}`,
       "",
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      "",
       "## Input Files",
-      `- Current evaluation results: ${bestEvaluationPath}`,
-      `- Learner recommendations: ${iterRecsPath}`,
+      `- Learner recommendations: ${prevRecsPath}`,
       `- Optimization history: ${historyPath}`,
-      formatBenchmarkContext(args.benchmarkResults),
+      `- Current evaluation: ${bestEvalPath}`,
+      formatBenchmarkText(args.benchmarkResults),
       "",
-      `Remaining iterations after this one: ${maxIter - iteration}`,
+      `Remaining iterations after this: ${maxIter - 1 - iteration}`,
       "",
-      criticalFixes.length > 0
-        ? `## CRITICAL: ${criticalFixes.length} critical fix(es) found\nThe Learner identified ${criticalFixes.length} critical fix(es) (crashes/correctness bugs). These MUST all be included in your selected_recommendations. Performance optimizations are secondary until all critical fixes are applied.`
-        : "",
-      "",
-      `## Output`,
-      `IMPORTANT: Write your decision as JSON to EXACTLY this path: ${iterDecisionJsonPath}`,
-      `Use this EXACT file path — do NOT change the filename or extension.`,
-      `Use the Write tool to create this file.`,
-      `Note: The Learner's recommendations now use "critical_fixes" (always apply) and "performance_optimizations" (select by priority). Your selected_recommendations should index into performance_optimizations. All critical_fixes are automatically included.`,
-    ].join("\n");
+      `Write decision JSON to: ${iterDecisionPath}`,
+    ];
 
-    const oaResult = await runAgent(orchestratorAgentConfig.name, {
-      systemPrompt: orchAgentSystemPrompt,
-      userPrompt: orchAgentUserPrompt,
+    const oaResult = await runAgent(`Orchestrator Agent (${query.id} iter${iteration})`, {
+      systemPrompt: await readFile(orchestratorAgentConfig.promptPath, "utf-8"),
+      userPrompt: oaInputs.join("\n"),
       allowedTools: orchestratorAgentConfig.allowedTools,
       model: args.model,
       cwd: runDir,
     });
-    recordAgentTelemetry(iterPhase, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
+    recordAgentTelemetry(`${query.name}_iter${iteration}`, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
 
-    // Convert agent's JSON output to TOON (not read by other agents, but consistent)
-    const decision = await convertJsonFileToTOON(iterDecisionJsonPath, iterDecisionPath);
+    const decision = await readJSON(iterDecisionPath);
     if (!decision) {
-      console.error(`[Orchestrator] Orchestrator Agent failed to produce decision. Stopping loop.`);
-      await updateIterationStatus(runDir, iteration, "failed", "Orchestrator Agent failed to produce decision");
+      console.error(`[Pipeline ${query.id}] Orchestrator Agent failed. Stopping.`);
       break;
     }
 
-    console.log(`[Orchestrator] Decision: ${decision.action}`);
-    console.log(`[Orchestrator] Reasoning: ${decision.reasoning}`);
+    console.log(`[Pipeline ${query.id}] Decision: ${decision.action} — ${decision.reasoning}`);
 
-    // 4. If decision is "stop", end the loop
     if (decision.action === "stop") {
-      console.log(`[Orchestrator] Orchestrator Agent decided to stop. Ending optimization loop.`);
-      await updateIterationStatus(runDir, iteration, "stopped_early", decision.reasoning);
+      console.log(`[Pipeline ${query.id}] Stopping optimization loop.`);
       break;
     }
 
-    // 5. Determine which optimization agent to invoke based on bottleneck category
-    const selectedOptimizations = (decision.selected_recommendations || []).map(idx => perfOptimizations[idx]);
-    const bottleneckCategories = new Set(selectedOptimizations.map(opt => opt.bottleneck_category).filter(Boolean));
+    // --- Run Optimizers ---
+    if (decision.action === "optimize") {
+      const optimizations = decision.optimizations || [];
+      if (optimizations.length === 0) {
+        console.log(`[Pipeline ${query.id}] No optimizations selected. Skipping.`);
+        continue;
+      }
 
-    // Add critical fixes (all have implicit bottleneck category)
-    const allOptimizations = [...criticalFixes, ...selectedOptimizations];
+      const parallelOps = optimizations.filter((o) => o.can_parallel);
+      const sequentialOps = optimizations.filter((o) => !o.can_parallel);
 
-    if (allOptimizations.length === 0) {
-      console.log(`[Orchestrator] No optimizations to apply in iteration ${iteration}. Skipping.`);
-      await updateIterationStatus(runDir, iteration, "skipped", "No optimizations selected");
-      continue;
-    }
+      // Run sequential optimizers first
+      for (const op of sequentialOps) {
+        console.log(`[Pipeline ${query.id}] Running ${op.optimizer} (sequential)...`);
+        const result = await invokeOptimizer(op, args, runDir, iterGenDir, bestEvalPath, query);
+        if (result) {
+          recordAgentTelemetry(`${query.name}_iter${iteration}`, op.optimizer, result.durationMs, result.tokens, result.costUsd);
+        }
+      }
 
-    // Select the appropriate optimization agent(s) based on bottleneck categories
-    const agentConfigs = [];
-
-    if (bottleneckCategories.has("query_structure")) {
-      agentConfigs.push({ config: queryRewriterConfig, category: "query_structure" });
-    }
-    if (bottleneckCategories.has("join_order")) {
-      agentConfigs.push({ config: joinOrderOptimizerConfig, category: "join_order" });
-    }
-    if (bottleneckCategories.has("cpu_bound")) {
-      agentConfigs.push({ config: executionOptimizerConfig, category: "cpu_bound" });
-    }
-    if (bottleneckCategories.has("io_bound")) {
-      agentConfigs.push({ config: ioOptimizerConfig, category: "io_bound" });
-    }
-    if (bottleneckCategories.has("algorithm")) {
-      agentConfigs.push({ config: physicalOperatorConfig, category: "algorithm" });
-    }
-
-    // If no specific category or multiple categories, fall back to operator specialist
-    if (agentConfigs.length === 0 || criticalFixes.length > 0) {
-      agentConfigs.push({ config: operatorSpecialistConfig, category: "general" });
-    }
-
-    // Run each selected optimization agent
-    for (const { config: agentConfig, category } of agentConfigs) {
-      console.log(`\n[Orchestrator] === Iteration ${iteration} Step 3: ${agentConfig.name} (${category}) ===`);
-      const agentSystemPrompt = await readFile(agentConfig.promptPath, "utf-8");
-
-      const agentUserPrompt = [
-        `Apply selected optimizations to the C++ code for iteration ${iteration}.`,
-        "",
-        `## Optimization Target: ${args.optimizationTarget}`,
-        "",
-        `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-        `Read relevant knowledge files for implementation patterns.`,
-        "",
-        "## Input Files",
-        `- Orchestrator decision: ${iterDecisionPath}`,
-        `- Optimization recommendations: ${iterRecsPath}`,
-        `- Evaluation results: ${bestEvaluationPath}`,
-        `- Workload analysis: ${resolve(runDir, "workload_analysis.toon")}`,
-        `- Storage design: ${resolve(runDir, "storage_design.toon")}`,
-        formatBenchmarkContext(args.benchmarkResults),
-        "",
-        `## Data Directory (source .tbl files)`,
-        `TPC-H .tbl files: ${args.dataDir}`,
-        `Scale factor: ${args.scaleFactor}`,
-        "",
-        `## GenDB Storage Directory (persistent binary storage)`,
-        `Binary columnar data: ${args.gendbDir}`,
-        `The main program reads from this directory. If you modify ingest.cpp or storage format, re-ingestion will be needed.`,
-        "",
-        `## Previous Performance (baseline to beat)`,
-        `Read the evaluation at: ${bestEvaluationPath}`,
-        `Your optimized code must: (1) not crash, (2) produce correct results, (3) ideally be faster`,
-        "",
-        "## Code Directory",
-        `Read and modify C++ files in: ${iterGeneratedDir}`,
-        `This directory contains the current best code. Apply optimizations here.`,
-        "",
-        `## Test-Refine Budget`,
-        `You may compile+run up to 3 times to iteratively fix issues. If your changes break correctness, revert them.`,
-        `Run command: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
-        `If you modified ingest.cpp or storage format, re-run ingest first: ./ingest ${args.dataDir} ${args.gendbDir}`,
-        "",
-        `## Important`,
-        criticalFixes.length > 0
-          ? `- Apply ALL critical_fixes from optimization_recommendations.toon FIRST (these fix crashes/correctness bugs)`
-          : "",
-        `- Apply the performance_optimizations selected in the orchestrator's decision (selected_recommendations field)`,
-        `- Focus on optimizations with bottleneck_category: "${category}"`,
-        `- After making changes, compile AND run to verify: cd ${iterGeneratedDir} && make clean && make all && ./main ${args.gendbDir}`,
-        `- Correctness is paramount — results must remain identical`,
-        `- CRITICAL: Do not return code that crashes or produces wrong results`,
-      ].join("\n");
-
-      const agentResult = await runAgent(agentConfig.name, {
-        systemPrompt: agentSystemPrompt,
-        userPrompt: agentUserPrompt,
-        allowedTools: agentConfig.allowedTools,
-        model: args.model,
-        cwd: runDir,
-      });
-
-      const agentNameKey = agentConfig.name.toLowerCase().replace(/\s+/g, "_");
-      recordAgentTelemetry(iterPhase, agentNameKey, agentResult.durationMs, agentResult.tokens, agentResult.costUsd);
-    }
-
-    // 6. Check if storage/ingest files were modified — if so, re-ingest
-    const needsReingest = checkIngestFilesModified(iterGeneratedDir, bestGeneratedDir);
-    if (needsReingest) {
-      console.log(`[Orchestrator] Storage/ingest files modified in iteration ${iteration}. Re-ingestion will be triggered.`);
-      // Remove existing gendb storage to force re-ingestion
-      if (existsSync(args.gendbDir)) {
-        rmSync(args.gendbDir, { recursive: true, force: true });
-        console.log(`[Orchestrator] Removed existing gendb storage at ${args.gendbDir} for re-ingestion.`);
+      // Run parallel optimizers together
+      if (parallelOps.length > 0) {
+        console.log(`[Pipeline ${query.id}] Running ${parallelOps.length} optimizers in parallel...`);
+        const results = await Promise.all(
+          parallelOps.map(async (op) => {
+            const result = await invokeOptimizer(op, args, runDir, iterGenDir, bestEvalPath, query);
+            return { op, result };
+          })
+        );
+        for (const { op, result } of results) {
+          if (result) {
+            recordAgentTelemetry(`${query.name}_iter${iteration}`, op.optimizer, result.durationMs, result.tokens, result.costUsd);
+          }
+        }
       }
     }
 
-    // 7. Run Evaluator
-    console.log(`\n[Orchestrator] === Iteration ${iteration} Step 4: Evaluator ===`);
-    const iterEvResult = await runEvaluator(args, runDir, iterGeneratedDir, iterEvaluationJsonPath);
-    recordAgentTelemetry(iterPhase, "evaluator", iterEvResult.durationMs, iterEvResult.tokens, iterEvResult.costUsd);
+    // --- Evaluate ---
+    console.log(`[Pipeline ${query.id}] Learner evaluating iteration ${iteration}...`);
 
-    // Convert agent's JSON output to TOON for downstream token efficiency
-    const iterEvaluation = await convertJsonFileToTOON(iterEvaluationJsonPath, iterEvaluationPath);
+    const iterEvalInputs = [
+      `mode: evaluate_and_analyze`,
+      "",
+      `## Evaluation Steps`,
+      `1. Compile: cd ${iterGenDir} && make clean && make all`,
+      `2. Run: cd ${iterGenDir} && ./main ${args.parquetDir} ${iterResultsDir}`,
+      hasGroundTruth
+        ? `3. Validate: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}`
+        : "3. Validate: no ground truth available",
+      "",
+      `## Write evaluation JSON to: ${iterEvalPath}`,
+      "",
+      `## For optimization analysis:`,
+      `- Optimization Target: ${args.optimizationTarget}`,
+      `- Workload analysis: ${resolve(runDir, "workload_analysis.txt")}`,
+      `- Current code: ${iterGenDir}/queries/${query.name}.cpp`,
+      `- Parquet data directory: ${args.parquetDir}`,
+      `- Optimization history: ${historyPath}`,
+      formatBenchmarkText(args.benchmarkResults),
+      `Write recommendations to: ${iterRecsPath}`,
+    ];
 
-    // 7. Record iteration results in optimization_history
-    const iterResult = {
-      iteration,
-      evaluationPath: iterEvaluationPath,
-      selectedRecommendations: decision.selected_recommendations || [],
-      focusAreas: decision.focus_areas || [],
-    };
+    const iterEvalResult = await runAgent(`Learner (${query.id} iter${iteration})`, {
+      systemPrompt: await readFile(learnerConfig.promptPath, "utf-8"),
+      userPrompt: iterEvalInputs.join("\n"),
+      allowedTools: learnerConfig.allowedTools,
+      model: args.model,
+      cwd: runDir,
+    });
+    recordAgentTelemetry(`${query.name}_iter${iteration}`, "learner", iterEvalResult.durationMs, iterEvalResult.tokens, iterEvalResult.costUsd);
 
-    if (iterEvaluation) {
-      iterResult.overall_status = iterEvaluation.overall_status;
-      iterResult.query_results = iterEvaluation.query_results || {};
-      console.log(`[Orchestrator] Iteration ${iteration} evaluation: ${iterEvaluation.overall_status}`);
-      if (iterEvaluation.summary) console.log(`[Orchestrator] Summary: ${iterEvaluation.summary}`);
+    const iterEval = await readJSON(iterEvalPath);
+
+    // Check improvement
+    const improved = await checkQueryImprovement(bestEvalPath, iterEvalPath, query);
+    const optimizerNames = (decision.optimizations || []).map((o) => o.optimizer).join(", ");
+
+    if (improved.isImproved) {
+      console.log(`[Pipeline ${query.id}] Iteration ${iteration} IMPROVED (${improved.newTimeMs}ms vs ${bestTimeMs}ms)`);
+      bestIterDir = iterGenDir;
+      bestEvalPath = iterEvalPath;
+      bestTimeMs = improved.newTimeMs;
+      historyText += `\n## Iteration ${iteration}: IMPROVED (${improved.newTimeMs}ms)\n`;
+      historyText += `Optimizers: ${optimizerNames}\n`;
     } else {
-      iterResult.overall_status = "unknown";
-      console.error(`[Orchestrator] Warning: could not parse evaluation for iteration ${iteration}`);
+      console.log(`[Pipeline ${query.id}] Iteration ${iteration} REGRESSED. Rolling back.`);
+      historyText += `\n## Iteration ${iteration}: REGRESSED (rolled back)\n`;
+      historyText += `Optimizers: ${optimizerNames}\n`;
+      historyText += `Avoid repeating this approach.\n`;
+    }
+    await writeFile(historyPath, historyText);
+  }
+
+  console.log(`[Pipeline ${query.id}] Pipeline complete — best: ${bestTimeMs}ms`);
+  return { query, bestIterDir, bestTimeMs, bestEvalPath };
+}
+
+// ---------------------------------------------------------------------------
+// Optimizer invocation
+// ---------------------------------------------------------------------------
+
+async function invokeOptimizer(op, args, runDir, generatedDir, evalPath, query) {
+  const config = OPTIMIZER_MAP[op.optimizer];
+  if (!config) {
+    console.error(`[Orchestrator] Unknown optimizer: ${op.optimizer}`);
+    return null;
+  }
+
+  const systemPrompt = await readFile(config.promptPath, "utf-8");
+  const userPrompt = [
+    `Apply the following optimization to ${query.id}.`,
+    "",
+    `## Guidance`,
+    op.guidance || "See recommendations file for details.",
+    "",
+    `## Target Query: ${query.id} (${generatedDir}/queries/${query.name}.cpp)`,
+    "",
+    `## Code Directory: ${generatedDir}`,
+    `## Parquet Data Directory: ${args.parquetDir} (read-only, NEVER modify)`,
+    `## Index Directory: ${resolve(args.parquetDir, "indexes")} (sorted index files, if available)`,
+    `## Build Indexes Tool: python3 ${BUILD_INDEXES_SCRIPT} (for index_optimizer only)`,
+    "",
+    `## Current Performance`,
+    `Read evaluation: ${evalPath}`,
+    `Read workload analysis: ${resolve(runDir, "workload_analysis.txt")}`,
+    "",
+    `After changes, compile and run to verify:`,
+    `  cd ${generatedDir} && make clean && make all && ./main ${args.parquetDir}`,
+    `Results must remain correct. Correctness is paramount.`,
+  ].join("\n");
+
+  try {
+    return await runAgent(`${config.name} (${query.id})`, {
+      systemPrompt,
+      userPrompt,
+      allowedTools: config.allowedTools,
+      model: args.model,
+      cwd: runDir,
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] Optimizer ${op.optimizer} (${query.id}) failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-query improvement check
+// ---------------------------------------------------------------------------
+
+async function checkQueryImprovement(prevEvalPath, newEvalPath, query) {
+  try {
+    const prevEval = JSON.parse(await readFile(prevEvalPath, "utf-8"));
+    const newEval = JSON.parse(await readFile(newEvalPath, "utf-8"));
+
+    const prevQueries = prevEval.queries || {};
+    const newQueries = newEval.queries || {};
+
+    const prevQ = prevQueries[query.id] || prevQueries[query.name] || Object.values(prevQueries)[0];
+    const newQ = newQueries[query.id] || newQueries[query.name] || Object.values(newQueries)[0];
+
+    if (!prevQ || !newQ) return { isImproved: false, newTimeMs: Infinity };
+
+    const prevTime = parseFloat(prevQ.time_ms) || Infinity;
+    const newTime = parseFloat(newQ.time_ms) || Infinity;
+
+    // If previous passed but new fails, it's a regression
+    if (prevQ.status === "pass" && newQ.status !== "pass") {
+      return { isImproved: false, newTimeMs: newTime };
     }
 
-    optimizationHistory.iterations.push(iterResult);
-    await writeTOON(historyPath, optimizationHistory);
-
-    // 8. Update "current best" if improved
-    const improved = checkImprovement(
-      await readTOON(bestEvaluationPath),
-      iterEvaluation
-    );
-
-    if (improved) {
-      console.log(`[Orchestrator] Iteration ${iteration} improved performance. Updating best.`);
-      bestGeneratedDir = iterGeneratedDir;
-      bestEvaluationPath = iterEvaluationPath;
-      previousIterationOutcome = `Iteration ${iteration} IMPROVED performance. Changes were kept.`;
-    } else {
-      console.log(`[Orchestrator] Iteration ${iteration} did not improve. Keeping previous best (code rolled back).`);
-      previousIterationOutcome = `Iteration ${iteration} REGRESSED — code was rolled back to previous best. The changes from iteration ${iteration} were discarded. Avoid repeating the same approach.`;
+    // If new passes but previous didn't, it's an improvement
+    if (newQ.status === "pass" && prevQ.status !== "pass") {
+      return { isImproved: true, newTimeMs: newTime };
     }
 
-    await updateIterationStatus(runDir, iteration, "completed", null);
+    // Both pass (or both fail): compare times
+    return { isImproved: newTime < prevTime, newTimeMs: newTime };
+  } catch {
+    return { isImproved: false, newTimeMs: Infinity };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Per-Query Parallel Optimization
+// ---------------------------------------------------------------------------
+
+async function runPhase2(args, runDir, templateGeneratedDir, queriesContent) {
+  console.log(`\n[Orchestrator] ========== PHASE 2: PER-QUERY PARALLEL OPTIMIZATION ==========\n`);
+
+  await updateRunMeta(runDir, (meta) => {
+    meta.phase2 = { status: "running" };
+  });
+
+  const parsedQueries = parseQueries(queriesContent);
+  console.log(`[Orchestrator] Parsed ${parsedQueries.length} queries: ${parsedQueries.map(q => q.id).join(", ")}`);
+
+  const groundTruthDir = resolve(BENCHMARKS_DIR, defaults.targetBenchmark, "query_results");
+
+  // Run ALL query pipelines in parallel
+  console.log(`[Orchestrator] Launching ${parsedQueries.length} parallel query pipelines...`);
+
+  const pipelineResults = await Promise.all(
+    parsedQueries.map((query) =>
+      runQueryPipeline(query, args, runDir, templateGeneratedDir, groundTruthDir, parsedQueries)
+        .catch((err) => {
+          console.error(`[Pipeline ${query.id}] FAILED: ${err.message}`);
+          return { query, bestIterDir: null, bestTimeMs: Infinity, bestEvalPath: null };
+        })
+    )
+  );
+
+  // =========================================================================
+  // Assemble final build from best per-query results
+  // =========================================================================
+  console.log(`\n[Orchestrator] === Assembling Final Build ===`);
+
+  const finalGenDir = resolve(runDir, "generated");
+  // Ensure clean final directory
+  await mkdir(resolve(finalGenDir, "queries"), { recursive: true });
+  await copyFile(PARQUET_READER_H, resolve(finalGenDir, "parquet_reader.h"));
+
+  const successfulQueries = [];
+
+  for (const { query, bestIterDir } of pipelineResults) {
+    if (!bestIterDir) {
+      console.error(`[Orchestrator] No successful iteration for ${query.id} — skipping.`);
+      continue;
+    }
+
+    // Copy best query .cpp to final directory
+    const srcCpp = resolve(bestIterDir, "queries", `${query.name}.cpp`);
+    const dstCpp = resolve(finalGenDir, "queries", `${query.name}.cpp`);
+    if (existsSync(srcCpp)) {
+      await copyFile(srcCpp, dstCpp);
+      successfulQueries.push(query);
+      console.log(`[Orchestrator] ${query.id}: copied from best iteration`);
+    }
+  }
+
+  // Generate final main.cpp, queries.h, Makefile
+  await generateBuildFiles(finalGenDir, successfulQueries);
+
+  // Final build + validation
+  console.log(`\n[Orchestrator] === Final Build ===`);
+  const finalResultsDir = resolve(runDir, "final_results");
+  await mkdir(finalResultsDir, { recursive: true });
+
+  try {
+    execSync("make clean && make all", {
+      cwd: finalGenDir,
+      encoding: "utf-8",
+      timeout: 120_000,
+    });
+    console.log("[Orchestrator] Final build: SUCCESS");
+
+    const runOutput = execSync(`./main ${args.parquetDir} ${finalResultsDir}`, {
+      cwd: finalGenDir,
+      encoding: "utf-8",
+      timeout: 300_000,
+    });
+    console.log(runOutput);
+
+    // Validate against ground truth
+    if (existsSync(groundTruthDir)) {
+      try {
+        const validateOutput = execSync(
+          `python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${finalResultsDir}`,
+          { encoding: "utf-8", timeout: 60_000 }
+        );
+        console.log(validateOutput);
+      } catch (err) {
+        console.warn("[Orchestrator] Validation issues: " + err.stdout);
+      }
+    }
+  } catch (err) {
+    console.error("[Orchestrator] Final build/run failed: " + err.message);
+  }
+
+  // Print per-query summary
+  console.log(`\n[Orchestrator] === Per-Query Results ===`);
+  for (const { query, bestTimeMs } of pipelineResults) {
+    const status = bestTimeMs < Infinity ? `${bestTimeMs.toFixed(1)}ms` : "FAILED";
+    console.log(`  ${query.id}: ${status}`);
   }
 
   await updateRunMeta(runDir, (meta) => {
     meta.phase2.status = "completed";
     meta.phase2.completedAt = new Date().toISOString();
-    meta.phase2.bestGeneratedDir = bestGeneratedDir;
+    meta.phase2.queryResults = pipelineResults.map(({ query, bestTimeMs }) => ({
+      query: query.id,
+      best_time_ms: bestTimeMs < Infinity ? bestTimeMs : null,
+    }));
   });
-}
-
-/** Update the status of a specific iteration in run.json. */
-async function updateIterationStatus(runDir, iteration, status, note) {
-  await updateRunMeta(runDir, (meta) => {
-    const iter = meta.phase2.iterations.find((it) => it.iteration === iteration);
-    if (iter) {
-      iter.status = status;
-      iter.completedAt = new Date().toISOString();
-      if (note) iter.note = note;
-    }
-  });
-}
-
-/**
- * Check if the new evaluation is better than the previous one.
- * Handles partial results: more queries passing = improvement, even if slower.
- * A previously-passing query that now crashes is a regression (always reject).
- */
-function checkImprovement(prevEval, newEval) {
-  if (!prevEval || !newEval) return false;
-  if (!prevEval.query_results || !newEval.query_results) return false;
-  if (newEval.overall_status === "fail") return false;
-
-  let prevTotal = 0, newTotal = 0;
-  let prevCount = 0, newCount = 0;
-
-  for (const qId of Object.keys(prevEval.query_results)) {
-    const prevQ = prevEval.query_results[qId];
-    const newQ = newEval.query_results[qId];
-    if (!newQ) continue;
-
-    const prevTime = parseFloat(prevQ.timing_ms);
-    const newTime = parseFloat(newQ.timing_ms);
-
-    // If prev query worked but new one crashes, that's a regression — reject
-    if (!isNaN(prevTime) && prevQ.status === "pass" && newQ.status !== "pass") return false;
-
-    if (!isNaN(prevTime) && prevQ.status === "pass") { prevTotal += prevTime; prevCount++; }
-    if (!isNaN(newTime) && newQ.status === "pass") { newTotal += newTime; newCount++; }
-  }
-
-  // More queries working = improvement (even if slower)
-  if (newCount > prevCount) return true;
-  // Same queries working, check total time
-  if (newCount === prevCount && newCount > 0) return newTotal < prevTotal;
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,106 +1004,82 @@ function checkImprovement(prevEval, newEval) {
 async function main() {
   const args = parseArgs(process.argv);
 
-  // Read input files
   const schema = await readFile(args.schema, "utf-8");
   const queries = await readFile(args.queries, "utf-8");
 
-  // Validate data directory exists
   if (!existsSync(args.dataDir)) {
     console.error(`[Orchestrator] Error: data directory not found: ${args.dataDir}`);
-    console.error(`[Orchestrator] Run 'bash benchmarks/tpc-h/setup_data.sh ${args.scaleFactor}' first to generate TPC-H data.`);
+    console.error(`[Orchestrator] Run 'bash benchmarks/tpc-h/setup_data.sh ${args.scaleFactor}' first.`);
     process.exit(1);
   }
 
-  // Determine workload and create run directory
   const workload = getWorkloadName(args.schema);
   const runId = createRunId();
   const runDir = await createRunDir(workload, runId);
 
-  // Try to load benchmark comparison results (PostgreSQL, DuckDB, etc.)
+  // Load benchmark comparison data
   const benchmarkResultsPath = resolve(
     BENCHMARKS_DIR, defaults.targetBenchmark,
     "results", `sf${args.scaleFactor}`, "metrics", "benchmark_results.json"
   );
-  const benchmarkResults = await readJSON(benchmarkResultsPath);
-  if (benchmarkResults) {
-    args.benchmarkResults = benchmarkResults;
-    console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
-  } else {
-    args.benchmarkResults = null;
-    console.log(`[Orchestrator] No benchmark comparison data found at: ${benchmarkResultsPath}`);
+  args.benchmarkResults = await readJSON(benchmarkResultsPath);
+  if (args.benchmarkResults) {
+    console.log(`[Orchestrator] Benchmark data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline");
-  console.log(`[Orchestrator] Schema:              ${args.schema}`);
-  console.log(`[Orchestrator] Queries:             ${args.queries}`);
-  console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
-  console.log(`[Orchestrator] GenDB Dir:           ${args.gendbDir}`);
-  console.log(`[Orchestrator] Scale Factor:        ${args.scaleFactor}`);
-  console.log(`[Orchestrator] Max Iterations:      ${args.maxIterations}`);
-  console.log(`[Orchestrator] Model:               ${args.model}`);
-  console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
-  console.log(`[Orchestrator] Knowledge Base:      ${KNOWLEDGE_BASE_PATH}`);
-  console.log(`[Orchestrator] Workload:            ${workload}`);
-  console.log(`[Orchestrator] Run ID:              ${runId}`);
-  console.log(`[Orchestrator] Run Dir:             ${runDir}`);
+  console.log("[Orchestrator] GenDB Pipeline (v7 — Parquet storage, pure C++, per-query parallel optimization)");
+  console.log(`[Orchestrator] Schema:      ${args.schema}`);
+  console.log(`[Orchestrator] Queries:     ${args.queries}`);
+  console.log(`[Orchestrator] Data Dir:    ${args.dataDir}`);
+  console.log(`[Orchestrator] Parquet Dir: ${args.parquetDir}`);
+  console.log(`[Orchestrator] SF:          ${args.scaleFactor}`);
+  console.log(`[Orchestrator] Iterations:  ${args.maxIterations}`);
+  console.log(`[Orchestrator] Model:       ${args.model}`);
+  console.log(`[Orchestrator] Target:      ${args.optimizationTarget}`);
+  console.log(`[Orchestrator] Run Dir:     ${runDir}`);
 
-  // Phase 1: Baseline
-  const { generatedDir, evaluationPath } = await runBaseline(args, runDir, schema, queries);
+  // Phase 1: Analysis + Parquet conversion + infrastructure
+  const { generatedDir } = await runPhase1(args, runDir, schema, queries);
 
-  // Phase 2: Optimization Loop
-  await runOptimizationLoop(args, runDir, generatedDir, evaluationPath);
+  // Phase 2: Per-query parallel optimization
+  await runPhase2(args, runDir, generatedDir, queries);
 
   // Finalize
   await updateRunMeta(runDir, (meta) => {
     meta.status = "completed";
     meta.completedAt = new Date().toISOString();
   });
-
   await updateLatestSymlink(workload, runId);
 
   // Write telemetry
   telemetryData.total_wall_clock_ms = Date.now() - runStartTime;
-  const telemetryPath = resolve(runDir, "telemetry.toon");
-  await writeTOON(telemetryPath, telemetryData);
+  const telemetryPath = resolve(runDir, "telemetry.json");
+  await writeFile(telemetryPath, JSON.stringify(telemetryData, null, 2));
 
-  // Print cost summary
+  // Print summary
   console.log(`\n[Orchestrator] === Run Summary ===`);
   console.log(`[Orchestrator] Total time: ${formatDuration(telemetryData.total_wall_clock_ms)}`);
   console.log(`[Orchestrator] Total tokens: ${Math.round(telemetryData.total_tokens.input / 1000)}K input, ${Math.round(telemetryData.total_tokens.output / 1000)}K output`);
   if (telemetryData.total_tokens.cache_read > 0) {
-    console.log(`[Orchestrator] Cache tokens: ${Math.round(telemetryData.total_tokens.cache_read / 1000)}K cache_read, ${Math.round(telemetryData.total_tokens.cache_creation / 1000)}K cache_creation`);
+    console.log(`[Orchestrator] Cache: ${Math.round(telemetryData.total_tokens.cache_read / 1000)}K read, ${Math.round(telemetryData.total_tokens.cache_creation / 1000)}K creation`);
   }
-  console.log(`[Orchestrator] Estimated cost: $${telemetryData.total_cost_usd.toFixed(2)} (cache-aware pricing)`);
+  console.log(`[Orchestrator] Cost: $${telemetryData.total_cost_usd.toFixed(2)}`);
 
-  // Per-phase summary
   const phaseSummaries = [];
-  for (const [phaseName, phase] of Object.entries(telemetryData.phases)) {
-    const phaseCost = Object.values(phase.agents || {}).reduce((s, a) => s + a.cost_usd, 0);
-    phaseSummaries.push(`${phaseName}: ${formatDuration(phase.total_ms)} ($${phaseCost.toFixed(2)})`);
+  for (const [name, phase] of Object.entries(telemetryData.phases)) {
+    const cost = Object.values(phase.agents || {}).reduce((s, a) => s + a.cost_usd, 0);
+    phaseSummaries.push(`${name}: ${formatDuration(phase.total_ms)} ($${cost.toFixed(2)})`);
   }
-  console.log(`[Orchestrator] ${phaseSummaries.join(" | ")}`);
-
-  // Most expensive agent
-  let maxAgent = { name: "", cost: 0 };
-  for (const phase of Object.values(telemetryData.phases)) {
-    for (const [agentName, agent] of Object.entries(phase.agents || {})) {
-      if (agent.cost_usd > maxAgent.cost) {
-        maxAgent = { name: agentName, cost: agent.cost_usd };
-      }
-    }
-  }
-  if (maxAgent.cost > 0 && telemetryData.total_cost_usd > 0) {
-    const pct = Math.round((maxAgent.cost / telemetryData.total_cost_usd) * 100);
-    console.log(`[Orchestrator] Most expensive agent: ${maxAgent.name} (${pct}% of total cost)`);
+  if (phaseSummaries.length > 0) {
+    console.log(`[Orchestrator] ${phaseSummaries.join(" | ")}`);
   }
 
-  console.log("\n[Orchestrator] Pipeline complete.");
-  console.log(`[Orchestrator] Run Dir:  ${runDir}`);
-  console.log(`[Orchestrator] Latest symlink: output/${workload}/latest → ${runId}`);
+  console.log(`\n[Orchestrator] Pipeline complete.`);
+  console.log(`[Orchestrator] Run Dir: ${runDir}`);
+  console.log(`[Orchestrator] Latest: output/${workload}/latest → ${runId}`);
 }
 
 main().catch((err) => {
-  console.error("[Orchestrator] Fatal error:", err.message);
+  console.error("[Orchestrator] Fatal:", err.message);
   process.exit(1);
 });

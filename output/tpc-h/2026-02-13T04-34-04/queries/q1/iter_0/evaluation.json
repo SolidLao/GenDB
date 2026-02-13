@@ -1,0 +1,13 @@
+{
+  "status": "fail",
+  "queries": {
+    "Q1": {
+      "status": "fail",
+      "time_ms": 252,
+      "rows": 1,
+      "error": "row count mismatch: expected 4, got 1 (row group pruning logic inverted)"
+    }
+  },
+  "compile_output": "Warning: ignoring returned value of type 'arrow::Status' in parquet_reader.h:378 (non-critical)",
+  "notes": "CRITICAL BUG: Row group pruning logic is inverted on line 165 of q1.cpp. Current code checks 'max_int >= date_threshold' but should check 'min_int <= date_threshold' for <= filter. This causes the code to read future-dated row groups and skip historical ones, producing only 1 group instead of 4. Performance is good (252ms) but results are wrong."
+}

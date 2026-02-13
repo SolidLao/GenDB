@@ -1,0 +1,24 @@
+{
+  "action": "optimize",
+  "reasoning": "Final iteration (2/2) with 2 failing queries and significant performance headroom. Q1 and Q3 have correctness issues that MUST be fixed. Q1 at 11259ms (58% of total time) is the biggest performance bottleneck with clear optimization path (morsel-driven parallelism). Q6 already passes and is fast (1024ms). Strategy: (1) Fix correctness issues in Q1 (output format) and Q3 (missing row), (2) Implement parallel aggregation for Q1 (expected 3-5x improvement to ~2-4 seconds), (3) Enable parallel row group reading for all queries (1.5-2x I/O improvement). These optimizations target different aspects and can be scheduled sequentially.",
+  "optimizations": [
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["Q1", "Q3"],
+      "guidance": "CRITICAL CORRECTNESS FIXES: [Q1] Lines 213-229 write output incorrectly - all columns are concatenated into single pipe-delimited string instead of separate CSV fields. Fix CSV output to write each column (l_returnflag, l_linestatus, sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc, count_order) as separate comma-separated fields, one result row per line. [Q3] Lines 383-395 use stable_sort but return only 9 rows instead of expected 10. Review tie-breaking logic in revenue comparison and ensure all qualifying rows are included. Check floating-point precision in revenue calculation (lines 347-357) and verify the top-10 selection logic does not drop valid rows due to epsilon comparison issues.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q1"],
+      "guidance": "Implement morsel-driven parallelism for aggregation (lines 160-185). Current implementation processes 59M rows single-threaded. Split filtered table into chunks of ~100K rows (morsels). Process each morsel in parallel using std::thread or arrow::internal::ThreadPool - each thread maintains local hash table for its chunk. After parallel aggregation, merge local hash tables (only 3-4 groups total, so merge is trivial). This should reduce Q1 time from 11259ms to ~2500-3700ms (3-5x improvement). Use Arrow's ThreadPool API for work scheduling. Critical: ensure thread-safe aggregation with no data races.",
+      "can_parallel": false
+    },
+    {
+      "optimizer": "io_optimizer",
+      "targets": ["ALL"],
+      "guidance": "Enable parallel row group reading for all queries. In scanner setup code (q1.cpp:98-123, q3.cpp similar sections, q6.cpp:81-103), add scanner_builder->UseThreads(true) before calling Finish(). This enables Arrow to read and decompress multiple row groups in parallel, especially beneficial for Q1 and Q6 which scan large lineitem table. Expected 1.5-2x improvement in I/O phase. Low risk change using standard Arrow dataset API feature.",
+      "can_parallel": false
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "action": "optimize",
+  "reasoning": "Final iteration for Q3. Current time 4376ms (43% improvement from baseline). Learner identifies multiple high-impact CPU optimizations that can be combined: prefetching hash probes (1.3x), optimizing string comparison (1.2x), reducing thread map overhead (1.1x), and array-based top-k merge (1.5x). Since this is the last iteration, focus on proven execution-level optimizations rather than risky index changes. Apply execution optimizer for CPU bottlenecks and query rewriter for merge optimization - these target non-overlapping code sections (scan loop vs merge phase) so can run in parallel.",
+  "optimizations": [
+    {
+      "optimizer": "execution_optimizer",
+      "targets": ["Q3"],
+      "guidance": "Apply three CPU optimizations: (1) Add prefetch instructions before hash probe at line 150 using __builtin_prefetch(&qualifying_orders.entries_[hash & mask_], 0, 1) to reduce cache misses during lineitem scan. (2) Replace string trimming loop (lines 48-59) with fast-path memcmp for 'BUILDING' prefix check - only trim rows that match first 8 bytes. (3) Reduce thread_maps initialization at lines 138-140 from 100000 to 4096 capacity to avoid expensive upfront allocation. These changes target the hot scan loop and initialization without altering correctness.",
+      "can_parallel": true
+    },
+    {
+      "optimizer": "query_rewriter",
+      "targets": ["Q3"],
+      "guidance": "Replace hash map merge (lines 186-206) with array-based top-k approach. Since we only need top 10 results, change thread_maps to use fixed-size vectors (capacity ~2000 per thread) instead of hash maps. After parallel aggregation, partially sort each thread's local vector to top 100, then merge using min-heap to get final top 10. This eliminates expensive hash lookups during merge phase (lines 189-198) and reduces memory overhead. Keep the aggregation logic in process_chunk using vector with linear search for small result sets.",
+      "can_parallel": true
+    }
+  ]
+}
