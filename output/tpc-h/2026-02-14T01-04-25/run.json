@@ -1,0 +1,46 @@
+{
+  "runId": "2026-02-14T01-04-25",
+  "workload": "tpc-h",
+  "startedAt": "2026-02-14T01:04:25.929Z",
+  "status": "running",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10",
+  "gendbDir": "/home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+  "scaleFactor": 10,
+  "maxIterations": 3,
+  "model": "haiku",
+  "optimizationTarget": "execution_time",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-02-14T01:04:26.696Z",
+        "completedAt": "2026-02-14T01:05:25.406Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-02-14T01:05:25.406Z",
+        "completedAt": "2026-02-14T01:11:49.180Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-02-14T01:11:49.180Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-02-14T01:11:49.180Z"
+      }
+    },
+    "completedAt": "2026-02-14T01:11:49.181Z"
+  },
+  "phase2": {
+    "status": "running",
+    "queries": [
+      "Q1",
+      "Q3",
+      "Q6"
+    ],
+    "maxConcurrent": 5,
+    "pipelines": {}
+  }
+}

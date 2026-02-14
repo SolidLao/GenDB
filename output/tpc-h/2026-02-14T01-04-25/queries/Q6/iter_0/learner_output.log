@@ -1,0 +1,44 @@
+Perfect! Now let me provide a brief summary:
+
+---
+
+## **Evaluation Summary: Q6 Iteration 0**
+
+**Hardware Profile:**
+- 64 cores (32 physical, HT enabled), 44 MB L3 cache (2 sockets), 376 GiB RAM, HDD storage
+- AVX2 and AVX512 SIMD support available
+
+### **Phase A: Evaluation Results**
+
+| Metric | Result |
+|--------|--------|
+| **Compilation** | ✅ PASS |
+| **Execution** | ❌ **SEGMENTATION FAULT** |
+| **Validation** | ❌ Cannot validate (crashed) |
+
+### **Phase B: Critical Analysis**
+
+**Root Cause:** Buffer overflow in delta decoding logic (lines 127-152 of q6.cpp)
+
+The `l_shipdate` column uses delta encoding. The code allocates a morsel-local array `shipdate_decoded` with size `(end - start)`, but then attempts to access it with absolute offsets:
+- Line 133: `prev = shipdate_decoded[start - 1]` → **OUT OF BOUNDS** when `start > 0`
+- Line 129: Tries to read `shipdate_data[start - 1]` without properly managing cumulative sum across morsel boundaries
+
+This is a **semantic/implementation bug** that makes the query non-functional.
+
+### **Recommendations**
+
+**Critical Fix (Priority 1 - BLOCKING):**
+- Replace buggy morsel-local delta decoding with a simple two-phase approach:
+  1. Decode entire `l_shipdate` column in single-threaded pass (~50ms)
+  2. Parallelize filtering across morsels (64 threads, 1M rows/morsel)
+- This eliminates the crash while remaining performant
+
+**Performance Optimizations (After Fix):**
+1. **SIMD vectorization** of filter predicates: 10-15% improvement
+2. **Cache prefetching**: 5-10% improvement
+3. **Branch-free filtering**: 3-7% improvement
+
+**Target:** Against DuckDB baseline of 19.3ms, realistic first iteration: **~30-35ms** (after semantic fix) → **25-30ms** (after optimizations).
+
+✅ **Evaluation JSON written** to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T01-04-25/queries/Q6/iter_0/evaluation.json`

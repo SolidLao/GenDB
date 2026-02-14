@@ -1,0 +1,22 @@
+## Summary
+
+✅ **Decision: OPTIMIZE (Continue to Iteration 1)**
+
+**Key Decision Points:**
+- **Gap**: 1.9x slower than DuckDB (164.4ms vs 86.4ms) — significant but addressable
+- **Bottleneck**: scan_filter dominates (89.4ms, 54% of runtime) with clear root causes
+- **Optimization Strategy**: Implement 3 high-impact CPU-bound optimizations:
+  1. **SIMD Vectorized Filtering** — Replace scalar predicate with AVX-512 16-way parallelism (30-40ms gain)
+  2. **Filter-Before-Decode Pattern** — Eliminate 2% wasted dictionary lookups, enable late materialization (5-10ms gain)
+  3. **Integer-Domain Aggregation** — Remove 359M FP operations, eliminate Kahan overhead (10-15ms gain)
+
+**Expected Outcome**: Combined reduction of 45-65ms brings Q1 to ~100-115ms range, competitive with DuckDB's 108.8ms average.
+
+**Why This Approach:**
+- Recommendations are proven techniques (used in DuckDB, PostgreSQL)
+- All are orthogonal — Query Optimizer can apply simultaneously
+- Hardware-aligned (AVX-512 available, HDD with MADV_SEQUENTIAL)
+- Conservative risk profile (medium per evaluation, but well-analyzed)
+- Leaves iteration 2 budget for secondary optimizations if needed
+
+Decision written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/queries/Q1/iter_1/decision.json` ✓

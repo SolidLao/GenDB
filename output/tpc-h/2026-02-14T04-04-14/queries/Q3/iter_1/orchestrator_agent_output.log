@@ -1,0 +1,23 @@
+## Summary
+
+**Decision: OPTIMIZE (Continue)**
+
+**Q3 is in critical condition** — completely wrong results and 8.3x slower than baseline. I've decided to **continue optimizing** because:
+
+1. **Correctness must be fixed**: Delta-encoded columns are not being decoded, causing semantic bugs (only 1/10 rows correct). This is non-negotiable.
+
+2. **High-confidence solutions available**: 
+   - Fix delta decoding (restore correctness)
+   - Implement morsel-driven parallelism (6-8x speedup on 64 cores, low risk)
+   - Swap hash tables for compact implementations (2-3x improvement, low risk)
+
+3. **Significant upside**: Target is sub-400ms (vs. current 3222ms). Combined fixes could reach ~100-150ms range.
+
+4. **2 iterations remain**: Sufficient budget for iterative refinement.
+
+**Selected Recommendations** (indices 0, 1, 2):
+- **0** (CRITICAL): Delta-encoded column decoding
+- **1** (Priority 1): Morsel-driven parallelism 
+- **2** (Priority 2): Compact hash tables
+
+Zone maps and SIMD filtering deferred to iteration 2 if performance gap persists.

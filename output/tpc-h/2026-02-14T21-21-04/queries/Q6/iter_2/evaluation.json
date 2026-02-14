@@ -1,0 +1,107 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": ""
+    },
+    "run": {
+      "status": "pass",
+      "output": "[TIMING] scan_filter: 19.0 ms\n[TIMING] output: 0.1 ms\n[TIMING] total: 33.8 ms\nQuery returned 1 rows (matched 1139264 detail rows)\n"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Q6 validation passed (1 row matched)"
+    },
+    "query_results": {
+      "Q6": {
+        "status": "pass",
+        "num_rows": 1,
+        "timing_ms": 33.8,
+        "operation_timings": {
+          "scan_filter": 19.0,
+          "output": 0.1,
+          "total": 33.8
+        },
+        "dominant_operation": "scan_filter",
+        "notes": "Query executes correctly with parallel morsel-driven scan. Performance is back to baseline (33.8ms vs 35.2ms baseline). Currently 1.75x slower than DuckDB target (19.3ms). Main bottleneck is full table scan without zone map pruning."
+      }
+    }
+  },
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q6": {
+        "current_time_ms": 33.8,
+        "status": "pass",
+        "operation_timings": {
+          "scan_filter": 19.0,
+          "output": 0.1,
+          "total": 33.8
+        },
+        "dominant_operation": "scan_filter (56.2% of total)",
+        "bottleneck": "Full table scan without zone map block skipping",
+        "root_cause": "The code currently scans all 59,986,052 rows with parallel morsel-driven execution (lines 75-121). While parallelism is working correctly, the implementation does not leverage zone maps to skip non-qualifying blocks. Storage design specifies zone maps for l_shipdate, l_discount, and l_quantity (storage_design.json lines 31-33) with block_size=100,000. With combined selectivity of ~1.9% (0.33 date × 0.09 discount × 0.48 quantity from workload_analysis.json), zone maps could skip approximately 67% of blocks entirely. On HDD systems, avoiding I/O is more valuable than CPU optimizations. The date range [1994-01-01, 1995-01-01) covers only ~14% of the TPC-H date range [1992-01-18, 1998-12-01], so most blocks can be pruned based on l_shipdate alone."
+      }
+    },
+    "overall": "Q6 iteration 2 returns correct results and maintains baseline performance (33.8ms). The correctness bug from iteration 1 has been fixed. Current implementation uses parallel execution (64 threads, morsel size 100K) with Kahan summation for numerical accuracy, which is good. However, the code does not use zone map indexes that are available in the storage design. Main optimization opportunity: implement zone map pruning to skip blocks before scanning. With 1.9% query selectivity and HDD storage, block-level pruning will provide the largest performance gain. Target: match DuckDB's 19.3ms by reducing I/O volume through intelligent block skipping."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "bottleneck_category": "index",
+      "technique": "Zone map block pruning with multi-column predicates",
+      "description": "Load and use zone map files (lineitem_shipdate_zonemap.bin, lineitem_discount_zonemap.bin, lineitem_quantity_zonemap.bin) to identify qualifying blocks before scanning. Zone map format per storage design: 24-byte entries with min_val, max_val, start_row, end_row (ZoneMapEntry struct defined at lines 17-23 but unused). Steps: (1) mmap all three zone map files, (2) iterate zone entries and test if block overlaps predicates: shipdate range [8766,9131), discount range [5,7], quantity max < 2400, (3) build list of qualifying block ranges, (4) modify scan loop to only process qualifying blocks. For l_shipdate alone, expect to skip ~86% of blocks (only 1 year out of 7 in TPC-H). Combined with discount (11 distinct values, want 2/11 = 18%) and quantity (< 48%), final selectivity is 1.9%. Zone map filtering avoids reading and evaluating ~50-60M irrelevant rows.",
+      "expected_improvement": "30-50% total time reduction (from 33.8ms to ~20-23ms) by skipping I/O and CPU work on non-qualifying blocks. Brings performance closer to DuckDB's 19.3ms target. On HDD, I/O reduction is critical.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD vectorized filtering with AVX2",
+      "description": "Current implementation evaluates predicates in scalar mode (lines 91-110). Vectorize the filter evaluation using AVX2 intrinsics. Process 8 rows at a time: (1) Load 8 shipdate values using _mm256_loadu_si256, (2) Compare against date_min/date_max using _mm256_cmpgt_epi32, (3) Similarly vectorize discount and quantity comparisons, (4) Combine masks with _mm256_and_si256, (5) Extract matching indices using _mm256_movemask_ps or gather pattern, (6) Compute revenue for matching rows only. Hardware supports AVX-512 (workload_analysis line 7) which could process 16 values per instruction, but start with AVX2 for stability. Reference: parallelism/simd.md. SIMD is most effective after zone map pruning reduces data volume.",
+      "expected_improvement": "15-25% reduction in scan_filter time (from 19.0ms to ~14-16ms after zone maps reduce working set). Combined with zone map pruning, total time could reach 18-20ms.",
+      "risk": "medium"
+    },
+    {
+      "priority": 3,
+      "target": "Q6",
+      "bottleneck_category": "filter",
+      "technique": "Optimized predicate evaluation order",
+      "description": "Reorder predicate evaluation to check most selective/cheapest predicates first. Current order (lines 93-95): shipdate, discount, quantity. Optimal order based on selectivity: (1) l_discount BETWEEN [5,7] — only 2 out of 11 distinct values (18% selectivity), cheapest comparison (two integer compares), (2) l_shipdate >= 8766 AND < 9131 — 33% selectivity, (3) l_quantity < 2400 — 48% selectivity (least selective, check last). This minimizes CPU work on rows that will fail later predicates. Use short-circuit evaluation: `if (discount[i] < discount_min || discount[i] > discount_max) continue; if (shipdate[i] < date_min || shipdate[i] >= date_max) continue; if (quantity[i] >= quantity_max) continue;` Expected to skip ~82% of rows at first predicate, ~67% at second, saving comparisons.",
+      "expected_improvement": "5-10% reduction in CPU time by avoiding unnecessary predicate evaluations. Modest but low-risk improvement.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "technique": "Block-granular I/O with targeted mmap",
+      "description": "After zone map pruning identifies qualifying blocks, only mmap/read those specific byte ranges instead of entire column files. Current implementation mmaps entire columns (lines 50-53). With 100K-row blocks and 4-byte shipdate values, each block is 400KB. For qualifying blocks only: (1) Calculate byte offset = block_start_row * sizeof(type), (2) Use mmap with offset/length parameters or pread() to load only qualifying ranges, (3) Process discontiguous blocks. On HDD, random seeks are expensive (~10ms per seek), but if qualifying blocks are clustered (likely due to l_shipdate sort order in storage design line 27), sequential reads of clustered ranges will be fast. Avoid MADV_RANDOM on HDD (current code correctly uses MADV_SEQUENTIAL at line 41). For SF10 lineitem, ~600 blocks total, zone maps reduce to ~120 qualifying blocks (20%).",
+      "expected_improvement": "10-15% additional I/O reduction beyond zone map pruning. Most benefit comes from zone map filtering itself. Combined with priority 1, total I/O savings ~40-50%.",
+      "risk": "medium"
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Reduce morsel size for better cache utilization",
+      "description": "Current morsel size is 100,000 rows (line 73). With 4 columns (shipdate, discount, quantity, price) of 4-8 bytes each, each morsel is ~2.4MB, exceeding the L3 cache size of 44MB / 64 threads = 687KB per thread. Reduce morsel size to ~40K-50K rows (~1.2MB per morsel) to fit working set in L3 cache. Formula: L3_cache_MB / num_threads / num_columns / sizeof(largest_type) = 44MB / 64 / 4 / 8 = ~22K rows. Use 50K for safety. Smaller morsels improve cache hit rate and reduce memory stalls. Reference: parallelism/thread-parallelism.md for morsel sizing guidelines.",
+      "expected_improvement": "5-8% reduction in memory stall time. Modest improvement but low-risk tuning parameter.",
+      "risk": "low"
+    },
+    {
+      "priority": 6,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Branch-free filtering in scalar paths",
+      "description": "After SIMD processes aligned portions, scalar tail handles remaining rows (lines 91-110 process all rows currently, but with SIMD would leave tail). Use branchless arithmetic to avoid pipeline stalls: `int match = (shipdate[i] >= date_min) & (shipdate[i] < date_max) & (discount[i] >= discount_min) & (discount[i] <= discount_max) & (quantity[i] < quantity_max);` Then conditionally add: `double revenue = (double)(price[i] * discount[i]) / 10000.0 * match;` This eliminates branch mispredictions. Reference: query-execution/scan-filter-optimization.md. Most effective for tail rows after SIMD vectorization.",
+      "expected_improvement": "3-5% reduction in scalar tail overhead. Minor but useful for reducing branch mispredictions.",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q6 iteration 2 achieves CORRECT RESULTS (fixing iteration 1's decimal bug) with 33.8ms execution time, essentially matching baseline performance (35.2ms). Currently 1.75x slower than DuckDB target (19.3ms). The dominant bottleneck is full table scan without zone map block skipping (scan_filter: 19.0ms = 56% of total). PRIMARY RECOMMENDATION: Implement zone map pruning using available l_shipdate, l_discount, and l_quantity zone maps to skip ~67% of blocks before scanning. This single optimization should reduce total time by 30-50% (target: 20-23ms), approaching DuckDB performance. Secondary optimizations: AVX2 SIMD filtering (15-25% additional speedup), predicate reordering (5-10%), cache-aware morsel sizing (5-8%). The query has low selectivity (1.9%) and runs on HDD, making I/O reduction through zone maps the critical optimization path."
+}

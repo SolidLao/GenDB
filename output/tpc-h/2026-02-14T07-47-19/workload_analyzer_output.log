@@ -1,0 +1,56 @@
+Excellent! Now let me create a brief summary of findings:
+
+## Workload Analysis Summary
+
+**Analysis Output:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T07-47-19/workload_analysis.json`
+
+### Hardware Profile
+- **CPU:** 64 cores (2 sockets × 16 cores, 2 threads/core) with AVX-512 SIMD support
+- **Memory:** 376 GB available (ample for this workload)
+- **Disk:** HDD (rotational, suggesting network or buffered I/O strategy needed)
+- **Cache:** L3 44 MiB (22 MiB per socket) → morsel size ~340-700K rows/thread for vectorization
+
+### Data Characterization
+| Table | Rows | Role | Key Columns |
+|-------|------|------|------------|
+| **lineitem** | **59.9M** | Fact | l_shipdate, l_discount, l_quantity, l_returnflag, l_linestatus |
+| **orders** | **15M** | Fact | o_orderdate, o_orderkey, o_custkey |
+| **customer** | **1.5M** | Dimension | c_mktsegment, c_custkey |
+| partsupp | 8M | Bridge | (unused in queries) |
+| part | 2M | Dimension | (unused in queries) |
+| supplier | 100K | Dimension | (unused in queries) |
+| nation | 25 | Dimension | (unused in queries) |
+| region | 5 | Dimension | (unused in queries) |
+
+### Query Analysis
+
+**Q1: Pricing Summary Report** (Dominant workload)
+- **Type:** Single-table aggregate scan on lineitem
+- **Input:** 59.9M rows → Filter selectivity 94.1% → **56.5M rows after filter**
+- **GROUP BY cardinality:** 6 groups (2 returnflag × 3 linestatus values)
+- **Computation:** Heavy arithmetic (7 aggregate functions with expressions)
+- **Opportunity:** Massive parallelism (64 cores), vectorizable aggregation arithmetic with AVX-512
+
+**Q3: Shipping Priority** (Critical bottleneck)
+- **Type:** Multi-way join chain: customer → orders → lineitem
+- **Filter selectivity:** customer (20%), orders (33%), lineitem (67%) → **~850K final rows**
+- **Join pattern:** PK-FK joins with early filtering
+- **Optimization:** Bloom filter semi-join reduction on customer, hash join (smaller build side), partial aggregation
+- **Output:** Only 10 rows (LIMIT 10)
+
+**Q6: Forecasting Revenue** (Highly selective)
+- **Type:** Single-table aggregate scan on lineitem
+- **Combined filter selectivity:** 2.04% (year 1994 + discount range + quantity filter) → **~1.22M rows**
+- **GROUP BY cardinality:** 1 (global sum)
+- **Optimization:** Filter pushdown critical; minimal parallelism benefit; cache-efficient tight loop
+
+### Optimization Strategy
+1. **Thread Parallelism:** Use all 64 cores for Q1/Q3 lineitem scans; morsel-driven execution with ~700K rows/thread
+2. **SIMD:** AVX-512 vectorization for Q1 aggregation arithmetic (7 simultaneous calculations per vector)
+3. **Join Optimization:** Q3 requires careful join ordering—smallest filtered side first; use hash joins with pre-sized tables
+4. **Filter Pushdown:** Q6 benefits from predicate pushdown into scan loop to eliminate 98% of rows early
+5. **Storage:** Columnar layout for lineitem (sequential access to l_shipdate, l_discount, l_quantity); dictionary encoding for flags
+
+**Bottleneck Query:** Q3 (multi-way joins + 15M orders scan)  
+**Computational Intensity:** Q1 (7 aggregate functions with expressions)  
+**Selectivity Challenge:** Q6 (tight 2% filter, minimal aggregation benefit)

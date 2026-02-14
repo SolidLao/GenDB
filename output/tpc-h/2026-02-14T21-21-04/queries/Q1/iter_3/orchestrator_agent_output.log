@@ -1,0 +1,19 @@
+## Summary
+
+**Decision: OPTIMIZE (Final Iteration)**
+
+Q1 Iteration 3 will aggressively pursue the two highest-impact, lowest-risk I/O optimizations:
+
+1. **Thread/Morsel Tuning** (Priority 1): Reduce thread count from 64→8-16 and increase morsel size from 100K→500K rows to eliminate HDD thrashing. Expected gain: 15-25ms (11-18% improvement).
+
+2. **MADV_SEQUENTIAL Removal** (Priority 2): Remove the conflicting kernel read-ahead hint that causes excessive seeks with parallel access. Expected gain: 5-10ms (4-7% improvement).
+
+**Rationale:**
+- Current: 137.9ms (1.6x slower than DuckDB's 86.4ms)
+- Iteration 2 showed strong +16% improvement trajectory with correct results
+- Dominant bottleneck identified: scan_filter at 46.8% of total time (HDD I/O bound)
+- These recommendations differ from Iteration 1's failed CPU approach—they're proven optimizations
+- Expected combined impact: ~107-123ms, a significant step toward DuckDB
+- This is the final iteration budget, so deploy decisively on high-confidence gains
+
+The decision balances aggressive optimization (not stopping early) with risk management (low-risk, well-understood techniques on a proven bottleneck).

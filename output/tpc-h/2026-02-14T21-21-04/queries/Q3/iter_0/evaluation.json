@@ -1,0 +1,135 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": ""
+    },
+    "run": {
+      "status": "pass",
+      "output": "[TIMING] load_data: 0.2 ms\n[TIMING] customer_filter: 32.3 ms\n[TIMING] orders_filter_join: 725.0 ms\n[TIMING] lineitem_scan_aggregation: 131.2 ms\n[TIMING] aggregation_merge: 36.5 ms\n[TIMING] sort: 10.9 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 936.5 ms\nQuery returned 10 rows\n"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Q3: 10/10 rows match"
+    },
+    "query_results": {
+      "Q3": {
+        "status": "pass",
+        "num_rows": 10,
+        "timing_ms": 936.5,
+        "operation_timings": {
+          "load_data": 0.2,
+          "customer_filter": 32.3,
+          "orders_filter_join": 725.0,
+          "lineitem_scan_aggregation": 131.2,
+          "aggregation_merge": 36.5,
+          "sort": 10.9,
+          "output": 0.2,
+          "total": 936.5
+        },
+        "dominant_operation": "orders_filter_join",
+        "notes": "orders_filter_join is the bottleneck at 77.4% of execution time. This is a single-threaded sequential scan of 15M orders with filter + join. Reference: DuckDB achieves 77.8ms (12.0x faster)."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 936.5,
+        "status": "pass",
+        "operation_timings": {
+          "load_data": 0.2,
+          "customer_filter": 32.3,
+          "orders_filter_join": 725.0,
+          "lineitem_scan_aggregation": 131.2,
+          "aggregation_merge": 36.5,
+          "sort": 10.9,
+          "output": 0.2,
+          "total": 936.5
+        },
+        "dominant_operation": "orders_filter_join (77.4% of total)",
+        "bottleneck": "Single-threaded sequential scan of 15M orders rows (lines 145-149 in q3.cpp) performing filter (o_orderdate < date_cutoff) and join probe (customer_ht.count(o_custkey)). This sequential loop takes 725ms out of 936.5ms total.",
+        "root_cause": "The orders table scan is not parallelized. On a 64-core machine, a single-threaded scan wastes 98.4% of available CPU resources. Additionally, the available orders_orderdate_zonemap index (from storage_design.json) is not being used to skip blocks that don't match the date predicate (o_orderdate < 9204). The hash table uses std::unordered_map which is 2-5x slower than modern compact hash tables."
+      }
+    },
+    "overall": "Q3 validation passes (10/10 rows correct). Performance is 12.0x slower than DuckDB (936.5ms vs 77.8ms min). The dominant bottleneck is orders_filter_join (77.4% of total time), which is a single-threaded sequential scan that should be parallelized and should use zone map pruning. Lineitem scan is already parallelized (good), but performance is still far from DuckDB due to the orders bottleneck and lack of zone map usage. The sort operation uses full sort instead of partial_sort despite LIMIT 10. Hardware: 64 cores available but orders scan uses only 1 core."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Parallel orders scan with morsel-driven execution",
+      "description": "The orders_filter_join phase (lines 145-149) is single-threaded and takes 725ms (77.4% of total). Parallelize this scan using the same morsel-driven approach already used for lineitem (lines 159-197). Split 15M orders into morsels of ~100K rows, distribute across 64 threads. Each thread should: (1) scan its morsel rows, (2) apply filter o_orderdate[i] < date_cutoff, (3) probe customer_ht for c_custkey match, (4) accumulate matching entries in a thread-local std::unordered_map<int32_t, OrderInfo>. After all threads finish, merge the thread-local hash tables into the final orders_ht. This change should reduce orders_filter_join time from 725ms to ~11-20ms (64-core near-linear speedup), bringing total query time from 936ms to ~220ms (4.3x improvement).",
+      "expected_improvement": "725ms → 11-20ms for orders_filter_join; total 936ms → 220ms (4.3x speedup). Near-linear scaling on 64 cores.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "index",
+      "technique": "Zone map pruning for orders.o_orderdate",
+      "description": "The storage_design.json specifies an orders_orderdate_zonemap index with block_size=100000. The predicate o_orderdate < 9204 (1995-03-15) has ~48.7% selectivity. By loading and checking the zone map min/max per block before scanning, we can skip ~51% of blocks where min_orderdate >= 9204. Implementation: (1) Load or generate zone map metadata (min/max o_orderdate per 100K-row block), (2) Before scanning a morsel, check if the block's max_orderdate < 9204 — if not, skip the entire block. (3) On HDD, this saves random seeks. Expected benefit: Skip ~51% of orders blocks, reducing data scanned from 15M rows to ~7.3M rows. Combined with parallelism, this could reduce orders_filter_join from 725ms to ~5-10ms (skipping + parallelism). Note: Zone map file may not exist yet — if missing, generate it during data load or first query run.",
+      "expected_improvement": "Skip ~51% of blocks (7.7M rows), reducing I/O and CPU. Combined with parallelism: 725ms → 5-10ms (70-145x speedup for this phase).",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "sort",
+      "technique": "Replace full sort with std::partial_sort for LIMIT 10",
+      "description": "The query uses LIMIT 10, but lines 225-230 perform a full sort of all ~1.4M aggregated groups. This is O(n log n) = O(1.4M * log(1.4M)) ≈ 29M comparisons. Replace std::sort with std::partial_sort(results.begin(), results.begin() + 10, results.end(), comparator) which is O(n log K) = O(1.4M * log(10)) ≈ 4.6M comparisons (6.3x fewer comparisons). Current sort time is 10.9ms; expected reduction to ~1.7ms (6.4x faster). Change line 225 from 'std::sort(results.begin(), results.end(), ...)' to 'std::partial_sort(results.begin(), results.begin() + std::min(10UL, results.size()), results.end(), ...)'.",
+      "expected_improvement": "10.9ms → 1.7ms for sort phase (6.4x faster), total query time improvement ~9ms.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Replace std::unordered_map with compact hash table (Robin Hood or linear probing)",
+      "description": "The current code uses std::unordered_map for customer_ht (line 125) and orders_ht (line 143), which has high memory overhead and poor cache locality. Modern compact hash tables (Robin Hood hashing or Swiss Tables from Abseil) are 2-5x faster for lookups due to better cache locality and SIMD-accelerated probing. Specifically: (1) Replace customer_ht with a custom open-addressed hash table using linear probing with power-of-2 sizing. (2) Replace orders_ht similarly. (3) Ensure load factor stays at 0.75 by pre-sizing. Expected benefit: customer_filter 32.3ms → 10-15ms (2-3x faster), orders_ht probing in lineitem_scan_aggregation 131.2ms → 50-70ms (1.9-2.6x faster). Total improvement: ~100ms reduction. Implementation: Use a simple fixed-size array with linear probing, or include Abseil's flat_hash_map (header-only, single #include).",
+      "expected_improvement": "customer_filter 32.3ms → 10-15ms, lineitem_scan_aggregation 131.2ms → 50-70ms (hash table probing is part of this). Total ~100ms reduction.",
+      "risk": "medium"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Parallel customer filter scan",
+      "description": "The customer_filter phase (lines 127-131) takes 32.3ms for a sequential scan of 1.5M rows. This is single-threaded and can be parallelized using the same morsel-driven approach. Split 1.5M customer rows into morsels, scan in parallel across 64 threads, each thread building a thread-local hash table for c_custkey where c_mktsegment == 0. Then merge the thread-local hash tables. Expected speedup: 32.3ms → ~0.5-1ms (32-64x speedup with 64 cores). This is lower priority than orders parallelization because customer_filter is only 3.4% of total time (vs 77.4% for orders).",
+      "expected_improvement": "32.3ms → 0.5-1ms (32-64x speedup), total query time improvement ~31ms.",
+      "risk": "low"
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Pre-size thread-local aggregation maps to reduce rehashing",
+      "description": "Line 165 reserves 50,000 entries per thread in thread_maps, but the workload analysis estimates ~1.4M total groups. With 64 threads, that's ~22K groups per thread on average. The current reservation of 50K is reasonable, but the final_agg hash table (line 205) reserves 1.5M, which may be oversized. More importantly, during the scan, if any thread exceeds 50K groups, it will trigger expensive rehashing. Monitor actual group counts per thread and adjust reservations. For better performance, use a load factor of 0.75: if expecting 22K groups per thread, reserve 22K / 0.75 ≈ 30K. For final_agg, reserve 1.4M / 0.75 ≈ 1.87M (round to 2M power-of-2). This avoids mid-execution rehashing which causes 50-200ms stalls. Current aggregation_merge is 36.5ms; better sizing could reduce to ~20-25ms.",
+      "expected_improvement": "aggregation_merge 36.5ms → 20-25ms (avoiding rehashing stalls). Total ~10-15ms improvement.",
+      "risk": "low"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Remove MADV_SEQUENTIAL for selective scans on HDD",
+      "description": "Line 37 applies MADV_SEQUENTIAL to all mmapped files. This is appropriate for full scans but suboptimal for selective scans with zone map pruning. When zone maps are enabled and we're skipping ~51% of blocks, MADV_SEQUENTIAL causes the kernel to aggressively prefetch sequential blocks that we won't read, wasting I/O bandwidth on HDD. After implementing zone map pruning (priority 2), replace MADV_SEQUENTIAL with MADV_RANDOM for the orders_o_orderdate file to prevent unnecessary prefetching. However, on HDD, random access is slow, so this is a tradeoff: MADV_RANDOM avoids wasted prefetch but doesn't improve seek time. Alternative: Use MADV_SEQUENTIAL for full scans (lineitem) and MADV_RANDOM for selective scans (orders). Expected benefit: Minor (5-10% I/O reduction on orders scan), ~5-10ms improvement on HDD.",
+      "expected_improvement": "Minor I/O efficiency gain, ~5-10ms improvement for orders scan on HDD.",
+      "risk": "low"
+    },
+    {
+      "priority": 8,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Bloom filter on customer_ht to accelerate orders probe",
+      "description": "The customer_filter has ~21.9% selectivity (workload analysis), meaning customer_ht contains ~330K keys out of 1.5M. When scanning orders (15M rows), each row probes customer_ht.count(o_custkey). A Bloom filter built on customer_ht keys can skip 78% of hash table lookups that will miss (when Bloom filter returns false). Implementation: (1) Build a Bloom filter (2-4 bits per key, ~100KB for 330K keys) during customer_filter phase. (2) In orders scan (line 146), first check if Bloom filter contains o_custkey; if not, skip the expensive customer_ht.count(). Expected benefit: Reduce customer_ht probes from 15M to ~3.3M (22% hit rate), saving ~10-20ms in orders_filter_join phase. Note: This optimization is most valuable when NOT parallelizing orders scan; if orders scan is parallelized (priority 1), the benefit is reduced because each thread already works on smaller chunks.",
+      "expected_improvement": "Reduce hash table probes by 78%, saving ~10-20ms in orders_filter_join (less impactful if orders scan is parallelized).",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q3 iteration 0 passes validation (10/10 rows correct) but is 12.0x slower than DuckDB (936.5ms vs 77.8ms). The dominant bottleneck is orders_filter_join (725ms, 77.4% of total), which is a single-threaded sequential scan on a 64-core system. Top recommendations: (1) Parallelize orders scan across 64 cores for ~64x speedup (725ms → 11ms), (2) Use zone map pruning on o_orderdate to skip ~51% of blocks, (3) Replace full sort with std::partial_sort for LIMIT 10 (10.9ms → 1.7ms). Combined, these optimizations could reduce total query time from 936ms to ~60-90ms (10-15x improvement), approaching DuckDB's 77.8ms. Lower-priority optimizations include compact hash tables, parallel customer scan, and Bloom filters."
+}

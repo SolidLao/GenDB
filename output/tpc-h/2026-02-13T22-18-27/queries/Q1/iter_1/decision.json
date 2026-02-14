@@ -1,0 +1,14 @@
+{
+  "action": "optimize",
+  "reasoning": "Q1 iteration 0 has critical floating-point precision errors (MUST fix) and is 15.4x slower than baseline (740ms vs 48ms). Primary bottleneck is HDD I/O with MADV_WILLNEED causing 2.5GB prefetch thrashing. With 2 iterations remaining, we must be aggressive: fix correctness + apply all high-impact optimizations simultaneously.",
+  "selected_recommendations": [0, 1, 2, 3, 4],
+  "focus_areas": [
+    "Fix floating-point precision errors with fixed-point integer arithmetic (CRITICAL - non-negotiable)",
+    "Remove MADV_WILLNEED for HDD optimization (2-3x I/O speedup expected)",
+    "Upgrade to AVX-512 SIMD for date filtering (1.3-1.5x CPU speedup)",
+    "Replace std::map with perfect hash table for 4-group aggregation (1.2-1.4x speedup)",
+    "Optimize aggregate math by hoisting divisions (1.1-1.2x speedup)"
+  ],
+  "strategy_notes": "Priority 1: Fix correctness with fixed-point integer arithmetic in aggregates (rec 0). Priority 2: Attack the 15x performance gap with multi-pronged approach: I/O optimization (rec 1 - biggest win), AVX-512 SIMD (rec 2), perfect hash aggregation (rec 3), and math optimization (rec 4). These optimizations are independent and can be applied simultaneously. Expected combined speedup: 4-7x (740ms → 100-200ms), targeting DuckDB performance range (87-150ms) or better. Be aggressive - we have 2 iterations left and automatic rollback on failure.",
+  "notes": "Skipping rec 5 (column reordering - medium risk, complex for 98.8% selectivity) and rec 6 (parallel distribution - minor gains). Focus on proven, high-impact changes. The Query Optimizer should implement all 5 selected recommendations in a single unified pass."
+}

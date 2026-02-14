@@ -1,0 +1,18 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING (action: "optimize")**
+
+**Key Points:**
+1. **Critical Fix Required**: Date encoding mismatch (YYYYMMDD vs days_since_epoch) causes 0 result rows. Must convert 19950315 → 9204.
+2. **Performance Gap**: After correctness fix, Q3 will be ~386ms (benchmark). DuckDB: 77-112ms. **3-4x gap remains** — significant optimization opportunity.
+3. **Selected Recommendations** (all 4):
+   - **Critical fix** (semantic): Date encoding
+   - **I/O optimization** (priority 1): Zone maps + selective columns → 10-25% gain
+   - **Aggregation** (priority 2): Better hash table sizing → 5-15% gain
+   - **SIMD** (priority 4): Vectorized filtering/revenue → 10-20% gain
+
+4. **Strategy**: Apply critical fix immediately, then pursue all performance optimizations in parallel. The codebase already has parallelism infrastructure on 64 cores—focus on I/O efficiency, data structure optimization, and vectorization.
+
+5. **Budget**: 2 iterations remaining. Aggressive multi-category optimization is appropriate given clear bottleneck identification and proven low-risk fixes.
+
+Decision written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-13T23-45-34/queries/Q3/iter_1/decision.json`

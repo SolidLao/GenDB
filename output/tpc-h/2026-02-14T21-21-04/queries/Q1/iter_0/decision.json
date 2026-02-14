@@ -1,0 +1,14 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Parallelism: Morsel-driven execution on 64 cores for full lineitem scan (59.9M rows). Target 10K-100K rows per morsel based on L3 cache sizing.",
+    "SIMD vectorized filtering: Vectorize l_shipdate <= filter using AVX-512 (compare 8 int32_t dates per instruction). Use branch-free predicates.",
+    "SIMD vectorized aggregation: Horizontal reductions for SUM, AVG on l_quantity, l_extendedprice, l_discount using AVX-512 (accumulate 8 values in parallel).",
+    "Partial aggregation: Each thread pre-aggregates into local hash table (only 4 unique groups: A/F, A/O, R/F, R/O). Global merge in single thread. Reduces shared memory contention.",
+    "Zone maps: Lineitem sorted by l_shipdate with zone maps. Pre-compute date threshold (1998-09-02) and skip blocks entirely where max_date <= threshold (reduces I/O by ~2% but exploits predicate structure).",
+    "Columnar load: Load only hot columns (l_shipdate, l_quantity, l_extendedprice, l_discount, l_returnflag, l_linestatus) to reduce memory bandwidth.",
+    "Dictionary decoding: l_returnflag/l_linestatus are dictionary-encoded uint8_t—avoid decoding in hot loop, use dictionary codes directly in aggregation keys."
+  ],
+  "strategy_notes": "Q1 dominates execution time due to 60M row scan. Aggressive strategy: (1) Saturate all 64 cores with morsel-driven execution, keeping each core on 10K-100K row batches to fit L3 cache. (2) Vectorize the l_shipdate filter using AVX-512 (8 dates per instruction) to reduce branch misses. (3) In aggregation, use SIMD horizontal reductions (AVG/SUM) on groups 1-8 simultaneously. (4) Partial aggregation is critical: only 4 groups total, so local pre-agg per thread eliminates global synchronization. (5) Use compiled code generation (template specialization) for tight loop with unrolled aggregation. Target: 8-10x speedup via parallelism alone, 2-3x from SIMD, for total ~20-30x vs single-threaded baseline. DuckDB achieves ~100ms; target 40-50ms with aggressive parallelism.",
+  "reasoning": "TPC-H SF10 is I/O and CPU bound on 60M lineitem scans. DuckDB achieves 86-113ms for Q1, 78-113ms for Q3, 19-21ms for Q6. Key opportunities: (1) Morsel-driven parallel execution on 64 cores for lineitem scans (7-8x speedup potential), (2) SIMD vectorized filtering and aggregation for hot loops, (3) Zone maps to skip blocks in Q6/Q1, (4) Selective join ordering in Q3 (filter customer→orders→lineitem) to minimize intermediates."
+}

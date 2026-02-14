@@ -1,0 +1,21 @@
+## Summary
+
+**Decision: OPTIMIZE** (Iteration 0 - Initial Strategy)
+
+**Strategic Guidance for Q3 Code Generation:**
+
+Q3 is a 3-way join query with significant optimization potential. Current performance is 386ms vs DuckDB's 78ms (5x gap), indicating room for substantial improvement.
+
+**Key Strategic Priorities:**
+
+1. **Aggressive 64-core parallelism** - Morsel-driven execution (10K-50K rows per task) across all operators
+2. **Optimal join ordering** - Dimension pushdown pattern: filter customer first (20% selectivity) → hash join with orders → hash join with lineitem
+3. **Zone map pruning** - Exploit sorted storage on date columns to skip blocks
+4. **Partial aggregation** - Thread-local hash tables + global merge to avoid contention
+5. **Top-K heap optimization** - Maintain size-10 min-heap instead of sorting 300K groups
+6. **SIMD arithmetic** - AVX512 for `l_extendedprice * (1 - l_discount)` computation
+7. **Column pruning** - Load only the 11 required columns (not all 33)
+
+**Expected Performance:** Target 60-80ms (competitive with DuckDB) through 2-3x from parallelism+zone maps, 1.5x from Top-K heap, 1.2x from SIMD.
+
+Decision written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-13T22-18-27/queries/Q3/iter_0/decision.json`

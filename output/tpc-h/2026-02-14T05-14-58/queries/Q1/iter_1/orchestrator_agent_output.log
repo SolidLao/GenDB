@@ -1,0 +1,16 @@
+## Summary
+
+**Decision: OPTIMIZE (Continue)**
+
+**Iteration 1 Focus**: Apply 2 critical fixes
+- **Fix 1 (Semantic/Architecture)**: Replace CSV text parsing with mmap-based binary columnar storage access — foundational fix for 100-300× improvement
+- **Fix 2 (Precision)**: Fix floating-point rounding errors in aggregation (use consistent summation order)
+
+**Rationale**:
+- Q1 is 308× slower than baseline (14,799 ms vs 48 ms)—critical architectural issue
+- Root cause: Code reads from hardcoded CSV file with text parsing instead of using GenDB columnar storage
+- Per priority rules, **critical fixes MUST be included when they exist**, no performance optimizations mixed in
+- After iteration 1 succeeds, iterations 2-3 can apply performance optimizations (array aggregation, parallelism, zone maps)
+- Strategy: Foundation first, then layer optimizations on top
+
+**Next Steps**: Query Optimizer will implement mmap-based columnar storage access (replacing CSV parsing) and fix floating-point precision in summation. Expected result: ~50-150 ms (major improvement, still room for optimization via parallelism in iteration 2-3).

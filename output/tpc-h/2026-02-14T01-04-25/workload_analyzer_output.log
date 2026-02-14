@@ -1,0 +1,59 @@
+Perfect! Let me print a summary of my findings:
+
+## Workload Analysis Summary: TPC-H SF10
+
+**Hardware Detected:**
+- **CPU**: 64 cores (32 physical cores × 2 threads/core, dual-socket Intel Xeon) with AVX-512 support
+- **Cache**: L3 44 MiB shared (2 sockets), L2 32 MiB per core
+- **Memory**: 376 GB available
+- **Storage**: HDD (ROTA=1, suggests magnetic disk) — sequential I/O patterns critical
+
+---
+
+### Workload Characteristics
+
+**Table Sizes (SF10):**
+- **lineitem**: 60M rows (fact table, ~7.3 GB) — accessed in all 3 queries
+- **orders**: 15M rows (~1.7 GB) — joins with customer/lineitem
+- **customer**: 1.5M rows (~234 MB) — dimension table
+- **part, partsupp, supplier, nation, region**: unused in this query set
+
+**Query Breakdown:**
+1. **Q1 (Pricing Summary)**: Full scan of lineitem with date filter (l_shipdate ≤ 1998-09-02) and 2-column GROUP BY (returnflag, linestatus) → 6 output groups. **High selectivity** (98.8%), so filter doesn't reduce volume much. Dominated by aggregation cost.
+
+2. **Q3 (Shipping Priority)**: 3-way join (customer ⊲⊳ orders ⊲⊳ lineitem) with **two selective filters**: c_mktsegment='BUILDING' (22%), o_orderdate < 1995-03-15 (49%). Join on orderkey (high cardinality). **Critical bottleneck**: Must materialize intermediate join results (customer→orders produces ~7.3M tuples, then joined with 60M lineitem). Final TOP-K sort on 10 rows.
+
+3. **Q6 (Forecasting Revenue)**: Single-table scan of lineitem with compound range predicates (date range 1994, discount 0.05–0.07, quantity < 24) producing **13.4% selectivity**. Simple scalar aggregation (no GROUP BY).
+
+---
+
+### Optimization Opportunities
+
+**Parallelism (90% of speedup potential):**
+- Q1 & Q6: Morsel-driven parallel scan of 60M lineitem with 64 threads (target 1M rows/morsel to fit L3 cache). Thread-local aggregation avoids lock contention.
+- Q3: After applying filters, partition both orders and lineitem on orderkey into 64 radix partitions; each partition pair joins independently on L3-resident data.
+
+**Filtering:**
+- Q1: Date filter (98.8% selectivity) is weak but best we can do. Predicate pushdown ensures scan+filter happen in one pass.
+- Q3: Apply c_mktsegment and o_orderdate filters **before** joins on their respective tables. These eliminate 51–78% of rows cheaply.
+- Q6: Vectorize with AVX-512 (compare 16 dates, 16 discounts, 16 quantities simultaneously); use branch-free arithmetic for 13% selectivity predicate.
+
+**Join Strategy (Q3):**
+- Hash join with **radix partitioning** to exploit 64 cores and keep partitions L3-resident. Build side: customer (smaller, 1.5M rows) + filtered orders → ~7.3M rows. Probe side: filtered lineitem (~8M rows after filter). Partition count = 64 to match socket count.
+- **Bloom filter** on customer.c_custkey during build to skip ~20% of lineitem probes that won't match.
+
+**Aggregation (Q1, Q3):**
+- Thread-local hash aggregation for Q1 (6 output groups) — minimal contention. Merge phase is negligible.
+- Q3: Aggregation happens post-join on ~300K–1M filtered tuples (selectivity of both joins); hash agg on 3-column key (l_orderkey, o_orderdate, o_shippriority).
+
+**Storage (HDD bottleneck):**
+- Text parsing (.tbl format) is expensive on HDD. Recommend **persistent binary encoding** with mmap: eliminates parsing, enables zero-copy column access.
+- Columnar layout (not row-based): Q1 accesses only 7 lineitem columns; Q3 accesses 4; Q6 accesses 4. Columnar reduces I/O by 50–80%.
+
+---
+
+### Critical Path
+
+**Q3 is the bottleneck** due to 3-way join with large intermediate results. Q1 and Q6 are single-table scans — parallelizable for 50–60x speedup on 64 cores. Q3 limited by join cost and final sort.
+
+**Output JSON** written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T01-04-25/workload_analysis.json`

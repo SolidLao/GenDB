@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Morsel-driven parallelism across 64 cores (~1M rows/core) with synchronized final merge",
+    "Sorted aggregation on very-low-cardinality GROUP BY (6 groups) post-parallel merge",
+    "SIMD-accelerated filtering for date predicate (l_shipdate <= cutoff)",
+    "Vectorized multi-aggregation computation (8 aggregates: SUM, AVG, COUNT) in single pass",
+    "Zone map skipping on l_shipdate to avoid scanning blocks outside range",
+    "Compact hash table or sorted stream for final 6-group aggregation"
+  ],
+  "strategy_notes": "Q1 is a parallel scan+aggregate on sorted lineitem. Use morsel-driven approach: partition 59.9M rows across 64 threads (~1M rows each), each thread filters by date and computes local aggregates. Pre-size hash table for 6 groups (very cheap). Final phase: single-threaded merge of 64 local aggregates into 6 groups. Zone maps on l_shipdate will skip blocks with early dates (99% selectivity means most blocks pass). Vectorize the filtering and aggregation computation using AVX-512 for 4-8x speedup on numeric operations. Dictionary encoding for l_returnflag and l_linestatus already in storage — decode during scan if needed.",
+  "reasoning": "TPC-H SF10 workload is I/O and parallelism bound with high selectivity differences across queries. GenDB is already 2-30x faster than competitors, but Q3 has the largest optimization gap (4.2x vs DuckDB). Strategy: exploit 64-core parallelism with morsel-driven execution, use SIMD for filtering/aggregation, leverage zone maps for early block skipping, and optimize join ordering to minimize materialization. Initial code generation should prioritize parallelism-first approach with vectorized operations."
+}

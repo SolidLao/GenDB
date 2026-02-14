@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Zone map filtering on l_shipdate (BETWEEN 1994-01-01 and 1995-01-01, 0.10 selectivity). Use zone map to skip non-matching blocks upfront.",
+    "Parallel morsel-driven scan with compound predicate pushdown: l_shipdate, l_discount, l_quantity. Apply in order of selectivity (0.10 → 0.48 → 0.18) to fail fast on non-matching rows.",
+    "SIMD vectorized filtering for range predicates: l_shipdate BETWEEN, l_quantity < 24 (can be branch-free SIMD), l_discount BETWEEN (use SIMD min/max compare).",
+    "Single final aggregation (SUM): vectorized reduction on discount expression (l_extendedprice * l_discount). Use SIMD accumulation across vector lanes.",
+    "Inline compound expression (l_extendedprice * l_discount) during scan instead of materializing intermediate column."
+  ],
+  "strategy_notes": "Q6 has acceptable baseline (29.3ms), but 1.5x gap vs DuckDB (20ms) suggests room for filtering/SIMD gains. Strategy: (1) Use zone map to prune blocks where l_shipdate is entirely outside [1994-01-01, 1995-01-01]—free win if zone maps are indexed. (2) Predicate ordering: apply l_shipdate FIRST (0.10 selectivity → 90% rows eliminated), then l_quantity < 24 (0.48 of remaining), then l_discount BETWEEN (0.18 of remaining). This 'fail-fast' ordering minimizes CPU wasted on expensive discount BETWEEN. (3) SIMD vectorization: dates and quantities are int32_t/int64_t, perfect for SIMD comparison. Discount is double (8B)—can still vectorize with AVX-512 (8 doubles per instruction). Use SIMD intrinsics for 4-8x throughput. (4) Fuse scan+filter+aggregation: no intermediate columns, stream directly to SUM accumulator. (5) Final result is single row—no sort needed. Target: reduce to <20ms.",
+  "reasoning": "TPC-H workload shows GenDB is already competitive on Q1 (48ms, near DuckDB) and Q6 (29.3ms, within 1.5x). Q3 is the critical bottleneck at 386ms vs DuckDB's 92ms—a 4.2x gap driven by high-cardinality 2.5M-group output combined with 3-way join complexity. Strategic priorities: (1) aggressively parallelize Q3's join chain with proper build/probe side selection, (2) exploit zone maps for date filter pruning on Q1/Q6, (3) apply SIMD vectorization across all filter/aggregation paths to narrow Q6's gap."
+}

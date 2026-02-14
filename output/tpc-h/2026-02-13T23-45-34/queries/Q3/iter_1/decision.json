@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 has a critical semantic bug (date encoding mismatch) causing 0 output rows instead of 10. This must be fixed first. After correction, Q3 will run at ~386ms (from benchmark), but DuckDB achieves 77-112ms—a 3-4x gap remains. The evaluation identifies multiple high-impact optimization opportunities: I/O reduction (zone maps, selective columns), hash aggregation improvements, and SIMD vectorization. With 2 iterations remaining and clear bottlenecks, aggressive pursuit of all performance optimizations is justified.",
+  "selected_recommendations": [0, 1, 2, 3],
+  "focus_areas": [
+    "Fix date encoding bug: Convert YYYYMMDD constants to days_since_epoch (e.g., 19950315 → 9204)",
+    "Implement zone map skipping for l_shipdate/o_orderdate to reduce I/O overhead",
+    "Optimize hash aggregation with pre-sizing (~2.5M groups, load factor 60%)",
+    "Apply SIMD vectorization to filtering and revenue calculation in Stage 3"
+  ],
+  "strategy_notes": "Priority order: (1) Apply critical fix immediately—change Date(19950315) to Date(9204) in line 250 of q3.cpp. (2) After correctness validation, pursue I/O optimization via zone maps and selective column loading (medium risk, 10-25% gain expected). (3) Improve hash table efficiency with better sizing and compact hash table variants (low risk, 5-15% gain). (4) Add SIMD vectorization for filtering and revenue calculation on 60M lineitem rows (high risk but 10-20% potential gain). Execute all performance optimizations in parallel where possible. Target final execution time: <200ms (vs current 386ms baseline after fix) to approach DuckDB competitiveness (~77ms represents remaining aspirational gap).",
+  "notes": "The optimization_history.json is currently empty (iterations: []). After this iteration completes, the history will be populated with results. The critical fix is low-risk and necessary for correctness. All performance recommendations are derived from analysis of the query plan and storage design—the code already has parallelism infrastructure (Thread Parallelism on 64 cores), so focus on I/O efficiency, aggregation data structures, and SIMD vectorization. Monitor for regression on the 0→10 row fix; this is the primary correctness gate."
+}

@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "Iteration 1 regressed due to critical zone map logic bug (inverted condition), causing 3 wrong rows despite apparent performance improvement. With 1 iteration remaining and 10.2x gap to DuckDB baseline, correctness must be fixed first. The iteration 1 evaluation identified viable lower-risk optimizations for iteration 2: Bloom filter for customer_ht probes, SIMD-accelerated lineitem hash join, and parallel aggregation merge. These avoid the failed zone map approach while targeting the dominant bottlenecks (orders_filter_join 50.7%, lineitem_scan_aggregation 32.3%).",
+  "selected_recommendations": [59, 70, 79],
+  "focus_areas": [
+    "Fix zone map logic bug (semantic correctness)",
+    "Implement Bloom filter for customer_ht probes to reduce hash table lookups",
+    "Apply SIMD acceleration to lineitem hash probing and date filtering",
+    "Optimize aggregation merge with parallel tree-based approach"
+  ],
+  "strategy_notes": "Iteration 1 regression analysis: The zone map concept was sound (could reduce orders_filter_join by 50-70%), but the skip condition at line 187 was inverted (skipped blocks where max_date < cutoff when filter is o_orderdate < cutoff; should skip blocks where min_date >= cutoff). For iteration 2, prioritize CORRECTNESS FIRST by fixing the zone map logic bug as a critical fix. Then apply conservative performance optimizations that are orthogonal to the zone map fix: (1) Bloom filter for customer_ht (low-risk, ~8-12ms savings in orders_filter_join by reducing hash table probe overhead), (2) SIMD-accelerated hash probing for lineitem_scan_aggregation using Abseil flat_hash_map or folly F14 (medium-risk, ~15-20ms savings via SSE/AVX2), (3) Parallel tree-based merge for aggregation_merge (low-risk, ~7-9ms savings). After these changes, performance should improve to ~170-185ms range (correctness-preserving). If time permits on next iteration, zone maps can be revisited with corrected logic. With 1 iteration left and 10.2x gap to DuckDB, even reaching ~170ms would be significant progress (5.5x improvement from baseline).",
+  "notes": "Critical: Must fix zone map pruning logic bug as a semantic correctness fix before applying performance optimizations. The Bloom filter and SIMD optimizations are independent and can run in parallel. Avoid repeating the complex parallel zone map approach from iteration 1 until correctness is fully validated."
+}

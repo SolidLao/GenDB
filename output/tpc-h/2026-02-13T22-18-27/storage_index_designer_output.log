@@ -1,0 +1,66 @@
+Excellent! The decimal encoding is correct too. Now let me create a brief summary:
+
+## Storage Design & Ingestion Summary
+
+### Design Decisions
+
+**Storage Architecture:**
+- **Binary columnar format** with 100K row blocks for L3 cache efficiency
+- **8.0GB total storage** for TPC-H SF10 (86.6M total rows across all tables)
+- **Days-since-epoch encoding** for dates (verified: 8036-10561 = 1992-01-02 to 1998-12-01)
+- **Fixed-point int64 (cents)** for decimals (verified: 0.00-0.10 range)
+
+**Sort Keys (for Zone Map Effectiveness):**
+- **lineitem**: Sorted by `l_shipdate` (all 3 queries filter on dates)
+- **orders**: Sorted by `o_orderdate` (Q3 filters on orderdate)
+- **customer**: Sorted by `c_custkey` (primary key order)
+
+**Dictionary Encoding (Low-Cardinality Columns):**
+- **lineitem**: l_returnflag (3 distinct), l_linestatus (2), l_shipinstruct, l_shipmode
+- **orders**: o_orderstatus, o_orderpriority
+- **customer**: c_mktsegment (5 distinct)
+
+**Indexes Built:**
+- **Zone maps** (600 blocks): lineitem.l_shipdate, l_quantity, l_discount; orders.o_orderdate
+- **Sorted indexes**: lineitem.l_orderkey, orders.o_custkey (for joins)
+- **Hash indexes**: orders.o_orderkey, customer.c_custkey (primary keys, O(1) lookup)
+
+### Ingestion Performance
+
+**Total time: 99.7 seconds** on 64-core HDD system
+
+| Table | Rows | Time (s) | Throughput |
+|-------|------|----------|------------|
+| lineitem | 59,986,052 | 50.5 | 1.19M rows/s |
+| orders | 15,000,000 | 25.0 | 600K rows/s |
+| customer | 1,500,000 | 4.7 | 317K rows/s |
+| part | 2,000,000 | 1.2 | 1.67M rows/s |
+| partsupp | 8,000,000 | 3.1 | 2.58M rows/s |
+| supplier | 100,000 | 0.07 | 1.43M rows/s |
+| nation | 25 | <0.001 | - |
+| region | 5 | <0.001 | - |
+
+**Key optimizations applied:**
+- mmap + MADV_SEQUENTIAL for input files
+- Parallel parsing (64 threads for lineitem)
+- Direct SoA parsing (no row structs)
+- std::from_chars for integers, manual date parsing (no mktime)
+- Permutation-based sorting (sort indices, not full rows)
+- Parallel column writes with 1MB buffers
+- Dictionary encoding during parse (merged across threads)
+
+### Data Correctness Verification
+
+✅ **Date encoding**: 8036-10561 days since epoch = 1992-1998 (correct)  
+✅ **Decimal encoding**: 0.00-0.10 stored as 0-10 cents (correct)  
+✅ **Dictionary encoding**: l_returnflag = {N, R, A} (correct)  
+✅ **Row counts**: All match expected SF10 cardinalities
+
+### Output Files
+
+**Column files**: `<table>.<column>.bin` (binary arrays)  
+**Dictionaries**: `<table>.<column>.dict` (text, one value per line)  
+**Indexes**: `*.idx` files (zone maps, sorted indexes, hash indexes)  
+**Metadata**: `metadata.json` (row counts, encoding info)
+
+All files ready for zero-copy mmap access by the query executor.

@@ -1,0 +1,65 @@
+Excellent! The date range is correct (1992-01-03 to 1998-12-02). Now let me create a brief summary:
+
+---
+
+## Storage Design & Ingestion Complete
+
+### Design Summary
+
+**Storage Layout:**
+- **Binary columnar format** with 100K row blocks for cache efficiency
+- **Sort keys**: lineitem sorted by `l_shipdate`, orders sorted by `o_orderdate` for zone map effectiveness
+- **Dictionary encoding**: Low-cardinality strings (returnflag, linestatus, mktsegment, orderstatus, etc.) compressed from strings to uint8_t codes
+- **Zone maps**: Built on `l_shipdate`, `l_discount`, `l_quantity` (lineitem), `o_orderdate` (orders) for block skipping
+- **Hash indexes**: Built on join keys (`l_orderkey`, `o_orderkey`, `c_custkey`) for O(1) lookups
+
+### Ingestion Performance
+
+**Ingestion time**: 1m 51.8s
+- 59.99M lineitem rows
+- 15M orders rows  
+- 1.5M customer rows
+- 8M partsupp rows
+- 2M part rows
+- 100K supplier rows
+- 25 nation rows
+- 5 region rows
+
+**Index building time**: 45.7s
+- 600 zone map blocks for lineitem (100K rows each)
+- 150 zone map blocks for orders
+- Hash indexes on join keys (15M orderkey entries, 1.5M custkey entries)
+
+**Total storage**: 9.2GB
+- Original .tbl files (text): ~13GB
+- Binary columnar: ~9.2GB (compression via dictionary encoding and binary format)
+
+### Data Correctness Verification
+
+✅ **Dates**: Correctly encoded as days-since-epoch (1970-01-01)
+- Sample shipdate: 8037 → 1992-01-03
+- Date range: 8037-10562 (1992-01-03 to 1998-12-02) ✓
+
+✅ **Decimals**: Full precision preserved
+- Sample discounts: 0.10, 0.02, 0.10, 0.01, 0.07 (not truncated) ✓
+
+✅ **Dictionary encoding**: 
+- l_returnflag: 3 values (N, R, A)
+- l_linestatus: 2 values (O, F)
+- l_shipmode: 7 values
+- c_mktsegment: 5 values (BUILDING, AUTOMOBILE, MACHINERY, HOUSEHOLD, FURNITURE)
+
+### Generated Files
+
+All files written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/generated_ingest/`
+- `ingest.cpp` - Parallel data ingestion with mmap, std::from_chars, manual date parsing
+- `build_indexes.cpp` - Index building from binary data (zone maps + hash indexes)
+- `Makefile` - Compilation targets
+
+### Key Design Decisions
+
+1. **Sorted storage**: lineitem sorted by `l_shipdate` enables zone map pruning for Q1/Q6 date filters
+2. **Dictionary encoding**: Reduced storage for categorical columns by 4x (string → uint8_t)
+3. **Separate ingestion/indexing**: Allows adding new indexes in Phase 2 without re-parsing .tbl files
+4. **100K block size**: Fits in L3 cache (44MB / 64 cores = ~700KB per thread)
+5. **Permutation-based sorting**: Avoids expensive string moves during sorting

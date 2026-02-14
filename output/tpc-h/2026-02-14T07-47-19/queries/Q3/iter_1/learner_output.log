@@ -1,0 +1,55 @@
+Perfect! Now let me print a concise summary:
+
+---
+
+## **Q3 Iteration 1: Evaluation & Analysis Complete**
+
+### **Phase A: Evaluation ✓**
+- **Status**: PASS (correct results)
+- **Execution time**: 755 ms
+- **Correctness**: 10 result rows match ground truth perfectly
+- **CPU utilization**: 447% (4.5 of 64 cores effectively used)
+- **Memory**: 712 MB RSS, 0 major page faults
+
+### **Phase B: Analysis & Bottlenecks**
+
+**Performance Gap:**
+- DuckDB: 91.7 ms (8.2x faster)
+- This Q3: 755 ms
+- PostgreSQL: 5483.8 ms (7.3x slower)
+
+**Root Cause Analysis:**
+1. **Parallelism Underutilization (PRIMARY)** – Only 4.5 of 64 cores effectively used (35% capacity)
+   - Customer filtering (1.5M rows) is sequential
+   - Orders filtering (15M rows) is sequential
+   - Only lineitem scan (60M rows) is parallelized
+   - Sequential 16.5M-row pre-filter bottleneck kills parallel scaling
+
+2. **Missing Zone Map Block Skipping** – Lineitem is sorted by l_shipdate but no zone maps
+   - Could skip ~33% of 60M rows given 67% selectivity
+   - DuckDB likely leverages this for 2-3x speedup
+
+3. **Naive Join Strategy** – No bloom filter semi-join reduction or radix partitioning
+   - 58.8M lineitem rows (98% non-matches) still do expensive hash lookups
+   - Bloom filter could skip those lookups at ~10 CPU cycles vs 100+ for hash miss
+
+4. **Inefficient Final Aggregation** – Uses std::unordered_map (30-50% overhead)
+   - Should use compact hash table (Robin Hood/Swiss table)
+
+5. **Underutilized SIMD** – Prefetching present but no vectorized filtering
+   - AVX-512 available but filtering loop is scalar
+
+### **Recommended Optimizations (Priority Order)**
+
+| Priority | Technique | Category | Expected Speedup | Risk |
+|----------|-----------|----------|------------------|------|
+| 1 | Parallelize customer/orders filtering | cpu_bound | 2-3x | Low |
+| 2 | Implement zone map block skipping | index | 1.5-2x | Low |
+| 3 | Add bloom filter for semi-join | join | 1.3-1.5x | Low |
+| 4 | Replace unordered_map with compact HT | cpu_bound | 1.1-1.3x | Low |
+| 5 | Refine madvise scope | io_bound | 0.8-1.2x | Medium |
+| 6 | Vectorize lineitem filter (SIMD) | cpu_bound | 1.2-1.5x | Medium |
+
+**Combined potential**: 5-10x speedup → **75-150ms execution time** (matching/closing DuckDB range)
+
+**Evaluation file written to**: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T07-47-19/queries/Q3/iter_1/evaluation.json`

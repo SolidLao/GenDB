@@ -1,0 +1,17 @@
+---
+
+## Summary
+
+**Decision: OPTIMIZE (Iteration 1) — All 3 Critical Fixes Selected**
+
+| Aspect | Details |
+|--------|---------|
+| **Action** | `optimize` — proceed to iteration 1 with fixes |
+| **Selected Fixes** | All 3 critical semantic fixes (indices 0, 1, 2) |
+| **Rationale** | Correctness is mandatory before performance. Query currently produces wrong results due to epoch-day misinterpretation. |
+| **Strategy** | Fix date handling, output formatting, and filter constants. After validation, iteration 2 will add parallelism (8-15x speedup target). |
+| **Remaining Budget** | 2 iterations left (after iteration 1) |
+
+**Critical fixes target the root cause**: GenDB's generated code interprets date columns as year-only integers (1996, 1994) when they're actually epoch days (~9204 for 1995-03-15). This causes wrong row filtering, wrong aggregation, and hardcoded "1994-01-01" output instead of actual dates.
+
+Decision written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T05-14-58/queries/Q3/iter_1/decision.json`.

@@ -1,0 +1,54 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation successful with O3 optimization"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Program executed without crashing (2337 ms)"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "Q3: row count mismatch: expected 10, got 0"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "fail",
+        "num_rows": 0,
+        "timing_ms": 2337,
+        "notes": "Query returned 0 rows instead of expected 10. Critical semantic bug in date encoding."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 2337,
+        "status": "fail",
+        "bottleneck": "semantic/correctness",
+        "root_cause": "Date encoding mismatch: Generated code assumes dates are stored as int32 epoch days (days since 1970-01-01), but actual GenDB storage encodes dates as year values (int32_t with values 1992-1998). Query uses epoch day constant 9204 for '1995-03-15' filtering, but storage only contains year values (1992, 1993, etc.). This causes all filter conditions to fail: (o_orderdate < 9204) and (l_shipdate > 9204) both fail when dates are in range [1992, 1998]. Consequently, no rows match any filters and the aggregation produces empty results."
+      }
+    },
+    "overall": "Critical semantic bug preventing query execution. The generated code's assumptions about date encoding do not match the actual storage format. Code expects epoch days (0-40000+ range) but storage contains year values (1992-1998). All filter predicates fail, resulting in 0 output rows vs expected 10."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q3",
+      "issue": "Date encoding mismatch: code assumes epoch days, storage uses year values. All date filters fail (o_orderdate < 9204 and l_shipdate > 9204), resulting in 0 output rows instead of expected 10.",
+      "fix": "Must decode year-encoded dates correctly. Since storage only contains year granularity (1992-1998) but expected results show specific dates (e.g., 1995-02-23), this suggests: (1) either the storage schema is incomplete and missing month/day information, or (2) the year values are actually misinterpreted and are meant to be epoch days. Investigate actual storage format: hexdump shows 0x07c8 = 1992 (year), not epoch day. Need to either: extract year and apply logic like 'o_orderdate < 1995 OR (o_orderdate == 1995 AND month < 3) OR (o_orderdate == 1995 AND month == 3 AND day < 15)', OR verify if there's a different date column with full precision, OR confirm the storage schema matches expected output format.",
+      "description": "The current filter constants are: const int32_t orderdate_cutoff = 9204; // o_orderdate < 9204 (1995-03-15), const int32_t shipdate_cutoff = 9204; // l_shipdate > 9204 (1995-03-15). These assume epoch days but storage uses year-only encoding. When l_shipdate values are 1992-1998 and code checks l_shipdate > 9204, condition is always false. Similarly for o_orderdate < 9204 with year values. Must determine the correct date representation in storage and either: (a) convert year values to comparable format (e.g., 1995 year → check if == 1995 without month/day fine-tuning), or (b) discover if full-precision dates are stored elsewhere, or (c) adjust expected output to match year-only precision.",
+      "bottleneck_category": "semantic",
+      "risk": "high"
+    }
+  ],
+  "performance_optimizations": [],
+  "summary": "Q3 iteration 1 compilation succeeds but query correctness is completely broken. Execution produces 0 rows instead of expected 10 due to critical semantic bug: date encoding mismatch between generated code's assumptions (epoch days: 9204) and actual GenDB storage format (year values: 1992-1998). All filter predicates fail silently. This must be fixed before any performance optimizations can be applied. Key blockers: (1) verify if dates in storage are genuinely year-only or if hexdump interpretation is wrong, (2) if year-only, determine how to produce expected output with specific dates, (3) if epoch days, find why mmap shows year values instead. Recommend immediate investigation of storage metadata and ground truth generation process."
+}

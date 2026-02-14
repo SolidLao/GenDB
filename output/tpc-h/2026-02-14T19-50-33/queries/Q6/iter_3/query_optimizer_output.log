@@ -1,0 +1,38 @@
+Excellent! The code compiles successfully. Now let me print a brief summary of what was optimized:
+
+---
+
+## Q6 Iteration 3 Optimization Summary
+
+**Critical Fix Applied**: Fixed SIMD revenue accumulation correctness bug
+
+### Problem Identified
+- Iterations 1-2 produced wrong results: actual revenue 1230136229.36 vs expected 1230113636.01 (error: +22593.35)
+- Root cause: The `revenue_acc` SIMD accumulator was initialized once but never reset between blocks
+- When early-exit optimizations triggered (lines with `continue`), partial revenue values remained in the accumulator
+- These stale values accumulated across 92 active blocks, corrupting the final result
+
+### Fix Implemented
+**Single-line critical fix** (after line 241):
+```cpp
+revenue_acc = _mm256_setzero_pd();  // Reset for next block
+```
+
+This ensures:
+- Each block starts with a clean accumulator
+- Only actual qualifying rows contribute to revenue
+- Stale values from previous blocks don't leak into subsequent computations
+
+### Expected Outcome
+- **Correctness**: Result should now match expected 1230113636.01 exactly
+- **Performance**: Maintains excellent performance from iteration 2 (~18.1ms)
+- **Competitive**: Already matching or beating DuckDB's 20ms target
+
+### Code Structure Preserved
+- Zone maps with 84.7% block skip rate (508/600 blocks skipped)
+- AVX2 SIMD processing 4 rows per iteration
+- Multi-threaded parallel execution across blocks
+- Early-exit optimizations for non-matching predicates
+- Per-operation timing instrumentation intact
+
+This was a conservative, low-risk fix focusing solely on correctness as required for the final iteration.

@@ -1,0 +1,91 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation successful with O3 -march=native -std=c++17"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Program ran without crashing, completed in 1.67 seconds"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "Q3: rows_expected=10, rows_actual=0, match=false. Error: row count mismatch. Generated 0 result rows instead of 10."
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "fail",
+        "num_rows": 0,
+        "timing_ms": 1670,
+        "notes": "Generated 0 rows due to date encoding mismatch. Expected 10 rows from top-k query."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 1670,
+        "status": "fail",
+        "bottleneck": "Semantic/correctness bug: Date encoding mismatch",
+        "root_cause": "The generated code uses YYYYMMDD integer format (e.g., 19950315) for date comparisons, but the storage design specifies 'date_encoding': 'days_since_epoch_1970'. Data contains dates as days since 1970-01-01 (e.g., 9204 for 1995-03-15, 8036 for orders min). All date comparisons fail because 19950315 >> 10562 (max lineitem shipdate). Result: l_shipdate > 19950315 never matches (lineitem max=10562 days), l_orderdate < 19950315 always matches (all orders < 10562 < 19950315). Filter chain produces 0 aggregated groups."
+      }
+    },
+    "overall": "CRITICAL FAILURE: The generated code has a fundamental semantic bug in date encoding. The storage layer encodes dates as days since epoch (1970), but the generated query code assumes YYYYMMDD integer encoding. This causes all date filters to malfunction, resulting in zero output rows instead of the expected 10 rows. The compilation succeeded and execution completes without crashing, but the results are completely incorrect. This is a critical_fix issue—the date constant conversion must be corrected to use epoch days."
+  },
+  "critical_fixes": [
+    {
+      "target": "ALL",
+      "issue": "Date encoding mismatch: code uses YYYYMMDD format but storage uses days-since-epoch",
+      "fix": "Replace hardcoded date constants with correct epoch day values. Convert 1995-03-15 from YYYYMMDD integer (19950315) to days since 1970-01-01 (9204).",
+      "description": "In q3.cpp line 250, change:\n  Date date_1995_03_15(19950315);\nto:\n  Date date_1995_03_15(9204);  // 1995-03-15 as days since epoch 1970-01-01\n\nRootcause: storage_design.json specifies 'date_encoding': 'days_since_epoch_1970' for all date columns (l_shipdate, o_orderdate, etc.). The Date struct constructor accepts this epoch-days integer format, but the hardcoded constant uses YYYYMMDD format instead. This mismatch causes:\n  - l_shipdate > 19950315: Always false (max l_shipdate = 10562 days)\n  - o_orderdate < 19950315: Always true (all o_orderdate values < 10562 << 19950315)\n  \nWith incorrect filters, the parallel aggregation in Stage 3 receives no matching lineitem rows (all filtered out in l_shipdate check), producing 0 groups.",
+      "bottleneck_category": "semantic",
+      "risk": "low"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Selective Column Loading and Zone Map Skipping",
+      "description": "Currently reads ALL columns from customer, orders, and lineitem tables unconditionally. Can reduce I/O by:\n  1. Using zone maps on l_shipdate and o_orderdate to skip irrelevant blocks (storage design specifies l_shipdate_zone and o_orderdate_zone indexes)\n  2. Reading only required columns: c_custkey, c_mktsegment (customer); o_orderkey, o_custkey, o_orderdate, o_shippriority (orders); l_orderkey, l_extendedprice, l_discount, l_shipdate (lineitem)\n  3. Implementing block-level filtering before decompressing full blocks\n  \nCurrently lineitem (60M rows × ~40 bytes/row = ~2.4GB) is fully read and decompressed. Date filters could skip ~50% of blocks for l_shipdate (range: 8037-10562 days, filter: > 9204).",
+      "expected_improvement": "10-25% reduction in I/O time by skipping unnecessary blocks with zone maps and only loading required columns. Estimated 150-300ms savings on this 1.67s query.",
+      "risk": "medium"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Pre-sized Hash Table with Better Load Factor",
+      "description": "The aggregation uses LinearProbeHashTable with capacity = filtered_orders * 2 + 1000. For Q3, filtered_orders ≈ 3M, resulting in hash table capacity ≈ 6M. With 2.5M groups expected (from workload_analysis), load factor ≈ 41%, which is reasonable but can be improved:\n  1. Use compact hash table (Swiss Table or Robin Hood) for better cache locality\n  2. Pre-size more accurately to expected ~2.5M groups (capacity = 4M to maintain 60% load factor)\n  3. Use separate hash function optimized for 3-tuple keys (l_orderkey, o_orderdate, o_shippriority)\n  \nCurrent std::unordered_map-based local_aggs[num_threads] can be replaced with more efficient data structures.",
+      "expected_improvement": "5-15% speedup in aggregation phase (Stage 3-4). Estimated 30-80ms improvement.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Three-Way Join Reordering and Semi-Join Optimization",
+      "description": "Current join order: customer → orders → lineitem (sequential with builds at each stage). For Q3 selectivities (c_mktsegment=0.20, o_orderdate<0.48, l_shipdate>0.50):\n  - Filtered customers: 1.5M × 0.20 = 300K\n  - Filtered orders: 15M × 0.48 = 7.2M → joined with customer = 3M\n  - Lineitem: 60M × 0.50 = 30M → joined with filtered orders\n  \nConsider Bloom filter semi-join to pre-filter lineitem rows: build Bloom filter on (filtered orders).l_orderkey, use to skip lineitem rows not in orders before main join probe. This reduces hash table probes and cache pressure in Stage 3.",
+      "expected_improvement": "5-10% reduction in Stage 3 time by filtering out ~30% of lineitem rows early. Estimated 25-50ms improvement.",
+      "risk": "medium"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD-Vectorized Revenue Calculation and Filtering",
+      "description": "Stage 3 inner loop (lines 310-325) processes one lineitem row at a time:\n  - l_shipdate check (line 312): scalar comparison\n  - hash table probe (line 315): scalar\n  - revenue calculation (line 323): `l_extendedprice * (1.0 - l_discount)` is scalar FP\n  - hash table insert (line 324): scalar\n  \nCan vectorize with AVX-512 (available on hardware):\n  1. Batch filter l_shipdate with SIMD comparisons (process 8 dates in parallel)\n  2. Vectorized revenue calculation: 8 × (price × (1 - discount)) in parallel\n  3. Use vector shuffle for gather/scatter on hash table probes\n  \nWith 60M lineitem rows and ~50% selectivity after filters, SIMD could process ~15M rows 8x faster (per instruction).",
+      "expected_improvement": "10-20% reduction in Stage 3 execution (currently ~1.4s of 1.67s query). Estimated 140-280ms improvement.",
+      "risk": "high"
+    }
+  ],
+  "summary": "CRITICAL FAILURE due to semantic bug: Date encoding mismatch causes zero output rows. The generated code uses YYYYMMDD format (19950315) for date constants, but GenDB storage encodes dates as days since epoch 1970 (9204 for 1995-03-15). This causes all date filters to fail silently, producing 0 result rows instead of 10. FIX REQUIRED: Change line 250 from Date(19950315) to Date(9204). After fixing correctness, performance optimizations should focus on: (1) I/O reduction via zone map skipping and selective column loading (10-25% gain), (2) Better hash aggregation with compact tables (5-15% gain), (3) SIMD vectorization of filtering/revenue calculation (10-20% gain). Current 1.67s execution is dominated by I/O overhead and single-threaded aggregation despite 64-core hardware."
+}

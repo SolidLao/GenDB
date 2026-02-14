@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 0.1 ms\n[TIMING] customer_filter: 22.3 ms\n[TIMING] orders_filter_join: 100.3 ms\n[TIMING] lineitem_scan_aggregation: 63.8 ms\n[TIMING] aggregation_merge: 10.6 ms\n[TIMING] sort: 0.4 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 197.7 ms\nQuery returned 10 rows\n",
+    "stderr": "",
+    "duration_ms": 256
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    },\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": false,\n      \"error\": \"3 row(s) differ\",\n      \"sample_mismatches\": [\n        {\n          \"row\": 0,\n          \"expected\": [\n            \"16384100.00\",\n            \"421478.73\",\n            \"1995-03-02\",\n            \"0.00\"\n          ],\n          \"actual\": [\n            \"15168096.00\",\n            \"398084.33\",\n            \"1995-03-06\",\n            \"0.00\"\n          ]\n        },\n        {\n          \"row\": 1,\n          \"expected\": [\n            \"22810436.00\",\n            \"423231.97\",\n            \"1995-01-02\",\n            \"0.00\"\n          ],\n          \"actual\": [\n            \"16384100.00\",\n            \"421478.73\",\n            \"1995-03-02\",\n            \"0.00\"\n          ]\n        },\n        {\n          \"row\": 2,\n          \"expected\": [\n            \"23861382.00\",\n            \"428739.14\",\n            \"1995-03-09\",\n            \"0.00\"\n          ],\n          \"actual\": [\n            \"20524164.00\",\n            \"409472.09\",\n            \"1995-03-04\",\n            \"0.00\"\n          ]\n        }\n      ]\n    },\n    \"Q6\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_data": 0.1,
+    "customer_filter": 22.3,
+    "orders_filter_join": 100.3,
+    "lineitem_scan_aggregation": 63.8,
+    "aggregation_merge": 10.6,
+    "sort": 0.4,
+    "output": 0.2,
+    "total": 197.7
+  },
+  "timing_ms": 197.7
+}

@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] scan_filter_customer: 30.7 ms\n[TIMING] scan_filter_orders: 702.7 ms\n[TIMING] join_aggregation: 163.1 ms\n[TIMING] merge: 38.7 ms\n[TIMING] sort: 2.6 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 938.2 ms\nQuery returned 10 rows\n",
+    "stderr": "",
+    "duration_ms": 1023
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    },\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    },\n    \"Q6\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "scan_filter_customer": 30.7,
+    "scan_filter_orders": 702.7,
+    "join_aggregation": 163.1,
+    "merge": 38.7,
+    "sort": 2.6,
+    "output": 0.2,
+    "total": 938.2
+  },
+  "timing_ms": 938.2
+}

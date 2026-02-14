@@ -1,0 +1,21 @@
+## Summary
+
+I've provided **strategic guidance for initial code generation of all 3 TPC-H queries** in batch mode. Here's the executive summary:
+
+### Decision Made: **Optimize All Queries**
+
+**Key Findings:**
+- **Q1 (48ms GenDB vs 108ms DuckDB)**: 2.25x gap — optimize with morsel-driven parallelism + sorted aggregation on 6-group result set
+- **Q3 (386ms GenDB vs 91ms DuckDB)**: **4.2x gap [PRIORITY]** — filter-join-aggregate pipeline with early customer filter + small hash join + parallel lineitem probe
+- **Q6 (29.3ms GenDB vs 20ms DuckDB)**: 1.5x gap — vectorized compound predicate filtering with SIMD masking
+
+**Strategic Guidance:**
+1. **Exploit 64-core parallelism** with morsel-driven execution (10K-100K rows/core)
+2. **Vectorize hot paths** using AVX-512 for filtering and aggregation
+3. **Leverage existing storage** (zone maps on l_shipdate, sorted indexes, dictionary encoding)
+4. **Optimize join ordering** for Q3: customer → orders → lineitem with early filtering to minimize intermediates
+5. **Use SIMD horizontal reductions** for aggregation operations (SUM, AVG)
+
+**Output File:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T02-34-16/batch_decision_iter0.json`
+
+The Query Optimizer can now proceed with initial code generation using these per-query strategies.

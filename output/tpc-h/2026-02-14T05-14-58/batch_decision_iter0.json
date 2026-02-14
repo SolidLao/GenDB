@@ -1,0 +1,40 @@
+{
+  "batch": true,
+  "reasoning": "TPC-H workload with 60M-row lineitem table. Q1 is already competitive (2x faster than DuckDB), but Q3 shows 5x regression due to inefficient 3-way join and Q6 has 1.5x gap from suboptimal filtering. Initial code generation should prioritize: (1) Q3's partition-based hash join with careful build/probe side selection to exploit L3 cache; (2) aggressive predicate pushdown to reduce intermediate result sizes early; (3) SIMD-accelerated filtering for Q6's compound range predicates; (4) vectorized aggregation for Q1/Q3 GROUP BY operations. Morsel-driven parallelism across 64 cores essential for all queries.",
+  "queries": {
+    "Q1": {
+      "action": "optimize",
+      "focus_areas": [
+        "morsel-driven parallel full scan on lineitem with 64-core parallelism",
+        "vectorized SIMD filtering on l_shipdate range (98.4% selectivity minimal pruning benefit)",
+        "thread-local hash aggregation on (returnflag, linestatus) with 6 groups — low contention",
+        "vectorized numeric aggregates (SUM, AVG, COUNT) using SIMD accumulators",
+        "final single-threaded sort on 6 tuples trivial (skip if already ordered by GROUP BY)"
+      ],
+      "strategy_notes": "Q1 is already fast (48ms vs 86ms DuckDB min). Focus on vectorized aggregation using SIMD to process multiple rows per instruction for numeric sums/averages. Use thread-local hash tables to avoid lock contention—6 groups fit easily. Morsel size ~1M rows per thread (60M/64 threads). Pre-compute dictionary-encoded flags to enable SIMD grouping. Optimize final merge+sort phase—6 groups sort trivially."
+    },
+    "Q3": {
+      "action": "optimize",
+      "focus_areas": [
+        "aggressive filter pushdown: filter customer (c_mktsegment='BUILDING') → 300K rows FIRST before any joins",
+        "filter orders by o_orderdate BEFORE joining with lineitem to reduce 15M → 7.3M",
+        "partition-based hash join: partition both probe-side (lineitem) and join-keys to fit in L3 cache (44MB) — ~16K-32K row partitions",
+        "careful build/probe side selection: build on smaller table (filtered orders 7.3M) then probe lineitem (30.8M post-filter)",
+        "parallel aggregation: GROUP BY (l_orderkey, o_orderdate, o_shippriority) with partial aggregation merged across threads",
+        "partial Top-K: use heap or radix-sort style top-10 extraction on revenue DESC + orderdate ASC order"
+      ],
+      "strategy_notes": "Q3 is 5x slower (386ms vs 77ms DuckDB)—this is the critical bottleneck. Root cause likely inefficient 3-way join execution. Strategy: (1) Filter customer earliest (20% selectivity) to 300K. (2) Filter orders by o_orderdate < '1995-03-15' (48% selectivity) to 7.3M BEFORE joining lineitem. (3) Use partition-based hash join to partition both order and lineitem data into L3-cache-friendly chunks (~16K-32K rows per partition, 64 threads × 44MB L3 / overhead). (4) Build hash table on filtered orders (smaller side), probe with lineitem. (5) Use vectorized join key comparison for fast matching. (6) Aggregate GROUP BY keys locally per morsel before global merge. (7) Heapify top-10 results by revenue DESC."
+    },
+    "Q6": {
+      "action": "optimize",
+      "focus_areas": [
+        "SIMD-vectorized range filtering: l_shipdate in [1994-01-01, 1995-01-01) AND l_discount BETWEEN 0.05-0.07 AND l_quantity < 24",
+        "compound predicate optimization: combine filters into single pass (AND logic) to reduce memory pressure",
+        "early filter combination: l_discount & l_quantity filters (combined ~0.11 × 0.48 = 5%) applied together to 60M → 4.8M rows",
+        "vectorized SUM reduction: use SIMD horizontal adds across thread-local sums, final atomic or single-threaded merge",
+        "parallel morsel-driven scan with reduction pattern: each thread computes local SUM, final result merged"
+      ],
+      "strategy_notes": "Q6 is 1.5x slower (29.3ms vs 19ms DuckDB). This is a pure single-aggregate query with compound predicates. Optimize via: (1) SIMD-accelerated range filtering on l_shipdate (16.7% selectivity). (2) Vectorized compound predicate evaluation: l_discount BETWEEN and l_quantity < using packed comparison masks. (3) Early filter ordering: evaluate l_quantity < 24 first (48% selectivity), then l_discount (11%)—combined ~5.3%. (4) Use morsel-driven approach: 60 threads each scan ~1M rows, apply filters, compute local SUM(l_extendedprice * l_discount). (5) Final reduction: merge thread-local sums with horizontal SIMD adds. Vectorization + parallelism should close the 1.5x gap."
+    }
+  }
+}

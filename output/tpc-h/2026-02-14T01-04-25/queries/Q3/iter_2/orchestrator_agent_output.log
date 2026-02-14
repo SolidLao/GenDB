@@ -1,0 +1,17 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING (Iteration 2/3)**
+
+**Output written to:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T01-04-25/queries/Q3/iter_2/decision.json`
+
+**Key Points:**
+
+1. **Correctness-First Approach**: Both critical bugs (inverted filter logic + lossy GROUP BY encoding) MUST be fixed. These are blocking valid results.
+
+2. **Single Highest-Impact Optimization**: Thread-based parallelism on the 64-core system. Current code is single-threaded (99% CPU util, wasting 98.4% of resources). This is the dominant bottleneck.
+
+3. **Aggressive but Focused**: With only 1 iteration left, skip secondary optimizations (zone maps, compact hash tables, SIMD) and go all-in on the two things that matter most: correctness + parallelism.
+
+4. **Risk Mitigation**: Previous iteration 1 regressed, so this iteration avoids repeating that approach and instead focuses on proven, low-risk strategies documented in the knowledge base.
+
+5. **Expected Outcome**: Fixing correctness should restore the ~386ms baseline. Thread parallelism (64 cores) should deliver 30-64x wall-clock improvement, targeting DuckDB's 77-112ms range (realistic target: 50-100ms on columnar binary storage).

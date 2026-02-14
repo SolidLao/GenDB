@@ -1,0 +1,26 @@
+## Decision Summary for Q3 (Iteration 3/3)
+
+**Action: STOP** ❌
+
+**Reason:** All optimization iterations exhausted (0 remaining) with no resolution of critical issues.
+
+### Optimization Trajectory:
+- **Iteration 1**: Attempted epoch day encoding fix → produced **0 rows** (all filters failed)
+- **Iteration 2**: Attempted year-based filter workaround → produced **10 rows but 100% wrong data** (0% orderkey overlap, ~20% wrong revenue)
+- **Iteration 3**: No iterations left to continue
+
+### Root Cause:
+**Fundamental data encoding mismatch** (not a query optimization problem):
+- GenDB storage: Contains year-only values (1992-1998)
+- Code expects: Epoch days (~8035-9204 range for 1990s)
+- Impact: Cannot produce correct results without fixing the underlying data encoding
+
+### Why Optimization Fails:
+The system made two good-faith attempts to resolve the 3 critical semantic bugs related to date handling, but both attempts failed in different ways. This indicates the problem is NOT solvable through code optimization—it requires:
+1. **Data re-ingestion** with proper epoch day conversion
+2. **Schema investigation** to verify date encoding format
+3. **Ground truth regeneration** with corrected data
+
+These are data engineering concerns, not query optimization concerns.
+
+**Recommendation**: Escalate to data engineering team to fix TPC-H data loading pipeline. Query optimization should resume after correctness is restored.

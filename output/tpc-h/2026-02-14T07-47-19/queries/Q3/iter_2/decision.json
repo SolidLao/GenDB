@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 is still 8.2x behind DuckDB (755ms vs 91.7ms) with significant untapped parallelism (447% CPU on 64 cores). Iteration 1 improved the query correctly. Three complementary, low-risk optimizations are available: (1) parallelize customer/orders pre-filtering to enable full core utilization, (2) implement zone maps on sorted lineitem to skip blocks, (3) add bloom filter for semi-join reduction. Combined potential: 5-10x speedup, bringing Q3 into 75-150ms range competitive with DuckDB.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Parallelize customer and orders filtering across 64 threads with morsel-driven approach (~24K rows per morsel) to eliminate sequential bottleneck",
+    "Implement zone maps (min/max per 100K-row block) for lineitem l_shipdate to skip ~33% of blocks based on 67% selectivity",
+    "Add bloom filter on filtered_orders.orderkeys during orders phase to skip 98% of hash table misses in lineitem probe"
+  ],
+  "strategy_notes": "Iteration 2 is the final optimization pass. Prioritize high-impact, low-risk recommendations (0, 1, 2) that directly address identified bottlenecks: (1) parallelism underutilization from sequential pre-filtering, (2) missing block-skipping on sorted lineitem, (3) naive join strategy with expensive hash probes. All three optimizations are complementary—parallelization enables full core utilization, zone maps reduce I/O volume, bloom filter reduces CPU work per I/O. Execute all three together to maximize combined speedup (5-10x projected). If compilation or validation fails, focus on correctness fixes first before performance tuning.",
+  "notes": "Remaining iterations: 1/3. Previous iteration 1 improved and maintained correctness. Current gap to DuckDB is significant but achievable with these low-risk techniques. Zone maps require precomputed metadata (already mentioned in recommendations). Bloom filter is standard probabilistic data structure with well-known false positive rates (~1-2%). Parallelization follows existing morsel-driven pattern already present in codebase."
+}

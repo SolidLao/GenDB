@@ -1,0 +1,44 @@
+{
+  "batch": true,
+  "reasoning": "TPC-H SF10 workload is dominated by lineitem scans (60M rows) across all queries. DuckDB achieves 8-108ms vs PostgreSQL's 2000-15000ms—a 100-140x gap. GenDB's first-iteration success depends on aggressive parallelism (64 cores available), vectorized arithmetic (AVX-512), and join optimization. Q1 is CPU-bound (complex aggregations), Q3 is join-bound (3-way multi-table), Q6 is I/O-bound (tight filters). All three require SIMD-accelerated execution and thread-level parallelism to compete.",
+  "queries": {
+    "Q1": {
+      "action": "optimize",
+      "focus_areas": [
+        "Morsel-driven parallelism: partition lineitem into 64 morsels (~937K rows/thread), process independently",
+        "Vectorized aggregation with AVX-512: SIMD arithmetic for (1-l_discount), (1-l_discount)*(1+l_tax), SUM/AVG computation",
+        "Hash aggregation on GROUP BY (l_returnflag, l_linestatus): only 6 groups, pre-allocate per-thread hash tables",
+        "Operator fusion: scan+filter+arithmetic+aggregate in single loop to minimize materialization",
+        "Zone map skipping using l_shipdate index: skip blocks outside date range (1998-06-02 cutoff)",
+        "Dictionary decoding for l_returnflag, l_linestatus: use dictionary values directly in aggregation keys"
+      ],
+      "strategy_notes": "Q1 is CPU-bound arithmetic. The key is to parallelize across 64 cores with SIMD arithmetic inside each morsel's inner loop. Use thread-local aggregation state for the 6 groups, then merge thread-local hash tables at the end. Avoid false sharing—each thread needs its own L3 cache-resident hash table (~1KB per 6 groups). Prefetch next block's l_shipdate column for early filter evaluation. Order filters by selectivity (l_shipdate first—94% pass rate is highest). Use compiled/specialized code for the aggregate expression (1-l_discount)*(1+l_tax) to avoid function call overhead."
+    },
+    "Q3": {
+      "action": "optimize",
+      "focus_areas": [
+        "Join ordering: Customer (small, 20% filtered→300K) → Orders (15M, 33% filtered→5M) → Lineitem (60M, 67% filtered→40M)",
+        "Hash join with early filter pushdown: Filter customer on c_mktsegment first (hash index available, 20% selectivity), build hash table on filtered c_custkey",
+        "Hash probe orders with o_custkey→c_custkey join, apply o_orderdate < '1995-03-15' as early filter (33% selectivity, ~5M remaining)",
+        "Semi-join with Bloom filter: Use Bloom filter on c_custkey before probing orders to eliminate non-matching keys early",
+        "Partial aggregation on lineitem: GROUP BY (l_orderkey, o_orderdate, o_shippriority) on filtered lineitem before final merge aggregation",
+        "Vectorized join key comparison: AVX-512 for l_orderkey matching with probe hash table entries",
+        "Final TOP-K sort: Only sort 10 rows, not 200K intermediate groups"
+      ],
+      "strategy_notes": "Q3 is join-bound. Critical path: (1) Hash join customer with c_mktsegment='BUILDING' (300K rows) on c_custkey. (2) Hash join with orders filtered by o_orderdate < '1995-03-15' (5M rows). (3) Hash probe lineitem filtered by l_shipdate > '1995-03-15' (40M rows). Use Bloom filter from step 1's keys to reduce orders→lineitem probe cost by 67% (eliminate 27M non-matching rows early). For aggregation, use partial aggregation per thread on lineitem chunk, then merge thread-local hash tables. Final step: sort only top 10 revenue entries (use heapsort or nth_element, not full sort)."
+    },
+    "Q6": {
+      "action": "optimize",
+      "focus_areas": [
+        "Early predicate pushdown in scan loop: Evaluate l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount BETWEEN 0.05-0.07 AND l_quantity < 24 sequentially before SUM",
+        "Vectorized predicate evaluation: AVX-512 to process 4-8 rows per instruction, branch-free filter logic to minimize branch mispredictions",
+        "Predicate ordering by selectivity: Apply tightest predicate first (l_discount BETWEEN 0.05-0.07: 9% selectivity), then l_quantity < 24 (47%), then dates (15.5% × 8.2%)",
+        "SIMD SUM computation: Use AVX-512 horizontal sum for l_extendedprice * l_discount products, minimize scalar operations",
+        "Column pruning: Only load l_shipdate, l_discount, l_quantity, l_extendedprice into cache—skip unused columns (l_partkey, l_suppkey, etc.)",
+        "Morsel-driven parallelism: Partition lineitem into 64 morsels, each thread computes local SUM, then single merge operation for final result",
+        "Zone map skipping: Use l_shipdate index min/max per block to skip blocks outside date range"
+      ],
+      "strategy_notes": "Q6 is I/O-bound but also benefits from parallelism due to selective filtering. 2% final selectivity (1.2M rows → 1 aggregate result) means early row elimination is critical. Use branch-free filtering: convert predicates to bitmasks, use AVX-512 to compute final predicate mask, then conditionally update running SUM only for rows passing all filters. Parallelize across 64 cores with thread-local SUM, merge at the end. Zone map skipping on l_shipdate (sorted index) eliminates most non-matching date blocks. Use vectorized multiply (l_extendedprice * l_discount) with SIMD before accumulation."
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Join ordering: Customer (small, 20% filtered→300K) → Orders (15M, 33% filtered→5M) → Lineitem (60M, 67% filtered→40M)",
+    "Hash join with early filter pushdown: Filter customer on c_mktsegment first (hash index available, 20% selectivity), build hash table on filtered c_custkey",
+    "Hash probe orders with o_custkey→c_custkey join, apply o_orderdate < '1995-03-15' as early filter (33% selectivity, ~5M remaining)",
+    "Semi-join with Bloom filter: Use Bloom filter on c_custkey before probing orders to eliminate non-matching keys early",
+    "Partial aggregation on lineitem: GROUP BY (l_orderkey, o_orderdate, o_shippriority) on filtered lineitem before final merge aggregation",
+    "Vectorized join key comparison: AVX-512 for l_orderkey matching with probe hash table entries",
+    "Final TOP-K sort: Only sort 10 rows, not 200K intermediate groups"
+  ],
+  "strategy_notes": "Q3 is join-bound. Critical path: (1) Hash join customer with c_mktsegment='BUILDING' (300K rows) on c_custkey. (2) Hash join with orders filtered by o_orderdate < '1995-03-15' (5M rows). (3) Hash probe lineitem filtered by l_shipdate > '1995-03-15' (40M rows). Use Bloom filter from step 1's keys to reduce orders→lineitem probe cost by 67% (eliminate 27M non-matching rows early). For aggregation, use partial aggregation per thread on lineitem chunk, then merge thread-local hash tables. Final step: sort only top 10 revenue entries (use heapsort or nth_element, not full sort).",
+  "reasoning": "TPC-H SF10 workload is dominated by lineitem scans (60M rows) across all queries. DuckDB achieves 8-108ms vs PostgreSQL's 2000-15000ms—a 100-140x gap. GenDB's first-iteration success depends on aggressive parallelism (64 cores available), vectorized arithmetic (AVX-512), and join optimization. Q1 is CPU-bound (complex aggregations), Q3 is join-bound (3-way multi-table), Q6 is I/O-bound (tight filters). All three require SIMD-accelerated execution and thread-level parallelism to compete."
+}

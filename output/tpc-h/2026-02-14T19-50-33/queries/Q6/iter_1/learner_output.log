@@ -1,0 +1,32 @@
+Perfect! Now let me provide a brief summary to complete the analysis:
+
+---
+
+## Q6 Iteration 1 Analysis Summary
+
+**Status: FAILED** - Wrong results (actual: 1230136229.36, expected: 1230113636.01, error: +22593.35)
+
+### Critical Issue (MUST FIX)
+The discount BETWEEN predicate uses fixed-point conversion with rounding (+0.5), causing boundary errors:
+- Values like 0.0499 round to 5 (0.05) and get incorrectly included
+- Values like 0.075 round to 8 and get incorrectly excluded
+- This violates SQL DECIMAL semantics
+
+**Fix**: Remove fixed-point conversion (lines 101-104, 139-142, 190-191) and use direct double comparisons: `l_discount[i] >= 0.05 && l_discount[i] <= 0.07`
+
+### Performance Gap
+- **Current**: 244.9ms
+- **DuckDB target**: ~20ms
+- **Gap**: 12.2x slower
+
+### Performance Bottlenecks
+1. **I/O overhead** (232.7ms): mmap/munmap syscalls and page faults dominate; only 12.2ms spent in actual computation
+2. **Inefficient filter evaluation** (11.9ms scan): Converting all 60M discount values upfront when only 15% survive shipdate filter
+3. **No SIMD**: Sequential predicate evaluation instead of vectorized AVX2
+
+### Top Recommendations (After Fixing Correctness)
+1. **Predicate ordering**: Apply shipdate filter first, avoid converting 51M irrelevant discount values (3-4x speedup expected)
+2. **AVX2 SIMD**: Vectorize all three predicates (shipdate, discount, quantity) for 3-4x additional speedup
+3. **Reduce I/O overhead**: Use zone-map-aware prefetching and avoid loading data for skipped blocks (60-65% total time reduction)
+
+Zone maps are working well (84.7% block skip rate), but correctness takes priority over all optimizations.

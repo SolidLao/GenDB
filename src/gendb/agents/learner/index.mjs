@@ -6,6 +6,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const config = {
   name: "Learner",
   promptPath: resolve(__dirname, "prompt.md"),
-  allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+  allowedTools: ["Read", "Write", "Glob", "Grep"],
   model: "sonnet",
 };

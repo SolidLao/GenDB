@@ -1,0 +1,31 @@
+---
+
+## Summary
+
+**Decision: OPTIMIZE (Final Iteration)**
+
+**Q6 Iteration 3 Strategy:**
+
+| Aspect | Details |
+|--------|---------|
+| **Action** | Optimize (final iteration, remaining=0) |
+| **Current Performance** | 33.8ms (correct results) |
+| **Target** | ~19.3ms (DuckDB benchmark) |
+| **Gap** | 1.75x slower |
+| **Selected Recommendations** | 0, 1, 2 (Zone maps, SIMD, Predicate reordering) |
+| **Expected Outcome** | 18-22ms, ~1.0-1.2x of DuckDB |
+
+**Rationale:**
+- **Iteration 2 succeeded** with correctness fixes, establishing a reliable baseline
+- **Clear bottleneck**: scan_filter dominates (56% of time, 19.0ms) due to full table scan without zone map pruning
+- **Low selectivity** (1.9%) means zone maps can skip ~67% of blocks → massive I/O savings
+- **Storage design includes zone maps** for l_shipdate, l_discount, l_quantity — they're available and ready
+- **Final iteration justifies aggression**: selecting 3 complementary optimizations (I/O reduction + CPU acceleration)
+- **Risk profile**: Low-to-medium risk optimizations with proven ROI
+
+**Optimization Path:**
+1. **Zone map pruning** (priority 1): Skip non-qualifying blocks before scanning → ~30-50% reduction
+2. **SIMD vectorization** (priority 1 technique): Accelerate predicate evaluation on reduced working set → ~15-25% additional
+3. **Predicate reordering** (priority 2): Check cheapest/most selective predicates first → ~5-10% additional
+
+Combined effect targets performance in the 18-22ms range, closing the gap from 1.75x to ~1.0-1.2x of DuckDB.

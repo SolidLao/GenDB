@@ -1,0 +1,54 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation successful with -O3 -march=native -std=c++17"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query executed successfully. Execution time: 38.1518 ms. Rows processed: 59986052"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "Result mismatch. Expected: 1230113636.0101, Got: 1226841856.1262. Difference: 3271779.88 (~0.27% error)"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q6": {
+        "status": "fail",
+        "num_rows": 1,
+        "timing_ms": 38.1518,
+        "notes": "Result is incorrect due to semantic bug in column loading. Query executed without errors but produced wrong output value."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q6": {
+        "current_time_ms": 38.1518,
+        "status": "fail",
+        "bottleneck": "Semantic/correctness issue - column decoding",
+        "root_cause": "The code reads l_shipdate directly from storage without applying delta decoding. Storage design specifies that l_shipdate is delta-encoded, but the mmap_column() function treats it as raw int32_t values. This causes the shipdate filter predicate to compare wrong decoded values, leading to incorrect row selection and aggregation result. The 0.27% error (~3.3M revenue difference) reflects the selective impact of incorrect date filtering on the final sum."
+      }
+    },
+    "overall": "CRITICAL: Query produces incorrect results due to semantic bug in column decoding. The l_shipdate column is delta-encoded in persistent storage but the code mmaps it as raw int32_t without applying delta decoding. This breaks the core filter logic for the shipdate range predicate (>= 1994-01-01 AND < 1995-01-01). Performance optimization cannot proceed until this correctness issue is resolved."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q6",
+      "issue": "Wrong query results due to undecodeddelta-encoded column",
+      "fix": "Implement delta decoding for l_shipdate column before filtering",
+      "description": "The mmap_column<int32_t>() function at line 102-126 in q6.cpp reads the raw binary data but does not apply delta decoding. The l_shipdate column is stored with delta encoding in the gendb storage (confirmed in storage_design.json). Delta decoding requires reading the first value as an absolute baseline, then each subsequent value is the previous decoded value plus the stored delta. Create a new function decode_delta_column() that reads the delta-encoded data, reconstructs absolute dates, and returns a fully decoded column. Alternatively, decode the column during the initial load in load_columns() before passing to process_morsel_scalar().",
+      "bottleneck_category": "semantic",
+      "risk": "high"
+    }
+  ],
+  "performance_optimizations": [],
+  "summary": "Q6 iteration 1 fails validation: expected 1230113636.0101 but got 1226841856.1262. CRITICAL BUG IDENTIFIED: l_shipdate column is delta-encoded in persistent storage but the code reads it as raw int32_t values without decoding. This breaks the shipdate range filter and produces incorrect results. The ~0.27% error reflects the impact on the final aggregation. This is a semantic/correctness issue (not a performance issue) that must be fixed before optimization work can proceed. Recommended action: Implement delta decoding for l_shipdate during column loading, then recompile and revalidate."
+}

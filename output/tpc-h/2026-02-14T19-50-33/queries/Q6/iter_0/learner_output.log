@@ -1,0 +1,50 @@
+Perfect! Now let me print a brief summary:
+
+---
+
+## Q6 Iteration 0 Analysis Summary
+
+### ❌ CRITICAL ISSUE: Wrong Result
+- **Expected**: 1230113636.01
+- **Actual**: 1230136229.36  
+- **Difference**: +22593.35
+
+**Root Cause**: Floating-point precision in `l_discount BETWEEN 0.05 AND 0.07` predicate. The column is stored as `double` but TPC-H specifies DECIMAL(15,2) which requires exact arithmetic. Floating-point rounding causes misclassification of boundary values.
+
+**Fix Required**: Convert discount to fixed-point integers (multiply by 100, compare as int32_t: `5 <= discount_int <= 7`) OR use epsilon-tolerant comparisons.
+
+---
+
+### Performance Analysis (23.7ms total)
+**Current vs Target**: 23.7ms vs DuckDB 20ms (18% slower, but close!)
+
+**Time Breakdown**:
+- Zone map load: 0.1ms (84.7% block skip rate ✓)
+- **Scan/filter: 16.7ms (70.5%)** ← DOMINANT BOTTLENECK
+- Aggregation: 0.0ms
+- Output: 0.2ms
+
+**Bottleneck**: Scan/filter dominates despite thread parallelism. Missing SIMD vectorization.
+
+---
+
+### Top Optimization Recommendations (After Fixing Correctness)
+
+1. **SIMD Vectorization** (Priority 1, cpu_bound)
+   - AVX512 available but unused
+   - Process 8 int32/4 double per instruction
+   - Expected: 3-5x speedup on scan_filter (16.7ms → 4-6ms)
+   - **Total time: 23.7ms → 12-14ms** (beats DuckDB!)
+
+2. **Predicate Reordering** (Priority 2, filter)
+   - Put most selective first: discount (2%) → shipdate (15%) → quantity (46%)
+   - Expected: 10-15% reduction (16.7ms → 14-15ms)
+
+3. **Selective Prefetching** (Priority 3, io_bound)
+   - MADV_WILLNEED only on non-skipped blocks (92/600)
+   - Avoid I/O waste on HDD
+   - Expected: 5-10% reduction
+
+---
+
+**Next Step**: Fix the discount precision issue (MUST FIX), then apply SIMD vectorization for major performance gains.

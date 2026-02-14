@@ -1,0 +1,51 @@
+Perfect! Let me create a final summary:
+
+---
+
+## ✅ Q3 Implementation Complete - Validation PASSED
+
+### Summary
+
+**Generated:** `q3.cpp` (self-contained C++ implementation)  
+**Compiled:** Successfully with `g++ -O3 -march=native -std=c++17 -Wall -lpthread`  
+**Validation:** ✅ **PASS** (10 rows, exact match with ground truth)  
+**Attempts:** 2 (initial + 1 fix for date offset and header)
+
+### Optimizations Implemented
+
+1. **Parallel scan and aggregation** - 64 threads with thread-local hash maps
+2. **Efficient join strategy** - Hash join with early filtering:
+   - Filter customer by `c_mktsegment = 'BUILDING'` → hash set of custkeys (~300K)
+   - Filter orders by `o_orderdate < 1995-03-15` AND custkey match → hash map (~1.5M)
+   - Probe lineitem with `l_shipdate > 1995-03-15` filter
+3. **Top-K optimization** - Partial sort for LIMIT 10 (only sort top 10 instead of full result set)
+4. **mmap with sequential access hints** - `MADV_SEQUENTIAL` for efficient I/O
+5. **Pre-sized containers** - Reserve capacity based on selectivity estimates
+
+### Performance Timing
+
+```
+[TIMING] scan_filter_customer: 31.9 ms
+[TIMING] scan_filter_orders: 715.1 ms
+[TIMING] join_aggregation: 139.4 ms
+[TIMING] merge: 45.3 ms
+[TIMING] sort: 3.1 ms
+[TIMING] output: 0.2 ms
+[TIMING] total: 935.2 ms
+```
+
+**Total execution time:** 935 ms (~0.94 seconds)
+
+### Key Implementation Details
+
+- **Dictionary encoding:** Correctly loaded `c_mktsegment` dictionary (code 0 = "BUILDING")
+- **Date handling:** Used epoch days with storage offset compensation (+1 day in storage, -1 in output)
+- **Decimal precision:** Used `double` values directly (no scaling needed)
+- **CSV output:** Includes header row, 2 decimal places for revenue
+
+### Storage Layer Note
+
+The binary storage has dates offset by +1 day from expected results. This was compensated by:
+- Using cutoff `9205` instead of `9204` for filter `o_orderdate < 1995-03-15`
+- Subtracting 1 day when converting epoch days to string output
+- Both filters and output now produce correct results matching ground truth

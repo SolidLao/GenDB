@@ -1,0 +1,38 @@
+## Summary
+
+I've completed a comprehensive workload analysis of the TPC-H queries and written the results to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/workload_analysis.json`.
+
+### Key Findings:
+
+**Hardware Profile (64-core HDD system with AVX-512 SIMD):**
+- 64 CPU cores (2 sockets × 16 cores × 2 threads) → excellent parallelism potential
+- 44 MiB L3 cache shared across 16 cores per socket → morsel size ~27KB optimal
+- HDD storage → prioritize predicate pushdown and zone maps to minimize I/O
+- 376 GB RAM available → sufficient for hash joins
+
+**Workload Characteristics:**
+
+1. **Q1 (Pricing Summary)** — Bottleneck query
+   - Full scan of 60M-row lineitem table with 98% selectivity (high selectivity)
+   - Multiple aggregation functions → materialization required
+   - Low-cardinality GROUP BY (4 groups) → aggregation is cheap
+   
+2. **Q6 (Forecasting Revenue)**
+   - Highly selective scan (1.9% match rate) on lineitem
+   - Multi-column filter with low combined selectivity
+   - Single-table, simple aggregation → ideal for vectorized execution
+
+3. **Q3 (Shipping Priority)**
+   - Complex 3-way join with selective filters
+   - Customer segment filter (0.22 selectivity) should be applied first
+   - Top-10 optimization possible via streaming aggregation
+
+**Critical Optimization Opportunities:**
+
+1. **Parallelism**: Lineitem scans are embarrassingly parallelizable (59M rows across 64 cores = morsel-driven streaming)
+2. **Columnar Storage**: Store hot columns (shipdate, discount, quantity, extendedprice) contiguously for cache efficiency
+3. **Zone Maps**: Date range predicates on lineitem can skip entire blocks for Q1 and Q6
+4. **Join Ordering**: Apply selectivity-based filtering (customer → orders → lineitem) to minimize intermediate rows
+5. **Streaming Aggregation**: Q3 can use online top-K instead of materializing all groups
+
+The analysis JSON includes exact row counts, column statistics from actual data samples, filter selectivity estimates, and actionable optimization strategies for each query.

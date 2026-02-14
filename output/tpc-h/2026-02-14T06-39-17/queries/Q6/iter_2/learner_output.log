@@ -1,0 +1,39 @@
+Perfect! Let me provide a summary to the user:
+
+## Summary: Q6 Iteration 2 Evaluation
+
+**Status: FAILED** ❌
+
+### Critical Issues Found:
+
+1. **Correctness Bug**: Result is **0.158% incorrect**
+   - Expected: 1230113636.0101
+   - Actual: 1230115575.3427  
+   - Difference: 1939.33 units
+   
+   **Root cause**: Line 162 uses `_mm256_and_pd(combined, products)` which incorrectly applies bitwise AND to IEEE754 doubles. This corrupts the aggregated values.
+
+2. **Severe Performance Regression**: **40x slowdown**
+   - Iteration 1: 29.3 ms
+   - Iteration 2: 1162 ms
+   
+   **Root cause**: Lines 76-86 allocate 4 padded vectors (shipdate, discount, quantity, extendedprice) and copy all 60M rows of data from mmap'd arrays (~2.4 GB copy). This eliminates the zero-copy mmap benefit and adds massive overhead.
+
+### What Went Wrong:
+
+Iteration 2 attempted to implement SIMD optimizations from iteration 1's recommendations:
+- SIMD mask blending → **Implemented incorrectly** (bitwise AND ≠ mask selection)
+- Horizontal aggregation → Added complexity without benefit
+- Array padding → Destroyed mmap zero-copy advantage
+
+Combining multiple aggressive optimizations simultaneously without validation caused a catastrophic failure.
+
+### Recommendation:
+
+**REVERT TO ITERATION 1 CODE IMMEDIATELY.** Iteration 1's simpler approach (scalar extraction + multiplication) is correct and achieves 29.3 ms — only 1.5x slower than DuckDB. Future optimizations should:
+- Apply ONE technique at a time
+- Validate correctness after each change  
+- Use safer SIMD patterns (e.g., `_mm256_blendv_pd` if blending is needed)
+- Avoid data copying strategies that eliminate mmap benefits
+
+The evaluation JSON has been written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T06-39-17/queries/Q6/iter_2/evaluation.json`.

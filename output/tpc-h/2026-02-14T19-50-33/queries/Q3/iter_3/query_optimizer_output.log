@@ -1,0 +1,52 @@
+Perfect! The code compiled successfully. Let me provide a summary of the optimizations applied:
+
+## Optimization Summary for Q3 Iteration 3
+
+I've successfully optimized the Q3 query code with the following changes:
+
+### 1. **Removed Bloom Filter Overhead** (Target: -76.1ms)
+- Eliminated the Bloom filter build phase (lines 255-263 removed)
+- Removed Bloom filter probe checks in lineitem scan (line 296-299 removed)
+- For Q3's ~5-7% join selectivity, direct hash table probes are more efficient than Bloom filter overhead
+- Modern hash tables have ~10-20ns lookup time, making the Bloom filter's false positive reduction not worth the build cost
+
+### 2. **Added Lineitem Zone Map Block Skipping** (Target: +34% join improvement)
+- Loaded l_shipdate zone map index to identify qualifying blocks
+- Filter blocks where `max_value > date_1995_03_15` (keeps ~54% of blocks)
+- Parallel scan now processes only qualifying blocks instead of full lineitem table
+- This optimization was successful in iteration 2 and is preserved here
+
+### 3. **Implemented Parallel Merge Tree Reduction** (Target: 46.3ms → 8-12ms)
+- Replaced sequential merge (O(n) depth) with parallel tree reduction (O(log n) depth)
+- Each level merges pairs of maps in parallel using thread pool
+- Reduces merge phase from single-threaded to fully parallelized
+- Expected 4-6x speedup on merge phase
+
+### 4. **Improved Hash Table Pre-Sizing**
+- Better reservation estimates for all hash tables to reduce rehashing overhead:
+  - `building_custkeys`: Reserved for ~20% of customers + buffer
+  - `local_qualified_orders`: Reserved based on estimated 1/15 of orders qualifying
+  - `qualified_orders`: Pre-sized to estimated qualified count
+  - Local aggregation maps: Reserved for 5K groups per thread
+- Prevents expensive rehashing during insertion
+
+### 5. **Preserved Working Optimizations from Previous Iterations**
+- Zone map block skipping for orders table (from iteration 1)
+- Parallel scanning with thread-per-block pattern
+- Partial aggregation with thread-local maps
+- Partial sort for Top-10 LIMIT optimization
+
+### Key Decisions:
+- **Did NOT add MADV_WILLNEED prefetching** - iteration 2 showed this causes disk thrashing on HDD (+96ms regression)
+- **Did NOT use Abseil** - not installed on system, would require external dependency
+- **Focused on proven, low-risk optimizations** that directly address regression root causes
+
+### Expected Performance Impact:
+- **Bloom filter removal**: -76.1ms build cost, +15-25ms from additional hash probes → Net -50-60ms
+- **Parallel merge**: 46.3ms → 8-12ms → -35-40ms improvement
+- **Lineitem zone map**: ~34% reduction in join/aggregation time (preserved from iter 2)
+- **Better hash sizing**: -10-20ms from reduced rehashing
+
+**Estimated total time**: 726.6ms (iter 2) → **550-600ms** (significant improvement toward DuckDB's 78ms baseline)
+
+The code compiles successfully and is ready for execution and validation by the Learner agent.

@@ -1,0 +1,39 @@
+Perfect! Let me print a summary:
+
+---
+
+## **Q6 Iteration 1 - Evaluation Summary**
+
+### **Status: FAIL** ❌
+
+**Compilation:** ✅ Pass  
+**Execution:** ✅ Pass (38.15 ms)  
+**Validation:** ❌ **FAIL** - Result mismatch
+
+### **Results**
+- **Expected:** `1230113636.0101`
+- **Actual:** `1226841856.1262`
+- **Difference:** 3,271,779.88 (~0.27% error)
+
+### **Root Cause: CRITICAL BUG IDENTIFIED** 🔴
+
+**Delta Decoding Bug in l_shipdate Column**
+
+The generated C++ code has a fundamental semantic bug:
+- The storage design specifies that `l_shipdate` is **delta-encoded** in persistent storage
+- The code's `mmap_column<int32_t>()` function reads the raw binary without decoding
+- This causes the shipdate filter predicate `(l_shipdate >= 8766 && l_shipdate < 9131)` to compare against wrong values
+- Incorrect row selection leads to the aggregation producing wrong results
+
+Delta encoding stores differences from the previous value, not absolute values. Reading raw delta-encoded data as absolute dates breaks the entire filter logic.
+
+### **Impact**
+Performance optimization cannot proceed until this correctness issue is resolved. This is a **semantic/correctness issue** (CRITICAL_FIX priority), not a performance issue.
+
+### **Recommended Fix**
+Implement proper delta decoding in the column loading phase:
+1. Read the first value as baseline
+2. For each subsequent value, compute: `decoded[i] = decoded[i-1] + stored[i]`
+3. Apply this to l_shipdate during `load_columns()` before filtering
+
+Evaluation JSON written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-13T23-45-34/queries/Q6/iter_1/evaluation.json`

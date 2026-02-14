@@ -1,0 +1,15 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Join ordering: customer (1.5M → 300K after c_mktsegment filter) → orders (15M → 4M after o_orderdate filter) → lineitem (60M → ~30M after l_shipdate filter)",
+    "Push filters BEFORE joins: c_mktsegment='BUILDING' (20% selectivity), o_orderdate < '1995-03-15' (26% selectivity), l_shipdate > '1995-03-15' (50% selectivity)",
+    "Hash join strategy: build hash table on filtered customer (300K rows, small side), probe with filtered orders (4M rows), then build on join result, probe with filtered lineitem",
+    "Parallel hash joins with thread-local build, then merge or partitioned hash join for large lineitem probe",
+    "Partial aggregation: local pre-aggregation per thread during lineitem probe, then global merge (reduces from ~3M rows to 300K groups)",
+    "Top-K heap for LIMIT 10: maintain min-heap of size 10 during aggregation, avoid full sort of 300K groups",
+    "Zone map exploitation: use o_orderdate_zonemap and l_shipdate_zonemap to skip blocks (both tables sorted by date)",
+    "Dictionary encoding for c_mktsegment (uint8_t) enables fast integer comparison"
+  ],
+  "strategy_notes": "Q3 is the critical bottleneck (5x slower than DuckDB). Attack vectors: (1) Join ordering—smallest filtered table first: customer 1.5M→300K (20% selectivity) is the best build side. (2) Filter pushdown—apply all three date/segment filters BEFORE joins using zone maps. (3) Join algorithm—use hash joins with proper build/probe sides: build on customer (300K), probe with orders (4M); then build on intermediate result, probe with lineitem (30M after filter). (4) Partial aggregation—don't materialize full join result (potentially 10M+ rows); aggregate during lineitem probe with thread-local hash tables, then merge to ~300K groups. (5) Top-K optimization—maintain heap of size 10 during aggregation; avoid sorting 300K groups. (6) Parallelism—partition hash join for lineitem probe (largest table), use all 64 cores. Target: close the 5x gap to reach ~100ms. Be aggressive with all optimizations simultaneously—this is the highest-impact query.",
+  "reasoning": "TPC-H SF10 workload with 64-core AVX512 hardware. Q1 already competitive (48ms vs DuckDB 87ms). Q3 is the primary bottleneck (386ms vs 78ms = 5x gap) due to multi-way joins. Q6 nearly optimal (29ms vs 19ms). Focus: maximize thread parallelism across all queries, optimize Q3 join strategy aggressively, leverage zone maps and dictionary encoding."
+}

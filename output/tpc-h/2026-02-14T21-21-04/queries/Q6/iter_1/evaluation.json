@@ -1,0 +1,115 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": ""
+    },
+    "run": {
+      "status": "pass",
+      "output": "[TIMING] scan_filter: 4.7 ms\n[TIMING] output: 0.1 ms\n[TIMING] total: 6.6 ms\nQuery returned 1 rows (matched 0 detail rows)\n"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "Expected: 1230113636.01, Actual: 0.00 (1 row differs)"
+    },
+    "query_results": {
+      "Q6": {
+        "status": "fail",
+        "num_rows": 1,
+        "timing_ms": 6.6,
+        "operation_timings": {
+          "scan_filter": 4.7,
+          "output": 0.1,
+          "total": 6.6
+        },
+        "dominant_operation": "scan_filter",
+        "notes": "CRITICAL: Wrong result (0.00 vs 1230113636.01). Decimal scale factor error in revenue computation. The query compiles and runs fast but produces incorrect output."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q6": {
+        "current_time_ms": 6.6,
+        "status": "fail",
+        "operation_timings": {
+          "scan_filter": 4.7,
+          "output": 0.1,
+          "total": 6.6
+        },
+        "dominant_operation": "scan_filter (71.2% of total)",
+        "bottleneck": "Correctness issue - wrong decimal arithmetic",
+        "root_cause": "Incorrect scale factor handling in revenue calculation. The code computes `revenue = (price[idx] * discount[idx]) / 100.0` (line 196, 223) then divides by 100 again at output (line 266). Since both price and discount are stored as int64_t scaled by 100, the multiplication yields a value scaled by 10000 (100*100). Dividing by 100 in the summation and 100 again at output = dividing by 10000 total, which produces 0.00 instead of the correct value. The correct formula should divide by 10000.0 during summation OR keep integer arithmetic and divide once at output."
+      }
+    },
+    "overall": "Q6 iteration 1 has a CRITICAL correctness bug due to incorrect decimal scale factor handling. The code uses zone maps, parallel execution, SIMD, and Kahan summation, which are all good optimizations, but the fundamental arithmetic is wrong. The query runs fast (6.6ms vs DuckDB's 19.3ms target) but returns 0.00 instead of 1230113636.01. This must be fixed before any performance optimizations. Additionally, the code uses MADV_RANDOM on HDD, which is inappropriate and will hurt sequential read performance."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q6",
+      "issue": "Wrong result: returns 0.00 instead of expected 1230113636.01",
+      "fix": "Fix decimal scale factor in revenue computation",
+      "description": "Lines 196 and 223: Change `revenue = (double)(price[idx] * discount[idx]) / 100.0` to `revenue = (double)(price[idx] * discount[idx]) / 10000.0`. Both l_extendedprice and l_discount are stored as int64_t scaled by 100 (per storage_design.json). When multiplied, the result is scaled by 100*100=10000. Currently dividing by 100 in summation + 100 at output (line 266) = 10000 total, which is correct mathematically but confusing. Better approach: divide by 10000.0 during summation, then remove the /100.0 division at line 266 (just output total_revenue directly). This makes the scale factor handling explicit and avoids the current bug where output expects pre-scaled values.",
+      "bottleneck_category": "semantic",
+      "risk": "low"
+    },
+    {
+      "target": "Q6",
+      "issue": "MADV_RANDOM used on HDD system",
+      "fix": "Remove MADV_RANDOM hint or use MADV_SEQUENTIAL for sorted data",
+      "description": "Lines 112-115: The code uses MADV_RANDOM madvise hint when mmapping columns on an HDD system. This is counterproductive because: (1) lineitem is sorted by l_shipdate, so access will be mostly sequential within qualifying date ranges, (2) HDD sequential reads are 100x faster than random seeks, (3) MADV_RANDOM disables read-ahead, harming sequential performance. Since zone maps already prune non-qualifying blocks and data is sorted by shipdate, use MADV_SEQUENTIAL or MADV_WILLNEED for qualifying block ranges. For HDD systems, leverage sequential I/O patterns. Change mmapFile calls to use MADV_SEQUENTIAL or remove the hint (default MADV_NORMAL is better for sorted data).",
+      "bottleneck_category": "io_bound",
+      "risk": "low"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "technique": "Block-level zone map + targeted I/O",
+      "description": "After fixing correctness: The current implementation loads entire column files (lines 112-115) then prunes blocks using zone maps. For HDD systems with sorted data, reverse this: (1) Use zone maps to identify qualifying block byte ranges, (2) Use pread() or mmap with MADV_WILLNEED only on qualifying ranges, (3) Skip loading non-qualifying blocks entirely. With l_shipdate selectivity of ~33% (1 year out of ~7 years in TPC-H), this avoids reading 67% of data. Reference: storage/persistent-storage.md for block-based I/O patterns. On HDD, avoiding unnecessary reads is more valuable than CPU optimizations.",
+      "expected_improvement": "30-50% reduction in I/O time (avoid reading 67% of blocks). Estimated total time: 4-5ms (currently 6.6ms).",
+      "risk": "medium"
+    },
+    {
+      "priority": 2,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "AVX-512 SIMD (hardware has avx512 support)",
+      "description": "Current code uses AVX2 (8x int32 or 4x int64 per instruction). Hardware supports AVX-512 (16x int32 or 8x int64). Upgrade SIMD code to use AVX-512 intrinsics: _mm512_loadu_si512, _mm512_cmpgt_epi32_mask (returns mask register, cleaner than movemask), _mm512_mask_compressstoreu_epi32 for gathering matching indices. This doubles SIMD width for date comparisons and enables better predicate evaluation. Reference: parallelism/simd.md for AVX-512 patterns. Expected speedup: 20-30% on CPU-bound portion (scan_filter).",
+      "expected_improvement": "Reduce scan_filter from 4.7ms to ~3.5-4.0ms (20-25% improvement)",
+      "risk": "medium"
+    },
+    {
+      "priority": 3,
+      "target": "Q6",
+      "bottleneck_category": "filter",
+      "technique": "Multi-column zone maps for compound predicate",
+      "description": "Current code only uses l_shipdate zone map. Storage design includes zone maps for l_discount and l_quantity (storage_design.json lines 32-33). Apply all three zone maps for block pruning: (1) shipdate in [8766, 9131), (2) discount in [5, 7], (3) quantity max < 2400. Combined selectivity is 1.9% (0.33 * 0.09 * 0.48 per workload_analysis). Using all three zone maps can skip more blocks. In qualifying_blocks loop (lines 100-108), add checks for discount and quantity zone maps. Blocks must pass all three predicates to qualify.",
+      "expected_improvement": "Skip additional 10-20% of blocks that pass date filter but fail discount/quantity. Reduces I/O and scan time by 10-15%.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Branch-free filtering in scalar tail",
+      "description": "Lines 212-231 (scalar tail): Use branch-free predicate evaluation to avoid pipeline stalls. Replace if-continue chains with: `uint32_t mask = (discount[i] >= discount_min) & (discount[i] <= discount_max) & (shipdate[i] >= date_min) & (shipdate[i] < date_max) & (quantity[i] < quantity_max);` then multiply revenue by mask (0 or 1). This eliminates 3-4 branch mispredictions per row. Reference: query-execution/scan-filter-optimization.md. Expected speedup: 10-15% on scalar tail (affects rows not processed by SIMD).",
+      "expected_improvement": "5-10% reduction in scan_filter time for non-SIMD rows",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Prefetch qualifying blocks",
+      "description": "After zone map pruning identifies qualifying blocks, issue prefetch instructions (__builtin_prefetch or _mm_prefetch) for upcoming blocks while processing current block. This hides memory latency. Prefetch ~2-3 blocks ahead (distance tuned to memory latency). Reference: storage/persistent-storage.md for prefetch patterns. Note: Only useful if NOT using targeted I/O (optimization #1). If using targeted I/O with MADV_WILLNEED, kernel already prefetches.",
+      "expected_improvement": "5-10% reduction in memory stall time if not using targeted I/O",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q6 iteration 1 FAILS validation due to incorrect decimal arithmetic (returns 0.00 vs expected 1230113636.01). The root cause is wrong scale factor handling in revenue calculation (divides by 100 during summation + 100 at output = 10000 total, should be 10000 in one place). CRITICAL FIX REQUIRED before performance optimization. Additionally, code uses MADV_RANDOM on HDD which is inappropriate for sorted data. After fixing correctness, main optimization opportunities: (1) block-level I/O to skip non-qualifying blocks (30-50% I/O reduction), (2) AVX-512 SIMD (hardware supports it), (3) multi-column zone maps, (4) branch-free filtering. Current 6.6ms is already faster than DuckDB target (19.3ms), but result is wrong."
+}

@@ -1,0 +1,32 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING (Iteration 2/3)**
+
+I've analyzed Q6's optimization trajectory and determined that **iteration 2 must focus exclusively on fixing the critical correctness bug** introduced in iteration 1.
+
+### Key Findings:
+
+**Iteration 1 Regression Analysis:**
+- **Correctness FAILED**: Returns `0.00` instead of `1230113636.01` (100% wrong)
+- **Root Cause**: Incorrect decimal scale factor arithmetic
+  - Lines 196, 223 divide by `100.0` (should be `10000.0`)
+  - Line 266 divides by `100.0` again → double division error
+  - Since l_extendedprice and l_discount are both scaled by 100, their product is scaled by 10000
+
+**Performance Trajectory:**
+- Iteration 0: 35.2ms (correct)
+- Iteration 1: 6.6ms (wrong result, but 5.3x speedup attempt)
+- DuckDB target: 19.3ms
+- Once corrected: ~6.6ms (estimated) → **3.0x faster than DuckDB**
+
+**Iteration 2 Strategy:**
+Selected only **critical_fixes** (indices 0, 1):
+1. **Fix decimal scale factor** - Change `/ 100.0` to `/ 10000.0` in summation, remove `/100.0` at output
+2. **Fix MADV_RANDOM hint** - Change to `MADV_SEQUENTIAL` for HDD sorted data (random seeks 100x slower than sequential)
+
+**Rationale:**
+- Per priority rules: Correctness fixes FIRST, no performance optimizations until bug is fixed
+- Remaining iterations (if available): Can pursue aggressive optimizations (block-level I/O, AVX-512 SIMD, multi-column zone maps)
+- Budget: 1 iteration remaining - sufficient to fix bug and validate
+
+Decision file written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/queries/Q6/iter_2/decision.json`

@@ -1,0 +1,16 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING** ✅
+
+**Rationale:**
+- Q6 is **1.76x slower than DuckDB** (35.2ms vs 20ms) with a clear, implementable optimization path
+- Zone map block pruning can save **50-70% of I/O** (10-12ms savings alone)
+- Query is already sub-50ms and runs correctly; optimization risk is manageable
+- With **2 iterations remaining**, aggressive execution is justified
+
+**Selected Optimizations (3 recommendations):**
+1. **Zone Map Block Pruning** (Priority 1) - Skip 67% of blocks on date range predicate
+2. **AVX-512 Vectorized Filtering** (Priority 2) - SIMD acceleration of compound predicates  
+3. **HDD-Aware Madvise Optimization** (Priority 3) - Adapt memory access hints for zone map-guided reads
+
+**Expected Outcome:** Combined ~50-70% scan_filter time reduction + ~20-30% CPU filter overhead reduction = overall query time 20-25ms range, achieving **~1.0-1.25x parity with DuckDB**.

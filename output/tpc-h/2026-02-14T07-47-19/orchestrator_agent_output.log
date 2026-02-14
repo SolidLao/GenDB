@@ -1,0 +1,41 @@
+Perfect! I've successfully created the batch decision file for iteration 0. Let me print a summary of the strategic guidance:
+
+---
+
+## 🎯 Iteration 0 Strategic Guidance Summary
+
+**Objective:** Provide initial code generation strategies for three TPC-H queries targeting DuckDB's 100-140x performance edge over PostgreSQL.
+
+### Key Strategic Insights:
+
+1. **Q1 (Pricing Summary) — CPU-Bound Aggregation**
+   - Parallelize across 64 cores with morsel-driven approach (~937K rows/thread)
+   - Use AVX-512 vectorization for expensive arithmetic: `(1-l_discount)*(1+l_tax)`
+   - Hash aggregate only 6 output groups with thread-local state and minimal false sharing
+   - Apply zone map skipping on l_shipdate index to skip non-matching blocks
+
+2. **Q3 (Shipping Priority) — Join-Bound Multi-Table**
+   - Critical path: Customer (filtered 20%) → Orders (filtered 33%) → Lineitem (filtered 67%)
+   - Use Bloom filter from customer c_custkey to reduce orders/lineitem probe cost by 67%
+   - Partial aggregation on lineitem before final merge to reduce intermediate cardinality
+   - Final TOP-K: heapsort/nth_element on 10 rows, not full sort on 200K groups
+
+3. **Q6 (Forecasting) — I/O-Bound Selective Scan**
+   - Branch-free vectorized filtering with AVX-512 to minimize mispredictions
+   - Predicate ordering: tightest first (discount 9% selectivity) → quantity (47%) → dates (1.3%)
+   - Zone map skipping on l_shipdate eliminates most non-matching blocks
+   - Parallelize with 64 morsels, each computing local SUM, then single merge
+
+### Hardware Exploitation:
+- **64 CPU cores:** Use morsel-driven parallelism on all large scans (10K-100K rows/morsel)
+- **AVX-512 SIMD:** Vectorize arithmetic, filtering, and horizontal sums
+- **44MB L3 cache:** Fit thread-local aggregation state and Bloom filters in cache
+- **HDD storage:** Zone map skipping and early filtering are critical to minimize I/O
+
+### Expected Path to 1.2x+ speedup vs DuckDB:
+- Morsel parallelism alone: ~50x speedup on Q1/Q6 (64 cores), ~30x on Q3 (join overhead)
+- SIMD arithmetic: 4-8x additional on Q1 aggregation
+- Bloom filter semi-join: 1.5-2x on Q3 join phase
+- Combined: Potential to match or exceed DuckDB if operator fusion and compilation are tight
+
+**Decision file written to:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T07-47-19/batch_decision_iter0.json`

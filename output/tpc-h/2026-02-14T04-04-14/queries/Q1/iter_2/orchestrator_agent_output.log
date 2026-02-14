@@ -1,0 +1,17 @@
+---
+
+## Summary
+
+**Decision: CONTINUE OPTIMIZING (Iteration 2/3)**
+
+✅ **Rationale:**
+- Iteration 1 improved successfully (55.47ms, consistent performance)
+- 36% gap vs. DuckDB remains, but **3 high-confidence optimizations identified**
+- **Selected recommendations** (0, 1, 2):
+  1. **Activate SIMD filtering** (8-15% gain) — unused function exists, straightforward activation
+  2. **Increase loop unroll** to 8-16 (5-10% gain) — improves instruction-level parallelism
+  3. **Lock-free aggregation** (2-5% gain) — eliminate mutex overhead on 32 threads
+
+**Expected impact:** 15-25% cumulative speedup, closing the gap toward DuckDB's performance.
+
+**Decision file written:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T04-04-14/queries/Q1/iter_2/decision.json`

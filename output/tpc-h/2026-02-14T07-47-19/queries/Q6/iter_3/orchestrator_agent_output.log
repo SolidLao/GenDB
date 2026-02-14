@@ -1,0 +1,16 @@
+## Summary
+
+**Decision: STOP optimization for Q6**
+
+**Rationale:**
+- ✅ **Early win**: GenDB Q6 at 19ms is **competitive with DuckDB** (19-21ms range) and actually **1.6% faster** than DuckDB's best run
+- ✅ **Correctness**: Iteration 2 semantic fix resolved all validation issues
+- ✅ **No budget remaining**: 0 iterations left; can't experiment with riskier optimizations like zone maps
+- ✅ **Diminishing returns**: Current 19ms execution is at practical limit for HDD storage with 2% row selectivity
+
+**Performance Achievement:**
+- GenDB: **19 ms**
+- DuckDB: 19-21 ms (best: 19.3 ms) ✓ **Beat baseline**
+- PostgreSQL: 2377 ms
+
+Q6 has reached optimization saturation. The parallel morsel-driven execution is highly efficient, and further improvements are marginal with increased risk. The decision has been written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T07-47-19/queries/Q6/iter_3/decision.json`.

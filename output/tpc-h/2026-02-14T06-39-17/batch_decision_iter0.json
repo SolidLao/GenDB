@@ -1,0 +1,41 @@
+{
+  "batch": true,
+  "reasoning": "GenDB shows strong performance on Q1 (1.8-3.2x faster than DuckDB) but critical underperformance on Q3 (3.4-5x slower) and Q6 (1.4-1.5x slower). The 64-core, 376GB hardware enables aggressive parallelism. Priority: (1) fix Q3 join strategy and selectivity pushdown, (2) optimize Q6 predicate evaluation order, (3) maintain Q1's strong scaling through morsel-driven parallelism and SIMD.",
+  "queries": {
+    "Q1": {
+      "action": "optimize",
+      "focus_areas": [
+        "morsel-driven parallel scan of 60M lineitem with 64-core distribution",
+        "SIMD-vectorized l_shipdate filtering (high selectivity 0.987 requires all rows)",
+        "thread-local hash aggregation into 6 groups (extremely low cardinality)",
+        "dictionary decoding for l_returnflag and l_linestatus (already encoded)",
+        "utilize l_shipdate_sorted index for zone map pruning on date range"
+      ],
+      "strategy_notes": "Q1 is already competitive but can be pushed further. Implement morsel-based scanning with 64 threads (target ~940K rows/morsel with L3 44MB cache). Use SIMD for date comparisons and arithmetic on quantity/price/tax. Each thread maintains thread-local aggregation hash table (6 groups) to avoid lock contention. Final merge aggregates results. Expected: maintain or improve current 48ms performance while demonstrating sustained parallelism."
+    },
+    "Q3": {
+      "action": "optimize",
+      "focus_areas": [
+        "selectivity-ordered join chain: filter customer on c_mktsegment first (0.216 selectivity → ~350K rows), then hash-join orders on c_custkey (0.15 date selectivity → ~2.2M rows), then hash-join lineitem on o_orderkey",
+        "build-side optimization: customer table is small enough (1.5M rows) to build hash table; use larger (orders 15M) as probe after filtering",
+        "parallel hash join with partition-based distribution: partition filtered customer results across 64 cores to parallelize subsequent lineitem probe",
+        "top-10 via min-heap, NOT full sort: avoid expensive O(n log n) sort for only 10 results",
+        "use hash indexes on o_custkey and o_orderkey for fast joins",
+        "dictionary decoding for c_mktsegment (already encoded)"
+      ],
+      "strategy_notes": "Q3 is the critical bottleneck. Current approach likely uses suboptimal join order or full sort. Reorder: (1) filter customer by mktsegment (350K rows build table), (2) hash-join to orders (2.2M rows after date filter), (3) probe lineitem with partitioned hash table across 64 cores. Use min-heap or partial sort for top-10 to avoid materializing all 2M rows. Dictionary decode c_mktsegment once at start. Expected: 4-5x speedup to match/beat DuckDB (77-112ms target)."
+    },
+    "Q6": {
+      "action": "optimize",
+      "focus_areas": [
+        "predicate reordering: apply most-selective predicates first (l_discount BETWEEN 0.09 → l_quantity < 0.48 → l_shipdate ranges 0.145 each)",
+        "SIMD-vectorized filtering for all 4 predicates in single pass: avoid repeated full-table scans",
+        "branch-free filtering or bit-mask filtering to minimize branch misprediction",
+        "single aggregate SUM() — no partial aggregation needed (no GROUP BY, just one scalar output)",
+        "utilize l_shipdate_sorted index and zone maps to skip blocks outside date range before applying other predicates",
+        "vectorized arithmetic for revenue computation (l_extendedprice * l_discount) on filtered results"
+      ],
+      "strategy_notes": "Q6 is a simple single-table scan with 4 independent filters and one scalar aggregate. Key is predicate evaluation efficiency. Load l_shipdate column, apply zone map to skip blocks outside [1994-01-01, 1995-01-01). Then scan remaining blocks, apply l_discount BETWEEN (most selective 0.09), then l_quantity < 24, then remaining date filter. Use SIMD to process 4-8 rows per instruction. Single final SUM() — no hash aggregation needed. Expected: 1.3-1.5x speedup to reach DuckDB ~20ms."
+    }
+  }
+}

@@ -1,0 +1,17 @@
+## Summary
+
+**Decision: OPTIMIZE (Iteration 1)**
+
+I've written the decision to continue optimizing Q1 with aggressive application of the three highest-priority, low-risk CPU-bound optimizations:
+
+1. **Robin Hood Hash Table** (Priority 1) — Expected 15-25 ms improvement by replacing std::unordered_map's poor cache locality with compact open-addressing
+2. **Morsel Scheduling** (Priority 2) — Expected 5-10 ms improvement via contiguous memory access patterns  
+3. **Type Conversion Elimination** (Priority 3) — Expected 3-5 ms improvement by removing unnecessary double↔long double conversions
+
+**Rationale:**
+- GenDB's baseline (48 ms) already beats DuckDB (86+ ms), but iteration 0 evaluation at 74 ms shows opportunity
+- All three optimizations are **low-risk**, **CPU-bound** (our hot loop), and **synergistic** on the aggregation path
+- Cumulative expected improvement: **23-40 ms** (bringing execution to 34-51 ms range)
+- With 2 iterations remaining, being aggressive here is justified and economical
+
+**Expected outcome:** Close the 48→74 ms gap and potentially drop well below DuckDB's minimum, further cementing GenDB's competitive advantage on TPC-H Q1.

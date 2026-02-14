@@ -1,0 +1,43 @@
+{
+  "batch": true,
+  "reasoning": "TPC-H SF10 workload is I/O and parallelism bound with high selectivity differences across queries. GenDB is already 2-30x faster than competitors, but Q3 has the largest optimization gap (4.2x vs DuckDB). Strategy: exploit 64-core parallelism with morsel-driven execution, use SIMD for filtering/aggregation, leverage zone maps for early block skipping, and optimize join ordering to minimize materialization. Initial code generation should prioritize parallelism-first approach with vectorized operations.",
+  "queries": {
+    "Q1": {
+      "action": "optimize",
+      "focus_areas": [
+        "Morsel-driven parallelism across 64 cores (~1M rows/core) with synchronized final merge",
+        "Sorted aggregation on very-low-cardinality GROUP BY (6 groups) post-parallel merge",
+        "SIMD-accelerated filtering for date predicate (l_shipdate <= cutoff)",
+        "Vectorized multi-aggregation computation (8 aggregates: SUM, AVG, COUNT) in single pass",
+        "Zone map skipping on l_shipdate to avoid scanning blocks outside range",
+        "Compact hash table or sorted stream for final 6-group aggregation"
+      ],
+      "strategy_notes": "Q1 is a parallel scan+aggregate on sorted lineitem. Use morsel-driven approach: partition 59.9M rows across 64 threads (~1M rows each), each thread filters by date and computes local aggregates. Pre-size hash table for 6 groups (very cheap). Final phase: single-threaded merge of 64 local aggregates into 6 groups. Zone maps on l_shipdate will skip blocks with early dates (99% selectivity means most blocks pass). Vectorize the filtering and aggregation computation using AVX-512 for 4-8x speedup on numeric operations. Dictionary encoding for l_returnflag and l_linestatus already in storage — decode during scan if needed."
+    },
+    "Q3": {
+      "action": "optimize",
+      "focus_areas": [
+        "Filter customer early by c_mktsegment = 'BUILDING' (20% selectivity, 300K rows → hash index lookup or vectorized filter)",
+        "Hash join: build on filtered customer (300K rows, compact), probe with orders (7.2M post-date-filter) to produce ~7.2M customer-order pairs",
+        "Filter orders by o_orderdate < '1995-03-15' (48% selectivity) BEFORE join if possible, or push into build phase",
+        "Parallelize lineitem scan+filter (52% selectivity on l_shipdate) across cores, probe filtered customer-order results",
+        "Vectorized hash join probe on l_orderkey to match lineitem to customer-order intermediate",
+        "Two-phase aggregation: local GROUP BY per thread on l_orderkey+o_orderdate+o_shippriority, global merge of ~100K groups",
+        "Top-K optimization: ORDER BY revenue DESC LIMIT 10 can use partial sort or heap after aggregation (10 rows is trivial)"
+      ],
+      "strategy_notes": "Q3 is the critical optimization target (4.2x gap). Use filter-join-aggregate pipeline. Step 1: Filter customer by mktsegment using hash index (c_mktsegment_hash available in storage), yield ~300K rows. Step 2: Hash join customer to orders on o_custkey, filter orders by o_orderdate < '1995-03-15' (48% selectivity) to get ~7.2M intermediate. This join is small enough to fit in L3 cache (44MB). Step 3: Parallelize lineitem scan across 64 cores, each core filters by l_shipdate > '1995-03-15' (52% selectivity) and probes joined customer-order hash table. Step 4: Local aggregation per core on (l_orderkey, o_orderdate, o_shippriority), then merge into global ~100K groups. Step 5: Top-K sort (trivial for 10 rows). Key insight: push filters early to minimize intermediate materialization. Use vectorized filtering for l_shipdate with zone maps if available."
+    },
+    "Q6": {
+      "action": "optimize",
+      "focus_areas": [
+        "Compound predicate filtering: l_shipdate BETWEEN + l_discount BETWEEN + l_quantity < (1.9% selectivity total)",
+        "Vectorized branch-free filtering combining all 3 predicates in single tight loop with SIMD masking",
+        "Predicate ordering: apply most selective first (l_discount BETWEEN 0.05-0.07 is ~1% selective) to short-circuit early",
+        "SIMD horizontal reduction for single-aggregate SUM(l_extendedprice * l_discount) computation",
+        "Morsel-driven parallelism if filtering is bottleneck; stream result if aggregate is dominant",
+        "Zone maps on l_shipdate to skip blocks entirely (year range 1994 only)"
+      ],
+      "strategy_notes": "Q6 is a single-aggregate scalar query with extremely selective compound predicates (1.9% combined). Use vectorized SIMD filtering: load l_shipdate, l_discount, l_quantity in parallel, apply all 3 predicates in single branch-free loop using AVX-512 masking. Order predicates by selectivity: discount is ~1% selective, so check that first to eliminate rows early. For rows that pass all filters, compute l_extendedprice * l_discount inline and accumulate into thread-local sum. Use horizontal SIMD reduction to fold final accumulation. Zone map on l_shipdate can skip entire blocks outside [1994-01-01, 1995-01-01). Given low cardinality (~1.2M rows after filtering), single-threaded or light parallelism sufficient. Final merge: sum all thread-local accumulators."
+    }
+  }
+}

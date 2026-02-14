@@ -1,0 +1,91 @@
+{
+  "evaluation": {
+    "overall_status": "partial",
+    "compile": {
+      "status": "pass",
+      "output": "Compiled successfully with -O3 -march=native -std=c++17"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query returned 10 rows\nExecution time: 3222.54 ms"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "3 row(s) differ. Only 1 out of 10 results match expected output. Completely wrong result set indicating semantic bug, not statistical variance."
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "fail",
+        "num_rows": 10,
+        "timing_ms": 3222.54,
+        "notes": "CRITICAL: Execution time is 8.3x SLOWER than baseline (3222 ms vs 386 ms target). Results are completely incorrect—only 1/10 rows match expected output. Expected top revenue order is 4791171 (440715), but got 55954913 (442425). Clear semantic bug in date filtering."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 3222.54,
+        "status": "fail",
+        "bottleneck": "SEMANTIC BUG + CPU-bound single-threaded execution",
+        "root_cause": "1. **Delta-encoded columns not decoded**: storage_design.json specifies o_orderdate and l_shipdate use 'delta' encoding. Code reads raw delta values and compares them directly to absolute date constants (9204 days = 1995-03-15). Delta-encoded values are relative differences, not absolute values, so comparisons are meaningless. This explains the completely wrong result set.\n\n2. **Single-threaded on 64-core system**: Code processes 60M lineitem rows sequentially using single thread. With 64 cores and near-linear parallelism potential, this wastes 98% of CPU capacity.\n\n3. **Slow hash tables**: Uses std::unordered_map for 3 hash tables (customer filter, orders join, aggregation). Known to be 2-5x slower than compact hash tables (Swiss Tables, Robin Hood)."
+      }
+    },
+    "overall": "CRITICAL FAILURES. Q3 produces completely wrong results due to failure to decode delta-encoded date columns before filtering. Baseline GenDB achieves 386ms; this implementation takes 3222ms (8.3x slower). The issue is two-fold: (1) semantic bug in date handling that breaks correctness, and (2) missing parallelism that cripples performance. Both must be fixed immediately. The workload analysis correctly identifies Q3 as a three-way join with 60M lineitem rows and recommends morsel-driven parallel execution on 64 cores, but this is not implemented."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q3",
+      "issue": "WRONG RESULTS: Delta-encoded date columns (o_orderdate, l_shipdate) are not decoded before use in comparisons",
+      "fix": "Decode delta-encoded columns using cumulative sum before any filtering. See storage/encoding-handling.md.",
+      "description": "storage_design.json specifies o_orderdate and l_shipdate use 'delta' encoding. The current code loads raw encoded values:\n  const int32_t* o_orderdate_raw = (const int32_t*)mmapFile(gendb_dir + \"/orders.o_orderdate.col\", orders_size);\n  const int32_t* l_shipdate_raw = (const int32_t*)mmapFile(gendb_dir + \"/lineitem.l_shipdate.col\", lineitem_size);\n\nThen directly uses them in comparisons:\n  if (...&& o_orderdate_raw[i] < orderdate_cutoff) { ... }\n  if (...&& shipdate > shipdate_cutoff) { ... }\n\nBut delta-encoded values are NOT absolute dates. They are relative differences. Example: if day 1 is 9200 and delta is +4, the encoded value is 4, not 9204. Comparing delta values to absolute constants produces garbage results.\n\nFix: Before filtering, decode both columns via cumulative sum:\n  std::vector<int32_t> o_orderdate_decoded(num_orders);\n  o_orderdate_decoded[0] = o_orderdate_raw[0];\n  for (size_t i = 1; i < num_orders; ++i)\n    o_orderdate_decoded[i] = o_orderdate_decoded[i-1] + o_orderdate_raw[i];\n\nThen use o_orderdate_decoded instead of o_orderdate_raw in all filtering. Do the same for l_shipdate.",
+      "bottleneck_category": "semantic",
+      "risk": "high"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Thread Parallelism (Morsel-Driven)",
+      "description": "Current code is single-threaded on 60M lineitem rows with 64 available cores. Implement morsel-driven parallelism:\n\n1. Divide lineitem table into morsels of ~100K rows using atomic counter\n2. Create 64 threads (or std::thread::hardware_concurrency())\n3. Each thread processes morsels independently:\n   - Decode delta-encoded l_shipdate for its morsel (one-time cost per morsel)\n   - Filter by shipdate > 9204\n   - Probe orders_hash for matching orders\n   - Aggregate into thread-local hash table\n4. Final merge: single-threaded merge of 64 local aggregation tables\n\nParallelize the hot loop (lines 108-118). Keep customer_hash and orders_hash shared read-only. Thread-local aggregation tables avoid lock contention.",
+      "expected_improvement": "6-8x speedup (near-linear on 64 cores). Lineitem processing from 3000+ ms down to ~400-500 ms. Combined with other optimizations, target <100 ms feasible.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Compact Hash Tables (Swiss Tables or Robin Hood)",
+      "description": "Replace three std::unordered_map with faster hash tables:\n\n1. customer_hash: std::unordered_map<int32_t, bool> → ~300K entries\n2. orders_hash: std::unordered_map<int32_t, OrderInfo> → ~1.2M entries\n3. aggregation: std::unordered_map<AggKey, double> → ~5M entries\n\nSwiss Tables (from Abseil) or Robin Hood hashing provide:\n- Better cache locality (contiguous buckets)\n- SIMD-accelerated lookups (16 probes per instruction)\n- 2-5x faster than std::unordered_map in practice\n\nEither use abseil-folly (see external-libs/abseil-folly.md) or implement custom compact hash table using robin_hood.hpp (header-only).",
+      "expected_improvement": "2-3x on aggregation-heavy portion (~30-40% of total time). Saves 200-300 ms.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Selective Column Loading (Predicate Pushdown via Zone Maps)",
+      "description": "Current code loads all 60M lineitem rows into mmap. With zone maps on l_shipdate (sorted index, 100K-row blocks), skip blocks where min(l_shipdate) <= 9204 or max(l_shipdate) > some upper bound.\n\nImplementation:\n1. Read zone map metadata: min/max l_shipdate per block\n2. For each block: if min > 9204, include in processing; else skip\n3. Estimate ~80-90% of lineitem blocks qualify (l_shipdate > 1995-03-15 covers most recent orders)\n\nThis reduces mmap page faults and cache pollution, though impact is secondary to parallelism on HDD.",
+      "expected_improvement": "10-20% reduction in I/O time (150-300 ms saved). Minor compared to parallelism, but cumulative.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD Filtering on Dates",
+      "description": "Vectorize the l_shipdate > 9204 check using AVX2 (compare 4 int32_t in parallel):\n\n```cpp\nconst __m128i mask = _mm_set1_epi32(shipdate_cutoff);\nfor (size_t j = 0; j < num_lineitems - 3; j += 4) {\n  __m128i dates = _mm_loadu_si128((__m128i*)&decoded_shipdate[j]);\n  __m128i cmp = _mm_cmpgt_epi32(dates, mask);\n  // Process matches\n}\n```\n\nCombine with partial aggregation per SIMD chunk to amortize overhead. This is a secondary optimization after parallelism.",
+      "expected_improvement": "10-15% on filter-heavy portion (50-100 ms). Gains outweigh complexity only if parallelism alone insufficient.",
+      "risk": "medium"
+    }
+  ],
+  "summary": "Q3 iteration 0 is **BROKEN** on two fronts: (1) semantic bug—delta-encoded date columns are not decoded, causing completely incorrect results (only 1/10 rows match); (2) performance crisis—single-threaded execution on 60M rows with 64 cores available yields 8.3x slowdown vs 386ms baseline. Immediate action required: fix delta decoding (CRITICAL), then implement morsel-driven parallelism (priority 1). With both fixes, expect sub-400ms execution. Compact hash tables and zone map skipping are secondary optimizations, each providing 2-3x and 1.2x speedup respectively. Current trajectory: UNFIXABLE without parallelism redesign."
+}

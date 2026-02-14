@@ -1,0 +1,16 @@
+## Decision Summary
+
+**Action**: OPTIMIZE (continue)
+
+**Selected Recommendations**: All 6 (critical fix + all 5 performance optimizations)
+- [0] **CRITICAL FIX**: Merge parallel aggregation maps before Top-K selection
+- [1] Join order optimization (10-20% gain)
+- [2] Zone map skipping (30-40% gain)  
+- [3] SIMD acceleration (20-30% gain)
+- [4] Hash table optimization (15-25% gain)
+- [5] Aggregation key optimization (5-10% gain)
+
+**Rationale**: 
+Iteration 0 failed validation due to a critical correctness bug where parallel threads don't merge their partial aggregation results. This MUST be fixed first. After fixing correctness, we have a massive 12x performance gap vs DuckDB (930ms vs 77ms) and 2 iterations remaining, so we can aggressively apply ALL 5 performance optimizations simultaneously. They operate at different layers (I/O, CPU, data structures) and are complementary. Expected combined improvement: 3-5x speedup.
+
+The Query Optimizer will implement these changes as a unified patch addressing correctness and performance together.

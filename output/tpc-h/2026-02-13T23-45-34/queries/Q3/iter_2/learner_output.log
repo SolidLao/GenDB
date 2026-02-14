@@ -1,0 +1,37 @@
+Perfect! Now let me print a summary:
+
+## Summary
+
+**Q3 Iteration 2 Evaluation Complete**
+
+### Status: **FAIL** (Semantic Bug)
+
+#### Key Findings:
+
+1. **Critical Semantic Bug (BLOCKS VALIDATION)**
+   - **Issue**: Line 301 filters for wrong market segment code
+   - **Current**: `if (c_mktsegment[i] == 1)` → filters for AUTOMOBILE
+   - **Expected**: `if (c_mktsegment[i] == 0)` → should filter for BUILDING
+   - **Impact**: Produces completely wrong result set (all 10 rows mismatch ground truth)
+   - **Fix**: Single-character change (1 → 0). Risk: **LOW**
+
+2. **Performance Baseline (After Fix)**
+   - Current execution time: **1,460 ms** (1.46 seconds)
+   - Baseline target: **386 ms** (iteration 1 baseline from prior run)
+   - **Gap**: 3.8x slower than baseline
+   - **Root causes identified**:
+     - Thread synchronization overhead in aggregation merge (40-50% of execution)
+     - Scalar I/O without zone map skipping on lineitem (60M rows read fully)
+     - Standard hash table (std::unordered_map) not optimized for compact GROUP BY
+     - Incomplete SIMD vectorization in aggregation loop
+
+3. **Optimization Roadmap**
+   - **Priority 1**: Thread synchronization (lock-free aggregation, NUMA optimization) → 30-40% improvement
+   - **Priority 2**: I/O prefetching and cache hints → 5-15% improvement
+   - **Priority 3**: Compact hash tables with pre-sizing → 10-20% improvement
+   - **Priority 4**: Zone map skipping for lineitem date filter → 20-40% improvement
+   - **Priority 5**: Complete SIMD vectorization → 3-5x on aggregation loop
+
+**Target after fix**: 600-800 ms (1.6-2.0x baseline). **Must fix semantic bug first.**
+
+Evaluation JSON written to `/home/jl4492/GenDB/output/tpc-h/2026-02-13T23-45-34/queries/Q3/iter_2/evaluation.json`

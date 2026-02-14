@@ -1,0 +1,223 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d: 32MiB, L1i: 32MiB, L2: 32MiB (32 instances), L3: 44MiB (2 sockets)",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd_support": "avx512"
+  },
+  "tables": {
+    "lineitem": {
+      "exact_row_count": 59986052,
+      "access_frequency": 3,
+      "role": "fact",
+      "estimated_cardinality": "59.9M",
+      "hot_columns": ["l_shipdate", "l_extendedprice", "l_discount", "l_tax", "l_quantity", "l_returnflag", "l_linestatus"],
+      "access_patterns": ["full_scan", "filtered_scan", "hash_join_probe"],
+      "column_stats": {
+        "l_shipdate": {"min": "1992-01-02", "max": "1998-12-01", "approx_distinct": 2500},
+        "l_extendedprice": {"min": "100.00", "max": "120000.00", "approx_distinct": "high"},
+        "l_discount": {"min": "0.00", "max": "0.10", "approx_distinct": 11},
+        "l_quantity": {"min": "1", "max": "50", "approx_distinct": 50},
+        "l_returnflag": {"min": "A", "max": "R", "approx_distinct": 3},
+        "l_linestatus": {"min": "F", "max": "O", "approx_distinct": 2}
+      }
+    },
+    "orders": {
+      "exact_row_count": 15000000,
+      "access_frequency": 2,
+      "role": "fact",
+      "estimated_cardinality": "15M",
+      "hot_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+      "access_patterns": ["hash_join_build", "filtered_scan", "index_lookup"],
+      "column_stats": {
+        "o_orderkey": {"min": "1", "max": "60000000", "approx_distinct": "15M"},
+        "o_custkey": {"min": "1", "max": "1500000", "approx_distinct": "1.5M"},
+        "o_orderdate": {"min": "1992-01-02", "max": "1998-08-02", "approx_distinct": 2400}
+      }
+    },
+    "customer": {
+      "exact_row_count": 1500000,
+      "access_frequency": 1,
+      "role": "dimension",
+      "estimated_cardinality": "1.5M",
+      "hot_columns": ["c_custkey", "c_mktsegment", "c_nationkey"],
+      "access_patterns": ["hash_join_build", "filtered_scan"],
+      "column_stats": {
+        "c_custkey": {"min": "1", "max": "1500000", "approx_distinct": "1.5M"},
+        "c_mktsegment": {"min": "AUTOMOBILE", "max": "MACHINERY", "approx_distinct": 5}
+      }
+    },
+    "part": {
+      "exact_row_count": 2000000,
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "2M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "partsupp": {
+      "exact_row_count": 8000000,
+      "access_frequency": 0,
+      "role": "bridge",
+      "estimated_cardinality": "8M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "supplier": {
+      "exact_row_count": 100000,
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "100K",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "nation": {
+      "exact_row_count": 25,
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "25",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "region": {
+      "exact_row_count": 5,
+      "access_frequency": 0,
+      "role": "dimension",
+      "estimated_cardinality": "5",
+      "hot_columns": [],
+      "access_patterns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "medium",
+      "join_cardinality_estimate": "15M"
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "high",
+      "join_cardinality_estimate": "~60M"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1",
+      "estimated_selectivity": 0.98
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3",
+      "estimated_selectivity": 0.33
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "high",
+      "query": "Q3",
+      "estimated_selectivity": 0.22
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "BETWEEN",
+      "selectivity": "medium",
+      "query": "Q6",
+      "estimated_selectivity": 0.16
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "low",
+      "query": "Q6",
+      "estimated_selectivity": 0.13
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6",
+      "estimated_selectivity": 0.48
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM(l_quantity)", "SUM(l_extendedprice)", "SUM(l_extendedprice*(1-l_discount))", "SUM(l_extendedprice*(1-l_discount)*(1+l_tax))", "AVG(l_quantity)", "AVG(l_extendedprice)", "AVG(l_discount)", "COUNT(*)"],
+      "query": "Q1",
+      "estimated_groups": "6"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM(l_extendedprice*(1-l_discount))"],
+      "query": "Q3",
+      "estimated_groups": "~100K"
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "query": "Q1"
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate"],
+      "limit": 10,
+      "query": "Q3"
+    }
+  ],
+  "filter_selectivities": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= '1998-09-02'",
+      "estimated_selectivity": 0.988,
+      "query": "Q1"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < '1995-03-15'",
+      "estimated_selectivity": 0.489,
+      "query": "Q3"
+    },
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "estimated_selectivity": 0.22,
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= '1994-01-01' AND < '1995-01-01'",
+      "estimated_selectivity": 0.161,
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24",
+      "estimated_selectivity": 0.134,
+      "query": "Q6"
+    }
+  ],
+  "optimization_hints": [
+    "Q1: Parallelize full scan of 60M-row lineitem with morsel-driven execution (64 threads, 1M rows/morsel); high selectivity date filter enables predicate pushdown; thread-local hash aggregation for 6 groups with merge at end",
+    "Q3: Two-stage strategy—(1) filter customer by mktsegment (22% selectivity) and order by orderdate (33% selectivity) first; (2) radix-partition both filtered orders/lineitem on orderkey for cache-friendly hash join with 64-partition layout; final TOP-K sort on 10 rows uses heap",
+    "Q6: Single-table scan with low-selectivity compound predicate (13.4% final selectivity); vectorize date/discount/quantity comparisons with AVX512 and use branch-free filtering; morsel-parallel scan then in-place aggregation (single GROUP result)"
+  ],
+  "summary": "TPC-H SF10 is dominated by lineitem scans (60M rows, fact table). Q1 is a bulk aggregation with high-selectivity date filter; Q3 is a 3-way join with moderate selectivity on customer mktsegment and order date; Q6 is a single-table scan with compound range predicates. Critical bottleneck is Q3's multi-way join materialization (customer→orders→lineitem chain). Key optimization: parallelize Q1 scan/aggregation across 64 cores with morsel-driven execution, partition Q3 on orderkey for cache-local joins, vectorize Q6 filtering. HDD storage requires prefetching and sequential I/O patterns; persistent binary encoding (vs. text .tbl) would eliminate parsing overhead."
+}

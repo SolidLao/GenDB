@@ -1,0 +1,33 @@
+Perfect! Now let me provide a brief summary:
+
+---
+
+## Q3 Iteration 0 Evaluation Complete
+
+**Status**: ❌ **FAILED** (Correctness Issue)
+
+### Critical Findings
+
+**Correctness Bug Detected**: The query produces incorrect results with revenues approximately **50% lower** than expected:
+- Expected top revenues: 440K, 439K, 432K, 428K...
+- Actual revenues: 229K, 218K, 213K, 210K...
+
+**Root Cause**: Parallel aggregation implementation (lines 293-304) fails to merge partial aggregation maps from different threads before Top-K selection. Each thread maintains local partial sums, but the code treats each thread's results independently rather than combining revenues for the same orderkey across threads.
+
+**Required Fix**: Add explicit merge step after line 282 to combine all `agg_maps` into a single global aggregation map before Top-K selection.
+
+### Performance Analysis (Post-Fix)
+
+Current: **930ms** vs DuckDB **77ms** (12x slower)
+
+**Top Optimization Opportunities**:
+1. **Zone map predicate pushdown** (30-40% gain) - Storage has zone maps on l_shipdate/o_orderdate but code doesn't use them
+2. **SIMD vectorization** (20-30% gain) - AVX512 available but unused for date filtering/hash probing
+3. **Hash table optimization** (15-25% gain) - Pre-size tables, consider robin_hood/abseil alternatives
+4. **Join order optimization** (10-20% gain) - Current builds 3M entry hash table, can be reduced
+
+### Hardware Context
+- 64 cores (AVX512), 44MB L3 cache, HDD storage, 376GB RAM
+- Good parallelization (64 threads), but missing vectorization and I/O optimizations
+
+**Evaluation written to**: `/home/jl4492/GenDB/output/tpc-h/2026-02-13T22-18-27/queries/Q3/iter_0/evaluation.json`

@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 is completely broken: wrong results (1/10 rows match) due to undecoded delta-encoded date columns, and 8.3x slower than baseline (3222ms vs 386ms target). The critical semantic bug must be fixed immediately, combined with morsel-driven parallelism (6-8x speedup) and compact hash tables (2-3x). With correctness restored and parallelism added, sub-400ms is achievable.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Fix delta-encoded column decoding for o_orderdate and l_shipdate (CRITICAL for correctness)",
+    "Implement morsel-driven parallelism across 64 cores for lineitem scan+filter+join (6-8x speedup)",
+    "Replace std::unordered_map with compact hash tables (Swiss Tables or Robin Hood) for 2-3x on aggregation"
+  ],
+  "strategy_notes": "Priority 1: Decode delta-encoded columns before ANY filtering to restore correctness. Priority 2: Implement thread-based morsel-driven execution (atomic counter, thread-local aggregation, final merge) targeting near-linear 64-core speedup. Priority 3: Swap hash table implementations (robin_hood.hpp is header-only, low integration cost). Zone maps and SIMD filtering are secondary optimizations deferred to iteration 2 if needed. Target sub-400ms combined execution time.",
+  "notes": "This is iteration 1/3. One critical fix identified (delta decoding). Selection includes the critical fix (index 0) + top 2 performance recommendations (indices 1, 2) based on impact and risk profile. Zone maps (index 3) and SIMD (index 4) deferred as secondary optimizations."
+}

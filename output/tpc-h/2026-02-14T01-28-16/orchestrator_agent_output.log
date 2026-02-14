@@ -1,0 +1,35 @@
+## Summary
+
+**Batch decision written for iteration 0 (initial code generation)**
+
+**Workload characteristics:**
+- 64-core AVX512 system with excellent parallel processing capability
+- TPC-H SF10: lineitem (60M rows), orders (15M), customer (1.5M)
+- Binary columnar storage with dictionary encoding and zone maps
+- Current performance: Q1 already competitive, Q3 is 5x slower than DuckDB (main bottleneck), Q6 nearly optimal
+
+**Strategic guidance provided:**
+
+**Q1** (48ms, already beating DuckDB's 87ms):
+- Aggressive 64-core morsel-driven parallelism
+- AVX512 SIMD for arithmetic operations
+- Correct dictionary encoding handling (uint8_t, not strings)
+- Zone map pruning on l_shipdate
+- Partial aggregation with pre-sized hash tables (4 groups max)
+
+**Q3** (386ms vs DuckDB 78ms - PRIMARY BOTTLENECK):
+- Optimal join ordering: filtered customer (300K) → orders (4M) → lineitem (30M)
+- Aggressive filter pushdown with zone map exploitation
+- Proper hash join build/probe sides
+- Partial aggregation during joins (reduce 10M+ rows to 300K groups)
+- Top-K heap optimization (LIMIT 10) to avoid sorting 300K groups
+- Parallel partitioned hash join for large lineitem table
+
+**Q6** (29ms vs DuckDB 19ms - nearly optimal):
+- Zone map pruning to skip 84% of blocks
+- Optimal predicate ordering by selectivity
+- AVX512 SIMD for vectorized filtering and arithmetic
+- Columnar access (only 4 of 16 columns)
+- 64-core parallel scan with thread-local aggregation
+
+The Query Optimizer now has comprehensive strategic guidance to generate high-performance initial code for all three queries simultaneously.

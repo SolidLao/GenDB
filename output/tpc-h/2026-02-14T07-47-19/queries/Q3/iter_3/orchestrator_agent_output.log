@@ -1,0 +1,23 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING** ✓
+
+**Q3 Iteration 3/3 Final Decision:**
+
+| Metric | Value |
+|--------|-------|
+| Current Performance | 631 ms |
+| DuckDB Target | 91.7 ms |
+| Performance Gap | 6.9x slower |
+| Improvement Trend | +16.4% (iter 1→2) ✓ |
+| Remaining Iterations | 0 (FINAL) |
+| **Action** | **OPTIMIZE** |
+
+**Selected Optimizations (indices 0, 1, 2):**
+1. **Priority 1 - Offline Zone Maps** (low-risk, 1.15-1.25x): Eliminate ~100-150ms per-query zone map computation by pre-computing metadata
+2. **Priority 2 - Top-K Heap** (low-risk, 1.05-1.10x): Replace full sort with heap-based Top-K for final 10 results
+3. **Priority 3 - Radix Partitioning** (medium-risk, 1.2-1.4x): Improve join cache locality through partitioning on orderkey bits
+
+**Expected Outcome:** 350-450ms execution time (4-5x improvement potential over current 631ms, narrowing DuckDB gap to ~4x)
+
+**Rationale:** This is the final iteration budget—aggressive pursuit of viable optimizations is justified. The three selected recommendations target the confirmed secondary bottlenecks (zone map overhead, sort inefficiency, join cache misses) without introducing high-risk changes. Combined execution should yield meaningful improvement on this final pass.

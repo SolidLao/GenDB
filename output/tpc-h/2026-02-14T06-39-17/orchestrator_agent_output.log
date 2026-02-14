@@ -1,0 +1,35 @@
+Perfect! I've created the batch decision file for iteration 0. Here's a summary:
+
+## Strategic Guidance Summary
+
+**Performance Status:**
+- ✅ **Q1 (48ms)**: Already competitive — 1.8-3.2x faster than DuckDB
+- ❌ **Q3 (386ms)**: Critical bottleneck — 3.4-5x slower than DuckDB (needs 4-5x speedup)
+- ❌ **Q6 (29.3ms)**: Underperforming — 1.4-1.5x slower than DuckDB (needs 1.3-1.5x speedup)
+
+**Optimization Strategy by Query:**
+
+1. **Q1 (Pricing Summary)**: Maintain and refine strong parallelism
+   - Morsel-driven scanning across 64 cores (~940K rows/morsel)
+   - SIMD-vectorized filtering and arithmetic
+   - Thread-local hash aggregation (6 groups = zero lock contention)
+
+2. **Q3 (Shipping Priority)** — **CRITICAL**: Fix join strategy
+   - **Reorder joins** by selectivity: customer (350K) → orders (2.2M) → lineitem probe
+   - Use **min-heap for top-10** instead of full sort
+   - **Partition-based parallel join** to utilize all 64 cores
+   - Expected: 4-5x speedup to beat DuckDB
+
+3. **Q6 (Revenue Forecasting)**: Optimize predicate evaluation
+   - **Reorder filters** by selectivity (discount BETWEEN 0.09 is most selective)
+   - Use **zone maps** to skip blocks outside date range
+   - **SIMD-vectorized filtering** in single pass
+   - Expected: 1.3-1.5x speedup to ~20ms
+
+**Key Techniques Across All Queries:**
+- Aggressive 64-core parallelism (morsel-driven scanning)
+- SIMD filtering and arithmetic (avx2/avx512 available)
+- Hash-based operations (joins, aggregation) with proper build/probe sizing
+- Storage index exploitation (sorted indexes, zone maps, hash indexes, dictionary encoding)
+
+Decision file written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T06-39-17/batch_decision_iter0.json`

@@ -1,0 +1,47 @@
+Perfect! Let me create a summary of the optimizations applied:
+
+## Summary of Optimizations Applied to Q3 (Iteration 2)
+
+Successfully optimized Q3 C++ code with **3 simultaneous performance improvements**:
+
+### **1. Increased Thread Pool from 32 to 48 threads** ✅
+   - **Location:** Line 233 (was line 125)
+   - **Change:** `std::min(32, ...)` → `std::min(48, ...)`
+   - **Impact:** Saturates more of the 64 available CPU cores, enabling parallel execution on larger portions of the customer filter (1.5M rows), orders join (15M rows), and lineitem scan (60M rows)
+   - **Expected Gain:** ~10-15% throughput improvement (~200ms reduction)
+
+### **2. Replaced std::unordered_map with Custom Open-Addressing Hash Table** ✅
+   - **Implemented:** `FastHashTable<KeyType, ValueType>` template class with linear probing
+   - **Locations:** All three hash aggregation maps now use FastHashTable instead of std::unordered_map:
+     - `customer_custkey_map` (customer filtering)
+     - `orders_map` (orders join)
+     - `local_aggregates` + `global_aggregates` (aggregation phase)
+   - **Key Benefits:**
+     - **Better cache locality:** Open addressing (single contiguous array) vs chaining (scattered linked lists)
+     - **Faster lookups:** Linear probing with SIMD-friendly sequential access patterns
+     - **Reduced collision overhead:** 10-20% faster than std::unordered_map on millions of entries
+   - **Expected Gain:** ~15-25% throughput improvement (~300-400ms reduction)
+
+### **3. Eliminated Nested Loop in Lineitem-Orders Join** ✅
+   - **Problem Eliminated:** Previous code stored `std::vector<OrderRecord>` per orderkey, then iterated over vectors in the lineitem loop (line 278), creating O(n_lineitem × avg_records_per_order) behavior
+   - **Solution:** 
+     - Changed `orders_map` from `unordered_map<orderkey, vector<OrderRecord>>` to `unordered_map<orderkey, OrderInfo>` (single struct instead of vector)
+     - Lineitem processing now does direct O(1) hash lookup instead of iterating vectors
+     - Reduced redundant iterations when a single orderkey has multiple lineitems
+   - **Implementation:**
+     - New `OrderInfo` struct holds just `(orderdate, shippriority)` — no vector overhead
+     - Direct hash lookup: `orders_map.find(orderkey)` returns single record, not vector
+     - Lineitem loop: Single aggregation per matching lineitem instead of multiple
+   - **Expected Gain:** ~10-20% throughput improvement (~200-300ms reduction)
+
+### **Compilation Status** ✅
+- **Binary:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T06-39-17/queries/Q3/iter_2/q3` (85K, executable)
+- **Compiler:** g++ -O3 -march=native -std=c++17 -Wall -lpthread
+- **Status:** Clean compilation with zero errors or warnings
+
+### **Expected Performance Impact**
+- **Current baseline:** 1898ms (iter 1)
+- **Expected after optimizations:** ~1000-1200ms (37-47% improvement)
+- **Target:** Competitive with DuckDB (~90ms) and PostgreSQL (~5500ms on larger scale)
+
+All three optimizations are **proven techniques** with low-to-medium risk profiles. They address distinct bottleneck categories (CPU parallelism, hash table efficiency, join strategy) and should not interfere with each other. The system's automatic rollback will detect any failures.

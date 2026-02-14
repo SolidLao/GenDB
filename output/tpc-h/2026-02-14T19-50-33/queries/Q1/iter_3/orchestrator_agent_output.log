@@ -1,0 +1,17 @@
+## Decision Summary
+
+**Action: STOP**
+
+**Rationale:**
+- **Competitive Performance**: Q1 baseline (iteration 1) achieved 92.9ms, only 7.5% slower than DuckDB's best time (86.4ms). This is well within acceptable range (1.07x vs ~1.2x threshold for continued optimization).
+- **No Remaining Budget**: This is iteration 3/3 with 0 iterations left. Cannot implement any fixes or optimizations.
+- **Known, Fixable Bug**: Iteration 2's regression was due to an inverted SIMD comparison in the filter logic (lines 304-305). This is a straightforward correctness bug, not a fundamental architectural failure, and can be fixed in future optimization rounds.
+- **Strong Baseline**: The iteration 1 implementation demonstrates good engineering—parallel execution, thread-local aggregation, Kahan summation, and zone map infrastructure is already in place.
+
+**Deferred Optimizations** (for future iterations):
+1. Fix SIMD comparison logic (invert mask or use proper `<=` semantics)
+2. Implement AVX-512 full vectorization with aggregation arithmetic (expected: 55-65ms total)
+3. Optimize zone map SCAN_ALL path
+4. Replace hash map with direct array indexing (4-group low-cardinality)
+
+Decision file written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/queries/Q1/iter_3/decision.json`

@@ -1,0 +1,29 @@
+---
+
+## Summary
+
+**Decision: OPTIMIZE** ✓
+
+**Q6 Optimization Decision (Iteration 2/3):**
+
+| Metric | Value |
+|--------|-------|
+| **Current Performance** | 29.4 ms |
+| **Target (DuckDB)** | 19.3 ms |
+| **Current Gap** | 52% slower |
+| **Action** | Continue optimizing |
+| **Selected Optimizations** | SIMD mask integration (1), horizontal SIMD aggregation (2), tail loop vectorization (3) |
+
+**Rationale:**
+- Iteration 1 improved successfully; no regressions to worry about
+- 5 concrete, actionable optimizations identified by evaluation—all low-to-medium risk
+- Top 3 optimizations target the CPU-bound bottleneck (SIMD inefficiency) and can yield **20-27% improvement** collectively
+- Realistic target: 21-23 ms (88-92% of DuckDB speed), closing ~60% of remaining gap
+- Only 1 iteration remains, so being aggressive is justified
+
+**Focus Areas:**
+1. Replace scalar mask extraction with SIMD blending/gather (eliminate 4-6 ms store-to-load latency)
+2. Keep aggregation in SIMD registers with horizontal reduction (save 2-3 ms)
+3. Eliminate scalar tail loop via array padding (save 1 ms)
+
+The code is fundamentally sound; this iteration polishes SIMD integration to close the performance gap.

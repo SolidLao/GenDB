@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 0.2 ms\n[TIMING] customer_filter: 32.3 ms\n[TIMING] orders_filter_join: 725.0 ms\n[TIMING] lineitem_scan_aggregation: 131.2 ms\n[TIMING] aggregation_merge: 36.5 ms\n[TIMING] sort: 10.9 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 936.5 ms\nQuery returned 10 rows\n",
+    "stderr": "",
+    "duration_ms": 1034
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    },\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    },\n    \"Q6\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_data": 0.2,
+    "customer_filter": 32.3,
+    "orders_filter_join": 725,
+    "lineitem_scan_aggregation": 131.2,
+    "aggregation_merge": 36.5,
+    "sort": 10.9,
+    "output": 0.2,
+    "total": 936.5
+  },
+  "timing_ms": 936.5
+}

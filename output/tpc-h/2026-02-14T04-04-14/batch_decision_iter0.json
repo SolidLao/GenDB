@@ -1,0 +1,39 @@
+{
+  "batch": true,
+  "reasoning": "TPC-H SF10 is a parallel analytical workload dominated by large table scans (59M-60M rows) with low-cardinality aggregations. GenDB has 64 cores available but current performance is competitive only on Q1 (48ms vs 86ms DuckDB). Q3 (386ms) and Q6 (29.3ms) indicate suboptimal parallelism, join strategy, and filter vectorization. Primary optimization levers: (1) morsel-driven thread parallelism across all three queries, (2) SIMD vectorization for complex predicates (Q6 especially), (3) early filter pushdown in Q3 three-way join, (4) per-morsel partial aggregation to minimize synchronization overhead.",
+  "queries": {
+    "Q1": {
+      "action": "optimize",
+      "focus_areas": [
+        "Morsel-driven parallelism: partition 59M lineitem rows into ~4K-5K morsels of 10-15K rows each for 64 cores; each thread executes vectorized date filter and local hash aggregation (6 groups only)",
+        "Per-morsel partial aggregation: each morsel produces 6 partial sums/counts, final thread merges 6*64=384 partial results (negligible overhead)",
+        "SIMD vectorization on l_shipdate filter using AVX2 (process 4-8 date comparisons per instruction)",
+        "Compact hash table for 6-group aggregation per morsel (low cardinality = fast lookups, minimal allocation)",
+        "Column pruning: load only hot columns (l_shipdate, l_returnflag, l_linestatus, l_quantity, l_extendedprice, l_discount, l_tax) from columnar storage"
+      ],
+      "strategy_notes": "Q1 is embarrassingly parallel with minimal filter selectivity (94%) but low-cardinality aggregation (6 groups). Focus on full core utilization via morsel queues: each of 64 threads pulls independent morsels, executes vectorized filter, aggregates locally, deposits partial result. Avoid cross-thread synchronization in hot loop. Dictionary encoding on l_returnflag/l_linestatus enables integer aggregation keys without string overhead. Compile query-specific tight loop (scan → filter → aggregate) with template specialization for column types. Expected: near-linear speedup with 64 cores."
+    },
+    "Q3": {
+      "action": "optimize",
+      "focus_areas": [
+        "Join ordering strategy: (1) filter customer on c_mktsegment='BUILDING' (20% selectivity, 1.5M→300K), (2) hash-join customer→orders on o_custkey (300K build side, 15M probe side), (3) hash-join result→lineitem on l_orderkey. Avoids large intermediate Cartesian products.",
+        "Early filter pushdown: apply c_mktsegment=BUILDING before joining orders to minimize join input from 1.5M to 300K; apply orders.o_orderdate<1995-03-15 (8% selectivity) at scan time",
+        "Morsel-driven lineitem scan (60M rows): partition into ~4K morsels for 64 cores; each thread scans lineitem morsels, probes hash table (result of customer⋈orders), outputs matching rows to aggregation stage",
+        "Per-morsel partial aggregation for 5M-group output: use compact hash table with robin-hood probing; merge partitions via thread-local buffers to avoid contention",
+        "Hash join algorithm: two-phase (build phase on smaller side with synchronization point, probe phase fully parallel)"
+      ],
+      "strategy_notes": "Q3 is the hardest query: 3-way join with 5M aggregation groups. Critical insight from analysis: filter customer first (20% selectivity) before joining to orders; this reduces the build-side table from 1.5M to 300K rows. Use hash join (PK-FK relationships indicated in analysis) with small build side (300K customer rows after filter). Morsel-parallelism on lineitem probe (60M rows across 64 cores = ~1M rows per morsel). Two aggregation levels: (1) local hash tables per morsel thread, (2) global merge across thread-local partial results. Avoid full synchronization; use atomic CAS or thread-local buffers. Compile the three-way join into single query-specific code path."
+    },
+    "Q6": {
+      "action": "optimize",
+      "focus_areas": [
+        "Vectorized multi-predicate filtering using AVX2: evaluate all 4 predicates (l_shipdate range, l_discount BETWEEN, l_quantity <) in a single branch-free loop; combined selectivity ~5% (60M→3M rows)",
+        "Morsel-driven parallelism: partition 60M lineitem rows into ~4K morsels; each thread: (1) vectorized filter evaluation on 10-15K rows, (2) accumulate partial sum per morsel in thread-local variable (no hash table needed, single global aggregate)",
+        "SIMD for discount BETWEEN check: use AVX2 packed compare (0.05≤discount≤0.07) + pack/compress to skip non-matching rows entirely",
+        "Final merge: each of 64 threads produces one partial sum, final reduction sums 64 values (negligible overhead, 1-2% of total time)",
+        "Column pruning: load only l_shipdate, l_discount, l_quantity, l_extendedprice (4 columns) from columnar storage"
+      ],
+      "strategy_notes": "Q6 is a high-throughput aggregation with complex filtering. The key insight is that filtering selectivity is low (~5%) but the input is large (60M rows). Use vectorized filtering to branch-miss minimally and process data in SIMD lanes. Since there's only 1 aggregation group (global sum), synchronization is trivial: each thread accumulates a thread-local sum without hash table overhead, then final merge uses atomic add or simple lock. Compile tight filter loop with SIMD intrinsics; unroll inner loop. Dictionary encoding on l_shipdate (delta) and other columns speeds up deserialization. Expected bottleneck: memory bandwidth for 60M row scan; SIMD filtering minimizes CPU overhead, letting I/O be bottleneck (good outcome)."
+    }
+  }
+}

@@ -1,0 +1,44 @@
+Excellent! The timing is consistent around 626-670ms (avg ~651ms). This is a significant improvement. Let me create a summary of the optimizations applied:
+
+## Summary
+
+### Iteration 1 Optimization Results for Q3
+
+**Performance Improvement:**
+- **Iter 0**: 930ms (INCORRECT results - ~50% revenue underestimation)
+- **Iter 1**: ~650ms average (CORRECT results)
+- **Speedup**: 30% faster than iter 0
+- **Gap to DuckDB**: Still ~8.4x slower than DuckDB (78ms), but now with correct results
+
+**Critical Fix Applied:**
+1. ✅ **Aggregation merge bug fixed** - Added explicit global aggregation merge step after parallel processing. This was the CRITICAL correctness issue causing revenues to be ~50% of expected values.
+
+**Performance Optimizations Applied:**
+
+2. ✅ **Hash table pre-sizing** - Pre-reserved hash tables to avoid rehashing:
+   - Customer hash: 350K entries
+   - Orders hash (per-thread): 200K entries  
+   - Orders hash (global): 3M entries
+   - Aggregation maps (per-thread): 150K entries
+   - Global aggregation: 500K entries
+
+3. ✅ **Improved hash function** - Replaced XOR-based hash with multiplicative hash with better mixing properties for aggregation keys
+
+4. ✅ **SIMD-accelerated filtering** - AVX2 vectorized date comparison in lineitem scan (processes 8 dates at once)
+
+5. ✅ **Zone map infrastructure** - Added zone map loading capability (though not actively used in final version due to complexity vs benefit tradeoff for morsel-driven execution)
+
+**Optimizations NOT Applied (for future iterations):**
+- Zone map pruning at morsel boundaries (deferred due to complexity)
+- Join order reversal (would require significant restructuring)
+- Compact hash table libraries (external dependency)
+
+**Validation:**
+✅ All 10 result rows match expected output exactly
+✅ Revenue values correct: 440K, 439K, 432K, 428K, 426K, 425K, 425K, 423K, 421K, 415K
+
+**Next Steps:**
+With correctness now established, future iterations could focus on:
+- More aggressive SIMD usage in join probing
+- Better cache-aware hash table implementations
+- Join order optimization to reduce hash table sizes

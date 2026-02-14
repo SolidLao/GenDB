@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Parallelism: thread-based morsel-driven scan of lineitem (59.9M rows across 64 cores, target 1M rows/thread)",
+    "SIMD vectorization: AVX512 for discount/tax arithmetic (l_extendedprice * (1 - l_discount) * (1 + l_tax))",
+    "Hash aggregation: Low-cardinality GROUP BY (only 6 distinct groups from l_returnflag × l_linestatus), pre-size hash table",
+    "Zone map skipping: Use l_shipdate zone map to skip blocks where l_shipdate > 1998-09-01",
+    "Dictionary decoding: Handle dictionary-encoded l_returnflag and l_linestatus during aggregation",
+    "Sort elimination: Final ORDER BY (6 rows) can be eliminated or replaced with simple in-memory sort"
+  ],
+  "strategy_notes": "Q1 is a classic analytical aggregation: massive scan with selective predicate (98% selectivity → 58.9M rows) and tiny output (6 rows). Parallelize the scan first using 64-thread morsel-driven execution. Use SIMD to vectorize the complex arithmetic (3 multiplications + 2 subtractions per row). Apply zone map skipping eagerly to filter blocks before processing. Build a compact hash table for aggregation with only 6 buckets. Fuse scan → filter → project → aggregation into single pipeline to minimize memory traffic. Final sort is trivial (6 rows in-memory).",
+  "reasoning": "TPC-H SF10 workload dominated by lineitem fact table (59.9M rows) with extreme DuckDB performance advantage (100-150x over PostgreSQL). Key opportunity: massive parallelism across 64 cores + AVX512 SIMD + predicate pushdown using zone maps. Q1 and Q6 are scan-heavy and embarrassingly parallel. Q3 requires smart join ordering + Bloom semi-joins for customer-side filtering. All queries benefit from tight operator fusion and dictionary-encoded column handling."
+}

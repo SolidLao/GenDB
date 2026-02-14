@@ -1,0 +1,30 @@
+Perfect! I've created the batch decision file with strategic guidance for all three queries.
+
+## Summary
+
+**Batch Decision Created:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/batch_decision_iter0.json`
+
+### Strategic Guidance for Each Query:
+
+**Q1 (Pricing Summary):** 
+- **Primary focus:** 64-thread morsel-driven scan parallelism on 59.9M lineitem rows
+- **SIMD:** Vectorize complex arithmetic (discount/tax calculations)
+- **Aggregation:** Hash aggregation on ultra-low cardinality (6 groups)
+- **Zone maps:** Skip blocks where shipdate is outside range
+- **Sort elimination:** 6-row final sort is trivial
+
+**Q3 (Shipping Priority - Bottleneck):**
+- **Join ordering:** Customer (filtered 300K) → Orders (3M after fan-out) → Lineitem (12M after filters)
+- **Bloom semi-join:** Build on customer, use to filter orders
+- **Parallel execution:** Hash join each stage with data partitioning across threads
+- **Partial aggregation:** Pre-aggregate within threads (500K groups is high-cardinality)
+- **Top-K:** Radix/heap-based for LIMIT 10, NOT full sort
+
+**Q6 (Forecasting):**
+- **SIMD filtering:** Branch-free vectorized predicates for highly selective ranges (~0.13% final selectivity)
+- **Zone map skipping:** Skip blocks on 3 columns simultaneously
+- **Predicate ordering:** Most selective (l_discount) first
+- **Operator fusion:** Single tight loop per morsel
+- **Scalar output:** Single SUM aggregate
+
+**Key Insight:** DuckDB's 100-150x advantage over PostgreSQL indicates GenDB must emphasize parallelism, SIMD, and zone map effectiveness. The 64 cores + AVX512 hardware is the key differentiator.

@@ -1,0 +1,46 @@
+Perfect! Now let me print a brief summary for the user:
+
+---
+
+## Q1 Iteration 2 Analysis Summary
+
+**STATUS: CRITICAL FAILURE** ❌
+
+### Issue
+Iteration 2 introduces a **semantic bug** that causes incorrect results:
+- **Expected**: 4 groups, 59,142,609 filtered rows
+- **Actual**: 0 groups, 0 filtered rows
+- **Root Cause**: SIMD comparison logic inverted at line 304-305
+
+### The Bug
+The AVX2 vectorized filter uses:
+```cpp
+__m256i cmp = _mm256_cmpgt_epi32(cutoff_vec, shipdate_vec);  // cutoff > shipdate
+```
+
+This checks if `cutoff > shipdate`, but the SQL predicate is `l_shipdate <= cutoff`. The comparison is semantically reversed, excluding all qualifying rows.
+
+### Critical Fix Required
+Invert the comparison to correctly implement `shipdate <= cutoff`:
+```cpp
+__m256i cmp_gt = _mm256_cmpgt_epi32(shipdate_vec, cutoff_vec); // shipdate > cutoff
+int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp_gt));
+mask = ~mask & 0xFF;  // Invert to get shipdate <= cutoff
+```
+
+### Post-Fix Optimization Path
+After fixing the bug, the SIMD implementation should be enhanced:
+1. **AVX-512 vectorization** (16-wide instead of 8-wide) - 40-50% speedup potential
+2. **Vectorized aggregation arithmetic** using FMA instructions
+3. **Direct array indexing** (replace hash map for 4-group aggregation)
+4. **Optimized zone map handling** for SCAN_ALL blocks
+
+**Expected performance** after fixes: 55-65ms (vs. DuckDB's 86.4ms), surpassing baseline.
+
+### Comparison to DuckDB
+- **DuckDB best**: 86.4ms
+- **Iteration 1 (working)**: 92.9ms (7.5% slower)
+- **Iteration 2 (broken)**: 4.3ms but returns 0 rows ❌
+- **Target after fix**: 55-65ms (25-35% faster than DuckDB)
+
+Evaluation written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/queries/Q1/iter_2/evaluation.json`

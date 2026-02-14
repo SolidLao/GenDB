@@ -1,0 +1,234 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d: 1 MiB (32 instances), L2: 32 MiB (32 instances), L3: 44 MiB (2 instances)",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd_support": "avx2, avx512f, avx512dq, avx512cd, avx512bw, avx512vl"
+  },
+  "tables": {
+    "lineitem": {
+      "exact_row_count": 59986052,
+      "role": "fact",
+      "access_frequency": 3,
+      "estimated_cardinality": "59M",
+      "hot_columns": ["l_shipdate", "l_returnflag", "l_linestatus", "l_extendedprice", "l_discount", "l_quantity", "l_tax"],
+      "access_patterns": ["full_scan", "filtered_scan"],
+      "column_stats": {
+        "l_shipdate": { "min": "1992-01-01", "max": "1998-12-31", "approx_distinct": 2556 },
+        "l_returnflag": { "min": "A", "max": "R", "approx_distinct": 3 },
+        "l_linestatus": { "min": "F", "max": "O", "approx_distinct": 2 },
+        "l_discount": { "min": "0.00", "max": "0.10", "approx_distinct": 11 },
+        "l_quantity": { "min": "1", "max": "50", "approx_distinct": 50 }
+      }
+    },
+    "orders": {
+      "exact_row_count": 15000000,
+      "role": "fact",
+      "access_frequency": 2,
+      "estimated_cardinality": "15M",
+      "hot_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+      "access_patterns": ["filtered_scan", "index_lookup"],
+      "column_stats": {
+        "o_orderdate": { "min": "1992-01-02", "max": "1998-08-02", "approx_distinct": 2406 },
+        "o_custkey": { "min": "1", "max": "1500000", "approx_distinct": 1500000 }
+      }
+    },
+    "customer": {
+      "exact_row_count": 1500000,
+      "role": "dimension",
+      "access_frequency": 2,
+      "estimated_cardinality": "1.5M",
+      "hot_columns": ["c_custkey", "c_mktsegment", "c_nationkey"],
+      "access_patterns": ["filtered_scan", "index_lookup"],
+      "column_stats": {
+        "c_mktsegment": { "min": "AUTOMOBILE", "max": "MACHINERY", "approx_distinct": 5 },
+        "c_custkey": { "min": "1", "max": "1500000", "approx_distinct": 1500000 }
+      }
+    },
+    "part": {
+      "exact_row_count": 2000000,
+      "role": "dimension",
+      "access_frequency": 0,
+      "estimated_cardinality": "2M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "partsupp": {
+      "exact_row_count": 8000000,
+      "role": "bridge",
+      "access_frequency": 0,
+      "estimated_cardinality": "8M",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "supplier": {
+      "exact_row_count": 100000,
+      "role": "dimension",
+      "access_frequency": 0,
+      "estimated_cardinality": "100K",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "nation": {
+      "exact_row_count": 25,
+      "role": "dimension",
+      "access_frequency": 0,
+      "estimated_cardinality": "25",
+      "hot_columns": [],
+      "access_patterns": []
+    },
+    "region": {
+      "exact_row_count": 5,
+      "role": "dimension",
+      "access_frequency": 0,
+      "estimated_cardinality": "5",
+      "hot_columns": [],
+      "access_patterns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "one-to-many",
+      "cardinality_estimate": "15M"
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "one-to-many",
+      "cardinality_estimate": "60M"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "predicate": "l_shipdate <= '1998-09-02'",
+      "estimated_selectivity": 0.94,
+      "query": "Q1"
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "estimated_selectivity": 0.20,
+      "query": "Q3"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "predicate": "o_orderdate < '1995-03-15'",
+      "estimated_selectivity": 0.08,
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "predicate": "l_shipdate > '1995-03-15'",
+      "estimated_selectivity": 0.82,
+      "query": "Q3"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">=",
+      "predicate": "l_shipdate >= '1994-01-01'",
+      "estimated_selectivity": 0.86,
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<",
+      "predicate": "l_shipdate < '1995-01-01'",
+      "estimated_selectivity": 0.14,
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "predicate": "l_discount BETWEEN 0.05 AND 0.07",
+      "estimated_selectivity": 0.34,
+      "query": "Q6"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "predicate": "l_quantity < 24",
+      "estimated_selectivity": 1.0,
+      "query": "Q6"
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM(l_quantity)", "SUM(l_extendedprice)", "SUM(l_extendedprice * (1 - l_discount))", "SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax))", "AVG(l_quantity)", "AVG(l_extendedprice)", "AVG(l_discount)", "COUNT(*)"],
+      "query": "Q1",
+      "estimated_groups": "6"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM(l_extendedprice * (1 - l_discount))"],
+      "query": "Q3",
+      "estimated_groups": "5M"
+    },
+    {
+      "group_by": [],
+      "functions": ["SUM(l_extendedprice * l_discount)"],
+      "query": "Q6",
+      "estimated_groups": "1"
+    }
+  ],
+  "ordering": [
+    {
+      "columns": ["l_returnflag ASC", "l_linestatus ASC"],
+      "limit": null,
+      "query": "Q1"
+    },
+    {
+      "columns": ["revenue DESC", "o_orderdate ASC"],
+      "limit": 10,
+      "query": "Q3"
+    }
+  ],
+  "filter_selectivities": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= '1998-09-02'",
+      "estimated_selectivity": 0.94
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01'",
+      "estimated_selectivity": 0.12
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount BETWEEN 0.05 AND 0.07",
+      "estimated_selectivity": 0.34
+    },
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "estimated_selectivity": 0.20
+    }
+  ],
+  "optimization_hints": [
+    "Q1: Fully parallelize lineitem scan with morsel-driven execution (64 cores): 59M rows, L3 cache = 44MB, divide into ~4000-5000 morsels of 10-15K rows. Use vectorized filtering on l_shipdate, then partial aggregation per morsel with compact hash tables (6 groups). Final merge is negligible.",
+    "Q3: Three-way join (customer→orders→lineitem): filter customer on c_mktsegment=BUILDING first (20% selectivity, reduces from 1.5M to 300K). Push filter to orders.o_orderdate < 1995-03-15 (8% selectivity, reduces from 15M to 1.2M). Use hash join with partial aggregation. Parallelism on lineitem scan (60M rows) is key bottleneck.",
+    "Q6: Single-table scan with complex predicates (4 filters, 2 conjunctions): vectorize filter evaluation using SIMD (discount BETWEEN via AVX2), estimate output ~5% of 60M = 3M rows. Parallelize with per-morsel aggregation, minimal synchronization (1 global counter)."
+  ],
+  "summary": "TPC-H SF10 is a parallel analytical workload dominated by full scans of the 60M-row lineitem table. Q1 and Q6 are embarrassingly parallel single-table scans with low-cardinality aggregations (6 and 1 group). Q3 is a three-way join filtered on customer.c_mktsegment=BUILDING (20%) and orders.o_orderdate (8%), with parallelism on the final lineitem scan yielding 5M aggregation groups—the critical optimization lever is early predicate pushdown (filter customer before joining orders) and morsel-driven parallel execution (64 cores available). With 376GB memory, all intermediate joins fit in RAM; disk I/O (HDD, not SSD) is secondary concern for this prototype. Key techniques: vectorized filtering (SIMD), parallel hash aggregation with per-morsel pre-aggregation, hash joins on FK relationships, and thread-safe morsel queues."
+}

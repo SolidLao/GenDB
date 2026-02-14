@@ -29,6 +29,7 @@ Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources 
 
 | File | Technique | When to Use |
 |------|-----------|-------------|
+| `storage/encoding-handling.md` | **Storage Encoding Handling** | **CRITICAL: Read FIRST if any column uses dictionary, delta, RLE, or other encoding. Incorrect decoding causes wrong results.** |
 | `storage/columnar-vs-row.md` | Columnar vs Row Storage | Analytical queries scanning few columns over many rows. Default for OLAP. |
 | `storage/compression.md` | Lightweight Compression | Dictionary encoding for strings, delta/RLE for sorted data, bit packing for small integers. |
 | `storage/memory-layout.md` | Memory Layout Optimization | Hot loops, scans, joins — align to cache lines (64B), use SOA pattern. |
@@ -52,6 +53,9 @@ Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources 
 | `query-execution/operator-fusion.md` | Operator Fusion | Fuse scan+filter+project into single loop. Reduces materialization. |
 | `query-execution/compiled-queries.md` | Compiled Queries | Template specialization for query-specific tight loops. Eliminates interpretation overhead. |
 | `query-execution/pipeline-breakers.md` | Pipeline Breakers | Understanding materialization points (hash joins, sorts). Memory budget planning. |
+| `query-execution/scan-filter-optimization.md` | Scan & Filter Optimization | Predicate ordering, branch-free filtering, vectorized filtering, predicate pushdown, string optimization. |
+| `query-execution/sort-topk.md` | Sort & Top-K Optimization | Partial sort for Top-K, radix sort, sort elimination, parallel merge sort. |
+| `query-execution/subquery-optimization.md` | Subquery Optimization | Correlated subquery decorrelation, EXISTS→semi-join, IN→hash semi-join, window functions. |
 
 ## Joins
 

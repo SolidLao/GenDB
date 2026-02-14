@@ -1,0 +1,37 @@
+Perfect! Let me print a brief summary for the user:
+
+---
+
+## Q3 Iteration 1 Analysis Complete
+
+**Status: FAIL (Correctness Issue)**
+
+### Critical Bug Found
+- **Validation**: 3 out of 10 rows differ from expected results
+- **Root cause**: Zone map pruning logic is inverted (line 187)
+  - Current: Skips blocks where `max_date < cutoff` 
+  - Problem: Filter is `o_orderdate < cutoff`, so we WANT those blocks!
+  - Fix: Change to skip blocks where `min_date >= cutoff`
+
+### Performance Analysis (after correctness fix)
+- **Current**: 197.7ms
+- **Target**: 77.8-112.8ms (DuckDB range)
+- **Gap**: 2.5x slower
+
+### Bottleneck Breakdown
+1. **orders_filter_join**: 100.3ms (50.7%) - dominant bottleneck
+2. **lineitem_scan_aggregation**: 63.8ms (32.3%)
+3. **customer_filter**: 22.3ms (11.3%)
+4. **aggregation_merge**: 10.6ms (5.4%)
+
+### Top Optimization Recommendations (after fixing correctness)
+1. **Concurrent hash table for join** (~10-15ms savings) - eliminate merge overhead
+2. **SIMD hash probing + date filtering** (~15-20ms) - AVX512 acceleration for lineitem join
+3. **Zone map for lineitem.l_shipdate** (~20-25ms) - skip ~35% of blocks (data is sorted)
+4. **Bloom filter for customer_ht** (~8-12ms) - reduce negative probe overhead
+5. **Parallel aggregation merge** (~7-9ms) - tree-based merge instead of serial
+6. **Remove MADV_SEQUENTIAL on HDD** (~5-10ms) - better madvise hints for mixed access patterns
+
+**Combined potential**: ~65-90ms improvement → target 90-110ms (within DuckDB range)
+
+Evaluation written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/queries/Q3/iter_1/evaluation.json`

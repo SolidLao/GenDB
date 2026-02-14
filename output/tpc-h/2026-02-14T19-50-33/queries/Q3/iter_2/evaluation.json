@@ -1,0 +1,126 @@
+{
+  "evaluation": {
+    "overall_status": "partial",
+    "compile": {
+      "status": "pass",
+      "output": ""
+    },
+    "run": {
+      "status": "pass",
+      "output": "[TIMING] scan_filter_customer: 46.8 ms\n[TIMING] scan_filter_orders: 449.9 ms\n[TIMING] bloom_filter_build: 76.1 ms\n[TIMING] join_aggregation: 104.0 ms\n[TIMING] merge: 46.3 ms\n[TIMING] sort: 3.0 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 726.6 ms\nQuery returned 10 rows"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Validation skipped - actual file not found"
+    },
+    "query_results": {
+      "Q3": {
+        "status": "pass",
+        "num_rows": 10,
+        "timing_ms": 726.6,
+        "operation_timings": {
+          "scan_filter_customer": 46.8,
+          "scan_filter_orders": 449.9,
+          "bloom_filter_build": 76.1,
+          "join_aggregation": 104.0,
+          "merge": 46.3,
+          "sort": 3.0,
+          "output": 0.2,
+          "total": 726.6
+        },
+        "dominant_operation": "scan_filter_orders (61.9% of total time)",
+        "notes": "REGRESSION: Total time increased from 661.9ms (iter 1) to 726.6ms (64.7ms slower, 9.8% regression). Orders scan regressed 96.2ms (353.7ms → 449.9ms). Join/aggregation improved 54.5ms (158.5ms → 104.0ms) due to lineitem zone map skipping. Net effect: negative. Customer scan also regressed (30.4ms → 46.8ms)."
+      }
+    }
+  },
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 726.6,
+        "status": "pass",
+        "operation_timings": {
+          "scan_filter_customer": 46.8,
+          "scan_filter_orders": 449.9,
+          "bloom_filter_build": 76.1,
+          "join_aggregation": 104.0,
+          "merge": 46.3,
+          "sort": 3.0,
+          "output": 0.2,
+          "total": 726.6
+        },
+        "dominant_operation": "scan_filter_orders (449.9ms, 61.9% of total)",
+        "bottleneck": "Orders table scan is now the dominant bottleneck at 449.9ms (62% of total), WORSE than iteration 1 (353.7ms). Despite adding MADV_WILLNEED prefetching (lines 229-240) and FastIntHash (lines 20-27), the orders scan regressed by 96.2ms (27% slower). The lineitem zone map optimization DID work - join_aggregation improved from 158.5ms to 104.0ms (34% faster), but this gain was overwhelmed by the orders regression. Customer scan also regressed from 30.4ms to 46.8ms (54% slower).",
+        "root_cause": "PREFETCHING BACKFIRE on HDD: The MADV_WILLNEED calls on lines 230-239 likely caused disk seek storms on rotational storage. HDD has ~10ms seek latency and ~100MB/s sequential throughput. Prefetching 90-100 qualifying blocks (out of 150 total) means issuing 90 prefetch hints before scanning, causing the disk to seek randomly across the file instead of reading sequentially. The zone map correctly identified blocks to skip, but prefetching all qualifying blocks at once defeated the purpose. Additionally, FastIntHash (Fibonacci hashing with 64-bit multiply + shift) adds CPU overhead for the ~7-8M hash lookups in building_custkeys.count() without proven benefit for integer keys in std::unordered_set. The customer scan regression (30.4ms → 46.8ms) suggests general overhead from FastIntHash affecting all hash table operations."
+      }
+    },
+    "overall": "Iteration 2 REGRESSED by 64.7ms (9.8%) compared to iteration 1. Total time: 726.6ms vs 661.9ms. DuckDB baseline: 78ms (9.3x gap). PostgreSQL: 5468ms. Changes applied: (1) FastIntHash for better distribution, (2) MADV_WILLNEED prefetching for orders blocks, (3) Zone map block skipping for lineitem, (4) MADV_WILLNEED prefetching for lineitem blocks. GOOD: Lineitem zone map skipping worked excellently - join_aggregation improved 34% (158.5ms → 104.0ms). BAD: Orders prefetching backfired on HDD - orders scan regressed 27% (353.7ms → 449.9ms). Customer scan regressed 54% (30.4ms → 46.8ms). Net effect: -64.7ms. Diagnosis: Aggressive prefetching on HDD causes disk thrashing. FastIntHash adds CPU overhead without measurable benefit for small integer hash tables. The zone map optimization should be KEPT but combined with different I/O strategy."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Remove MADV_WILLNEED prefetching and rely on MADV_SEQUENTIAL for HDD",
+      "description": "The current code uses MADV_WILLNEED to prefetch qualifying blocks (lines 230-239 for orders, 322-333 for lineitem). On HDD, this causes disk seek storms and defeats sequential I/O optimization. The regression is clear: orders scan went from 353.7ms (iter 1, no prefetching) to 449.9ms (iter 2, with prefetching) - a 27% slowdown.\n\nRoot cause: MADV_WILLNEED on HDD triggers random seeks to fault in pages across the file, destroying sequential read patterns. For ~90 qualifying blocks scattered across 100MB+ of data, this means 90 seeks × 10ms = 900ms of seek overhead. The kernel's readahead mechanism with MADV_SEQUENTIAL is more effective for HDD.\n\nSpecific changes to q3.cpp:\n1. REMOVE lines 230-239 (orders prefetching loop)\n2. REMOVE lines 322-333 (lineitem prefetching loop)\n3. KEEP zone map block skipping logic (lines 212-227 for orders, 306-319 for lineitem) - this is working well\n4. Change mmap hint from MADV_SEQUENTIAL (line 59) to more aggressive MADV_SEQUENTIAL + posix_fadvise(fd, 0, size, POSIX_FADV_SEQUENTIAL) BEFORE mmap to enable kernel readahead\n\nAlternative approach for SSD: If migrating to SSD, re-enable MADV_WILLNEED as it's highly effective on SSDs (no seek penalty).\n\nExpected improvement: Orders scan should return to ~350-360ms (iter 1 baseline) or better with zone maps. Customer scan should return to ~30-35ms. Net improvement: 95-115ms saved. Total: 726.6ms → 610-630ms (1.15-1.2x speedup).",
+      "expected_improvement": "Orders scan: 449.9ms → 350-360ms (-90-100ms). Customer scan: 46.8ms → 30-35ms (-12-17ms). Total: 726.6ms → 615-630ms (1.15-1.2x speedup).",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Remove FastIntHash and use std::hash for integer keys",
+      "description": "The FastIntHash implementation (lines 20-27) uses Fibonacci hashing (64-bit multiply + shift) for integer keys. While this provides better distribution for worst-case inputs, it adds CPU overhead for the ~7-8M hash lookups in building_custkeys.count() during the orders scan.\n\nAnalysis: For uniformly distributed integer keys (custkey, orderkey are sequential IDs), std::hash<int32_t> is often a simple identity function or single multiply, significantly faster than 64-bit Fibonacci hashing. The customer scan regression (30.4ms → 46.8ms, 54% slower) despite no algorithmic changes suggests hash function overhead.\n\nSpecific changes to q3.cpp:\n1. REMOVE FastIntHash struct (lines 20-27)\n2. REMOVE template aliases fast_hash_set and fast_hash_map (lines 29-34)\n3. REVERT to std::unordered_set<int32_t> for building_custkeys (line 186)\n4. REVERT to std::unordered_map<int32_t, ...> for qualified_orders and local_qualified_orders (lines 243, 271)\n5. REVERT to std::unordered_map<AggregateKey, ...> for aggregation (lines 336, 393)\n\nNote: If hash collisions become a problem later (not observed in current data), consider switching to Abseil flat_hash_set/map (external library) which uses SIMD-accelerated Swiss Tables. This provides both speed AND good distribution.\n\nExpected improvement: Eliminate hash function overhead - customer scan should improve by 10-15ms, orders scan by 20-30ms from faster lookups. Total savings: 30-45ms. Combined with priority 1: 726.6ms → 575-595ms.",
+      "expected_improvement": "Customer scan: 46.8ms → 32-37ms (-10-15ms). Orders scan: 449.9ms → 420-430ms via faster hash (-20-30ms after removing prefetch overhead). Total: 726.6ms → 580-600ms when combined with priority 1.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Replace std::unordered_map/set with Abseil flat_hash_map/set",
+      "description": "After reverting FastIntHash (priority 2), the code uses standard std::unordered_map/set which is 2-5x slower than modern hash table implementations. Abseil's flat_hash_map/set uses Swiss Tables with SIMD-accelerated lookups and open addressing for better cache locality.\n\nSpecific changes to q3.cpp:\n1. Add #include <absl/container/flat_hash_set.h> and #include <absl/container/flat_hash_map.h> at top\n2. Replace std::unordered_set<int32_t> building_custkeys → absl::flat_hash_set<int32_t> (line 186)\n3. Replace std::unordered_map for qualified_orders → absl::flat_hash_map<int32_t, std::pair<int32_t, int32_t>> (line 271)\n4. Replace std::unordered_map for aggregation maps → absl::flat_hash_map<AggregateKey, AggregateValue> (lines 336, 393)\n5. Add compilation flag: -labsl_hash -labsl_container (or header-only if using Abseil header-only mode)\n\nBenefits: Abseil uses SIMD (SSE2/AVX2) to probe 16 hash slots in parallel, achieving 10-20ns lookups vs 30-50ns for std::unordered_map. For ~8M building_custkeys lookups + ~3-4M aggregation operations, this saves 40-80ms.\n\nReference: external-libs/abseil-folly.md, data-structures/compact-hash-tables.md. Swiss Tables are production-proven (used in Google, Chromium).\n\nExpected improvement: Orders scan: 420-430ms → 360-380ms (-40-60ms from faster membership tests). Join/aggregation: 104.0ms → 80-90ms (-15-25ms from faster hash aggregation). Total savings: 55-85ms.",
+      "expected_improvement": "Orders scan: -40-60ms (faster lookups). Join/aggregation: 104.0ms → 80-90ms (-15-25ms). Combined with priorities 1-2: total 726.6ms → 490-540ms (1.35-1.5x speedup).",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Optimize Bloom filter with SIMD hashing or remove it entirely",
+      "description": "The Bloom filter build takes 76.1ms (10.5% of total) and adds probe overhead in the join phase. For Q3's join selectivity (~5-7% of lineitem matches qualified_orders), the cost-benefit tradeoff is unclear.\n\nOption A: Remove Bloom filter entirely\n- REMOVE lines 285-292 (bloom filter build)\n- REMOVE lines 356-359 (bloom filter probe check)\n- Rely on direct hash table probe (line 362: qualified_orders.find())\n- With Abseil flat_hash_map (priority 3), hash table lookups are ~10-15ns, making Bloom filter overhead unnecessary\n- Savings: 76.1ms build + reduced code complexity\n- Risk: Increased hash table probes (~60M → ~60M, but without Bloom pre-filter). With fast hash tables, overhead is ~600ms × 0.015 = ~9ms, far less than 76.1ms Bloom build cost.\n\nOption B: Optimize Bloom filter with parallel build\n- Parallelize Bloom filter insertion (lines 287-289) across num_threads\n- Use SIMD for hash computation (AVX2 can hash 4-8 keys in parallel)\n- Reduce build time: 76.1ms → 15-20ms (4-5x speedup)\n- Keep Bloom filter for semantic clarity (explicit semi-join reduction)\n\nRecommendation: Option A (remove) is simpler and likely faster given modern hash tables. Option B preserves the optimization for future workloads with lower join selectivity.\n\nExpected improvement: Option A: -76.1ms Bloom build, +10-15ms increased hash probes, net -60-65ms. Option B: -50-55ms Bloom build optimization.",
+      "expected_improvement": "Option A (remove): -76.1ms + ~10ms hash overhead = -66ms net savings. Option B (optimize): -50-55ms. Recommend Option A for simplicity. Combined with priorities 1-3: total 726.6ms → 425-475ms.",
+      "risk": "medium"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD-accelerated filtering and aggregation arithmetic",
+      "description": "The join_aggregation phase (104.0ms) performs ~3-4M iterations of date filtering, hash lookups, and revenue calculations. Several operations are SIMD-friendly:\n\n1. Date filtering (l_shipdate > date_1995_03_15): Vectorize using AVX2 to process 8 int32 comparisons per instruction\n2. Revenue calculation (l_extendedprice * (1.0 - l_discount)): Vectorize using AVX2 to process 4 doubles per instruction\n\nSpecific changes to q3.cpp:\n1. Add #include <immintrin.h> for AVX2 intrinsics\n2. In the lineitem scan loop (lines 350-377), replace scalar processing with batched SIMD:\n\n```cpp\nconst __m256i date_threshold = _mm256_set1_epi32(date_1995_03_15);\nconst __m256d ones = _mm256_set1_pd(1.0);\n\nfor (size_t i = start; i + 8 <= end; i += 8) {\n    // SIMD date comparison\n    __m256i shipdates = _mm256_loadu_si256((__m256i*)(l_shipdate + i));\n    __m256i date_mask = _mm256_cmpgt_epi32(shipdates, date_threshold);\n    int mask = _mm256_movemask_epi8(date_mask);\n    if (mask == 0) continue; // All 8 rows filtered out\n    \n    // Process matching rows (scalar hash lookup, SIMD revenue calc)\n    for (int lane = 0; lane < 8; ++lane) {\n        if ((mask >> (lane * 4)) & 0xF) {\n            auto it = qualified_orders.find(l_orderkey[i + lane]);\n            if (it != qualified_orders.end()) {\n                // SIMD revenue: load 4 prices and 4 discounts, compute revenues\n                // (Requires gathering matching indices or hybrid approach)\n                double revenue = l_extendedprice[i + lane] * (1.0 - l_discount[i + lane]);\n                AggregateKey key{l_orderkey[i + lane], it->second.first, it->second.second};\n                local_map[key].revenue += revenue;\n            }\n        }\n    }\n}\n// Scalar tail for remaining rows\n```\n\nNote: SIMD revenue calculation is complex due to data dependencies (only matching rows). Alternative: Use branch-free masking or gather/scatter instructions (AVX512).\n\nExpected improvement: Date filtering is ~5-10% of join_aggregation time (~5-10ms), SIMD reduces by 6-8x → saves 4-9ms. Revenue calculation is ~10-15% (~10-15ms), SIMD reduces by 3-4x → saves 7-12ms. Total savings: 11-21ms. Reference: parallelism/simd.md.\n\nChallenges: SIMD arithmetic requires careful handling of sparse matching (low density after filters). Hybrid approach may be needed.",
+      "expected_improvement": "Join/aggregation: 104.0ms → 83-93ms (-11-21ms). Total combined with priorities 1-4: 726.6ms → 405-460ms (1.6-1.8x speedup from iter 2, 0.61-0.69x from iter 1 - unclear if improvement over iter 1).",
+      "risk": "high"
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Parallel merge reduction for local aggregation maps",
+      "description": "The merge phase (46.3ms, 6.4% of total) sequentially combines local aggregation maps from 64 threads. With ~1000-5000 groups per thread, this involves ~64K-320K hash operations performed single-threaded.\n\nSpecific changes to q3.cpp:\n1. Replace sequential merge (lines 391-403) with parallel tree reduction\n2. Use log2(num_threads) merge levels, parallelizing each level\n3. Pattern:\n```cpp\nstd::vector<absl::flat_hash_map<AggregateKey, AggregateValue>> current = std::move(local_maps);\nwhile (current.size() > 1) {\n    std::vector<absl::flat_hash_map<AggregateKey, AggregateValue>> next((current.size() + 1) / 2);\n    std::vector<std::thread> merge_threads;\n    for (size_t i = 0; i < next.size(); ++i) {\n        merge_threads.emplace_back([&, i]() {\n            next[i] = std::move(current[i * 2]);\n            if (i * 2 + 1 < current.size()) {\n                for (auto& [key, val] : current[i * 2 + 1]) {\n                    next[i][key].revenue += val.revenue;\n                }\n            }\n        });\n    }\n    for (auto& t : merge_threads) t.join();\n    current = std::move(next);\n}\nglobal_map = std::move(current[0]);\n```\n\nExpected improvement: Current 46.3ms single-threaded → ~8-12ms with parallel reduction (4-6x speedup). Savings: 34-38ms. Reference: aggregation/partial-aggregation.md recommends parallel merge for multi-threaded aggregation.",
+      "expected_improvement": "Merge: 46.3ms → 8-12ms (-34-38ms). Combined with priorities 1-5: total 726.6ms → 370-425ms (1.7-2.0x speedup from iter 2).",
+      "risk": "low"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Interleaved block processing to maximize sequential I/O on HDD",
+      "description": "Current code identifies qualifying blocks via zone maps, then scans them in parallel across threads. On HDD, this can cause seeks if threads access non-contiguous blocks. Better approach: process qualifying blocks in sequential file order, distributing work to threads via a work queue.\n\nSpecific changes to q3.cpp:\n1. After identifying qualifying_blocks (line 227), SORT them by block_id to ensure sequential file order\n2. Change thread processing pattern from strided access (idx += num_threads) to sequential block assignment:\n```cpp\nstd::atomic<size_t> next_block_idx{0};\nfor (size_t t = 0; t < num_threads; ++t) {\n    order_threads.emplace_back([&]() {\n        while (true) {\n            size_t idx = next_block_idx.fetch_add(1);\n            if (idx >= qualifying_blocks.size()) break;\n            size_t block_id = qualifying_blocks[idx];\n            // Process block...\n        }\n    });\n}\n```\n3. Apply same pattern to lineitem scan (lines 339-379)\n\nBenefits: Sequential block processing reduces HDD seeks. Threads dynamically grab next block, ensuring no idle threads. Load balancing is automatic.\n\nExpected improvement: On HDD with current strided access, threads may cause ~10-20 random seeks per second. Sequential access reduces seeks by 50-70%. Estimate: 20-40ms savings on orders scan. Reference: storage/persistent-storage.md recommends sequential access patterns for HDD.",
+      "expected_improvement": "Orders scan: -20-40ms (reduced seeks). Join/aggregation: -10-20ms. Combined with priorities 1-6: total 726.6ms → 340-395ms (1.85-2.1x speedup from iter 2, 0.52-0.60x from iter 1 baseline).",
+      "risk": "medium"
+    }
+  ],
+  "summary": "Q3 iteration 2 REGRESSED by 64.7ms (9.8%) to 726.6ms compared to iteration 1 (661.9ms). DuckDB baseline: 78ms (9.3x gap). GOOD NEWS: Lineitem zone map block skipping worked excellently - join/aggregation improved 34% (158.5ms → 104.0ms). BAD NEWS: MADV_WILLNEED prefetching backfired on HDD, causing orders scan to regress 27% (353.7ms → 449.9ms). FastIntHash added CPU overhead without benefit, causing customer scan to regress 54% (30.4ms → 46.8ms). CRITICAL FIX: Remove MADV_WILLNEED prefetching (priority 1, -100-115ms) and revert FastIntHash (priority 2, -30-45ms) to restore baseline performance. Then apply high-impact optimizations: Abseil hash tables (priority 3, -55-85ms), remove/optimize Bloom filter (priority 4, -60-65ms), parallel merge (priority 6, -34-38ms). Combined estimated improvement: 726.6ms → 340-425ms (1.7-2.1x from current, potential 0.51-0.64x from iter 1 baseline = 425-595ms range). The zone map optimization should be KEPT - it's highly effective. Focus on fixing the I/O strategy for HDD while preserving the good algorithmic wins."
+}

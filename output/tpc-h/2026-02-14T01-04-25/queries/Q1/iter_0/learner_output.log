@@ -1,0 +1,57 @@
+Perfect! Now let me print a brief summary:
+
+---
+
+## **Evaluation Summary: Q1 Iteration 0**
+
+### **Status: ❌ FAIL (Correctness)**
+
+**Hardware Profile:**
+- 64 cores (32 phys, 2 threads/core), Intel with AVX-512
+- L1: 1MB/core, L2: 32MB, L3: 44MB shared
+- HDD storage, 376GB RAM
+
+**Execution Results:**
+- ✅ Compilation: Pass (4 minor warnings)
+- ✅ Runtime: Pass (98.98 ms)
+- ❌ Validation: **FAIL** — Expected 4 rows, got 4 rows, but **3 of 4 rows have wrong aggregates**
+
+**Expected Groups:**
+| l_returnflag | l_linestatus | Expected Count |
+|---|---|---|
+| A | F | 14,804,077 |
+| N | F | 385,998 |
+| N | O | 29,144,351 |
+| R | F | 14,808,183 |
+
+**Actual Groups:** (A,F), (A,O), (N,O), (R,O) — **wrong group combinations, wrong counts**
+
+---
+
+### **Root Cause: CRITICAL SEMANTIC ERROR**
+
+**Dictionary Hardcoding Bug (Line 188-189):**
+```cpp
+std::vector<char> rf_dict = {'A', 'N', 'R'};  // ❌ WRONG ORDER
+```
+
+**Actual dictionary from `lineitem_dicts.txt`:**
+- Code 0 → 'A'
+- Code 1 → 'R' (not 'N')
+- Code 2 → 'N' (not 'R')
+
+**Impact:** Rows with returnflag codes 1 and 2 get mapped to wrong character values, causing GROUP BY to place them in wrong aggregation buckets. Result: completely incorrect aggregates.
+
+---
+
+### **Critical Fixes (Must Do)**
+
+1. **Parse Dictionary Correctly** — Don't hardcode. Read `lineitem_dicts.txt`, parse code-to-value mapping in order of appearance.
+2. **Optimize Delta Decode** — Current O(n²) complexity per morsel. Store last-decoded value, use as starting point for next morsel (O(n) instead).
+
+---
+
+### **Evaluation JSON**
+✅ Written to: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T01-04-25/queries/Q1/iter_0/evaluation.json`
+
+The execution strategy is sound (morsel-parallel, thread-local aggregation, perfect hash table), but the dictionary bug makes results completely wrong. After fix, query should run in ~94-98 ms (close to GenDB benchmark of 48 ms, accounting for scale factor).

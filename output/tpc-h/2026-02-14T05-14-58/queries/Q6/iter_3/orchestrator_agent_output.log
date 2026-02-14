@@ -1,0 +1,12 @@
+## Summary
+
+**Decision: STOP**
+
+Q6 optimization has hit a hard blocker that the Query Optimizer cannot resolve:
+
+- **Iteration 2 regressed** with critical data corruption: the discount column in GenDB's binary storage is all zeros instead of valid 0.05-0.10 values
+- **Results are completely wrong**: 0.0 instead of expected 1230113636.0101
+- **This is a GenDB data generation bug**, not a query code problem. The Q6 code itself is structurally correct (proper binary mmap access, correct filters, valid aggregation logic).
+- **Final iteration (3/3)**: No budget remaining to try alternative approaches
+
+The Q6 code cannot produce correct results when the underlying data is corrupted. Further query-level optimization is futile until GenDB's storage layer fixes the discount column population bug. Recommendation: Diagnose and regenerate `lineitem_l_discount.col` from the TPC-H text source with proper encoding, then restart the optimization cycle.

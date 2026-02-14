@@ -1,0 +1,15 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Single-table scan on lineitem with compound range predicates (selectivity: 13.4% final)",
+    "Predicate ordering: apply most selective filter first (l_discount BETWEEN 0.05-0.07, 13% selectivity), then l_quantity < 24 (48% selectivity), then l_shipdate range (16% selectivity)",
+    "Use zone map on l_shipdate to skip blocks where date range doesn't match (min/max per 128K-row block)",
+    "Vectorize predicates with AVX512: process 8 rows per instruction for date/discount/quantity comparisons",
+    "Branch-free filtering: use masked comparisons to avoid branch misprediction on tight filter loop",
+    "Morsel-driven parallel scan (64 cores, ~1M rows/morsel) with thread-local partial results (single SUM aggregate)",
+    "In-place aggregation: no GROUP BY (single result row). Accumulate SUM locally per thread, merge at end with single atomic add or final single-threaded sum",
+    "Delta encoding on l_shipdate (already in storage) reduces memory bandwidth; decode in vectorized loop"
+  ],
+  "strategy_notes": "Q6 is already fast (29.3ms), but parallelism can close the gap to DuckDB (20ms). Focus on vectorized filtering with AVX512 and morsel-driven parallel scan. Zone map filtering on l_shipdate eliminates unmatched blocks. Aggregate is trivial (single SUM); the bottleneck is filtering throughput. Target: 20ms with aggressive vectorization and parallelism.",
+  "reasoning": "TPC-H SF10 workload dominated by 60M-row lineitem scans across three distinct patterns. Q1 and Q6 already achieve competitive performance; Q3's 3-way join (customer→orders→lineitem) is 4.2x slower than DuckDB (386ms vs 91ms). Critical optimizations: (1) Exploit 64-core parallelism with morsel-driven execution; (2) Fix Q3's join materialization bottleneck through optimal join ordering and radix partitioning; (3) Leverage existing storage design (zone maps, sorted indexes, dictionary encoding) with aggressive filter pushdown. Hardware supports AVX512 vectorization for filtering and aggregation."
+}

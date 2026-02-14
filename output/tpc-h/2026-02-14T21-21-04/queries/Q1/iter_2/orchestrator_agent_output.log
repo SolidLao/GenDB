@@ -1,0 +1,24 @@
+## Summary
+
+**Decision: CONTINUE OPTIMIZING (Iteration 2/3)**
+
+**Situation:**
+- Iteration 1 regressed with a **critical correctness bug** (integer division precision loss in disc_price/charge calculations)
+- Current baseline (iter 0): 164.4ms, correct results
+- Target: Close the 1.78x gap to DuckDB's 86.4ms minimum
+- Remaining budget: **1 iteration**
+
+**Strategy:**
+1. **Fix critical semantic error** (integer precision in aggregation) from failed iteration 1
+2. **Apply 2 high-impact, conservative optimizations**:
+   - **SIMD vectorized filtering** (89.4ms bottleneck) → Expected 30-40ms reduction
+   - **Perfect hash aggregation** (4 groups only) → Expected 5-8ms reduction
+3. **Cumulative target**: ~120-130ms, approaching DuckDB's 108.8ms average
+
+**Why continue:**
+- Significant performance gap (1.78x slower than DuckDB min) with viable optimizations
+- Correctness must be restored first, then performance gains are achievable
+- The failed iteration pinpointed the precision issue; conservative approach now avoids that path
+- With 1 remaining iteration, this aggressive strategy maximizes the chance of closing the gap
+
+Decision written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/queries/Q1/iter_2/decision.json`

@@ -1,0 +1,33 @@
+Perfect! I've created the batch decision file with strategic guidance for all three queries. Let me summarize the approach:
+
+## Strategic Guidance Summary
+
+**Overall Strategy**: Exploit massive parallelism (64 cores) combined with SIMD vectorization (AVX-512) and selective block-skipping to close the gap with DuckDB and PostgreSQL baselines.
+
+### Q1 (Pricing Summary)
+- **Bottleneck**: Full scan of 60M lineitem rows (98% selectivity)
+- **Strategy**: 
+  - Morsel-driven parallel execution: divide 60M rows into ~600 morsels of 100K rows each, process on 64 cores → ~7-8x speedup
+  - SIMD vectorized date filter using AVX-512 (8 dates compared per instruction)
+  - Partial aggregation: only 4 unique groups, so local pre-agg per thread eliminates contention
+  - Target: 40-50ms (vs DuckDB's ~100ms)
+
+### Q3 (Shipping Priority)  
+- **Bottleneck**: 3-way join with selective customer/orders filters
+- **Strategy**:
+  - Filter-first: apply predicates before joins (customer 22% selectivity, orders 49%, lineitem 65%)
+  - Hash join build on smaller relations (customer 330K rows, orders 7.35M rows)
+  - Streaming aggregation with Top-K heap (10 items) instead of full sort
+  - Parallel probe phase using work-stealing
+  - Target: 80-100ms (matching DuckDB's 78-113ms range)
+
+### Q6 (Forecasting Revenue)
+- **Bottleneck**: Highly selective (1.9%) single-table scan with compound predicates
+- **Strategy**:
+  - Zone map skipping: eliminate 98% of blocks before even loading
+  - SIMD vectorized compound filtering (date + discount + quantity in 8 rows per instruction)
+  - Parallel morsel execution, each thread sums locally
+  - No materialization, single final aggregation
+  - Target: 15-20ms (competitive with DuckDB's 19-21ms)
+
+**Decision file written to**: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/batch_decision_iter0.json`

@@ -1,0 +1,133 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": ""
+    },
+    "run": {
+      "status": "pass",
+      "output": "[TIMING] scan_filter_customer: 30.7 ms\n[TIMING] scan_filter_orders: 702.7 ms\n[TIMING] join_aggregation: 163.1 ms\n[TIMING] merge: 38.7 ms\n[TIMING] sort: 2.6 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 938.2 ms\nQuery returned 10 rows\n"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Q3: rows_expected=10, rows_actual=10, match=true"
+    },
+    "query_results": {
+      "Q3": {
+        "status": "pass",
+        "num_rows": 10,
+        "timing_ms": 938.2,
+        "operation_timings": {
+          "scan_filter_customer": 30.7,
+          "scan_filter_orders": 702.7,
+          "join_aggregation": 163.1,
+          "merge": 38.7,
+          "sort": 2.6,
+          "output": 0.2,
+          "total": 938.2
+        },
+        "dominant_operation": "scan_filter_orders (74.9% of total time)",
+        "notes": "Initial baseline implementation with basic parallel aggregation. Orders scan dominates execution time."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 938.2,
+        "status": "pass",
+        "operation_timings": {
+          "scan_filter_customer": 30.7,
+          "scan_filter_orders": 702.7,
+          "join_aggregation": 163.1,
+          "merge": 38.7,
+          "sort": 2.6,
+          "output": 0.2,
+          "total": 938.2
+        },
+        "dominant_operation": "scan_filter_orders (74.9% of total time)",
+        "bottleneck": "Orders table scan with date filtering and hash probe consumes 702.7ms out of 938.2ms total. This is the primary bottleneck.",
+        "root_cause": "The orders scan (15M rows) is single-threaded, reads all 4 columns into memory sequentially, performs date filtering AND custkey hash lookup in a tight loop without vectorization. Despite zone map indexes being available on o_orderdate, they are not utilized in the current implementation."
+      }
+    },
+    "overall": "Q3 runs in 938.2ms vs DuckDB's 77.8ms (12.1x gap). The dominant bottleneck is the orders table scan at 702.7ms (75% of runtime), which is single-threaded and doesn't leverage available zone maps. Secondary bottlenecks are join/aggregation (163.1ms) and merge (38.7ms). Customer scan is already fast at 30.7ms."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Zone Map Skipping for Orders Date Filter",
+      "description": "The orders table has an o_orderdate zone map index (storage_design.json line 62). The filter 'o_orderdate < 1995-03-15' has ~49% selectivity. Implement zone map loading and block skipping in the orders scan loop. Read zone map metadata from disk, evaluate min/max per block against the date predicate, skip blocks where min >= 1995-03-15. With 100K row blocks (150 blocks total), expect to skip ~51% of blocks (76 blocks). Implementation: Load zone map file '<gendb_dir>/orders/o_orderdate_zonemap.bin', iterate through block metadata, only read blocks where block_max < date_1995_03_15. This eliminates I/O for ~7.5M rows (60MB saved assuming 8 bytes/row avg).",
+      "expected_improvement": "Reduce orders scan from 702.7ms to ~350-400ms (1.75-2x speedup). Zone map overhead is ~2-5ms. DuckDB achieves high selectivity through similar techniques. This addresses the #1 bottleneck directly.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Thread Parallelism for Orders Scan",
+      "description": "The orders scan (lines 132-154 in q3.cpp) is currently single-threaded, processing 15M rows sequentially. The system has 64 cores available (workload_analysis.json line 3). Parallelize the orders scan using morsel-driven execution. Split the 15M rows into chunks of ~234K rows per thread (64 threads). Each thread builds a local hash map of qualified orders, then merge. Implementation: Create vector<unordered_map> local_qualified_orders(num_threads), parallelize loop 146-150 with thread t processing rows [t*chunk_size, (t+1)*chunk_size), merge local maps into global qualified_orders. This is similar to the existing lineitem parallelization (lines 168-210).",
+      "expected_improvement": "Reduce orders scan from 702.7ms to ~40-50ms (14-17x speedup). With 64 cores and minimal synchronization (embarrassingly parallel), expect near-linear speedup. Merge overhead ~5-10ms for combining 64 local hash maps.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Bloom Filter for Qualified Orders",
+      "description": "In the lineitem scan (lines 182-193 in q3.cpp), each row performs a hash lookup 'qualified_orders.find(l_orderkey[i])'. With 60M lineitem rows and qualified_orders containing ~1.5M entries (49% date selectivity * 20% custkey selectivity * 15M orders), the hash table has good density but still incurs hash computation and probe overhead for 58.5M non-matching rows. Build a Bloom filter over qualified_orders keys after the orders scan completes. Use 2-hash Bloom filter with 2MB bit array (16M bits, ~10 bits/key for 1% FP rate). Check Bloom filter before hash table lookup: 'if (!bloom.contains(l_orderkey[i])) continue;'. This eliminates ~97-98% of hash table probes (58.5M * 0.98 = 57.3M avoided probes).",
+      "expected_improvement": "Reduce join_aggregation from 163.1ms to ~90-100ms (1.6x speedup). Bloom filter construction: ~15-20ms. Bloom filter checks are extremely fast (~2-3 CPU cycles per lookup vs ~20-30 for hash table). Expect 35-40% reduction in join time.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Optimized Hash Table Pre-Sizing",
+      "description": "The local aggregation hash maps (line 180 in q3.cpp) are pre-sized to 10,000 entries per thread, but the actual group count is ~500K total (workload_analysis.json line 198). With 64 threads, expect ~7,800 groups per thread on average. Current sizing causes rehashing during execution. Pre-size local_map with 10,000 capacity (already adequate), but pre-size global_map at line 219 to 600,000 entries (500K expected groups / 0.75 load factor). Also use faster hash function: replace std::hash with a simple multiplicative hash for int32_t keys (e.g., 'return k * 0x9e3779b9;'). This is 2-3x faster than std::hash for integers.",
+      "expected_improvement": "Reduce merge time from 38.7ms to ~25-28ms (1.4x speedup). Pre-sizing global_map eliminates 3-4 rehashing operations. Faster hash function saves 2-3ms in aggregation phase. Total savings: 10-13ms across merge + join_aggregation.",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Optimized mmap Hints for Sequential Scans",
+      "description": "The current mmapFile helper (lines 19-44 in q3.cpp) uses MADV_SEQUENTIAL for all mmapped files (line 42). This is correct for large sequential scans (lineitem, orders), but inefficient for customer (1.5M rows = ~12MB, fits in L3 cache). For small dimension tables, use MADV_WILLNEED + MAP_POPULATE to prefetch into page cache immediately. For orders table, also add madvise(MADV_WILLNEED) on the specific byte range that will be accessed after zone map filtering. Implementation: Add size-based heuristic in mmapFile: if (size < 50MB) use MADV_WILLNEED, else use MADV_SEQUENTIAL. For zone-map-filtered scans, call madvise(ptr + block_offset, block_size, MADV_WILLNEED) before processing each qualifying block.",
+      "expected_improvement": "Reduce orders scan by ~20-30ms (from 702.7ms to 672-682ms before other optimizations). Customer scan already fast, no change expected. Prefetching hides I/O latency for HDD storage by overlapping I/O with computation.",
+      "risk": "low"
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD Vectorization for Date Filtering",
+      "description": "The orders scan date filter 'o_orderdate[i] < date_1995_03_15' (line 147 in q3.cpp) is evaluated sequentially. The system has AVX-512 support (workload_analysis.json line 7), enabling 16-way SIMD for int32 comparisons. Vectorize the date comparison using AVX-512 intrinsics: load 16 dates at once with _mm512_loadu_si512, compare with _mm512_cmplt_epi32_mask, process matching indices. Similarly vectorize the custkey hash lookup by batching: gather 16 custkeys, compute 16 hashes in parallel, probe in batch. Implementation: Process orders in chunks of 16, accumulate matching orderkeys in a buffer, flush to hash map when buffer fills.",
+      "expected_improvement": "Reduce orders scan by ~50-80ms (from 702.7ms to 620-650ms before other optimizations, combined with parallelism expect ~5-8ms absolute savings). SIMD provides 4-6x throughput for date comparisons but is bottlenecked by hash lookups. Combined with other optimizations, contributes to overall speedup.",
+      "risk": "medium"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Reverse Join Order - Build on Orders Instead of Customer",
+      "description": "Current implementation builds building_custkeys hash set (300K entries, ~2.4MB), then probes with orders (15M rows). Alternative: Build qualified_orders hash map directly during orders scan, eliminating the building_custkeys intermediate. New flow: (1) Scan orders, for each row with o_orderdate < date, check if o_custkey exists in a customer-derived bitmap/hash set. (2) Build bitmap of BUILDING custkeys (1.5M bits = 187KB for 1.5M customers, much smaller than 300K * 4 bytes hash set). Use bitmap[custkey] to test membership in O(1). Implementation: Replace unordered_set<int32_t> building_custkeys with vector<bool> or uint8_t bitmap. Bitmap requires ~187KB vs 2.4MB hash set (12x smaller), fits in L2 cache.",
+      "expected_improvement": "Reduce customer scan overhead by ~10-15ms and improve orders scan cache locality. Bitmap lookup is 2-3x faster than hash set (1-2 cache misses vs 3-4). Total savings: ~15-20ms across customer + orders phases.",
+      "risk": "low"
+    },
+    {
+      "priority": 8,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Eliminate Merge Phase with Lock-Free Aggregation",
+      "description": "The merge phase (lines 217-233 in q3.cpp) combines 64 local hash maps into a global map, taking 38.7ms. Alternative: Use a single global hash map with fine-grained locking or lock-free concurrent hash map. Since aggregation keys are orderkey-based and orderkey is correlated with data locality (TPC-H property), use partitioned hash maps: partition global_map by orderkey % 64, each thread writes to its assigned partition(s) based on key hash. This eliminates the merge phase entirely. Implementation: Replace global_map with vector<unordered_map<AggregateKey, AggregateValue>> partitioned_maps(64), during aggregation insert into partitioned_maps[l_orderkey[i] % 64]. No locking needed if each thread owns distinct partitions.",
+      "expected_improvement": "Eliminate merge phase (38.7ms saved). Add ~5-10ms overhead for partition management during aggregation. Net savings: 28-33ms. Also reduces memory pressure by avoiding duplicate hash map entries during merge.",
+      "risk": "medium"
+    }
+  ],
+  "summary": "Q3 baseline (iteration 0) runs in 938.2ms with correct results (10 rows). DuckDB target is 77.8ms (12.1x faster). PRIMARY BOTTLENECK: Orders table scan (702.7ms, 75% of runtime) is single-threaded and doesn't use zone map indexes. RECOMMENDED IMMEDIATE ACTIONS: (1) Implement zone map skipping for o_orderdate filter (Priority 1, ~2x speedup, low risk). (2) Parallelize orders scan across 64 cores (Priority 2, ~14x speedup, low risk). (3) Add Bloom filter for join pruning (Priority 3, ~1.6x speedup, low risk). These three optimizations target different bottleneck categories (io_bound, cpu_bound, join) and are expected to reduce runtime from 938.2ms to ~120-150ms (6-8x speedup), closing the gap with DuckDB significantly."
+}

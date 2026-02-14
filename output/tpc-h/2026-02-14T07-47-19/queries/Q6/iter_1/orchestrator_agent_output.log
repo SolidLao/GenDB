@@ -1,0 +1,18 @@
+## Decision Output
+
+**✅ CONTINUE OPTIMIZING**
+
+**Reasoning**: Q6 is **6.9x slower than DuckDB** (134ms vs 20ms), far exceeding the 1.2x stopping threshold. The dominant bottleneck is single-threaded CPU execution on a 64-core system with minimal parallelism. Morsel-driven thread parallelism is a proven, low-risk optimization with expected **30-40x speedup** (targeting 3-4ms execution time).
+
+**Selected Optimizations**:
+1. **Morsel-Driven Thread Parallelism** (Priority 1, CPU-bound)
+2. **Optimize madvise Hints** (Priority 2, I/O-bound)
+
+**Key Actions for Query Optimizer**:
+- Use `std::thread::hardware_concurrency()` to detect 64 cores
+- Divide 59.9M rows into 2K-10K row morsels
+- Implement atomic counter-based work-stealing for load balancing
+- Use thread-local accumulators (no locks in critical path)
+- Final merge: combine all thread-local SUM results
+
+**Next Steps**: If parallelism succeeds and brings Q6 close to DuckDB performance, iteration 2 can explore vectorized filtering (SIMD) and zone map skipping. Remaining budget: 1 more iteration after this one.

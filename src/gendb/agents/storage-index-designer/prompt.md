@@ -45,7 +45,7 @@ Generate these files in the `generated_ingest/` subdirectory:
    - Use std::from_chars for integers/doubles, manual date parsing (no mktime)
    - Permutation-based sorting (don't sort full Row structs)
    - Buffered binary writes (1MB+ buffers)
-   - Write metadata JSON (row counts, column types, offsets)
+   - Write metadata as `<table>_metadata.json` (valid JSON with row_count, columns, and dictionaries)
    - Usage: `./ingest <data_dir> <gendb_dir>`
 
 2. **`build_indexes.cpp`** — Index building from binary data:
@@ -77,14 +77,14 @@ After generating code:
   "tables": {
     "<table_name>": {
       "columns": [
-        { "name": "<col>", "cpp_type": "<type>", "encoding": "none|dictionary|delta|rle|bitpack" }
+        { "name": "<col>", "cpp_type": "<type>", "semantic_type": "INTEGER|DECIMAL|DATE|STRING", "encoding": "none|dictionary|delta|rle|bitpack", "scale_factor": "<for DECIMAL cols: e.g. 100 for 2 decimal places>" }
       ],
       "file_format": { "filename": "<table>.tbl", "delimiter": "|", "column_order": [...] },
       "sort_order": ["col1"], "block_size": 100000, "estimated_rows": "<number>",
       "indexes": [ { "name": "<name>", "type": "sorted|hash|zone_map", "columns": [...] } ]
     }
   },
-  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t", "CHAR": "std::string", "VARCHAR": "std::string" },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "int64_t", "DATE": "int32_t", "CHAR": "std::string", "VARCHAR": "std::string" },
   "date_encoding": "days_since_epoch_1970",
   "hardware_config": { "cpu_cores": "<N>", "l3_cache_mb": "<N>", "disk_type": "ssd|hdd", "total_memory_gb": "<N>" },
   "summary": "<brief summary: storage format, sort keys, key indexes, encoding choices>"
@@ -98,6 +98,7 @@ After generating code:
 - No `design_rationale` (mention key decisions in `summary` instead)
 - No `sql_type` or `used_in` per column (sql_type derivable from type_mappings, used_in in workload analysis)
 - Tables not accessed by any query can have minimal entries (columns list only)
+- **DECIMAL columns MUST use `cpp_type: "int64_t"` with a `scale_factor`** (e.g., 100 for DECIMAL(15,2)). NEVER use `double` for DECIMAL — IEEE 754 cannot exactly represent values like 0.05, causing boundary comparison errors in WHERE/BETWEEN clauses
 
 ## Ingestion Performance Requirements
 
@@ -110,7 +111,18 @@ The generated `ingest.cpp` must follow these performance best practices:
 ### Fast Value Parsing
 - **Dates**: Manual YYYY-MM-DD → days-since-epoch conversion using arithmetic (no mktime/strptime — they involve timezone/locale overhead).
 - **Integers**: Use `std::from_chars` (C++17) instead of strtol/stoi.
-- **Decimals**: Use `std::from_chars` for doubles, or better: parse as fixed-point int64 (e.g., money × 100 → int64 cents) when precision allows.
+- **Decimals**: MUST parse as fixed-point int64_t (e.g., money × 100 → int64_t cents). Parse the string as double first, then multiply by scale_factor and round: `int64_t val = (int64_t)std::llround(double_val * scale_factor)`. NEVER store DECIMAL columns as `double`.
+
+### Column Type Dispatch (CRITICAL)
+
+The ingest code MUST dispatch parsing on the column's **semantic type** (from `storage_design.json`), not just `cpp_type`. Using `std::from_chars<int32_t>` on a DATE string "1995-03-15" only reads the year (1995). Using `std::from_chars<int32_t>` on a DECIMAL string "0.04" stops at the decimal point and stores 0.
+
+**Dispatch rules:**
+- `semantic_type: "DATE"` → Parse YYYY-MM-DD as epoch days via arithmetic. NEVER use `std::from_chars<int32_t>`.
+- `semantic_type: "DECIMAL"` → Parse the decimal string (e.g., "0.04") as a floating-point value, then multiply by the column's `scale_factor` (e.g., 100) and round to `int64_t`: `int64_t val = (int64_t)std::llround(double_val * scale_factor)`. This ensures exact boundary comparisons. NEVER store DECIMAL as `double` — IEEE 754 cannot represent values like 0.05 exactly, causing boundary comparison errors.
+- `semantic_type: "INTEGER"` → Use `std::from_chars<int32_t>` or `<int64_t>`.
+- `semantic_type: "STRING"` → Copy or dictionary-encode.
+
 - **Low-cardinality strings**: Build a dictionary during parsing — store uint8_t/uint16_t codes instead of strings. Identify columns with few distinct values (flags, status codes, modes, priorities) from the workload analysis.
 
 ### Parallelism Strategy
@@ -152,13 +164,19 @@ The generated `ingest.cpp` must follow these performance best practices:
 
 **Encoding rules — verify each column type:**
 - **DATE columns**: Must be encoded as **days since epoch (1970-01-01)**, preserving full YYYY-MM-DD precision. Use manual arithmetic: `(year-1970)*365 + leap_days + day_of_year`. **NEVER** store dates as year-only integers — this loses month/day information and makes date range filters impossible.
-- **DECIMAL/NUMERIC columns**: Preserve full precision. Use `double` or fixed-point `int64_t` (e.g., cents). Do not truncate or round during ingestion.
+- **DECIMAL/NUMERIC columns**: MUST be stored as `int64_t` scaled integers (e.g., DECIMAL(15,2) → multiply by 100, store as int64_t cents). NEVER store as `double` — IEEE 754 floating-point cannot exactly represent values like 0.05 or 0.07, causing 15+ boundary rows to be misclassified in BETWEEN comparisons. Record `scale_factor` in `storage_design.json` per column (e.g., `"scale_factor": 100` for 2 decimal places).
 - **STRING columns**: Preserve exact values. Dictionary encoding must map back to the original strings losslessly.
 - **INTEGER columns**: Use appropriately sized types (`int32_t`, `int64_t`) to avoid overflow.
 
 **Verification after ingestion:**
 - After ingestion completes, spot-check a few rows from the largest table by reading binary column values and comparing against the source `.tbl` file. Specifically verify at least one DATE column to confirm it stores days-since-epoch (not year-only or other lossy encoding).
 - Log the min/max values of date columns — they should span a realistic range (e.g., 8000-10000 for TPC-H dates in days-since-epoch), NOT small integers like 1992-1998 (which would indicate year-only encoding).
+
+**Post-ingestion sanity checks (MANDATORY):**
+The ingest program itself must verify data correctness before exiting:
+- DATE columns: Read back a sample of values and assert they are > 3000 (epoch days). If any date value is < 3000, it indicates year-only parsing. Abort with a clear error.
+- DECIMAL columns: Read back a sample of values and assert at least some are non-zero. If all sampled values are 0, it indicates truncated parsing. Abort with a clear error.
+- If any check fails, print the column name, expected vs actual values, and exit with non-zero status.
 
 ## Important Notes
 - Data ingestion must be **highly parallelized** — use all available CPU cores

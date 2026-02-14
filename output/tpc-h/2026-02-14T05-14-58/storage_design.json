@@ -1,0 +1,144 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "tpch_sf10.gendb" },
+  "tables": {
+    "lineitem": {
+      "columns": [
+        { "name": "l_orderkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_partkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_suppkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_linenumber", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_quantity", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_extendedprice", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "l_discount", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_tax", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_returnflag", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "l_linestatus", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "l_shipdate", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_commitdate", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_receiptdate", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "l_shipinstruct", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "l_shipmode", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "l_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "lineitem.tbl", "delimiter": "|" },
+      "sort_order": ["l_shipdate"], "block_size": 262144, "estimated_rows": "59986052",
+      "indexes": [
+        { "name": "idx_lineitem_shipdate", "type": "zone_map", "columns": ["l_shipdate"] },
+        { "name": "idx_lineitem_orderkey", "type": "sorted", "columns": ["l_orderkey"] }
+      ]
+    },
+    "orders": {
+      "columns": [
+        { "name": "o_orderkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "o_custkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "o_orderstatus", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "o_totalprice", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "o_orderdate", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "o_orderpriority", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "o_clerk", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "o_shippriority", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "o_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "orders.tbl", "delimiter": "|" },
+      "sort_order": ["o_orderdate"], "block_size": 262144, "estimated_rows": "15000000",
+      "indexes": [
+        { "name": "idx_orders_orderdate", "type": "zone_map", "columns": ["o_orderdate"] },
+        { "name": "idx_orders_custkey", "type": "sorted", "columns": ["o_custkey"] }
+      ]
+    },
+    "customer": {
+      "columns": [
+        { "name": "c_custkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "c_name", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "c_address", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "c_nationkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "c_phone", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "c_acctbal", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "c_mktsegment", "cpp_type": "uint8_t", "encoding": "dictionary" },
+        { "name": "c_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "customer.tbl", "delimiter": "|" },
+      "sort_order": ["c_custkey"], "block_size": 262144, "estimated_rows": "1500000",
+      "indexes": [
+        { "name": "idx_customer_custkey", "type": "sorted", "columns": ["c_custkey"] },
+        { "name": "idx_customer_mktsegment", "type": "hash", "columns": ["c_mktsegment"] }
+      ]
+    },
+    "partsupp": {
+      "columns": [
+        { "name": "ps_partkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "ps_suppkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "ps_availqty", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "ps_supplycost", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "ps_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "partsupp.tbl", "delimiter": "|" },
+      "sort_order": ["ps_partkey"], "block_size": 262144, "estimated_rows": "8000000",
+      "indexes": [
+        { "name": "idx_partsupp_partkey", "type": "sorted", "columns": ["ps_partkey"] },
+        { "name": "idx_partsupp_suppkey", "type": "sorted", "columns": ["ps_suppkey"] }
+      ]
+    },
+    "part": {
+      "columns": [
+        { "name": "p_partkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "p_name", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "p_mfgr", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "p_brand", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "p_type", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "p_size", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "p_container", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "p_retailprice", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "p_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "part.tbl", "delimiter": "|" },
+      "sort_order": [], "block_size": 262144, "estimated_rows": "2000000",
+      "indexes": [ { "name": "idx_part_partkey", "type": "sorted", "columns": ["p_partkey"] } ]
+    },
+    "supplier": {
+      "columns": [
+        { "name": "s_suppkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "s_name", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "s_address", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "s_nationkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "s_phone", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "s_acctbal", "cpp_type": "int64_t", "encoding": "none" },
+        { "name": "s_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "supplier.tbl", "delimiter": "|" },
+      "sort_order": [], "block_size": 262144, "estimated_rows": "100000",
+      "indexes": [ { "name": "idx_supplier_suppkey", "type": "sorted", "columns": ["s_suppkey"] } ]
+    },
+    "nation": {
+      "columns": [
+        { "name": "n_nationkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "n_name", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "n_regionkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "n_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "nation.tbl", "delimiter": "|" },
+      "sort_order": [], "block_size": 262144, "estimated_rows": "25",
+      "indexes": [ { "name": "idx_nation_nationkey", "type": "sorted", "columns": ["n_nationkey"] } ]
+    },
+    "region": {
+      "columns": [
+        { "name": "r_regionkey", "cpp_type": "int32_t", "encoding": "none" },
+        { "name": "r_name", "cpp_type": "std::string", "encoding": "none" },
+        { "name": "r_comment", "cpp_type": "std::string", "encoding": "none" }
+      ],
+      "file_format": { "filename": "region.tbl", "delimiter": "|" },
+      "sort_order": [], "block_size": 262144, "estimated_rows": "5",
+      "indexes": [ { "name": "idx_region_regionkey", "type": "sorted", "columns": ["r_regionkey"] } ]
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DECIMAL": "int64_t",
+    "DATE": "int32_t",
+    "CHAR": "std::string",
+    "VARCHAR": "std::string"
+  },
+  "date_encoding": "days_since_epoch_1970",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "44", "disk_type": "hdd", "total_memory_gb": "376" },
+  "summary": "Binary columnar storage for TPC-H analytical workload. lineitem (60M) sorted by l_shipdate for zone map-based range filtering; orders (15M) sorted by o_orderdate. Low-cardinality columns (returnflag, linestatus, mktsegment, orderpriority, orderstatus) use dictionary encoding (uint8_t). Decimals stored as int64_t (cents×100). Dates as int32_t (days since epoch 1970) for fast range filtering. Block size 256K rows (~22MB per block) fits in L3 cache with overhead. Zone maps on shipdate/orderdate columns skip blocks during range predicates. Sorted indexes on join keys (orderkey, custkey, partkey, suppkey) enable probe-side lookups. Parallel ingestion via global thread pool (64 threads), permutation-based sorting for sorted tables, buffered binary writes."
+}

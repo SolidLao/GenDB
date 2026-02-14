@@ -1,0 +1,31 @@
+---
+
+## Analysis Complete ✓
+
+I've produced a comprehensive workload analysis for the TPC-H benchmark and written it to:
+**`/home/jl4492/GenDB/output/tpc-h/2026-02-13T23-45-34/workload_analysis.json`**
+
+### Key Findings
+
+**Hardware Profile:**
+- 64 CPU cores (32 physical × 2 HT) | AVX-512 SIMD | 376 GB RAM | HDD storage
+- L3 cache: 44 MB → Morsel size ~10-50K rows for optimal parallelism
+
+**Workload Characteristics:**
+- **Lineitem (60M rows)**: Hot table across all 3 queries. Dense access patterns on shipdate, quantity, discount, extendedprice.
+- **Orders (15M rows)**: Q3 bottleneck. FK-join critical path.
+- **Customer (1.5M rows)**: Filter-heavy (c_mktsegment = 'BUILDING' = 20% selectivity).
+
+**Query Profiles:**
+- **Q1**: Simple aggregate, 4 groups, high-selectivity filter (98%). Fast, parallelizable.
+- **Q6**: Selective compound filter (2% combined selectivity). Single-table scan good for parallelism.
+- **Q3** (Bottleneck): 3-way join with high-cardinality GROUP BY (2.5M groups). Requires join reordering + hash join optimization + LIMIT 10 sort elimination.
+
+**Optimization Priorities:**
+1. **Thread parallelism** with morsel-driven execution (64 cores → near-linear speedup on large scans/joins)
+2. **Vectorized scan + filter** with SIMD for date/quantity predicates
+3. **Partial pre-aggregation** per thread before global merge (especially Q1's 4-group aggregate)
+4. **Join optimization** for Q3: filter→build on smallest dimension (customer), probe sequentially
+5. **Top-K sort elimination** for Q3 (LIMIT 10 doesn't need full sort)
+
+The analysis includes exact row counts, column statistics, filter selectivities (measured via sampling), and hardware-aware optimization hints for downstream code generation.

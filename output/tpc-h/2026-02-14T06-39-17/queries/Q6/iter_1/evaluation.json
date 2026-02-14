@@ -1,0 +1,92 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation successful with -O3 -march=native -std=c++17 flags"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query executed successfully. Execution time: 29-30 ms (10-run average: 29.4 ms, std dev: 0.7 ms)"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "Result matches ground truth: revenue = 1230113636.0101"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null,
+      "notes": "perf tool not available in environment. Timing consistency indicates excellent cache locality (std dev < 2.5%)"
+    },
+    "query_results": {
+      "Q6": {
+        "status": "pass",
+        "num_rows": 1,
+        "timing_ms": 29.4,
+        "notes": "Single aggregate result (SUM). 10-run consistency: 28-30 ms range. Real-world overhead: 0.074 seconds wall-clock (init + mmap overhead ~44 ms)."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q6": {
+        "current_time_ms": 29.4,
+        "status": "pass",
+        "bottleneck": "SIMD mask extraction to scalar + branch misprediction on mask values",
+        "root_cause": "Lines 136-149: The code extracts AVX2 mask results (_mm256_stoadu_pd) into scalar arrays, then branches on each element (if d_combined[j] != 0.0). This pattern incurs store-to-load latency stalls and branch misprediction on unpredictable mask bits. Modern SIMD should use blending or gather instructions instead."
+      }
+    },
+    "overall": "Q6 is a simple single-table scan with multi-predicate filtering and single aggregate. Current implementation uses solid fundamentals: 64-thread parallelism via morsel-driven approach, AVX2 SIMD for batch filtering, mmap with MADV_SEQUENTIAL for HDD. Execution time 29.3 ms is excellent vs PostgreSQL (2377 ms, 81x slower) but lags DuckDB (19.3 ms, 1.5x slower). The 34% performance gap vs DuckDB is primarily due to inefficient SIMD mask handling (extracting to scalars and branching) rather than algorithmic issues. Predicate reordering is correct (discount 9% selectivity first). The code is CPU-bound, not I/O-bound (mmap benefit already captured). Further optimization requires tighter SIMD integration."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD Mask Integration (avoid scalar extraction)",
+      "description": "Replace lines 136-149 mask extraction pattern with direct blending or gather operations. Current approach: (1) _mm256_storeu_pd(d_combined) → scalar array, (2) branch on each element. Instead: use _mm256_blending or horizontal reduction to avoid store-to-load latency. Specific change: For each matched mask, use _mm256_blend_pd with predefined patterns to directly multiply price*discount without extracting to scalars. Use _mm256_cvtepi32_pd to convert mask bits to indices, then gather-multiply in single SIMD loop. Expected: eliminate ~4-6 ms (store stall + branch mispredict penalty).",
+      "expected_improvement": "14-20% (4-6 ms reduction, achieving ~24 ms). Reasoning: Store latency on modern CPUs ~7-10 cycles, × 15M iterations (60M rows / 4-element batch) of mask extraction = ~15-18 ms overhead. Direct SIMD blending reduces to ~1-2 ms.",
+      "risk": "medium"
+    },
+    {
+      "priority": 2,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Horizontal SIMD Aggregation (accumulate in registers)",
+      "description": "Current code maintains local_sum in scalar register. Optimization: Maintain 4 partial sums in __m256d (one per SIMD lane) during the vectorized batch loop, accumulate matching products directly into the corresponding lane. After batch loop, horizontal reduce the 4 lanes to scalar. Specific: Instead of scalar branch (line 146-148), use _mm256_blending to accumulate matched products into one of 4 partial-sum registers. After all morsels, use _mm256_hadd_pd for final reduction. Expected: eliminate ~2-3 ms (scalar accumulation into cache line).",
+      "expected_improvement": "6-10% (2-3 ms reduction). Reasoning: Keep aggregation in L1 cache (SIMD register file) rather than spilling to memory. Each scalar accumulation ~3 cycles latency; vectorized blend ~1 cycle.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q6",
+      "bottleneck_category": "io_bound",
+      "technique": "Prefetching hot columns",
+      "description": "Lines 54-61 mmap 4 columns with MADV_SEQUENTIAL. Optimization: Explicitly prefetch the next cache line of l_discount (most selective predicate, accessed first) and l_quantity within the loop. Add __builtin_prefetch(&discount[i+8], 0, 3) at start of SIMD batch loop to hint the CPU to fetch ahead. This amortizes prefetch latency across iterations. Expected: ~1 ms improvement on HDD due to better page prefetching.",
+      "expected_improvement": "3-5% (1-1.5 ms reduction). Reasoning: HDD random-access latency ~5 ms, but with sequential madvise, OS is already prefetching effectively. Explicit CPU-level prefetch helps avoid page-in stalls mid-loop.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Tail Loop SIMD Vectorization",
+      "description": "Lines 155-164 (scalar tail): Handle remaining rows sequentially after SIMD batch. With row_count=59986052, batch_size=4, tail ≈ 1.5M rows. Optimization: Use AVX-512 to process 8 doubles per iteration (if hardware supports), or keep batch=4 but eliminate the scalar tail entirely by padding input arrays to SIMD boundary. Specific: Pre-allocate column data aligned to 32-byte boundaries and padded with sentinel values (max date, min discount, max quantity) that fail all predicates. This eliminates the scalar tail loop and keeps execution in vectorized path. Expected: ~1 ms savings.",
+      "expected_improvement": "3-4% (1 ms reduction). Reasoning: Scalar tail is 1.5M iterations × ~10 cycles per iteration = 15M cycles ≈ 0.5-1 ms on 64-core system; vectorized batch is ~2-3 cycles per 4-element group.",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q6",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Reduce Thread Count for Better Cache Sharing",
+      "description": "Current implementation spawns 64 threads (all cores). With 44 MB L3 cache and 4 columns × 60M rows = ~1.4 GB total, threads compete for L3 space. Optimization: Reduce to 32 threads (1 per physical core, ignore hyperthreading). Each thread then has 44 MB / 32 ≈ 1.4 MB L3 per thread for working set. This reduces contention and improves cache hit rate. Trade-off: slightly lower parallelism, but better per-thread cache efficiency. Expected: ~0.5-1 ms improvement due to fewer L3 misses.",
+      "expected_improvement": "2-3% (0.5-1 ms reduction). Reasoning: With 64 threads, each threads gets ~20 MB / 64 ≈ 0.69 MB effective L3, causing more misses. With 32 threads, each gets ~1.4 MB, improving hit rate.",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q6 is functionally correct and performs well (29.3 ms vs DuckDB's 19.3 ms). The 34% performance gap is attributable to inefficient SIMD mask handling (scalar extraction + branching) rather than fundamental algorithmic issues. The top optimization (SIMD mask integration using blending/gathering) can close 50-60% of the gap (achieving ~24 ms). Secondary improvements (horizontal aggregation, prefetching, tail vectorization) can push toward 22-23 ms. With focused work on SIMD mask handling and register-level aggregation, achieving 21-22 ms (93% of DuckDB speed) is realistic within the constraints of mmap I/O. The code demonstrates solid engineering: correct parallelism, column pruning, and predicate ordering. Next iteration should focus on tighter SIMD integration rather than algorithmic changes."
+}

@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "Thread parallelism with morsel-driven scan (64 cores, 10K-50K row morsels)",
+    "Predicate ordering by selectivity: l_shipdate range (low, ~16%), l_discount BETWEEN (low, ~20%), l_quantity < 24 (high, ~50%)",
+    "Zone map pruning on l_shipdate (sorted, indexed) to skip blocks outside [1994-01-01, 1995-01-01)",
+    "AVX512 SIMD for predicate evaluation (vectorized comparisons on dates, discount, quantity) and arithmetic (l_extendedprice * l_discount)",
+    "Columnar access: only load 3 columns (l_shipdate, l_discount, l_quantity, l_extendedprice)",
+    "Branch-free filtering or bitmask-based selection for tight predicate loop"
+  ],
+  "strategy_notes": "Q6 is a highly selective single-table scan (2.4% selectivity → ~1.4M qualifying rows from 60M). Already close to DuckDB (29ms vs 19ms). Focus: (1) Zone map pruning—l_shipdate is sorted and indexed, should skip ~84% of blocks immediately. (2) Predicate ordering—apply cheapest, most selective predicates first: date range (excludes 84%), then discount BETWEEN, then quantity. Use short-circuit evaluation. (3) SIMD—AVX512 can process 8 doubles or 16 int32s per instruction; vectorize all comparisons and the final multiplication. (4) Parallelism—60M rows / 64 cores = ~1M rows/core, with 100K block size = ~10 blocks/core. Morsel-driven execution with thread-local sum, then reduce. (5) Columnar access—only touch 4 columns, ignore other 12. Target: match or beat DuckDB's 19ms by maximizing zone map skipping and SIMD utilization.",
+  "reasoning": "TPC-H SF10 workload with 64-core AVX512 hardware. Q1 already competitive (48ms vs DuckDB 87ms). Q3 is the primary bottleneck (386ms vs 78ms = 5x gap) due to multi-way joins. Q6 nearly optimal (29ms vs 19ms). Focus: maximize thread parallelism across all queries, optimize Q3 join strategy aggressively, leverage zone maps and dictionary encoding."
+}

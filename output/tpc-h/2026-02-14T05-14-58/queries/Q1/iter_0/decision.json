@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "focus_areas": [
+    "morsel-driven parallel full scan on lineitem with 64-core parallelism",
+    "vectorized SIMD filtering on l_shipdate range (98.4% selectivity minimal pruning benefit)",
+    "thread-local hash aggregation on (returnflag, linestatus) with 6 groups — low contention",
+    "vectorized numeric aggregates (SUM, AVG, COUNT) using SIMD accumulators",
+    "final single-threaded sort on 6 tuples trivial (skip if already ordered by GROUP BY)"
+  ],
+  "strategy_notes": "Q1 is already fast (48ms vs 86ms DuckDB min). Focus on vectorized aggregation using SIMD to process multiple rows per instruction for numeric sums/averages. Use thread-local hash tables to avoid lock contention—6 groups fit easily. Morsel size ~1M rows per thread (60M/64 threads). Pre-compute dictionary-encoded flags to enable SIMD grouping. Optimize final merge+sort phase—6 groups sort trivially.",
+  "reasoning": "TPC-H workload with 60M-row lineitem table. Q1 is already competitive (2x faster than DuckDB), but Q3 shows 5x regression due to inefficient 3-way join and Q6 has 1.5x gap from suboptimal filtering. Initial code generation should prioritize: (1) Q3's partition-based hash join with careful build/probe side selection to exploit L3 cache; (2) aggressive predicate pushdown to reduce intermediate result sizes early; (3) SIMD-accelerated filtering for Q6's compound range predicates; (4) vectorized aggregation for Q1/Q3 GROUP BY operations. Morsel-driven parallelism across 64 cores essential for all queries."
+}

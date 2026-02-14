@@ -1,0 +1,30 @@
+Perfect! Now let me print a brief summary as instructed:
+
+---
+
+## Q6 Iteration 3 Analysis Complete
+
+**Status**: FAILED validation (wrong results)
+
+**Performance**: Excellent - 17.7ms total (11% faster than DuckDB's 20ms target)
+- Zone map loading: 0.1ms (skipped 508/600 blocks = 84.7%)
+- Scan/filter: 12.3ms (dominant operation, 69.5% of total)
+- Aggregation: 0.0ms
+- Output: 0.1ms
+
+**Critical Issue**: Wrong result - actual revenue 1230136229.36 vs expected 1230113636.01 (off by +22593.35)
+
+**Root Cause**: The revenue_acc reset fix from iteration 2 was correctly implemented (line 245) but did NOT resolve the underlying bug. The SAME error (+22593.35) across all 3 iterations indicates a systematic issue with:
+1. SIMD bitwise masking approach (`_mm256_and_pd` at lines 229-232)
+2. Floating-point precision at discount boundaries (0.05, 0.07)
+3. Possible incorrect comparison semantics for BETWEEN predicate
+
+**Recommended Fix**: Replace complex SIMD implementation with simple scalar code to establish correctness baseline, then investigate exact decimal comparison for the discount predicate using scaled integer arithmetic (truncation, not rounding).
+
+**Performance Opportunities** (after fixing correctness):
+1. Software prefetching for next block (10-20% scan improvement)
+2. AVX-512 upgrade (1.5-1.8x scan speedup)
+3. OpenMP thread pool (5-15% overhead reduction)
+4. Early termination with sorted shipdate (marginal gain)
+
+**Output**: Evaluation written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/queries/Q6/iter_3/evaluation.json`

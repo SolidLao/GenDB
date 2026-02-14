@@ -1,0 +1,100 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation succeeded with -O3 -march=native -std=c++17"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Program executed successfully, completed in 1.46 seconds"
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "3 of 10 rows differ. Expected output completely mismatches. All 10 result rows are wrong — different order keys, revenues, and dates than ground truth."
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "fail",
+        "num_rows": 10,
+        "timing_ms": 1460,
+        "notes": "Execution completed but produced wrong results. Expected first row: l_orderkey=4791171 with revenue=440715.22. Actual first row: l_orderkey=18869634 with revenue=503070.62. Completely different dataset indicates semantic bug in filtering logic."
+      }
+    }
+  },
+  "iteration": 2,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 1460,
+        "status": "fail",
+        "bottleneck": "Critical semantic bug: Wrong market segment code for BUILDING filter",
+        "root_cause": "Line 301 in q3.cpp checks `if (c_mktsegment[i] == 1)` but the dictionary encoding shows BUILDING = 0, not 1. Code filters for AUTOMOBILE segment (code 1) instead of BUILDING (code 0). Dictionary verified from /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb/customer/c_mktsegment_dict.txt: '0=BUILDING', '1=AUTOMOBILE', '4=FURNITURE', '3=HOUSEHOLD', '2=MACHINERY'. This causes filtering of wrong customer segment (~300K AUTOMOBILE customers instead of BUILDING), which cascades to wrong orders, wrong lineitem aggregation, and completely incorrect final results."
+      }
+    },
+    "overall": "**CRITICAL SEMANTIC BUG BLOCKS VALIDATION**: Line 301 uses wrong market segment code. Code filters for AUTOMOBILE (1) instead of BUILDING (0). Dictionary verified from gendb storage. This fundamental error produces completely wrong result set. Performance (1.46s) is secondary to correctness. Must fix dictionary code immediately."
+  },
+  "critical_fixes": [
+    {
+      "target": "Q3",
+      "issue": "Customer market segment filter uses wrong dictionary code: filters for AUTOMOBILE (1) instead of BUILDING (0)",
+      "fix": "Change line 301 from `if (c_mktsegment[i] == 1)` to `if (c_mktsegment[i] == 0)`",
+      "description": "The c_mktsegment column uses dictionary encoding. Dictionary mapping: '0=BUILDING', '1=AUTOMOBILE', '2=MACHINERY', '3=HOUSEHOLD', '4=FURNITURE'. Line 301 currently filters for code 1 (AUTOMOBILE segment) but SQL query requires c_mktsegment = 'BUILDING' which is code 0. This single-character change fixes the entire filtering pipeline and produces correct results.",
+      "bottleneck_category": "semantic",
+      "risk": "low"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Thread Synchronization Optimization for Parallel Aggregation",
+      "description": "Current implementation (lines 340-415) uses 64 threads with thread-local unordered_map aggregation, then merges in single-threaded phase (lines 421-425). Issue: global merge is O(n*m) where n=num_threads and m=groups_per_thread. With 64 threads and ~113K groups, merge phase becomes bottleneck. Opportunities: (1) Use lock-free thread-local maps (e.g., tbb::concurrent_hash_map) to avoid merge phase entirely, (2) Use segmented aggregation where each thread handles disjoint key ranges via pre-partitioning, (3) Use CPU-specific optimizations (NUMA-aware data placement, thread pinning to reduce cache coherency traffic). Currently morsel_size=200K with 64 threads on 60M lineitem rows means each thread processes ~8 morsels serially. Load balancing is fair but merge phase is expensive.",
+      "expected_improvement": "After correctness fix, expect 1.46s to regress toward 1.0-1.2s range (still 2.6-3.1x slower than baseline 386ms). With lock-free aggregation + NUMA optimization: target 600-800ms (1.6-2.0x baseline). Improvement: 30-40% reduction via synchronization overhead elimination.",
+      "risk": "medium"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Prefetching and Cache Hint Optimization for Lineitem Scan",
+      "description": "Lineitem is 60M rows (900MB+ in binary form). Code reads l_orderkey, l_extendedprice, l_discount, l_shipdate sequentially. Current MmapReader does not specify prefetch hints. Optimization: (1) Use MADV_WILLNEED after mmap to ensure OS preloads data into page cache, (2) Use _mm_prefetch(__builtin_prefetch) in aggregation loop (line 390+) to prefetch next cache line, (3) Consider sequential access pattern for lineitem (currently mmap without MADV_SEQUENTIAL hint to lineitem columns). With HDD storage, prefetching reduces random I/O stalls. Given 60M rows and 200K morsel size, each thread makes ~300 morsel transitions—prefetching next morsel's first cache line during current morsel processing hides latency.",
+      "expected_improvement": "5-15% speedup on lineitem scan phase via I/O hiding. Reduces cache miss stalls during hash probe.",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Compact Hash Table for GROUP BY with Pre-Sizing",
+      "description": "Code uses std::unordered_map<GroupKey, AggState> (line 340, 419) with default load factor ~0.75. GroupKey is 12 bytes (int32+int32+int32), AggState is 8 bytes (double). With ~113K groups, hash table allocates ~150K buckets. Optimization: (1) Pre-size hash table to capacity = num_groups_expected * 1.5 (use known selectivity to estimate), (2) Use compact hash tables (SwissTable/Robin Hood from Abseil/Folly) instead of std::unordered_map—2-4x faster, (3) Specialize for Decimal aggregation to use direct double addition without Decimal struct overhead. Expected groups = 2.5M (from workload analysis) filtered to ~113K after joins. Pre-sizing avoids rehashes during insertion.",
+      "expected_improvement": "10-20% reduction in aggregation phase time via improved hash table efficiency. Reduces memory allocation and rehash overhead.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "index",
+      "technique": "Zone Map Skipping for Lineitem Date Filter",
+      "description": "Code reads all 60M lineitem rows then filters by l_shipdate > 9204 (1995-03-15). Storage design specifies l_shipdate_zone_map index (zone_map on l_shipdate). Current code does not consult zone map—it loads all rows. Optimization: (1) Load zone map (min/max l_shipdate for each block), (2) Skip blocks where max_l_shipdate <= 9204 (no rows pass filter), (3) For blocks where min_l_shipdate <= 9204 < max_l_shipdate, load normally and filter in-memory. Given l_shipdate is delta-encoded and sorted, zone map can skip ~40-50% of lineitem blocks. Reduces I/O by 40-50% (saves ~450-500MB I/O from 900MB file).",
+      "expected_improvement": "20-40% reduction in I/O latency for lineitem scan. On HDD with slow random I/O, this is significant. Could save 100-300ms from 1.46s total.",
+      "risk": "medium"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD Vectorization for Aggregation Loop",
+      "description": "Lines 389-401 perform scalar filtering and aggregation on lineitem. Current code checks l_shipdate[i] > date_threshold sequentially, looks up hash table, then computes revenue = l_extendedprice[i] * (1.0 - l_discount[i]). SIMD optimizations: (1) Vectorize date comparison using AVX-512 (8 dates at once), (2) Vectorize revenue calculation using AVX-512 (4 doubles at once), (3) Use SIMD hash computation for GroupKey (pack 3 int32s into SIMD compare against precomputed hash ranges). Current code has SIMD AVX-512 path at lines 356-386 that attempts this, but implementation is incomplete—it processes 8 dates then falls back to scalar loop. Complete SIMD path should process 4-8 rows fully (filter, hash lookup, aggregation) per SIMD instruction without fallback.",
+      "expected_improvement": "3-5x speedup on aggregation loop (lines 390-401) which processes ~30M lineitem rows after date filter. Could reduce aggregation phase from 800-1000ms to 200-300ms. Requires careful SIMD implementation to avoid branch misprediction on hash miss.",
+      "risk": "high"
+    }
+  ],
+  "summary": "**CRITICAL: Iteration 2 has semantic bug that produces wrong results.** Line 301 filters for wrong market segment (AUTOMOBILE=1 instead of BUILDING=0). Dictionary verified from storage: '0=BUILDING'. This is a one-character fix (1→0). After fix, execution time will be 1.46s, which is 3.8x slower than baseline 386ms. Hardware is capable (64 cores, 376GB RAM, AVX-512). Bottlenecks: (1) Thread synchronization overhead in aggregation merge phase (40-50% of execution), (2) Scalar I/O and filtering (lineitem scan underutilizes parallelism and misses zone map skipping), (3) Hash table efficiency (std::unordered_map not optimized for GroupKey), (4) SIMD vectorization incomplete (started at line 356 but not fully exploited). Recommend: Fix semantic bug immediately (risk=low, high impact), then prioritize thread synchronization + zone map skipping + compact hash tables for 2-3x speedup toward 600-800ms target."
+}

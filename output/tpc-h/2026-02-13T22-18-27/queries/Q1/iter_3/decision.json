@@ -1,0 +1,13 @@
+{
+  "action": "optimize",
+  "reasoning": "This is the final iteration. Despite 15.2x gap to baseline (48ms) and 8.4x to DuckDB (87ms), we have clear, actionable bottlenecks with high-confidence recommendations. Priority 1 alone promises 2-3x speedup by eliminating SIMD mask extraction overhead—the root cause. Combining priorities 1-4 could reach ~190-290ms (2-6x from baseline), a dramatic improvement. Must use remaining budget aggressively.",
+  "selected_recommendations": [0, 1, 2, 3],
+  "focus_areas": [
+    "eliminate SIMD mask extraction for high-selectivity filter (98.8%) → sequential scan with branch prediction",
+    "remove MADV_WILLNEED on HDD for better I/O scheduling",
+    "add software prefetching for 6 column accesses to hide memory latency",
+    "optimize or remove Kahan summation overhead (5 FP ops per row × 60M rows)"
+  ],
+  "strategy_notes": "FINAL ITERATION - BE MAXIMALLY AGGRESSIVE. Priority 1 is the game-changer: at 98.8% selectivity, SIMD bitmask iteration (ctz, mask clearing, scattered column loads) is counterproductive. Replace with sequential scalar scan + branch prediction—modern CPUs predict >95% correctly. This eliminates mask extraction overhead and enables sequential memory access (better prefetching). Combine with Priority 2 (remove MADV_WILLNEED for sequential I/O), Priority 3 (explicit software prefetching for 6 columns), and Priority 4 (remove Kahan summation if validation passes). Expected combined impact: 728ms → 190-290ms (2.5-3.8x speedup), closing gap to 4-6x from baseline. The 48ms baseline likely uses this exact approach: simple sequential scan optimized for high-selectivity predicates, no SIMD overhead.",
+  "notes": "This is iteration 3/3 (last chance). Select all low-risk, high-impact optimizations simultaneously. Priority 1-3 are all 'low risk' per Learner. Priority 4 is 'medium risk' (may fail validation) but worth trying—if validation fails, Query Optimizer can fall back to pairwise summation. The Query Optimizer handles multiple optimizations at once, so no need to be conservative."
+}

@@ -1,0 +1,32 @@
+Perfect! Now let me provide a brief summary for the user:
+
+## Summary
+
+**Q1 Iteration 3 Evaluation Complete**
+
+### Results
+- ✅ **Compilation**: Success
+- ✅ **Execution**: 559.26ms (4 rows)
+- ✅ **Validation**: PASS - Results match ground truth
+
+### Performance Analysis
+**Improvement**: 23.2% faster than iter_2 (729ms → 559ms) by removing SIMD mask extraction
+**Gap**: Still 6.4x slower than DuckDB (87ms)
+
+### Root Cause
+The bottleneck has **shifted from CPU to I/O**:
+1. **Over-threading**: 64 threads on HDD creates seek storms and memory bandwidth saturation
+2. **Small morsels**: 8K rows with 64 threads = excessive fragmentation (60K I/O operations)
+3. **Manual loop unrolling**: 85 lines of repetitive code pollutes L1 instruction cache (~30KB footprint)
+4. **No zone map usage**: Despite available shipdate zone maps
+
+### Top Recommendations
+1. **Reduce thread count to 8-16** for HDD (2-3x speedup) - fewer threads = less seeking
+2. **Increase morsel size to 64K rows** (1.5-2x speedup) - larger I/O batches
+3. **Remove manual loop unrolling** (10-20% speedup) - let compiler optimize, reduce code size
+4. **Implement zone map pruning** (2-3% for Q1, critical for Q6)
+5. **Remove Kahan summation** (5-10% speedup) - unnecessary precision overhead
+
+**Expected Combined Improvement**: 4-8x speedup → **70-140ms** (competitive with DuckDB's 87ms)
+
+Key insight: HDD workloads need **less parallelism** + **larger chunks** + **sequential I/O**, not more threads.

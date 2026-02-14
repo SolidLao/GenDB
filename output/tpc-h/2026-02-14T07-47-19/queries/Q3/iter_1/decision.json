@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 shows a massive 18x performance gap to DuckDB (1645 ms vs 92 ms) with clear, actionable bottlenecks. Root causes are suboptimal hash table data structures (std::unordered_map), missing SIMD vectorization on AVX-512 hardware, and poor cache locality. Multiple high-impact, low-risk optimizations are available—compact hash tables (20-30% improvement), SIMD vectorization (30-40%), and prefetching (10-15%)—all targeting different bottlenecks and complementary. With 2 iterations remaining and positive trajectory opportunity, aggressive optimization is justified.",
+  "selected_recommendations": [0, 1, 3],
+  "focus_areas": [
+    "Replace std::unordered_map with compact hash table (Swiss Table or Robin Hood hashing) for 2-4x lookup speedup in hot lineitem loop",
+    "Implement SIMD vectorization for filtering and revenue computation using AVX-512 (8-way parallel processing)",
+    "Add prefetching and madvise hints for sequential lineitem column scans"
+  ],
+  "strategy_notes": "Target 40-60% overall improvement by attacking three orthogonal bottlenecks simultaneously: (1) data structure efficiency (compact hash table with SIMD-accelerated lookups), (2) vectorized arithmetic (SIMD revenue computation), (3) cache efficiency (prefetching ahead in column scans). The lineitem scan (60M rows) is the critical path; optimizations here provide multiplicative benefit. Leverage AVX-512 and 32-core parallelism (already present, morsel-driven) to close the DuckDB gap. Expected outcome: ~800-1000 ms, narrowing gap to 8-10x DuckDB. Iteration 2 can address remaining optimizations (index-based range skipping, predicate reordering) if needed.",
+  "notes": "Do NOT attempt all 7 recommendations at once. Focus on compact hash tables (priority 1, low risk, high impact), SIMD (priority 2, medium risk but well-scoped to inner loop), and prefetching (priority 4, low risk, orthogonal to first two). These are complementary and can be integrated together. Avoid priority 5-7 in this iteration unless time permits; they are secondary to the hot-path optimizations."
+}

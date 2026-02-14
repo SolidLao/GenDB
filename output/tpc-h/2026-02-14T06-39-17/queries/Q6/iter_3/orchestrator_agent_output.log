@@ -1,0 +1,22 @@
+## Summary
+
+**Decision: STOP optimization for Q6**
+
+**Rationale:**
+1. **No iterations remaining** (budget exhausted: 0/3)
+2. **Iteration 2 failed catastrophically**: 
+   - 40x performance regression (29.3 ms → 1162 ms)
+   - Correctness loss (0.158% error in aggregate result)
+   - Root causes: Flawed SIMD mask blending (bitwise AND on IEEE754 doubles) and array copying overhead eliminating mmap zero-copy benefit
+
+3. **Iteration 1 baseline is acceptable**:
+   - 29.3 ms execution time
+   - Exact correctness (revenue = 1230113636.0101)
+   - Only 1.5x slower than DuckDB (19.3 ms)
+   - 81x faster than PostgreSQL (2377 ms)
+
+4. **Risk assessment**: 
+   - Further optimization attempts carry high failure risk with no budget for recovery
+   - Aggressive SIMD refactoring requires extreme care; the last attempt corrupted both performance and correctness
+
+**Recommendation**: Revert to iteration 1's simpler, proven approach. The code is correct and performs reasonably—the optimization attempt was too ambitious and poorly executed.

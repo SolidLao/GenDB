@@ -1,0 +1,35 @@
+Perfect! Now let me print a brief summary:
+
+## Analysis Summary for Q6 Iteration 2
+
+**Status**: FAIL (correctness bug) ❌
+
+**Key Findings**:
+1. **CRITICAL BUG**: Wrong results - revenue is 1230136229.36 instead of 1230113636.01 (off by +22593.35)
+   - **Same error as iteration 1** - semantic bug persists in SIMD implementation
+   - Root cause: `revenue_acc` register not reset after horizontal reduction (line 241)
+   - Stale values from early-exit iterations accumulate across blocks
+
+2. **Performance**: Excellent (despite wrong results)
+   - Total time: 18.1ms (13.5x improvement from iter 1's 244.9ms)
+   - Within 10% of DuckDB's target (20ms)
+   - Zone maps highly effective (84.7% block skip rate)
+   - Scan dominates: 12.2ms (67.4% of total)
+
+3. **Root Cause Analysis**:
+   - SIMD loop initializes `revenue_acc` once (line 187)
+   - Early exits (lines 201-203, 215-217) leave partial computations in `revenue_acc`
+   - Horizontal reduction adds to `local_revenue` but doesn't reset `revenue_acc`
+   - Stale values accumulate over 92 active blocks → +22593.35 error
+
+**Critical Fix** (iteration 3):
+- Add `revenue_acc = _mm256_setzero_pd();` after line 241 to reset accumulator between blocks
+- Risk: LOW (one-line change)
+
+**Performance Optimizations** (after correctness fix):
+1. **AVX-512 upgrade** (priority 1): 1.5-2x SIMD speedup → 6-8ms scan time
+2. **Software prefetching** (priority 2): Hide I/O latency → 10-15% reduction
+3. **OpenMP threading** (priority 4): Lower overhead → 5-10% improvement
+4. **Early termination** (priority 5): Exploit sorted data → marginal gain
+
+**Target**: Fix correctness in iter 3, then optimize to 10-12ms total (beating DuckDB's 20ms).

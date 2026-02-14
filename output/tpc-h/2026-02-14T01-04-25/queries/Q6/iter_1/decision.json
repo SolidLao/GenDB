@@ -1,0 +1,17 @@
+{
+  "action": "optimize",
+  "reasoning": "Q6 iteration 0 crashed with a segmentation fault due to a critical buffer overflow in delta decoding logic. The morsel-local `shipdate_decoded` array uses incorrect indexing (absolute offsets instead of relative), causing out-of-bounds access. This is a correctness blocker that must be fixed first. After fixing the crash, we can pursue performance optimizations to close the gap with DuckDB's 19.3ms baseline.",
+  "selected_recommendations": [
+    0,
+    1,
+    2
+  ],
+  "focus_areas": [
+    "Fix buffer overflow in delta decoding (CRITICAL)",
+    "Implement single-pass decode + parallel filter approach",
+    "SIMD vectorization of filter predicates after crash fix",
+    "Cache-aware prefetching for column data"
+  ],
+  "strategy_notes": "This iteration focuses entirely on CORRECTNESS FIRST. The critical fix involves replacing the buggy morsel-local delta decoding (lines 127-152) with a two-phase approach: (1) Decode the entire l_shipdate column once with a single-threaded pass using cumulative sum semantics, storing results in a shared vector. This overhead is ~50ms and is paid once. (2) Parallelize the filtering phase across morsels using the pre-decoded shipdate values. This eliminates the out-of-bounds access and semantic error. After confirming the crash is fixed and results are correct, iteration 2 can pursue performance optimizations: SIMD vectorization of filters (expected 10-15% improvement), prefetching (5-10%), and branch-free filtering (3-7%). Target execution time after fixes: 30-50ms to compete with DuckDB baseline of 19.3ms.",
+  "notes": "Critical fix MUST be applied before any performance optimizations. The evaluation clearly identifies the root cause: incorrect buffer management and indexing in morsel-driven delta decoding. The recommended approach (Approach A: Separate decode + filter phases) is simple, correct, and performant. After this fix passes validation in iteration 1, we have 2 remaining iterations (iterations 2-3) to pursue incremental performance improvements."
+}

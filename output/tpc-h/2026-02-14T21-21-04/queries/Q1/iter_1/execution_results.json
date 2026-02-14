@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] decode: 0.1 ms\n[TIMING] scan_filter: 100.8 ms\n[TIMING] aggregation: 0.0 ms\n[TIMING] sort: 0.0 ms\n[TIMING] output: 0.2 ms\n[TIMING] total: 153.9 ms\nQuery returned 4 rows\n",
+    "stderr": "",
+    "duration_ms": 159
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"3 row(s) differ\",\n      \"sample_mismatches\": [\n        {\n          \"row\": 0,\n          \"expected\": [\n            \"A\",\n            \"F\",\n            \"377518399.00\",\n            \"566065727797.25\",\n            \"537759104278.07\",\n            \"559276670892.12\",\n            \"25.50\",\n            \"38237.15\",\n            \"0.05\",\n            \"14804077.00\"\n          ],\n          \"actual\": [\n            \"A\",\n            \"F\",\n            \"377518399.00\",\n            \"566065727797.25\",\n            \"537759043706.13\",\n            \"559276544192.44\",\n            \"25.50\",\n            \"38237.15\",\n            \"0.05\",\n            \"14804077.00\"\n          ]\n        },\n        {\n          \"row\": 1,\n          \"expected\": [\n            \"N\",\n            \"F\",\n            \"9851614.00\",\n            \"14767438399.17\",\n            \"14028805792.21\",\n            \"14590490998.37\",\n            \"25.52\",\n            \"38257.81\",\n            \"0.05\",\n            \"385998.00\"\n          ],\n          \"actual\": [\n            \"N\",\n            \"F\",\n            \"9851614.00\",\n            \"14767438399.17\",\n            \"14028804214.75\",\n            \"14590487697.26\",\n            \"25.52\",\n            \"38257.81\",\n            \"0.05\",\n            \"385998.00\"\n          ]\n        },\n        {\n          \"row\": 2,\n          \"expected\": [\n            \"N\",\n            \"O\",\n            \"743124873.00\",\n            \"1114302286901.88\",\n            \"1058580922144.96\",\n            \"1100937000170.59\",\n            \"25.50\",\n            \"38233.90\",\n            \"0.05\",\n            \"29144351.00\"\n          ],\n          \"actual\": [\n            \"N\",\n            \"O\",\n            \"743124873.00\",\n            \"1114302286901.88\",\n            \"1058580802883.22\",\n            \"1100936750695.12\",\n            \"25.50\",\n            \"38233.90\",\n            \"0.05\",\n            \"29144351.00\"\n          ]\n        }\n      ]\n    },\n    \"Q3\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    },\n    \"Q6\": {\n      \"match\": false,\n      \"error\": \"actual file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "decode": 0.1,
+    "scan_filter": 100.8,
+    "aggregation": 0,
+    "sort": 0,
+    "output": 0.2,
+    "total": 153.9
+  },
+  "timing_ms": 153.9
+}

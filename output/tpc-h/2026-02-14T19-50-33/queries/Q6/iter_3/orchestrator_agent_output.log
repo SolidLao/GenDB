@@ -1,0 +1,23 @@
+## Summary
+
+**Q6 Iteration 3 Decision: OPTIMIZE (Final Iteration with Critical Fix)**
+
+I've made the decision to apply a **critical correctness fix** for Q6's final iteration:
+
+### Problem
+- Q6 has been failing validation across iterations 1-2 with **identical error**: revenue off by +22593.35
+- Root cause identified: SIMD `revenue_acc` accumulator is never reset between blocks, causing stale values to corrupt results
+- Current performance is excellent (18.1ms), but correctness blocks any victory claim
+
+### Solution
+- **Apply critical fix:** Reset `revenue_acc = _mm256_setzero_pd()` after the horizontal reduction (line 241)
+- **Low risk:** Single-line change that directly addresses the identified bug
+- **Expected outcome:** Correct results (1230113636.01) at 18.1ms performance
+
+### Rationale
+- This is iteration **3/3** (final iteration, remaining budget = 0)
+- Correctness must be fixed to claim any success
+- Performance is already competitive with DuckDB, so no additional optimizations are needed
+- The identical error across two iterations confirms the bug; the fix targets the root cause directly
+
+**Output:** `/home/jl4492/GenDB/output/tpc-h/2026-02-14T19-50-33/queries/Q6/iter_3/decision.json` written with action=optimize, critical fix selected, and detailed strategy notes for the Query Optimizer.

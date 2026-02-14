@@ -1,0 +1,108 @@
+{
+  "evaluation": {
+    "overall_status": "fail",
+    "compile": {
+      "status": "pass",
+      "output": "Successfully compiled with g++ -O3 -march=native -std=c++17 -Wall -lpthread (56KB binary)"
+    },
+    "run": {
+      "status": "fail",
+      "output": "Query did not complete within 30 seconds. Expected: 386ms baseline. Expected: 100-150ms with optimizations (per optimizer log). Process hung, likely due to infinite loop in hash table probing."
+    },
+    "validation": {
+      "status": "fail",
+      "comparison_result": "No results file generated - query did not complete execution"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null
+    },
+    "query_results": {
+      "Q3": {
+        "status": "timeout",
+        "num_rows": null,
+        "timing_ms": null,
+        "notes": "Query timeout after 30+ seconds (expected 100-150ms). Process killed due to hang."
+      }
+    }
+  },
+  "iteration": 1,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": "timeout (>30000ms)",
+        "status": "crash",
+        "bottleneck": "Infinite loop in hash table probing due to distance field overflow",
+        "root_cause": "The CompactHashTable and CompactBoolHashTable use uint8_t for the distance-from-ideal-bucket (DIB) tracking. When probing beyond 255 positions in the hash table, the distance counter wraps from 255 to 0, causing the termination condition (distance > table[idx].distance) to fail. This creates an infinite loop when hash collisions force probing more than 255 positions. The code can reach this state easily with 1.5M+ entries in hash tables with ~1M-2M capacity, causing ~75% load factor and heavy clustering."
+      }
+    },
+    "overall": "Critical implementation bug prevents execution. The iteration attempted to fix delta encoding and add morsel-driven parallelism, but introduced a fatal flaw in the robin hood hash table implementation. The uint8_t distance field cannot track probing distances beyond 255, causing infinite loops under high-cardinality insertions."
+  },
+  "critical_fixes": [
+    {
+      "target": "ALL",
+      "issue": "CRASH: Infinite loop in hash table DIB (distance-from-ideal-bucket) probing when distance exceeds 255",
+      "fix": "Change uint8_t distance field to uint16_t (or use modular distance tracking). In CompactHashTable and CompactBoolHashTable, change line 44 from 'uint8_t distance;' to 'uint16_t distance;' and similarly on line 137. This allows probing up to 65535 positions without wrapping.",
+      "description": "The CompactHashTable (lines 40-130) and CompactBoolHashTable (lines 133-207) use uint8_t for tracking probe distance. When more than 255 consecutive probes are needed (due to hash collisions from high cardinality data like 1.5M+ orders or 5M+ aggregation groups), the distance counter wraps to 0, breaking the probe termination condition (distance > table[idx].distance) on line 99/117/182. This causes an infinite loop. With load factor 0.75 and millions of entries, cluster formation is inevitable. Fix: change to uint16_t, which supports up to 65K probes (sufficient for practical hash tables up to 10B entries).",
+      "bottleneck_category": "semantic",
+      "risk": "low"
+    },
+    {
+      "target": "ALL",
+      "issue": "CRASH: Similar uint8_t overflow issue in CompactBoolHashTable distance tracking",
+      "fix": "Change line 137 from 'uint8_t distance = 0;' to 'uint16_t distance = 0;' in the Entry struct of CompactBoolHashTable",
+      "description": "Same overflow issue as CompactHashTable. The distance field in CompactBoolHashTable::Entry (line 137) also uses uint8_t, causing infinite loops in the insert() and contains() methods when probing exceeds 255 positions.",
+      "bottleneck_category": "semantic",
+      "risk": "low"
+    }
+  ],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Verify Delta Decoding Correctness",
+      "description": "After fixing the hash table crash, verify that delta decoding (lines 245-261 for o_orderdate and l_shipdate) produces correct absolute dates. The optimizer log indicates this was intended as a critical correctness fix. Check that filtering on decoded dates (line 278 using orderdate_cutoff=9204, line 327 using shipdate_cutoff=9204) correctly filters for dates before/after 1995-03-15. Verify output rows against ground truth.",
+      "expected_improvement": "Correctness fix only (no speedup). Ensures results match expected output.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Parallel Morsel-Driven Aggregation (Already Implemented)",
+      "description": "The code already implements morsel-driven parallelism (lines 306-343) with 64 threads and 100K-row morsels. This distributes lineitem scanning across cores with thread-local aggregation tables to avoid synchronization overhead. Expected to achieve 6-8x speedup on 64-core system. Verify that thread creation overhead and local aggregation merging (lines 351-356) does not exceed gains. Monitor: measure per-thread cache locality, check for work imbalance (some threads finishing early).",
+      "expected_improvement": "6-8x speedup from parallelism on 64 cores vs. single-threaded baseline. With proper execution: ~50-60ms total (current buggy attempt timeouts at 30s+).",
+      "risk": "low"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Optimize Aggregation Hash Table Sizing",
+      "description": "The CompactHashTable for aggregation (line 307) is pre-sized to 1.5M capacity, targeting ~5M aggregation groups (from workload analysis). With load factor 0.75, this allows ~1.125M entries comfortably. However, the uint8_t distance field overflow happens at 256 probes regardless of size. After fixing to uint16_t, monitor probe depth distribution to ensure average probe length stays <10. If average probe length exceeds 20, increase initial capacity (e.g., 3M) to reduce clustering. Expected improvement: near-O(1) lookup/insert after fix.",
+      "expected_improvement": "Once uint16_t fix applied: O(1) aggregation operations instead of O(n) due to clustering. ~1-2ms aggregation phase.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "Optimize AggKey Hash Function",
+      "description": "The AggKey hash function (lines 294-302) combines orderkey, shippriority, and orderdate via bitwise operations. Current implementation: 1) hash orderkey+shippriority, 2) XOR with orderdate. This is weak because orderdate contribution is limited. Proposed: use multiply-and-shift (FNV-1a style) to mix all three fields more thoroughly. Replace lines 295-301 with proper three-way mixing: compute hash((orderkey << 16) | shippriority), then MurmurHash-mix with orderdate. This reduces collisions in the 5M-group aggregation table. Expected: faster merging and lower probe depths.",
+      "expected_improvement": "Reduce hash collisions in aggregation table from ~20% to <5%, improving insert/merge performance by ~10-15%.",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Use Zone Maps for Early Shipdate Filtering",
+      "description": "The storage design includes zone maps (lineitem.l_shipdate.zmap on 100K-row blocks) for the frequently-filtered l_shipdate column. Current code does not exploit these. Add zone map loading and checks in the morsel loop (before line 323) to skip entire blocks where min_date <= shipdate_cutoff (9204). This reduces lineitem scans from 60M to ~49M rows (estimated 82% selectivity on l_shipdate > 1995-03-15). Expected: reduce L1/L2 cache misses on column loads and improve memory bandwidth utilization.",
+      "expected_improvement": "~18% reduction in lineitem.l_extendedprice and l_discount loads (avoid reading/processing ~11M filtered-out rows). Estimated 15-20ms savings on I/O-bound phase.",
+      "risk": "medium"
+    }
+  ],
+  "summary": "Q3 Iteration 1 FAILED due to infinite loop bug in hash table implementation. The robin hood hash tables (CompactHashTable and CompactBoolHashTable) use uint8_t for distance tracking, which wraps at 256, causing infinite loops when probing beyond 255 positions. This is triggered by high-cardinality data (1.5M+ orders, 5M+ aggregation groups). The iteration intended to fix delta encoding bugs and add morsel-driven parallelism, both of which are good optimizations, but the hash table implementation is broken and prevents any execution. IMMEDIATE ACTION: Change uint8_t distance to uint16_t in both hash table classes (4 lines, ~2 minute fix). Once fixed, expect correctness (delta decoding) and 6-8x speedup (parallelism) relative to baseline, targeting ~50-100ms total execution (vs 386ms baseline, vs 77-112ms DuckDB)."
+}

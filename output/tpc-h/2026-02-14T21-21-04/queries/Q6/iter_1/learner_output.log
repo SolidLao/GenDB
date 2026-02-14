@@ -1,0 +1,29 @@
+## Summary
+
+**Q6 Iteration 1 Analysis Complete**
+
+### Critical Issue Found ❌
+The query **fails validation** - returns `0.00` instead of expected `1230113636.01`
+
+**Root Cause**: Incorrect decimal scale factor handling
+- Both `l_extendedprice` and `l_discount` are stored as `int64_t * 100`
+- Multiplication yields value scaled by `100 × 100 = 10,000`
+- Code divides by 100 during summation (lines 196, 223) + 100 at output (line 266) = **wrong**
+- Should divide by 10,000 once, not 100 twice
+
+**Secondary Issue**: Using `MADV_RANDOM` on HDD system
+- HDD sequential reads are 100× faster than random seeks
+- Data is sorted by `l_shipdate`, access is sequential within date ranges
+- `MADV_RANDOM` disables readahead, hurting performance
+
+### Performance Potential (after fixing correctness)
+Current: 6.6ms (but wrong result)
+Target: DuckDB = 19.3ms
+
+**Top optimizations identified**:
+1. **Block-level I/O** (io_bound): Skip reading 67% of non-qualifying blocks → 30-50% I/O reduction
+2. **AVX-512 SIMD** (cpu_bound): Hardware supports it, double the SIMD width → 20-25% speedup
+3. **Multi-column zone maps** (filter): Use discount + quantity zone maps too → 10-15% fewer blocks
+4. **Branch-free filtering** (cpu_bound): Eliminate branch mispredictions → 5-10% speedup
+
+**Evaluation written to**: `/home/jl4492/GenDB/output/tpc-h/2026-02-14T21-21-04/queries/Q6/iter_1/evaluation.json`

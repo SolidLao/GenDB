@@ -1,0 +1,40 @@
+Perfect! Now let me print a concise summary:
+
+---
+
+## **Q3 Iteration 0 - Evaluation & Analysis Summary**
+
+### **Evaluation Results**
+✅ **Compilation**: Pass  
+✅ **Execution**: Pass (1645 ms average, stable across 3 runs: 1581-1700 ms)  
+✅ **Correctness**: Pass (10 rows returned, all match ground truth)  
+⚠️ **Profiling**: No perf data available (not in environment)
+
+### **Performance Context**
+- **Current**: 1645 ms (GenDB Q3)
+- **Target (DuckDB)**: 91.7 ms (~18x faster)
+- **Reference (PostgreSQL)**: 5483.8 ms (~3.3x slower)
+- **Gap Analysis**: GenDB is competitive with PostgreSQL but significantly behind DuckDB
+
+### **Root Causes**
+1. **Data Structures** (Priority 1): `std::unordered_map` is cache-unfriendly; causes 2-5x slower hash lookups than compact alternatives
+2. **CPU Underutilization** (Priority 2): No SIMD vectorization despite AVX-512 support; filtering and arithmetic done scalar
+3. **I/O Inefficiency** (Priority 4): Missing prefetch and madvise hints; sequential scan of 60M lineitem rows suffers cache misses
+4. **Join/Filter Strategy** (Priorities 3, 6, 7): Suboptimal predicate ordering; not using sorted indexes to skip non-matching ranges
+
+### **Top Optimizations (7 recommended)**
+1. **Compact Hash Tables** (2-4x speedup) - Replace std::unordered_map with Swiss Table/Robin Hood
+2. **SIMD Vectorization** (3-5x speedup) - AVX-512 filtering and arithmetic in hot loop
+3. **Join Reordering** (5-10% improvement) - Filter orders by date before lineitem join
+4. **Prefetching** (10-15% improvement) - madvise hints + manual prefetch for sequential scan
+5. **Hash Table Pre-sizing** (5-10% improvement) - Reserve capacity based on cardinality estimates
+6. **Index-Based Range Skipping** (5-15% improvement) - Binary search on o_orderdate to skip non-matching orders
+7. **Predicate Reordering** (5-10% improvement) - Branch prediction optimization
+
+### **Expected Cumulative Impact**
+Combined optimizations could achieve **50% reduction** (from 1645 ms to ~800 ms), narrowing DuckDB gap from 18x to 9x. Focus priorities: #1 (low-risk, high-impact), #2 (medium-risk, high-impact), #4 (low-risk, steady improvement).
+
+---
+
+**Evaluation complete. JSON written to:**  
+`/home/jl4492/GenDB/output/tpc-h/2026-02-14T07-47-19/queries/Q3/iter_0/evaluation.json`

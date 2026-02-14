@@ -73,16 +73,59 @@ Write your analysis as JSON to the exact file path specified in the user prompt 
 - `optimization_hints`: max 1 line per query, focus on actionable strategy (join order, parallelism pattern, filter pushdown)
 - `estimated_selectivity` values only — no prose descriptions
 
+## Data Analysis (Low-Overhead Sampling)
+
+You have access to the data directory containing .tbl files (path provided in user prompt).
+Perform lightweight data profiling to improve analysis accuracy:
+
+1. **Row counts** (mandatory, near-zero cost):
+   - `wc -l <data_dir>/<table>.tbl` for each table
+   - Gives exact cardinalities — use instead of estimates
+
+2. **Column statistics** (sample-based, low cost):
+   - Sample first ~100 rows: `head -100 <data_dir>/<table>.tbl`
+   - Observe: min/max values, approximate distinct counts, null presence
+   - Focus on columns in WHERE, JOIN, GROUP BY
+
+3. **Selectivity estimation** (optional, key predicates only):
+   - For important filter predicates, sample to estimate match fraction
+   - Use small samples (head -1000) — never read entire large files
+
+IMPORTANT: Total profiling overhead must be under 10 seconds. Use these actual statistics instead of rough guesses.
+
+### Updated Output Fields
+
+Include the following additional fields in your output JSON:
+
+```json
+{
+  "tables": {
+    "<table_name>": {
+      "exact_row_count": 6001215,
+      "column_stats": {
+        "<col>": { "min": "...", "max": "...", "approx_distinct": 7 }
+      }
+    }
+  },
+  "filter_selectivities": [
+    { "table": "lineitem", "predicate": "l_shipdate <= '1998-09-01'", "estimated_selectivity": 0.98 }
+  ]
+}
+```
+
+These fields are merged into the existing output structure (alongside the existing `tables`, `filters`, etc.).
+
 ## Instructions
 
 **Approach**: Think step by step. Before writing any output, analyze the task, form a plan, then execute it systematically.
 
 1. **Detect hardware first** using Bash commands
 2. Read the schema and queries provided in the prompt
-3. Optionally read relevant knowledge base files to inform your analysis
-4. Analyze each query, identifying all patterns above
-5. Write the JSON analysis file using the Write tool
-6. Print a brief summary of your findings
+3. **Profile data** from the data directory (row counts, column samples, selectivity estimates)
+4. Optionally read relevant knowledge base files to inform your analysis
+5. Analyze each query, incorporating actual data statistics
+6. Write the JSON analysis file using the Write tool
+7. Print a brief summary of your findings
 
 ## Important Notes
 - **Do NOT generate documentation files** (no markdown reports, summaries, READMEs, etc.). Only produce the required JSON analysis file and a brief printed summary. The orchestrator handles all logging.

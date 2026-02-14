@@ -1,0 +1,46 @@
+Perfect! I've completed the evaluation and analysis. Let me provide a summary:
+
+## Summary: Q1 Iteration 2 Evaluation
+
+### ❌ **CRITICAL: Performance Regression**
+- **Iteration 1**: 55.47 ms ✓
+- **Iteration 2**: 132.97 ms ✗
+- **Regression**: 2.4x slowdown
+
+### ✅ **Correctness: PASSED**
+- 4 rows returned, matches ground truth perfectly
+- Validation successful
+
+### 🔍 **Root Cause Analysis**
+
+The optimization attempt in iteration 2 **backfired**:
+
+1. **Two-Pass Processing**: Introduced `std::vector<size_t> matching_indices` that collects filtered row indices first, then processes them
+   - Creates ~320K allocations across 64 threads × 5000+ morsels
+   - Memory allocation overhead: 10-100 cycles per allocation
+   - Lost cache locality: indirect vector access vs sequential scan
+
+2. **Inefficient SIMD Filter**: The `simd_filter_dates()` function:
+   - Computes SIMD comparisons for 8 dates (lines 135-138)
+   - Then validates each element INDIVIDUALLY in scalar code (lines 141-148)
+   - Defeats the purpose of SIMD acceleration
+   - 2.4x slower than the simple inline scalar filter in iteration 1
+
+3. **Lost Inline Filtering**: Iteration 1's tight, sequential loop was superior:
+   - Direct scan + filter + aggregate in single pass
+   - Better branch prediction (94% selectivity is consistent)
+   - Zero allocation overhead
+   - Cache-friendly streaming access
+
+### 🛠️ **Critical Fix**
+
+**Revert to iteration 1's approach** — the inline scalar filtering is superior to the SIMD attempt. Keep the good part from iteration 2 (lock-free per-thread aggregation), but discard the vector-based SIMD filtering.
+
+### 📊 **Performance Target**
+- DuckDB: ~86 ms (current best)
+- GenDB iter 1: 55 ms (already beating DuckDB!)
+- GenDB iter 2: 133 ms (regression)
+
+**Goal for iter 3**: Restore to 55 ms baseline, then apply minor optimizations (loop unroll to 8, prefetching) to reach <50 ms.
+
+The evaluation JSON has been written to `/home/jl4492/GenDB/output/tpc-h/2026-02-14T04-04-14/queries/Q1/iter_2/evaluation.json` with detailed recommendations.

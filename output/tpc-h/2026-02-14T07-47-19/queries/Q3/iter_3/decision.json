@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Q3 has improved 16.4% in iteration 2 (755ms → 631ms) and remains significantly slower than DuckDB (6.9x gap). With 0 iterations remaining, this is the final optimization opportunity. Low-risk Priority 1-2 optimizations (offline zone maps, Top-K heap) are straightforward wins; medium-risk Priority 3 (radix partitioning) offers substantial upside. Combined potential: 350-450ms execution time. Aggressive pursuit of remaining budget is warranted.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Move zone map computation offline to eliminate per-query ~100-150ms overhead",
+    "Replace full sort with Top-K heap for final aggregates to save 20-30ms on sort phase",
+    "Implement radix partitioning for lineitem-orders join to improve cache locality and reduce probe overhead by 150-300ms"
+  ],
+  "strategy_notes": "This is iteration 3/3—the final budget. Execute Priority 1 (offline zone maps, low-risk 1.15-1.25x), Priority 2 (Top-K heap, low-risk 1.05-1.10x), and Priority 3 (radix partitioning, medium-risk 1.2-1.4x) simultaneously. Focus on cache locality improvements (radix partitioning) and eliminating redundant computation (offline zone maps). The primary bottleneck remains I/O-bound HDD access; parallelism gains are bounded by memory bandwidth. Combined optimizations target secondary bottlenecks: zone map overhead, sort inefficiency, and join cache misses. Expected result: 350-450ms, reducing DuckDB gap from 6.9x to ~4x. If successful, this represents solid optimization trajectory for a complex 3-way join workload on HDD storage.",
+  "notes": "Priority 5 (SIMD vectorization) deliberately excluded due to high risk in final iteration—zone map offline + radix partitioning + Top-K heap offer better risk/reward. Avoid attempting SIMD unless first three succeed; if radix partitioning fails, fall back to Priority 2 + offline zone maps as conservative finish."
+}

@@ -1,0 +1,18 @@
+## Summary
+
+**Decision: OPTIMIZE (Iteration 1/3)**
+
+**Q6 Status:**
+- **Current Performance**: 12,496 ms (627x slower than DuckDB)
+- **Action**: Implement the critical fix (binary columnar storage)
+- **Expected Outcome**: 400-600x speedup → ~20-30ms, competitive with DuckDB
+
+**Critical Issue Identified:**
+The generated C++ code has a **semantic bug**: it parses CSV text from disk instead of using GenDB's prepared binary `.col` files. This is not a performance tuning problem — it's a code-generation issue that must be fixed before any meaningful optimization.
+
+**Iteration 1 Strategy:**
+- **Select**: Critical fix #0 (switch to mmap-based binary columnar storage)
+- **Skip**: All performance optimizations (zone maps, SIMD, predicate reordering) — correctness first
+- **After fix**: Profile the code to identify remaining bottlenecks and prioritize next iteration's optimizations
+
+**Remaining Budget**: 2 iterations — plenty for sequential optimization (zone maps → predicate reordering → SIMD, as profiling indicates)

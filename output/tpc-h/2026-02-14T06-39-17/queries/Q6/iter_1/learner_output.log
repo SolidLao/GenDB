@@ -1,0 +1,59 @@
+Excellent! Now let me print a brief summary:
+
+---
+
+## **Q6 Evaluation Summary (Iteration 1)**
+
+### **Phase A: Evaluation** ✅
+- **Compilation**: ✅ PASS
+- **Execution**: ✅ PASS (29.4 ms average, 10-run consistency: 28-30 ms)
+- **Correctness**: ✅ PASS (Result: 1230113636.0101 matches ground truth)
+- **Profiling**: Available metrics show tight timing variance (<2.5% std dev), indicating excellent cache locality
+
+### **Performance Context**
+| System | Q6 Time | Relative to GenDB |
+|--------|---------|------------------|
+| GenDB (current) | 29.3 ms | — |
+| DuckDB | 19.3 ms | 1.5× slower |
+| PostgreSQL | 2377 ms | **81× faster** |
+
+GenDB is **81× faster than PostgreSQL** but **1.5× slower than DuckDB** — the gap is algorithmic/implementation, not fundamental.
+
+---
+
+### **Phase B: Analysis**
+
+**Root Cause of Performance Gap:**
+The code extracts AVX2 mask results to scalar arrays (`_mm256_storeu_pd()`) then branches on each element. This incurs:
+- **Store-to-load latency stalls** (~7-10 CPU cycles per extraction)
+- **Branch misprediction** on unpredictable mask bits
+- **15M mask extractions** (60M rows ÷ 4-element batch) = ~4-6 ms overhead
+
+**Current Strengths:**
+✅ Parallelism: 64-thread morsel-driven on 32 cores  
+✅ SIMD: AVX2 vectorization for batch filtering  
+✅ Storage: mmap with MADV_SEQUENTIAL optimized for HDD  
+✅ Predicate Ordering: Correct (discount 9% selectivity first)  
+✅ CPU-bound (not I/O-bound)
+
+---
+
+### **Top Optimization (34% Performance Gap Closure)**
+
+**Priority 1: SIMD Mask Integration**
+- Replace scalar extraction + branching with direct SIMD blending/gathering
+- Expected improvement: **14-20% (4-6 ms)** → achieves **~24 ms**
+- Risk: Medium (SIMD intrinsics require careful implementation)
+
+**Secondary Optimizations:**
+- Priority 2: Horizontal SIMD aggregation (register-level, 6-10% gain)
+- Priority 3: Prefetching hot columns (3-5% gain)
+- Priority 4: Tail loop vectorization (3-4% gain)
+- Priority 5: Reduce thread count for better L3 sharing (2-3% gain)
+
+**Realistic Target:** 21-23 ms (93% of DuckDB speed) with combined optimizations.
+
+---
+
+**Evaluation JSON written to:**  
+`/home/jl4492/GenDB/output/tpc-h/2026-02-14T06-39-17/queries/Q6/iter_1/evaluation.json`

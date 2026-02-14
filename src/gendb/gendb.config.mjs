@@ -10,4 +10,12 @@ export const defaults = {
   model: "haiku",
   optimizationTarget: "execution_time",
   maxConcurrentQueries: 5,
+  agentModels: {
+    workload_analyzer: "haiku",
+    storage_designer: "sonnet",
+    orchestrator_agent: "haiku",
+    code_generator: "sonnet",
+    query_optimizer: "sonnet",
+    learner: "sonnet",
+  },
 };

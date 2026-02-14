@@ -1,0 +1,17 @@
+{
+  "action": "optimize",
+  "reasoning": "Q6 is a highly selective single-table scan (2.4% selectivity) on 60M rows with simple aggregation. GenDB is already competitive with DuckDB (29.3ms vs 20ms). With 64 cores + AVX512, aggressive parallelism and SIMD filtering should close the gap. Zone maps on sorted l_shipdate enable efficient block skipping.",
+  "selected_recommendations": [],
+  "focus_areas": [
+    "Maximize parallelism: 64 threads with morsel-driven execution (~10K rows/morsel)",
+    "Zone map exploitation: skip blocks outside date/quantity/discount ranges using existing indexes",
+    "SIMD filtering: AVX512 vectorized predicate evaluation for l_shipdate, l_discount, l_quantity",
+    "Partial aggregation: thread-local accumulation, then lock-free merge to minimize contention",
+    "Column pruning: only load l_shipdate, l_discount, l_quantity, l_extendedprice (4/16 columns)",
+    "Predicate ordering: evaluate cheapest predicates first (l_quantity < 24, then l_discount BETWEEN, then l_shipdate range)",
+    "Branch-free filtering: use bitmasks to reduce branch mispredictions in tight scan loop",
+    "Memory access pattern: sequential scan within blocks for cache efficiency"
+  ],
+  "strategy_notes": "This is a best-case workload for columnar + parallel execution. The 2.4% selectivity means ~1.4M qualifying rows out of 60M. With zone maps on sorted l_shipdate data, expect to skip 80%+ of blocks immediately. The Query Optimizer should generate a parallel scan with: (1) Zone map pruning at block level, (2) SIMD-accelerated predicate evaluation within blocks, (3) Thread-local partial sums, (4) Final merge. Target near-linear speedup with 64 cores. The storage is already optimized (columnar, sorted, zone maps) so focus on execution efficiency.",
+  "notes": "GenDB is already very close to DuckDB (29.3ms vs 20ms target). The goal is to match or beat DuckDB by exploiting the 64-core hardware and AVX512. Be aggressive with parallelism and SIMD — this query has no complex logic to worry about."
+}

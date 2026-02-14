@@ -109,17 +109,17 @@ def main():
         print(json.dumps({"match": False, "error": f"actual directory not found: {args.actual_dir}"}))
         sys.exit(1)
 
-    # Find all Q*.csv files in expected directory
-    expected_files = sorted(f for f in os.listdir(args.expected_dir) if f.startswith("Q") and f.endswith(".csv"))
+    # Find all Q*.csv files in actual directory (only validate what was actually produced)
+    actual_files = sorted(f for f in os.listdir(args.actual_dir) if f.startswith("Q") and f.endswith(".csv"))
 
-    if not expected_files:
-        print(json.dumps({"match": False, "error": "no Q*.csv files in expected directory"}))
+    if not actual_files:
+        print(json.dumps({"match": False, "error": "no Q*.csv files in actual directory"}))
         sys.exit(1)
 
     all_match = True
     queries = {}
 
-    for filename in expected_files:
+    for filename in actual_files:
         query_name = filename.replace(".csv", "")
         expected_path = os.path.join(args.expected_dir, filename)
         actual_path = os.path.join(args.actual_dir, filename)

@@ -1,0 +1,12 @@
+{
+  "action": "optimize",
+  "reasoning": "Iteration 0 produced completely wrong results (9.3x slower than benchmark, wrong dates and revenue values). Three critical semantic bugs in date handling must be fixed immediately: (1) epoch-day interpretation vs year-only, (2) dateFormatToString() hardcoded output, (3) filter predicate constants. Correctness is priority 1; performance optimizations will follow in iteration 2 after fixes are validated.",
+  "selected_recommendations": [0, 1, 2],
+  "focus_areas": [
+    "Fix epoch-day date conversion logic in date comparison (lines 118-126)",
+    "Implement proper dateFormatToString() for YYYY-MM-DD epoch-day conversion",
+    "Update filter predicate constants to correct epoch day values (~9204 for 1995-03-15)"
+  ],
+  "strategy_notes": "ALL THREE critical fixes are semantic/correctness issues and MUST be selected per priority rules. Do not proceed with performance optimizations until validation confirms correct results. The fixes target: (1) Replace year-based date interpretation (1996, 1994) with proper epoch-day constants (~9204). (2) Implement calendrical algorithm for epoch-day to YYYY-MM-DD conversion (reference storage/encoding-handling.md). (3) Ensure filter logic uses correct epoch-day comparisons for o_orderdate < 9204 and l_shipdate > 9204. After correctness is verified, iteration 2 will optimize performance via thread parallelism (32 cores, 8-15x target) and join/aggregation improvements.",
+  "notes": "Iteration 1 focus: correctness only. Validation will confirm 10 rows with correct revenue values and Feb/Mar 1995 dates before iteration 2 performance work."
+}

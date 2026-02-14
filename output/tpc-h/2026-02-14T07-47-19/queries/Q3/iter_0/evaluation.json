@@ -1,0 +1,110 @@
+{
+  "evaluation": {
+    "overall_status": "pass",
+    "compile": {
+      "status": "pass",
+      "output": "Compilation successful with -O3 -march=native -std=c++17 -Wall -lpthread"
+    },
+    "run": {
+      "status": "pass",
+      "output": "Query executed successfully. Query returned 10 rows, Execution time: 1645 ms (average of 3 runs: 1581-1700 ms)"
+    },
+    "validation": {
+      "status": "pass",
+      "comparison_result": "10 rows returned, all results match ground truth (Q3: rows_expected=10, rows_actual=10, match=true)"
+    },
+    "profiling": {
+      "available": false,
+      "cache_misses": null,
+      "ipc": null,
+      "notes": "perf not available in environment; analysis based on code review and mental profiling"
+    },
+    "query_results": {
+      "Q3": {
+        "status": "pass",
+        "num_rows": 10,
+        "timing_ms": 1645,
+        "notes": "Baseline timing stable across 3 runs (1581-1700 ms). Results are correct. Hardware: 32 cores (64 threads), 44MB L3 cache, AVX-512 support available but not utilized."
+      }
+    }
+  },
+  "iteration": 0,
+  "analysis": {
+    "per_query": {
+      "Q3": {
+        "current_time_ms": 1645,
+        "status": "pass",
+        "bottleneck": "Multi-dimensional: (1) I/O bound—scanning 60M lineitem rows with 4 columns; (2) CPU bound—unoptimized hash lookups in hot loop (filtered_orders map lookup per row); (3) Data structure—std::unordered_map with per-entry allocations; (4) Missing SIMD—no vectorized predicate filtering or arithmetic.",
+        "root_cause": "The current implementation uses sequential scan + filter + hash lookups without SIMD acceleration, compact data structures, or prefetching. While parallelization is present (morsel-driven), the per-thread work includes suboptimal hash table operations and cache-unfriendly memory access patterns. The join strategy (filter customer → build orders map → probe with lineitem) is reasonable but could be reordered to filter orders by date first, producing a smaller intermediate result before lineitem join."
+      }
+    },
+    "overall": "Q3 passes correctness validation but executes ~18x slower than DuckDB (1645 ms vs 92 ms) and ~3.3x faster than PostgreSQL (1645 ms vs 5484 ms). The code demonstrates good parallelism fundamentals (64 threads, morsel-driven) but loses performance to: (1) suboptimal hash table implementations (std::unordered_map), (2) lack of SIMD vectorization for filtering/aggregation, (3) missing prefetching and cache optimization, (4) potential join ordering suboptimality. The hardware provides 32 cores (64 threads), L3 cache (44 MB), and AVX-512 support—opportunities exist to exploit all three."
+  },
+  "critical_fixes": [],
+  "performance_optimizations": [
+    {
+      "priority": 1,
+      "target": "Q3",
+      "bottleneck_category": "data_structures",
+      "technique": "Replace std::unordered_map with compact hash table (Swiss Table or Robin Hood hashing)",
+      "description": "The current code uses std::unordered_set<int32_t> for filtered_customers and std::unordered_map<int32_t, std::pair<int32_t, int32_t>> for filtered_orders. These use per-entry allocations and have poor cache locality. Replace with a compact open-addressing hash table (e.g., abseil::flat_hash_map or a custom Swiss Table implementation using SIMD probing). This reduces memory fragmentation, improves cache efficiency, and speeds up lookups by 2-5x. The GroupKey hash table (for aggregation) should also use compact hashing with optimized GroupKeyHash computation.",
+      "expected_improvement": "2-4x speedup in hash lookup operations. Estimated overall improvement: 20-30% (from 1645 ms to ~1200-1300 ms), as hash lookups during the lineitem scan are in the hot path.",
+      "risk": "low"
+    },
+    {
+      "priority": 2,
+      "target": "Q3",
+      "bottleneck_category": "cpu_bound",
+      "technique": "SIMD vectorization for predicate filtering and arithmetic",
+      "description": "The inner loop (lines 194-212) evaluates predicates sequentially: orderkey lookup, shipdate range check, and revenue computation. Vectorize this using AVX-512 (or AVX2 as fallback given the hardware supports both). Process 8 shipdate values in parallel with vector comparison, broadcast shipdate cutoff, and compute revenue (extprice * (1 - discount)) vectorized. This requires restructuring the inner loop to process morsels in SIMD batches rather than scalar. Expected 4-6x throughput improvement on the arithmetic intensive part. Code pattern: load 8 shipdate values, compare all 8 against cutoff in one instruction, compute 8 revenues in parallel.",
+      "expected_improvement": "3-5x speedup on filtering and aggregation arithmetic. Estimated overall improvement: 30-40% (from 1645 ms to ~1000-1150 ms), as SIMD exploits the 64-thread hardware and AVX-512.",
+      "risk": "medium"
+    },
+    {
+      "priority": 3,
+      "target": "Q3",
+      "bottleneck_category": "join",
+      "technique": "Optimize join order: filter orders by orderdate before joining with lineitem",
+      "description": "Current order: (1) filter customer by c_mktsegment → 300K rows, (2) filter orders by custkey AND orderdate → estimate ~100K rows (based on 33% selectivity), (3) filter lineitem by orderkey (join probe). Alternative: (1) filter orders by orderdate first (~33% of 15M = 5M rows), (2) filter by custkey from filtered_customers (20% of 300K = 60K rows result), (3) join with lineitem using filtered_orders keyset. The alternative reduces the intermediate orders result earlier. However, the bottleneck is primarily lineitem (60M rows), so the join reordering impact is modest. The real win is ensuring the filtered_orders lookup in the lineitem loop is as fast as possible (hence priority 1 for compact hash tables).",
+      "expected_improvement": "5-10% speedup from reduced memory footprint of filtered_orders if join cardinality estimates are conservative. Estimated improvement: 50-100 ms (from 1645 ms to ~1550 ms). This is secondary to data structure optimization.",
+      "risk": "low"
+    },
+    {
+      "priority": 4,
+      "target": "Q3",
+      "bottleneck_category": "io_bound",
+      "technique": "Add madvise hints and prefetching for sequential lineitem scan",
+      "description": "The lineitem scan (lines 194-212) accesses l_orderkey, l_shipdate, l_extendedprice, l_discount sequentially. Add madvise(MADV_SEQUENTIAL) on the mmap'd regions to hint to the OS for readahead. Additionally, implement manual prefetch using __builtin_prefetch() or _mm_prefetch() for columns ahead of the current iteration. This reduces cache misses on the sequential scan. Prefetch l_shipdate and l_extendedprice at least 16 rows ahead to hide memory latency.",
+      "expected_improvement": "10-15% speedup from reduced cache misses on the sequential scan. Estimated improvement: 150-250 ms (from 1645 ms to ~1400-1500 ms). Impact depends on actual L3 cache misses, which are hard to profile without perf.",
+      "risk": "low"
+    },
+    {
+      "priority": 5,
+      "target": "Q3",
+      "bottleneck_category": "aggregation",
+      "technique": "Pre-size hash tables based on cardinality estimates and tune load factor",
+      "description": "The GroupKey hash table (line 179) is default-initialized without pre-sizing. Based on workload analysis, estimated_groups for Q3 is ~200K. Pre-allocate the aggregates hash table to accommodate 200K entries at 75% load factor (~267K capacity) to minimize rehashing during insertion. Similarly, pre-size the aggregates vectors in thread_aggregates (line 187) to avoid dynamic resizing. Use reserve() to pre-allocate capacity without changing size.",
+      "expected_improvement": "5-10% speedup from reduced hash table resizing/rehashing. Estimated improvement: 75-150 ms (from 1645 ms to ~1500-1570 ms).",
+      "risk": "low"
+    },
+    {
+      "priority": 6,
+      "target": "Q3",
+      "bottleneck_category": "index",
+      "technique": "Use sorted index on o_orderdate to skip non-matching date ranges in orders filtering",
+      "description": "The storage design includes a sorted index on orders_o_orderdate. The current code linearly scans orders (line 154) and checks each against the date cutoff. Instead, use binary search on the sorted o_orderdate column to find the range [orderdate_min, cutoff_date) and only iterate over matching rows. This reduces the orders scan from 15M to ~5M rows (33% selectivity). Implementation: binary search on o_orderdate to find start/end indices, then iterate only that range when building filtered_orders.",
+      "expected_improvement": "5-15% speedup from skipping ~67% of orders rows. Estimated improvement: 75-250 ms (from 1645 ms to ~1400-1570 ms). Impact is modest because the lineitem scan (60M rows) dominates, but this reduces memory footprint and unlocks further optimizations.",
+      "risk": "low"
+    },
+    {
+      "priority": 7,
+      "target": "Q3",
+      "bottleneck_category": "filter",
+      "technique": "Branch prediction optimization: reorder predicates to filter early and avoid stalls",
+      "description": "In the lineitem loop (lines 195-212), the predicate order is: (1) orderkey lookup in map (expensive, unpredictable branch), (2) shipdate comparison. Reorder to: (1) shipdate range check first (fast, predictable), (2) orderkey lookup only if shipdate matches. This reduces the number of expensive hash lookups when shipdate is out of range. Additionally, use branchless filtering (e.g., mask-based filtering) if the selectivity allows.",
+      "expected_improvement": "5-10% speedup from improved branch prediction. Estimated improvement: 75-150 ms (from 1645 ms to ~1495-1570 ms).",
+      "risk": "low"
+    }
+  ],
+  "summary": "Q3 iteration 0 passes correctness validation and demonstrates solid parallelism fundamentals with 64 threads and morsel-driven execution. However, execution time (1645 ms) is 18x slower than DuckDB (92 ms), indicating significant optimization opportunities. Root causes: (1) suboptimal hash table data structures (std::unordered_map), (2) lack of SIMD vectorization for filtering/aggregation, (3) missing cache optimization (prefetching, madvise), (4) sequential/unpredictable hash lookups in the hot lineitem scan loop. Recommendations prioritize quick wins: (1) compact hash tables (Swiss Table/Robin Hood) for 2-4x lookup speedup, (2) SIMD vectorization for 3-5x arithmetic throughput, (3) prefetching for cache efficiency, (4) index-based range skipping on o_orderdate. Combined, these optimizations could target 50% reduction (to ~800 ms) in the next iteration, narrowing the DuckDB gap. The hardware (32 cores, AVX-512, 44 MB L3 cache) is under-utilized; focus on exploiting parallelism and SIMD in the hot loop."
+}
