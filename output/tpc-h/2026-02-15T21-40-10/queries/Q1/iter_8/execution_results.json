@@ -1,0 +1,41 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.11 ms\n[TIMING] load_zonemap: 0.02 ms\n[TIMING] load_columns: 0.06 ms\n[TIMING] scan_filter: 3.31 ms\n[TIMING] merge: 0.01 ms\n[TIMING] sort: 0.00 ms\n[TIMING] output: 0.97 ms\n[TIMING] total: 3.67 ms\n",
+    "stderr": "",
+    "duration_ms": 11
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 4, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 4, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.11,
+    "load_zonemap": 0.02,
+    "load_columns": 0.06,
+    "scan_filter": 3.31,
+    "merge": 0.01,
+    "sort": 0,
+    "output": 0.97,
+    "total": 3.67
+  },
+  "timing_ms": 2.7
+}

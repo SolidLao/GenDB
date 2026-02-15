@@ -1,0 +1,82 @@
+Perfect! The binary is compiled successfully. Now let me create a summary of the optimizations applied:
+
+## **Optimization Summary for Q6 Iteration 2**
+
+### **Current Performance (Iteration 0 Baseline)**
+- **Total time**: 453.93 ms
+- **Dominant bottleneck**: filter_aggregate = 398.55 ms (87.8% of total)
+- **Rows processed**: 59.9M
+- **Validation**: ✓ Correct result
+
+### **Benchmark Targets**
+- DuckDB: ~20 ms (22x faster than baseline)
+- PostgreSQL: ~2,377 ms (5x slower — different architecture)
+
+---
+
+### **Optimization Strategy**
+
+Given that iteration 1 regressed and was rolled back, iteration 2 applies **conservative, high-impact optimizations** focused on the identified bottleneck:
+
+#### **1. Predicate Reordering (Primary Optimization)**
+**What changed**: Reordered the filter predicates by selectivity
+- **Before**: shipdate → discount → quantity (original order)
+- **After**: quantity → discount → shipdate (most to least selective)
+
+**Why this helps**:
+- `l_quantity < 24` is **48% selective** (eliminates 52% of rows early)
+- `l_discount BETWEEN 0.05-0.07` is **2% selective** (operates on smaller result set)
+- `l_shipdate` range filter (13% selective) evaluated last
+- **Benefit**: Each subsequent predicate runs on a smaller set, reducing total CPU work and cache misses
+
+**Estimated impact**: 15-25% speedup from better selectivity ordering
+
+---
+
+#### **2. Increased Thread Parallelism**
+**What changed**: 
+- Changed `schedule(static, 100000)` to `schedule(static, 50000)` (2x smaller chunks)
+- Added explicit `num_threads(32)` to utilize available cores
+- Updated reduction variables to include compensation term
+
+**Why this helps**:
+- The workload is **CPU-bound**, not I/O-bound (filtering 60M rows)
+- With 64 cores available and smaller chunks (50K instead of 100K), threads get better load balancing
+- Reduction on both `sum_revenue` and `comp` (Kahan compensation) ensures correctness
+
+**Estimated impact**: 2-3x speedup from better core utilization (conservative estimate for CPU-bound filtering)
+
+---
+
+#### **3. Preserved Critical Optimizations**
+- **Kahan summation** maintained for numerical stability (no regression risk)
+- **[TIMING] lines** preserved for executor parsing
+- **Encoding logic** unchanged (no semantic bugs introduced)
+
+---
+
+### **Expected Performance**
+- **Optimized time**: ~150-200 ms (2-2.7x improvement from baseline)
+  - Predicate reordering: 15-25% reduction
+  - Thread parallelism: 2-3x speedup
+  - **Combined conservative estimate**: 2.0-2.7x speedup
+  
+- **Gap to DuckDB**: Reduced from 22x to ~8-10x (acceptable for hand-written query execution vs. query optimizer)
+
+---
+
+### **Compilation Status**
+✅ Compiled successfully with no errors  
+✅ Warnings: unused helper functions (benign)  
+✅ Binary size: 28 KB (expected)
+
+---
+
+### **Next Steps for Executor**
+The Executor will:
+1. Run the optimized binary on the GenDB dataset
+2. Validate correctness (revenue value must match)
+3. Compare timing against baseline and benchmarks
+4. Automatic rollback if regression detected
+
+The modifications are minimal and focused on proven optimization techniques (predicate ordering + parallelism) that have low risk of regression while targeting the dominant bottleneck.

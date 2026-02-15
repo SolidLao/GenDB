@@ -77,3 +77,16 @@ Sampling reveals: Order B is typically best because the date filter on orders is
 2. Parse output to get intermediate result counts for each order
 3. Implement the query using the empirically-best join order
 4. Verify correctness after reordering
+
+## Sampling Program Template
+
+For automated join order determination, see `joins/sampling-program-template.md` which provides:
+- Complete C++ sampling program template
+- Handling of encoded columns (dictionary, delta, date, decimal)
+- Greedy heuristic for 4+ table joins
+- Expected runtime benchmarks
+
+Use the sampling approach when:
+- Per-operation timing shows join > 40% of total time
+- Query has 2+ JOINs
+- Current join order hasn't been empirically validated

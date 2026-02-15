@@ -1,0 +1,27 @@
+## Summary
+
+✅ **Workload analysis complete.** JSON written to `/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/workload_analysis.json`
+
+### Key Findings
+
+**Hardware Profile:**
+- 64 CPU cores (AVX512 + AVX2 support)
+- 44 MiB L3 cache (shared), 376 GiB RAM
+- HDD storage
+
+**Table Profiles:**
+- **lineitem** (59.9M rows): Fact table, 3 queries access it, hot columns: shipdate, discount, quantity, extended price
+- **orders** (15M rows): Fact table with order metadata
+- **customer** (1.5M rows): Dimension with 5 market segments
+
+**Dominant Patterns:**
+1. **Q1** (Pricing Summary): Full scan lineitem → 6-group aggregation (extremely low-cardinality). Selective date filter (92% pass-through).
+2. **Q3** (Shipping Priority): 3-way join (customer→orders→lineitem) with date range filters + Top-K sort. Customer segment filter is most selective (20%).
+3. **Q6** (Revenue Forecast): Single-table lineitem scan with tight compound predicates (discount BETWEEN + quantity < 24). No joins or aggregation.
+
+**Optimization Priorities:**
+1. **Parallelize lineitem scans** across 64 cores using morsel-driven execution (partition into 1024-row chunks per thread)
+2. **Zone-map indexes** on `l_shipdate` for block-level skip (TPC-H dates span 7 years, enabling ~80-90% block skipping)
+3. **Partial aggregation** for Q1 (reduce 60M rows to 6 groups early, before global merge)
+4. **Hash semi-join** optimization in Q3 (filter orders on small customer subset before lineitem probe)
+5. **SIMD vectorization** for filtering (discount BETWEEN 0.05-0.07 is selectivity 4%, good for AVX2 branch prediction)

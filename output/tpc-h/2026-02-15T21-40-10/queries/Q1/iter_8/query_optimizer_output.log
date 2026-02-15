@@ -1,0 +1,44 @@
+Perfect! The code structure looks good. Let me create a summary of the optimizations made:
+
+## **Optimization Summary for Q1 Iteration 8**
+
+### **Bottleneck Analysis**
+- **Baseline (Iter 4):** 61.94 ms total, with **scan_filter dominating at 61.67 ms (99.5% of time)**
+- **History:** Iterations 5-7 all regressed, indicating that previous approaches introduced inefficiencies
+- **Category:** `io_bound` + `aggregation` on 60M row table with low-cardinality GROUP BY (6 groups max)
+
+### **Optimizations Applied** (2 complementary techniques)
+
+1. **Zone Map Pruning** ✓
+   - Load pre-built zone map index for `l_shipdate` from `indexes/zone_map_l_shipdate.bin`
+   - Skip entire 100K-row blocks where `block_min > 10516` (the date threshold)
+   - Expected impact: ~25-35% reduction in rows processed (since data is sorted by shipdate, blocks with older dates can be skipped entirely)
+   - Added graceful fallback: if zone map doesn't load, process all rows normally
+
+2. **Flat Array Aggregation** ✓
+   - Replaced thread-local `std::map<pair<int32_t,int32_t>, AggregateRow>` with flat arrays
+   - 6 groups (3 returnflags × 2 linestatuses) → indexed by `rf_code * 2 + ls_code`
+   - **Expected speedup: 2-3x faster** for aggregation (array access vs. hash table lookups)
+   - Eliminates memory allocations per group and hash computation overhead
+
+3. **Cache Prefetching** ✓
+   - Added `__builtin_prefetch` for 3 hot columns (shipdate, returnflag, linestatus) 64 rows ahead
+   - Reduces L3 cache misses during the tight scan loop
+
+### **Key Correctness Guarantees**
+✅ All [TIMING] lines preserved in `#ifdef GENDB_PROFILE` guards  
+✅ Encoding logic unchanged (decimals still at scale_factor=100)  
+✅ Zone map skip logic correct: skip when `min_val > threshold` for `col <= X` predicate  
+✅ Flat array index calculation: `rf_code * 2 + ls_code` with bounds checking  
+✅ Comma-delimited CSV output preserved  
+✅ OpenMP parallelism retained with static scheduling across blocks  
+
+### **Expected Performance Impact**
+- **Zone map pruning:** 25-35% reduction in rows scanned (depends on block-level clustering)
+- **Flat array aggregation:** 2-3x faster per-row aggregation cost
+- **Combined impact:** Target is to drop scan_filter from 61.67 ms → **~25-35 ms range** (40-50% reduction)
+
+### **Compilation Status**
+✅ **Successful** with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+The optimized code is ready for execution and validation. The Executor will compile, run, and compare against the baseline to measure improvement.

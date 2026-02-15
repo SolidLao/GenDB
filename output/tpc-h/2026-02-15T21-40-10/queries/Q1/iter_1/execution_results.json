@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.10 ms\n[TIMING] load_columns: 0.07 ms\n[TIMING] scan_filter: 8.37 ms\n[TIMING] merge: 0.00 ms\n[TIMING] sort: 0.00 ms\n[TIMING] output: 0.10 ms\n[TIMING] total: 8.89 ms\n",
+    "stderr": "",
+    "duration_ms": 15
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 4, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 4, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.1,
+    "load_columns": 0.07,
+    "scan_filter": 8.37,
+    "merge": 0,
+    "sort": 0,
+    "output": 0.1,
+    "total": 8.89
+  },
+  "timing_ms": 8.790000000000001
+}

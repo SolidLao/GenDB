@@ -1,0 +1,47 @@
+## Optimization Summary for Q3 - Iteration 3
+
+### Bottleneck Analysis
+From iteration 2 execution results:
+- **filter_lineitem_join: 75.71 ms (27.2%)** — Full scan of 60M lineitem rows
+- **build_order_map: 65.46 ms (23.5%)** — Building hash table for order key lookup
+- **filter_orders: 46.94 ms (16.8%)** — Filtering 15M orders
+- **Total: 278.38 ms**
+
+### Optimizations Applied
+
+**1. Zone Map Pruning on `lineitem_shipdate` (High Impact)**
+   - Loaded pre-built zone map file: `lineitem_shipdate_zonemap.bin`
+   - Added block-level skip logic: Skip blocks where `max_val <= 9204` (all rows violate `l_shipdate > threshold`)
+   - Processing blocks in parallel with `#pragma omp parallel for schedule(dynamic, 1)`
+   - **Expected Impact**: ~40-50% reduction in filter_lineitem_join time (from 75.71ms → ~38-45ms)
+   - Reason: Lineitem is sorted by l_shipdate; many blocks at start will have max_val ≤ 9204 and can be skipped entirely
+
+**2. Optimized Zone Map Loading**
+   - Implemented `ZoneMapEntry` struct matching the binary layout
+   - Added `load_zonemap()` function with proper error handling and mmap-based zero-copy loading
+   - Graceful fallback to full scan if zone map unavailable
+
+### Code Changes
+- **Added structures**: `MultiValueHashIndex`, `ZoneMapEntry`, `load_zonemap()`
+- **Modified filter_lineitem_join**: 
+  - Loads zone map and processes blocks in parallel
+  - Skips blocks where all rows fail predicate
+  - Maintains thread-local result vectors for efficiency
+  - Falls back to original logic if zone map unavailable
+- **Preserved all [TIMING] lines** inside `#ifdef GENDB_PROFILE` guards
+- **No encoding logic changes** — data interpretation remains identical
+- **Maintained CSV output format** with comma delimiters
+
+### Expected Performance Impact
+- **Baseline (Iter 2)**: 278.38 ms
+- **Estimated (Iter 3)**: **~190-210 ms** (32-40% improvement)
+  - Zone map pruning: -40 ms (from 75.71 → ~35 ms)
+  - Parallel zone processing: -10 to -30 ms depending on cache efficiency
+
+### Compilation
+✅ **SUCCESS** — Binary compiled with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`
+- No errors
+- Existing snprintf warning preserved (not a correctness issue)
+- Binary size: 69K
+
+The code is ready for execution validation by the Executor.

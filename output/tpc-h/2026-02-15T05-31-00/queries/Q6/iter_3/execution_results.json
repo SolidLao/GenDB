@@ -1,0 +1,49 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_mmap: 0.06 ms\n[METADATA CHECK] Q6: num_rows=59986052, l_shipdate size=239944208, l_discount size=479888416, l_quantity size=479888416, l_extendedprice size=479888416\n[TIMING] scan_filter: 31.36 ms\n[TIMING] aggregation: 0.00 ms\n[TIMING] total: 31.48 ms\n[TIMING] output: 0.17 ms\nQ6 executed successfully. Result written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T05-31-00/queries/Q6/iter_3/results/Q6.csv\n",
+    "stderr": "",
+    "duration_ms": 64
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": false,\n      \"error\": \"1 row(s) differ\",\n      \"sample_mismatches\": [\n        {\n          \"row\": 0,\n          \"expected\": [\n            \"1230113636.01\"\n          ],\n          \"actual\": [\n            \"1230136229.36\"\n          ]\n        }\n      ]\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q6": {
+          "rows_expected": 1,
+          "rows_actual": 1,
+          "match": false,
+          "error": "1 row(s) differ",
+          "sample_mismatches": [
+            {
+              "row": 0,
+              "expected": [
+                "1230113636.01"
+              ],
+              "actual": [
+                "1230136229.36"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_mmap": 0.06,
+    "scan_filter": 31.36,
+    "aggregation": 0,
+    "total": 31.48,
+    "output": 0.17
+  },
+  "timing_ms": 31.31
+}

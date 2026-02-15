@@ -1,0 +1,51 @@
+Perfect! We're in the right directory. Now let me create a summary of the optimizations:
+
+## Summary of Q3 Iteration 5 Optimizations
+
+**Bottleneck Identified:**
+- `join_and_aggregate: 459.29 ms (66% of total time)` from iteration 4
+- This operation includes: lineitem scan (60M rows) + join with filtered_orders + aggregation into result groups
+
+**Optimizations Applied:**
+
+### 1. **Combined Aggregation Structure (High Impact)**
+- **Problem**: The previous code used TWO separate hash tables:
+  - `local_revenues[tid]`: key → revenue (int64_t)
+  - `local_metadata[tid]`: key → {o_orderdate, o_shippriority} 
+  - Resulted in duplicate hash lookups for same key
+  
+- **Solution**: Created a single `AggEntry` struct containing `{revenue, o_orderdate, o_shippriority}` and a single `CompactHashTable<uint64_t, AggEntry>` per thread
+  - Eliminates second hash lookup per row during aggregation
+  - Reduces memory allocation overhead
+  - Improves cache locality (smaller working set per thread)
+
+- **Expected Impact**: ~10-15% reduction in join_and_aggregate time
+  - Saves ~100M hash probes (60M lineitem rows × 2 lookups reduced to 1)
+  - Saves memory accesses and TLB misses
+
+### 2. **Improved Hash Table Pre-Sizing**
+- **Problem**: Conservative pre-allocation of thread-local tables (50K groups shared across 64 threads = 781 per thread)
+- **Solution**: Increased `expected_agg_groups` from 50K to 50K with better per-thread sizing: `expected_agg_groups / num_threads + 2000` (providing 2000 extra slots per thread for improved load factor)
+- **Expected Impact**: Slight reduction in hash collision overhead
+
+### 3. **Code Simplification**
+- Removed separate metadata merge loop, consolidating all aggregation operations into single pass
+- Reduced loop overhead and improved instruction cache usage
+
+**Code Changes:**
+- Lines 227-239: Added `AggEntry` struct combining revenue and metadata
+- Lines 418-478: Refactored aggregation to use single `CompactHashTable<uint64_t, AggEntry>`
+- Lines 510-513: Simplified result extraction using combined table
+
+**Expected Performance Gain:**
+- **Baseline (Iteration 4)**: 691.72 ms
+- **Target**: ~630-660 ms (5-10% improvement)
+  - Primary savings from eliminating duplicate hash lookups in hot join/aggregation loop
+
+**Validation:**
+- ✅ Compiles successfully with `-O3 -march=native -std=c++17 -fopenmp`
+- ✅ Preserves all [TIMING] instrumentation within `#ifdef GENDB_PROFILE` guards
+- ✅ Maintains encoding correctness (no changes to date/decimal handling)
+- ✅ Preserves output format (comma-delimited CSV with \r\n line endings)
+
+The Executor will now run the optimized code and validate correctness. The main optimization reduces memory traffic during the critical join_and_aggregate phase by consolidating metadata and revenue into a single hash table lookup per row.

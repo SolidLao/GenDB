@@ -1,0 +1,50 @@
+Excellent! The changes are in place. Let me provide a summary of what was fixed:
+
+## ✅ CORRECTNESS FIX SUMMARY
+
+### Problem Identified
+The code was producing **0 rows** instead of filtering correctly (expected 312K rows). The output was 0.0000 instead of 1230113636.0101.
+
+**Root Cause:** Incorrect discount scale factor in filter predicates and revenue calculation.
+
+### Bugs Fixed
+
+#### Bug 1: Discount Filter Predicates (Lines 141-142)
+**Before:**
+```cpp
+const int64_t DISCOUNT_MIN = 500;   // 0.05 * 10000 (WRONG!)
+const int64_t DISCOUNT_MAX = 700;   // 0.07 * 10000 (WRONG!)
+```
+
+**After:**
+```cpp
+const int64_t DISCOUNT_MIN = 5;   // 0.05 * 100 (CORRECT)
+const int64_t DISCOUNT_MAX = 7;   // 0.07 * 100 (CORRECT)
+```
+
+**Explanation:** The Storage Guide clearly states l_discount is scaled by **100**, not 10,000. The discount range is 0–10 (representing 0.00–0.10), not 0–1000.
+
+#### Bug 2: Revenue Calculation (Line 299)
+**Before:**
+```cpp
+double revenue_contribution = static_cast<double>(extendedprice[i]) *
+                             static_cast<double>(discount[i]) / 1000000.0;
+```
+
+**After:**
+```cpp
+double revenue_contribution = static_cast<double>(extendedprice[i]) *
+                             static_cast<double>(discount[i]) / 10000.0;
+```
+
+**Explanation:** Both extendedprice and discount are scaled by 100, so:
+- Revenue = (extendedprice / 100) × (discount / 100) = (extendedprice × discount) / 10000
+
+### Impact
+- **Before:** 0 rows passed the discount filter (expected = 0, actual = 1230113636.0101) ❌
+- **After:** Will correctly filter ~312K rows and compute revenue ≈ 1.23 trillion ✅
+
+### Compilation Status
+✅ **Compilation successful** at `/home/jl4492/GenDB/output/tpc-h/2026-02-15T08-20-59/queries/Q6/iter_2/q6`
+
+The Executor will now run the corrected binary and validate that it produces the expected result.

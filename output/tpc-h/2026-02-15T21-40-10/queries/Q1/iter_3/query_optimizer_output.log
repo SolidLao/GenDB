@@ -1,0 +1,35 @@
+Perfect. Now let me create a summary of the optimization applied:
+
+## Optimization Summary for Q1 Iteration 3
+
+### Changes Made:
+
+1. **Zone Map Pruning**: Implemented block-level pruning using pre-built zone map index on `l_shipdate` column
+   - Load zone map metadata from `indexes/zone_map_l_shipdate.bin`
+   - Parse header (num_blocks = 600) and ZoneMapEntry array (min_val, max_val per block)
+   - Skip entire blocks where `min_val > date_threshold` (10471) — fast pointer arithmetic, zero processing cost
+
+2. **Block-aware Scan**: Restructured main scan loop to iterate over 600 blocks (100K rows each) instead of 60M rows directly
+   - **Fast-path**: For blocks where `max_val <= date_threshold`, process all rows without per-row predicate check
+   - **Slow-path**: For partial blocks, check predicate per row (same as before)
+   - This reduces branch mispredictions in fast-path blocks
+
+3. **Fallback**: If zone map fails to load, gracefully fall back to full scan
+
+### Expected Impact:
+
+- **I/O reduction**: Skip blocks with all rows after date threshold (though data is already sorted by l_shipdate, so benefit depends on date distribution)
+- **Branch prediction improvement**: Fast-path blocks avoid per-row comparison, reducing pipeline stalls
+- **Cache coherency**: Block-level iteration improves spatial locality
+- **Optimization category**: Moved from failed "io_bound" (iters 1-2) to hybrid "zone-map pruning + cache efficiency"
+
+### Correctness Preservation:
+
+✅ All [TIMING] sections preserved within #ifdef GENDB_PROFILE guards  
+✅ Encoding logic unchanged (still 100-based decimals, int32 dates)  
+✅ Zone map skip logic correct: `if (zone.min_val > date_threshold) continue` for `col <= threshold`  
+✅ Aggregation accumulation identical (still thread-local, same merge)  
+✅ CSV output format unchanged (comma-delimited)  
+✅ Fallback scan logic identical to previous iteration
+
+The code compiles successfully with `-O3 -march=native -fopenmp`. The Executor will validate results and measure timing improvements.

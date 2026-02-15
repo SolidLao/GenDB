@@ -1,0 +1,58 @@
+Perfect! The code looks correct. Let me create a summary of the optimizations applied:
+
+## Optimization Summary for Q3 - Iteration 1
+
+### Performance Bottleneck Analysis
+From execution_results.json (iter_0):
+- **Total**: 2311.37 ms
+- **Orders filter**: 1095.07 ms (47%)
+- **Join & Aggregate**: 1154.66 ms (50%)
+- **Customer filter**: 44.63 ms
+- **Remaining**: 64.24 ms
+
+The bottleneck is the combination of filtering and join operations, which are heavily I/O and CPU-bound.
+
+### Optimizations Applied
+
+**1. Parallel Customer Filter (OpenMP)**
+- Converted sequential filter to `#pragma omp parallel for` with morsel-driven approach (100K rows per morsel)
+- Each thread maintains a local `unordered_set`, reducing contention
+- Merge phase combines all local results
+- Expected improvement: ~4-8x speedup on 64 cores for the filtering phase
+
+**2. Parallel Orders Filter (OpenMP)**
+- Same pattern: `#pragma omp parallel for` with 150K-row morsels
+- Thread-local `unordered_map<int32_t, pair<int32_t, int32_t>>` accumulation
+- Expected improvement: ~4-8x speedup for orders filtering
+
+**3. Parallel Lineitem Scan & Aggregation (OpenMP)**
+- Most critical optimization: hot loop over 59.9M rows
+- Each thread maintains thread-local:
+  - `unordered_map<uint64_t, int64_t>` for accumulated revenue
+  - `unordered_map<uint64_t, pair<int32_t, int32_t>>` for metadata
+- 500K-row morsels to balance cache efficiency and thread scheduling
+- Merge phase combines results with simple aggregation
+- Expected improvement: **~4-8x speedup** (lineitem scan dominates execution time)
+
+### Key Design Decisions
+
+1. **Thread-local accumulation over locks**: Avoids synchronization overhead in hot loops
+2. **Morsel-driven parallelism**: Fixed chunk sizes for good CPU cache utilization
+3. **Late merging**: Two-phase execution (parallel accumulate, then serial merge) minimizes synchronization
+4. **Preserved correctness**: All arithmetic logic and encoding handling unchanged; only parallelization added
+
+### Expected Overall Improvement
+
+The optimization focuses on the two dominant bottlenecks (orders_filter + join_and_aggregate = 2250ms of 2311ms total). With 64 cores and near-linear scaling for embarrassingly parallel operations:
+
+- **Baseline**: 2311 ms
+- **Expected**: ~300-500 ms (4-8x speedup across parallel components)
+- **Target (DuckDB Q3)**: 78-112 ms (higher target, but Q3 is compute-heavy and we're not OLAP-specialized)
+
+### Code Quality
+
+✓ All `[TIMING]` instrumentation preserved within `#ifdef GENDB_PROFILE` guards
+✓ All encoding logic unchanged
+✓ CSV output format unchanged (comma-delimited)
+✓ Validation logic preserved
+✓ Compiles successfully with `-O3 -march=native -fopenmp`

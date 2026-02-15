@@ -1,0 +1,58 @@
+[METADATA CHECK] Q6 Iteration 0
+================================
+
+STORAGE VERIFICATION:
+✓ l_shipdate.bin: 229 MB (int32_t, 59986052 rows)
+  Sample values: 9569, 9599, 9525, 9608 (all > 3000 = valid epoch days)
+  Date range: ~1992-1998 (matches TPC-H SF10)
+
+✓ l_discount.bin: 458 MB (int64_t, scale=100)
+  Sample values: 4, 9, 10, 7, 6, 1 (represent 0.04, 0.09, 0.10, 0.07, 0.06, 0.01)
+  Scale factor verified: 100 ✓
+
+✓ l_extendedprice.bin: 458 MB (int64_t, scale=100)
+  Contains scaled monetary values (stored as * 100)
+  
+✓ l_quantity.bin: 458 MB (int64_t, scale=100)
+  Contains scaled quantities
+
+ENCODING RULES APPLIED:
+✓ DATE (l_shipdate): 
+  - Converted date literals to epoch days
+  - 1994-01-01 → 8766 epoch days
+  - 1995-01-01 → 9131 epoch days
+  - Direct integer comparison: date_value >= lower AND date_value < upper
+
+✓ DECIMAL (l_discount, l_extendedprice, l_quantity):
+  - All stored as int64_t with scale_factor=100
+  - Comparison: scale literal to scaled int64_t
+    * discount: BETWEEN 0.05 AND 0.07 → BETWEEN 5 AND 7 (scaled)
+    * quantity: < 24 → < 2400 (scaled)
+  - Arithmetic: Decode to double (divide by scale), multiply, sum
+  - Output: Convert back to decimal string (%.4f precision)
+
+C++ SAFETY PATTERNS:
+✓ No SIMD (iteration 0 requirement)
+✓ No namespace std hash specialization
+✓ Kahan summation for floating-point reduction
+✓ Thread-safe parallel reduction (OpenMP)
+✓ Safe mmap pattern (stat, mmap, close, munmap)
+✓ No hardcoded file paths (uses gendb_dir parameter)
+
+QUERY LOGIC:
+✓ Filter predicates applied in order:
+  1. l_shipdate >= 1994-01-01 (estimated selectivity: 0.13)
+  2. l_shipdate < 1995-01-01 
+  3. l_discount BETWEEN 0.05 AND 0.07 (estimated selectivity: 0.02)
+  4. l_quantity < 24 (estimated selectivity: 0.48)
+
+✓ Aggregation: SUM(l_extendedprice * l_discount)
+  - Rows passing all filters: ~7.8M (from workload_analysis)
+  - Final rows in aggregate: Depends on combined selectivity
+
+CORRECTNESS VALIDATION:
+Ground truth:  revenue = 1230113636.0101
+Generated:     revenue = 1230113636.0101
+Status:        ✓ EXACT MATCH
+
+NO ERRORS DETECTED.

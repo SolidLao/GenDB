@@ -1,16 +1,20 @@
 /**
- * GenDB Orchestrator v12
+ * GenDB Orchestrator v16
  *
- * Two-phase agentic system with pipeline parallelism:
+ * Two-phase agentic system with notification-based execution queue:
  *   Phase 1 (Offline Data Storage Optimization):
- *     Workload Analyzer → Storage/Index Designer (design + ingest + build_indexes)
+ *     Workload Analyzer → Storage/Index Designer (design + ingest + build_indexes + per-query guides)
  *   Phase 2 (Online Per-Query Pipeline-Parallel Optimization):
- *     Iteration 0: Code Generators (parallel) → Executor (serial, fast) → Learner (parallel LLM)
- *     Iteration 1+: Pipeline-parallel per query:
- *       Orchestrator Agent → Query Optimizer → Executor (serial) → Learner (parallel)
+ *     Iteration 0: Code Generators (parallel) → Executor (serial via ExecutionQueue)
+ *     Iteration 1+: Per query (parallel):
+ *       shouldContinue() [programmatic] → Query Optimizer [LLM] → Executor → checkImprovement()
  *     → Final Assembly
  *
- * Features: Per-agent LLM model config, per-operation timing, pipeline parallelism
+ * v16 changes: Per-query storage guides from S/I Designer (exact binary format docs passed to
+ * CG/QO agents), dual-mode timing with #ifdef GENDB_PROFILE (stripped from final build),
+ * hardware_config in filtered query context.
+ *
+ * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
  *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>]
@@ -37,10 +41,8 @@ const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
 import { defaults } from "./gendb.config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
-import { config as learnerConfig } from "./agents/learner/index.mjs";
 import { config as queryOptimizerConfig } from "./agents/query-optimizer/index.mjs";
 import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
-import { config as orchestratorAgentConfig } from "./agents/orchestrator/index.mjs";
 import {
   createRunId,
   getWorkloadName,
@@ -264,6 +266,39 @@ async function copyDir(src, dest) {
   await cp(src, dest, { recursive: true });
 }
 
+/**
+ * Extract context relevant to a single query from full storage design and workload analysis.
+ * Filters to only the tables referenced in the query SQL.
+ */
+function extractQueryContext(query, storageDesign, workloadAnalysis) {
+  const sqlLower = query.sql.toLowerCase();
+  const allTables = Object.keys(storageDesign.tables || {});
+  const relevantTables = allTables.filter(t => sqlLower.includes(t.toLowerCase()));
+
+  const filteredStorage = {
+    persistent_storage: storageDesign.persistent_storage,
+    tables: {},
+    type_mappings: storageDesign.type_mappings,
+    date_encoding: storageDesign.date_encoding,
+    hardware_config: storageDesign.hardware_config,
+  };
+  for (const t of relevantTables) {
+    filteredStorage.tables[t] = storageDesign.tables[t];
+  }
+
+  const filteredWorkload = { tables: {} };
+  const waTables = workloadAnalysis.tables || {};
+  for (const t of relevantTables) {
+    if (waTables[t]) filteredWorkload.tables[t] = waTables[t];
+  }
+  const queries = workloadAnalysis.queries || workloadAnalysis.query_analysis || [];
+  const qArr = Array.isArray(queries) ? queries : Object.values(queries);
+  const qMatch = qArr.find(q => q.id === query.id || q.query_id === query.id);
+  if (qMatch) filteredWorkload.query = qMatch;
+
+  return { filteredStorage, filteredWorkload };
+}
+
 /** Format benchmark comparison results as a prompt section. */
 function formatBenchmarkContext(benchmarkResults) {
   if (!benchmarkResults) return "";
@@ -306,7 +341,46 @@ function parseQueryFile(queriesText) {
   return queries;
 }
 
-/** Simple semaphore for concurrency limiting. */
+// ---------------------------------------------------------------------------
+// ExecutionQueue: notification-based serial execution (replaces Semaphore)
+// ---------------------------------------------------------------------------
+
+/**
+ * Notification-based execution queue. Callers await a single promise;
+ * Node.js event loop handles notification when their turn arrives.
+ * Zero polling, zero token/resource consumption while waiting.
+ */
+class ExecutionQueue {
+  constructor() {
+    this.queue = [];
+    this.running = false;
+  }
+
+  requestExecution(queryId, executionFn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ queryId, executionFn, resolve, reject });
+      if (!this.running) this._processNext();
+    });
+  }
+
+  async _processNext() {
+    if (this.queue.length === 0) {
+      this.running = false;
+      return;
+    }
+    this.running = true;
+    const { queryId, executionFn, resolve, reject } = this.queue.shift();
+    try {
+      resolve(await executionFn());
+    } catch (err) {
+      reject(err);
+    } finally {
+      this._processNext();
+    }
+  }
+}
+
+/** Simple semaphore for concurrency limiting (used for parallel LLM calls). */
 class Semaphore {
   constructor(max) {
     this.max = max;
@@ -330,6 +404,55 @@ class Semaphore {
       this.queue.shift()();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Programmatic shouldContinue() (replaces Orchestrator Agent LLM)
+// ---------------------------------------------------------------------------
+
+function getBestBaselineTime(benchmarkResults, queryId) {
+  if (!benchmarkResults) return null;
+  let best = Infinity;
+  for (const [system, data] of Object.entries(benchmarkResults)) {
+    const qData = data?.queries?.[queryId] || data?.[queryId];
+    const time = qData?.time_ms || qData?.median_ms;
+    if (time && time < best) best = time;
+  }
+  return best === Infinity ? null : best;
+}
+
+function shouldContinue(queryId, history, benchmarkResults, execResults, iteration, maxIter) {
+  if (iteration > maxIter) return { action: 'stop', reason: 'Max iterations reached' };
+
+  // Never stop if results are still incorrect
+  if (execResults?.validation?.status === 'fail') {
+    return { action: 'continue', reason: 'Fix correctness first' };
+  }
+
+  const timing = execResults?.timing_ms;
+  if (timing && timing < 50) return { action: 'stop', reason: 'Already fast (<50ms)' };
+
+  // Already 1.2x faster than best baseline
+  if (benchmarkResults && timing) {
+    const best = getBestBaselineTime(benchmarkResults, queryId);
+    if (best && timing < best / 1.2) return { action: 'stop', reason: `1.2x faster than baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
+  }
+
+  return { action: 'continue', reason: 'Optimization potential remains' };
+}
+
+// ---------------------------------------------------------------------------
+// Execution improvement check (replaces evaluation.json-based check)
+// ---------------------------------------------------------------------------
+
+function checkExecutionImprovement(prevExec, newExec) {
+  // Reject if correctness regressed
+  if (prevExec?.validation?.status === 'pass' && newExec?.validation?.status === 'fail') return false;
+  // Accept if correctness improved
+  if (prevExec?.validation?.status !== 'pass' && newExec?.validation?.status === 'pass') return true;
+  // Compare timing
+  if (prevExec?.timing_ms && newExec?.timing_ms) return newExec.timing_ms < prevExec.timing_ms;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +561,13 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
   const generatedIngestDir = resolve(runDir, "generated_ingest");
   await mkdir(generatedIngestDir, { recursive: true });
 
+  // Create query_guides directory for per-query storage guides
+  const queryGuidesDir = resolve(runDir, "query_guides");
+  await mkdir(queryGuidesDir, { recursive: true });
+
+  // Parse queries so we can pass them to the designer
+  const parsedQueries = parseQueryFile(queries);
+
   const designerUserPrompt = [
     "Design the storage layout, generate ingestion + index building code, compile and run both.",
     "",
@@ -454,6 +584,14 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     schema.trim(),
     "```",
     "",
+    `## Queries in Workload`,
+    `The following queries will be optimized in Phase 2. Generate a per-query storage guide for each.`,
+    ...parsedQueries.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``),
+    ``,
+    `## Query Guides Output Directory`,
+    `Write per-query storage guides to: ${queryGuidesDir}`,
+    `Each file: <QUERY_ID>_storage_guide.md`,
+    ``,
     `## Data Directory (source .tbl files)`,
     `${args.dataDir}`,
     "",
@@ -469,6 +607,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     `3. Compile: cd ${generatedIngestDir} && make clean && make all`,
     `4. Run ingestion: cd ${generatedIngestDir} && ./ingest ${args.dataDir} ${args.gendbDir}`,
     `5. Run index building: cd ${generatedIngestDir} && ./build_indexes ${args.gendbDir}`,
+    `6. Generate per-query storage guides in: ${queryGuidesDir}`,
   ].join("\n");
 
   const sdResult = await runAgent(storageDesignerConfig.name, {
@@ -533,7 +672,7 @@ async function detectStorageIssues(parsedQueries, runDir) {
 /**
  * Re-invoke Storage/Index Designer with error context to fix ingestion bugs.
  */
-async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, detectedIssues) {
+async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, detectedIssues, parsedQueries) {
   console.log(`\n[Orchestrator] === RE-INGESTION: Fixing ${detectedIssues.length} storage issue(s) ===`);
 
   // Read previous design for reference
@@ -547,6 +686,7 @@ async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalys
 
   const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
   const generatedIngestDir = resolve(runDir, "generated_ingest");
+  const queryGuidesDir = resolve(runDir, "query_guides");
 
   const issuesSummary = detectedIssues.map(i =>
     `- ${i.queryId}: ${i.issue} — ${i.details}`
@@ -575,6 +715,14 @@ async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalys
     schema.trim(),
     "```",
     "",
+    `## Queries in Workload`,
+    `The following queries will be optimized in Phase 2. Generate a per-query storage guide for each.`,
+    ...(parsedQueries || []).map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``),
+    ``,
+    `## Query Guides Output Directory`,
+    `Write per-query storage guides to: ${queryGuidesDir}`,
+    `Each file: <QUERY_ID>_storage_guide.md`,
+    ``,
     `## Data Directory (source .tbl files)`,
     `${args.dataDir}`,
     "",
@@ -590,6 +738,7 @@ async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalys
     `3. Compile: cd ${generatedIngestDir} && make clean && make all`,
     `4. Run ingestion: cd ${generatedIngestDir} && ./ingest ${args.dataDir} ${args.gendbDir}`,
     `5. Run index building: cd ${generatedIngestDir} && ./build_indexes ${args.gendbDir}`,
+    `6. Generate per-query storage guides in: ${queryGuidesDir}`,
     "",
     `Pay special attention to the detected issues above. Verify that the fixes work by spot-checking the binary output.`,
   ].join("\n");
@@ -610,6 +759,7 @@ async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalys
 
   console.log(`[Orchestrator] Re-ingestion completed. Tables: ${Object.keys(design.tables || {}).length}`);
 }
+
 
 // ---------------------------------------------------------------------------
 // Phase 2: Online Per-Query Parallel Optimization
@@ -642,61 +792,22 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
   const groundTruthDir = resolve(BENCHMARKS_DIR, defaults.targetBenchmark, "query_results");
   const hasGroundTruth = existsSync(groundTruthDir);
 
-  // Execution semaphore (max=1): ensures only one Executor runs at a time
-  // to avoid CPU/memory contention from concurrent multi-threaded query execution.
-  // Only the Executor (compile+run+validate) needs this — LLM agents run freely in parallel.
-  const executionSemaphore = new Semaphore(1);
+  // ExecutionQueue: ensures only one Executor runs at a time (notification-based, zero polling)
+  const executionQueue = new ExecutionQueue();
 
-  // --- Iteration 0: Batch Orchestrator Agent → parallel Code Generators → Storage Checkpoint → serialized Learners ---
-  console.log(`\n[Orchestrator] === Iteration 0: Batch Orchestrator Agent for all queries ===`);
-  const batchDecisionPath = resolve(runDir, "batch_decision_iter0.json");
-  const orchAgentSystemPrompt = await readFile(orchestratorAgentConfig.promptPath, "utf-8");
+  // Concurrency limiter for parallel LLM calls
+  const semaphore = new Semaphore(args.maxConcurrent);
 
-  const allQueriesSql = parsedQueries.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``).join("\n\n");
-  const batchOrchUserPrompt = [
-    `Provide strategic guidance for initial code generation of ALL queries (iteration 0, batch mode).`,
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    "",
-    "## Input Files",
-    `- Workload analysis: ${workloadAnalysisPath}`,
-    `- Storage design: ${storageDesignPath}`,
-    "",
-    `## Queries to implement`,
-    allQueriesSql,
-    "",
-    formatBenchmarkContext(args.benchmarkResults),
-    "",
-    `This is the FIRST iteration — there is no Learner evaluation yet.`,
-    `Use BATCH MODE: provide strategies for ALL ${parsedQueries.length} queries in a single JSON file.`,
-    `Analyze the workload and provide per-query strategic guidance for the Query Optimizer to generate high-quality initial code.`,
-    `Focus on: parallelism strategy, join approach, filter optimization, data access patterns.`,
-    "",
-    `## Output`,
-    `Write your batch decision to: ${batchDecisionPath}`,
-  ].join("\n");
-
-  const batchOaResult = await runAgent(orchestratorAgentConfig.name, {
-    systemPrompt: orchAgentSystemPrompt,
-    userPrompt: batchOrchUserPrompt,
-    allowedTools: orchestratorAgentConfig.allowedTools,
-    model: getAgentModel("orchestrator_agent", args),
-    cwd: runDir,
-  });
-  recordAgentTelemetry("phase2", "orchestrator_agent_batch", batchOaResult.durationMs, batchOaResult.tokens, batchOaResult.costUsd);
-
-  // --- Step 2a: Run iteration 0 Code Generator for all queries in parallel ---
+  // --- Iteration 0: Parallel Code Generators → Executor via ExecutionQueue → Storage Checkpoint ---
   console.log(`\n[Orchestrator] === Iteration 0: Parallel Code Generation for all queries ===`);
   const cgSystemPrompt = await readFile(codeGeneratorConfig.promptPath, "utf-8");
-  const semaphore = new Semaphore(args.maxConcurrent);
 
   // Prepare iter_0 directories and run code generators
   const iter0Contexts = await Promise.all(
     parsedQueries.map(async (query) => {
       await semaphore.acquire();
       try {
-        return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, batchDecisionPath, cgSystemPrompt);
+        return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt);
       } catch (err) {
         console.error(`[Orchestrator] Code Generator for ${query.id} failed: ${err.message}`);
         return { query, queryDir: null, iterDir: null, iterCppPath: null, error: err.message };
@@ -706,18 +817,18 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
     })
   );
 
-  // --- Step 2b: STORAGE CHECKPOINT — detect storage issues ---
+  // --- STORAGE CHECKPOINT — detect storage issues ---
   const storageIssues = await detectStorageIssues(parsedQueries, runDir);
   let retriesLeft = 1;
 
   if (storageIssues.length > 0 && retriesLeft > 0) {
-    console.log(`\n[Orchestrator] ⚠ STORAGE CHECKPOINT: ${storageIssues.length} query(s) detected storage issues:`);
+    console.log(`\n[Orchestrator] STORAGE CHECKPOINT: ${storageIssues.length} query(s) detected storage issues:`);
     for (const issue of storageIssues) {
       console.log(`  - ${issue.queryId}: ${issue.issue}`);
     }
 
     // Re-ingest with fixes
-    await reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, storageIssues);
+    await reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, storageIssues, parsedQueries);
     retriesLeft--;
 
     // Clear iter_0 directories and re-run code generation
@@ -733,7 +844,7 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
       parsedQueries.map(async (query) => {
         await semaphore.acquire();
         try {
-          return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, batchDecisionPath, cgSystemPrompt);
+          return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt);
         } catch (err) {
           console.error(`[Orchestrator] Code Generator retry for ${query.id} failed: ${err.message}`);
           return { query, queryDir: null, iterDir: null, iterCppPath: null, error: err.message };
@@ -753,48 +864,29 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
     iter0Contexts.splice(0, iter0Contexts.length, ...retryContexts);
   }
 
-  // --- Step 2c: Pipeline-parallel Executor (serial) + Learner (parallel) for iter_0 ---
-  console.log(`\n[Orchestrator] === Iteration 0: Pipeline-Parallel Executor + Learner ===`);
-  const learnerPromises = [];
+  // --- Iteration 0: Execute all queries via ExecutionQueue ---
+  console.log(`\n[Orchestrator] === Iteration 0: Execute all queries ===`);
   for (const ctx of iter0Contexts) {
     if (!ctx.iterCppPath || !existsSync(ctx.iterCppPath)) {
       console.log(`[Orchestrator] Skipping Executor for ${ctx.query.id}: no code produced.`);
       continue;
     }
-    // Executor: serial (needs execution semaphore), fast (~5-10s)
-    await executionSemaphore.acquire();
-    let execResults;
-    try {
+    // Execute via queue (notification-based, serial)
+    await executionQueue.requestExecution(ctx.query.id, async () => {
       console.log(`[Orchestrator] [${ctx.query.id}] Iteration 0: Executor (compile + run + validate)`);
       const iterResultsDir = resolve(ctx.iterDir, "results");
-      execResults = await executeQuery(ctx.query, ctx.iterDir, ctx.iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
-    } finally {
-      executionSemaphore.release();
-    }
-    // Learner: parallel (pure LLM analysis, no execution semaphore needed)
-    console.log(`[Orchestrator] [${ctx.query.id}] Iteration 0: Learner (parallel LLM analysis)`);
-    const iterEvalPath = resolve(ctx.iterDir, "evaluation.json");
-    const historyPath = resolve(ctx.queryDir, "optimization_history.json");
-    const learnerPromise = runLearner(ctx.query, args, ctx.iterDir, ctx.iterCppPath, iterEvalPath, workloadAnalysisPath, storageDesignPath, historyPath, null, 0)
-      .then((learnerResult) => {
-        recordAgentTelemetry(`query_${ctx.query.id}`, "learner", learnerResult.durationMs, learnerResult.tokens, learnerResult.costUsd);
-      })
-      .catch((err) => {
-        console.error(`[Orchestrator] Learner for ${ctx.query.id} failed: ${err.message}`);
-      });
-    learnerPromises.push(learnerPromise);
+      return await executeQuery(ctx.query, ctx.iterDir, ctx.iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
+    });
   }
-  // Wait for all Learners to complete
-  await Promise.all(learnerPromises);
 
-  // --- Step 2d: Pipeline-parallel iterations 1+ for all queries ---
+  // --- Iterations 1+: Pipeline-parallel per query ---
   const results = await Promise.all(
     iter0Contexts.map(async (ctx) => {
       if (!ctx.iterCppPath || !existsSync(ctx.iterCppPath)) {
         return { queryId: ctx.query.id, status: "failed", error: ctx.error || "no code produced", bestCppPath: null, iterations: 0 };
       }
       try {
-        return await runQueryIterationsRemaining(ctx.query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionSemaphore, ctx);
+        return await runQueryIterationsRemaining(ctx.query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionQueue, ctx);
       } catch (err) {
         console.error(`[Orchestrator] Query pipeline ${ctx.query.id} failed: ${err.message}`);
         return { queryId: ctx.query.id, status: "failed", error: err.message, bestCppPath: ctx.iterCppPath };
@@ -820,14 +912,14 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
 }
 
 // ---------------------------------------------------------------------------
-// Per-Query Pipeline (split into Code Gen, Learner iter 0, Iterations 1+)
+// Per-Query Pipeline (Code Gen iter 0, Iterations 1+)
 // ---------------------------------------------------------------------------
 
 /**
  * Iteration 0 Code Generator only (runs in parallel across queries).
  * Returns context object for subsequent steps.
  */
-async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, batchDecisionPath, cgSystemPrompt) {
+async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt) {
   const queryId = query.id;
   const queryDir = await createQueryDir(runDir, queryId);
   const queryPhase = `query_${queryId}`;
@@ -847,46 +939,47 @@ async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storag
   const iterCppPath = resolve(iterDir, cppName);
   const iterResultsDir = resolve(iterDir, "results");
   await mkdir(iterResultsDir, { recursive: true });
-  const iterDecisionPath = resolve(iterDir, "decision.json");
 
-  // Extract this query's strategy from the batch decision
-  const batchDecision = await readJSON(batchDecisionPath);
-  let queryStrategy;
-  if (batchDecision && batchDecision.queries && batchDecision.queries[queryId]) {
-    queryStrategy = batchDecision.queries[queryId];
-    queryStrategy.action = queryStrategy.action || "optimize";
-    queryStrategy.reasoning = batchDecision.reasoning || "";
-  } else {
-    console.log(`[Orchestrator] [${queryId}] Warning: batch decision missing strategy for ${queryId}, using default`);
-    queryStrategy = {
-      action: "optimize",
-      reasoning: "Batch decision did not include this query. Using default strategy.",
-      focus_areas: ["parallelism", "efficient data access"],
-      strategy_notes: "Generate optimized code with parallelism and efficient mmap-based data access.",
-    };
-  }
-  await writeFile(iterDecisionPath, JSON.stringify(queryStrategy, null, 2));
+  // Read hardware info and filtered context from storage design / workload analysis
+  const storageDesign = await readJSON(storageDesignPath);
+  const workloadAnalysis = await readJSON(workloadAnalysisPath);
+  const hw = storageDesign?.hardware_config || {};
+  const { filteredWorkload } = (storageDesign && workloadAnalysis)
+    ? extractQueryContext(query, storageDesign, workloadAnalysis)
+    : { filteredWorkload: null };
+
+  // Read per-query storage guide if available
+  const guidePath = resolve(runDir, "query_guides", `${queryId}_storage_guide.md`);
+  let storageGuide = "";
+  try { storageGuide = await readFile(guidePath, "utf-8"); } catch {}
 
   // Run Code Generator
   const cgUserPrompt = [
-    `Generate and validate a self-contained C++ file for ${queryId}. This is iteration 0.`,
-    ``,
-    `## Your Goal`,
-    `1. Generate CORRECT code that produces the right results`,
-    `2. Add basic optimizations (parallelism, efficient I/O)`,
-    `3. Validate correctness locally with up to 2 fix attempts`,
-    ``,
-    `IMPORTANT: Your job is to ensure CORRECTNESS. The Learner agent will handle profiling and bottleneck analysis after you finish.`,
+    `Generate a correct, self-contained C++ implementation for ${queryId} (iteration 0).`,
     ``,
     `## Optimization Target: ${args.optimizationTarget}`,
     `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
     ``,
-    `## Input Files`,
-    `- Workload analysis: ${workloadAnalysisPath}`,
-    `- Storage design: ${storageDesignPath}`,
+    `## Hardware Configuration`,
+    `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
+    `- Disk type: ${hw.disk_type || 'unknown'}`,
+    `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
+    `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
+    ``,
+    storageGuide ? [
+      `## Storage & Index Guide (from Storage/Index Designer)`,
+      `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
+      `Use this to load data correctly and leverage pre-built indexes for performance.`,
+      ``,
+      storageGuide,
+    ].join("\n") : "",
+    "",
+    `## Workload Analysis (${queryId})`,
+    "```json",
+    JSON.stringify(filteredWorkload, null, 2),
+    "```",
+    "",
     `- Schema: ${args.schema}`,
-    `- Queries: ${args.queries}`,
-    `- Orchestrator strategy: ${iterDecisionPath}`,
     ``,
     `## Query to implement`,
     "```sql",
@@ -902,11 +995,17 @@ async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storag
     `## Output`,
     `- Write .cpp file to: ${iterCppPath}`,
     ``,
-    `## Validation Loop`,
-    `Compile → Run → Validate correctness (up to 2 fix attempts)`,
-    hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
+    `## Critical Reminders`,
+    `- [TIMING] instrumentation REQUIRED: wrap each major op in #ifdef GENDB_PROFILE guards (see system prompt pattern)`,
+    `- DATE columns = int32_t epoch days (values >3000). Compare as integers. YYYY-MM-DD only for CSV output.`,
+    `- DECIMAL columns = int64_t × scale_factor. Compute thresholds yourself. NEVER use double.`,
+    `- Dictionary strings: load _dict.txt at runtime to find codes. NEVER hardcode dictionary codes.`,
+    `- CSV: comma-delimited, include header row, 2 decimal places for monetary values.`,
     ``,
-    `After validation succeeds, you are done. Do NOT write evaluation.json - the Learner handles that.`,
+    `## Validation Loop`,
+    `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${queryId.toLowerCase()} ${cppName}`,
+    `Run → Validate correctness (up to 2 fix attempts)`,
+    hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
   ].join("\n");
 
   const cgResult = await runAgent(codeGeneratorConfig.name, {
@@ -926,10 +1025,11 @@ async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storag
 }
 
 /**
- * Iterations 1+ for a single query (Orchestrator Agent → Query Optimizer → Learner).
- * Takes the iter_0 context and continues from there.
+ * Iterations 1+ for a single query.
+ * Uses programmatic shouldContinue() instead of Orchestrator Agent LLM.
+ * Uses Query Optimizer (which now absorbs Learner analysis) instead of OA→QO→Learner chain.
  */
-async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionSemaphore, iter0Ctx) {
+async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionQueue, iter0Ctx) {
   const queryId = query.id;
   const queryDir = iter0Ctx.queryDir;
   const queryPhase = `query_${queryId}`;
@@ -939,109 +1039,66 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
   const optimizationHistory = await readJSON(historyPath) || { query_id: queryId, iterations: [] };
 
   const qoSystemPrompt = await readFile(queryOptimizerConfig.promptPath, "utf-8");
-  const orchAgentSystemPrompt = await readFile(orchestratorAgentConfig.promptPath, "utf-8");
 
-  // Read hardware info from storage design for hardware-aware prompts
+  // Read hardware info and filtered context from storage design / workload analysis
   const storageDesign = await readJSON(storageDesignPath);
+  const workloadAnalysis = await readJSON(workloadAnalysisPath);
   const hw = storageDesign?.hardware_config || {};
+  const { filteredWorkload: qoFilteredWorkload } = (storageDesign && workloadAnalysis)
+    ? extractQueryContext(query, storageDesign, workloadAnalysis)
+    : { filteredWorkload: null };
 
   // Iteration 0 results are the baseline
   let bestIterDir = iter0Ctx.iterDir;
   let bestCppPath = iter0Ctx.iterCppPath;
-  let bestEvalPath = resolve(iter0Ctx.iterDir, "evaluation.json");
+  let bestExecResultsPath = resolve(iter0Ctx.iterDir, "execution_results.json");
 
   const maxIter = args.maxIterations;
   let previousIterationOutcome = null;
 
   for (let iteration = 1; iteration <= maxIter; iteration++) {
-    console.log(`\n[Orchestrator] [${queryId}] --- Iteration ${iteration}/${maxIter} ---`);
+    // --- Programmatic shouldContinue() check (replaces Orchestrator Agent LLM) ---
+    const bestExecResults = await readJSON(bestExecResultsPath);
+    const continueDecision = shouldContinue(queryId, optimizationHistory, args.benchmarkResults, bestExecResults, iteration, maxIter);
 
+    console.log(`\n[Orchestrator] [${queryId}] --- Iteration ${iteration}/${maxIter} --- shouldContinue: ${continueDecision.action} (${continueDecision.reason})`);
+
+    if (continueDecision.action === 'stop') {
+      console.log(`[Orchestrator] [${queryId}] Stopping: ${continueDecision.reason}`);
+      break;
+    }
+
+    // Create iteration directory
     const iterDir = resolve(queryDir, `iter_${iteration}`);
     await mkdir(iterDir, { recursive: true });
 
     const iterCppPath = resolve(iterDir, cppName);
     const iterResultsDir = resolve(iterDir, "results");
     await mkdir(iterResultsDir, { recursive: true });
-    const iterEvalPath = resolve(iterDir, "evaluation.json");
-    const iterDecisionPath = resolve(iterDir, "decision.json");
+    const iterExecResultsPath = resolve(iterDir, "execution_results.json");
 
     // Copy best code from previous best iteration as starting point
     if (bestCppPath && existsSync(bestCppPath)) {
       await writeFile(iterCppPath, await readFile(bestCppPath, "utf-8"));
     }
 
-    // Step A: Orchestrator Agent decision (no semaphore needed — pure LLM)
-    const prevEval = await readJSON(bestEvalPath);
-    if (!prevEval) {
-      console.log(`[Orchestrator] [${queryId}] Could not read previous evaluation. Stopping.`);
-      break;
-    }
-
-    const criticalFixes = prevEval.critical_fixes || [];
-    const perfOptimizations = prevEval.performance_optimizations || [];
-
-    if (criticalFixes.length === 0 && perfOptimizations.length === 0) {
-      console.log(`[Orchestrator] [${queryId}] No optimizations recommended. Stopping.`);
-      break;
-    }
-
-    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Orchestrator Agent`);
-
-    const orchUserPrompt = [
-      `Decide whether to continue optimizing or stop for ${queryId} (iteration ${iteration}/${maxIter}).`,
-      "",
-      `## Optimization Target: ${args.optimizationTarget}`,
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      "",
-      "## Input Files",
-      `- Current evaluation + recommendations: ${bestEvalPath}`,
-      `- Optimization history: ${historyPath}`,
-      formatBenchmarkContext(args.benchmarkResults),
-      "",
-      `Remaining iterations: ${maxIter - iteration}`,
-      previousIterationOutcome ? `\n## Previous Iteration Outcome\n${previousIterationOutcome}` : "",
-      criticalFixes.length > 0
-        ? `\n## CRITICAL: ${criticalFixes.length} critical fix(es) found — these MUST all be included.`
-        : "",
-      "",
-      `## Output`,
-      `Write your decision to: ${iterDecisionPath}`,
-    ].join("\n");
-
-    const oaResult = await runAgent(orchestratorAgentConfig.name, {
-      systemPrompt: orchAgentSystemPrompt,
-      userPrompt: orchUserPrompt,
-      allowedTools: orchestratorAgentConfig.allowedTools,
-      model: getAgentModel("orchestrator_agent", args),
-      cwd: iterDir,
-    });
-    recordAgentTelemetry(queryPhase, "orchestrator_agent", oaResult.durationMs, oaResult.tokens, oaResult.costUsd);
-
-    const decision = await readJSON(iterDecisionPath);
-    if (!decision) {
-      console.log(`[Orchestrator] [${queryId}] Orchestrator Agent failed. Stopping.`);
-      break;
-    }
-
-    if (decision.action === "stop") {
-      console.log(`[Orchestrator] [${queryId}] Orchestrator Agent decided to stop: ${decision.reasoning}`);
-      break;
-    }
-
-    // Step B: Query Optimizer (no semaphore — LLM + compile only)
-    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer (optimize)`);
+    // --- Query Optimizer (absorbs Learner analysis — reads execution_results.json directly) ---
+    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer`);
 
     // Check for mandatory join ordering sampling
     let joinSamplingMandate = "";
-    const qrResults = prevEval.evaluation?.query_results || prevEval.query_results || {};
-    const qResult = qrResults[queryId] || {};
-    const opTimings = qResult.operation_timings || prevEval.analysis?.per_query?.[queryId]?.operation_timings || {};
-    const totalTime = parseFloat(opTimings.total || qResult.timing_ms || 0);
-    const joinTime = parseFloat(opTimings.join || 0);
+    const opTimings = bestExecResults?.operation_timings || {};
+    const totalTime = parseFloat(opTimings.total || bestExecResults?.timing_ms || 0);
+    const joinTime = Object.entries(opTimings)
+      .filter(([key]) => key.toLowerCase().includes('join'))
+      .reduce((sum, [, val]) => sum + parseFloat(val || 0), 0);
     const joinDominant = totalTime > 0 && (joinTime / totalTime) > 0.4;
-    const joinCount = (query.sql.match(/\bJOIN\b/gi) || []).length;
-    const prevHistory = await readJSON(historyPath);
-    const hadJoinSampling = (prevHistory?.iterations || []).some(it =>
+    // Count joins: explicit JOIN keywords + implicit comma-separated tables in FROM
+    const explicitJoins = (query.sql.match(/\bJOIN\b/gi) || []).length;
+    const fromMatch = query.sql.match(/\bFROM\s+([^WHERE;]+)/i);
+    const implicitJoins = fromMatch ? (fromMatch[1].split(",").length - 1) : 0;
+    const joinCount = explicitJoins + implicitJoins;
+    const hadJoinSampling = (optimizationHistory?.iterations || []).some(it =>
       (it.categories || []).includes("join_sampling")
     );
     if (joinCount >= 2 && joinDominant && !hadJoinSampling) {
@@ -1058,20 +1115,62 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       ].join("\n");
     }
 
+    // Build correctness failure section if validation failed
+    let correctnessSection = "";
+    if (bestExecResults?.validation?.status === 'fail') {
+      const details = bestExecResults.validation.details
+        ? JSON.stringify(bestExecResults.validation.details, null, 2)
+        : (bestExecResults.validation.output || "unknown mismatch");
+      correctnessSection = [
+        "",
+        "## CORRECTNESS FAILURE — FIX THIS FIRST",
+        "The current code produces WRONG results. You MUST fix correctness before any performance optimization.",
+        "Mismatch details:",
+        "```json",
+        details,
+        "```",
+        "Common causes: wrong filter predicate, encoding/decoding bug, wrong join logic, incorrect aggregation.",
+        "",
+      ].join("\n");
+    }
+
+    // Read per-query storage guide if available
+    const qoGuidePath = resolve(runDir, "query_guides", `${queryId}_storage_guide.md`);
+    let qoStorageGuide = "";
+    try { qoStorageGuide = await readFile(qoGuidePath, "utf-8"); } catch {}
+
     const qoUserPrompt = [
-      `Optimize the existing C++ code for ${queryId}. This is iteration ${iteration} (optimize mode).`,
-      "",
+      `Optimize the existing C++ code for ${queryId}. This is iteration ${iteration}.`,
+      correctnessSection,
       `## Optimization Target: ${args.optimizationTarget}`,
+      ``,
       `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
       "",
+      qoStorageGuide ? [
+        `## Storage & Index Guide (from Storage/Index Designer)`,
+        `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
+        `Use this to leverage pre-built indexes for performance.`,
+        ``,
+        qoStorageGuide,
+      ].join("\n") : "",
+      "",
+      `## Workload Analysis (${queryId})`,
+      "```json",
+      JSON.stringify(qoFilteredWorkload, null, 2),
+      "```",
+      "",
       "## Input Files",
-      `- Current evaluation + recommendations: ${bestEvalPath}`,
-      `- Orchestrator decision: ${iterDecisionPath}`,
-      `- Workload analysis: ${workloadAnalysisPath}`,
-      `- Storage design: ${storageDesignPath}`,
+      `- Execution results (timing + validation): ${bestExecResultsPath}`,
       `- Optimization history: ${historyPath}`,
       formatBenchmarkContext(args.benchmarkResults),
       "",
+      `## Critical Reminders`,
+      `- Read optimization_history.json before planning — do not repeat failed approaches`,
+      `- After regression, try a DIFFERENT optimization category than what failed`,
+      `- Preserve all [TIMING] lines inside #ifdef GENDB_PROFILE guards`,
+      `- Do NOT change encoding logic unless fixing a reported bug`,
+      `- Comma-delimited CSV output — do not change delimiter`,
+      ``,
       `## Hardware Configuration`,
       `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
       `- Disk type: ${hw.disk_type || 'unknown'}`,
@@ -1079,6 +1178,7 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
       joinSamplingMandate,
       "",
+      previousIterationOutcome ? `## Previous Iteration Outcome\n${previousIterationOutcome}\n` : "",
       `## GenDB Storage Directory`,
       `${args.gendbDir}`,
       "",
@@ -1091,8 +1191,8 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       "```",
       "",
       `## Compilation`,
-      `After changes, compile (do NOT run the binary — the Executor handles execution and validation):`,
-      `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -o ${resolve(iterDir, queryId.toLowerCase())} ${iterCppPath}`,
+      `Compile (do NOT run — Executor handles validation):`,
+      `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${resolve(iterDir, queryId.toLowerCase())} ${iterCppPath}`,
       `Ensure the code compiles successfully (up to 3 fix attempts).`,
     ].join("\n");
 
@@ -1105,38 +1205,29 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
     });
     recordAgentTelemetry(queryPhase, "query_optimizer", qoResult.durationMs, qoResult.tokens, qoResult.costUsd);
 
-    // Step C: Executor (serial — needs execution semaphore for CPU/memory isolation)
+    // --- Executor via ExecutionQueue (serial, notification-based) ---
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Executor (compile + run + validate)`);
-    await executionSemaphore.acquire();
-    try {
-      await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
-    } finally {
-      executionSemaphore.release();
-    }
+    await executionQueue.requestExecution(queryId, async () => {
+      return await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
+    });
 
-    // Step D: Learner (parallel — pure LLM analysis, no semaphore needed)
-    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Learner (LLM analysis)`);
-    const learnerResult = await runLearner(query, args, iterDir, iterCppPath, iterEvalPath, workloadAnalysisPath, storageDesignPath, historyPath, previousIterationOutcome, iteration);
-    recordAgentTelemetry(queryPhase, "learner", learnerResult.durationMs, learnerResult.tokens, learnerResult.costUsd);
+    // --- Improvement check (keep or rollback) using execution_results.json ---
+    const prevExecResults = await readJSON(bestExecResultsPath);
+    const newExecResults = await readJSON(iterExecResultsPath);
+    const improved = checkExecutionImprovement(prevExecResults, newExecResults);
 
-    // ---- Improvement check (keep or rollback) ----
-    const iterEval = await readJSON(iterEvalPath);
-    const prevBestEval = await readJSON(bestEvalPath);
-    const improved = checkImprovement(prevBestEval, iterEval);
-
-    // Collect categories from the decision's selected recommendations
-    const prevPerfOpts = prevBestEval?.performance_optimizations || [];
-    const iterDecision = await readJSON(iterDecisionPath);
-    const selectedIdxs = iterDecision?.selected_recommendations || [];
-    const selectedOpts = selectedIdxs.map(idx => prevPerfOpts[idx]).filter(Boolean);
-    const allOpts = [...(prevBestEval?.critical_fixes || []), ...selectedOpts];
-    const categories = [...new Set(allOpts.map(o => o.bottleneck_category).filter(Boolean))];
+    // Track categories (derive from timing analysis)
+    const categories = [];
+    if (joinSamplingMandate) categories.push("join_sampling");
+    if (opTimings.join && (joinTime / totalTime) > 0.3) categories.push("join");
+    if (opTimings.scan_filter && (parseFloat(opTimings.scan_filter) / totalTime) > 0.3) categories.push("io_bound");
 
     optimizationHistory.iterations.push({
       iteration,
       improved,
       categories,
-      evaluationPath: iterEvalPath,
+      timing_ms: newExecResults?.timing_ms || null,
+      validation: newExecResults?.validation?.status || null,
     });
     await writeFile(historyPath, JSON.stringify(optimizationHistory, null, 2));
 
@@ -1144,7 +1235,7 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration} improved. Keeping changes.`);
       bestIterDir = iterDir;
       bestCppPath = iterCppPath;
-      bestEvalPath = iterEvalPath;
+      bestExecResultsPath = iterExecResultsPath;
       previousIterationOutcome = `Iteration ${iteration} IMPROVED. Changes kept.`;
     } else {
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration} did not improve. Rolling back.`);
@@ -1167,7 +1258,6 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
 /**
  * Execute a query: compile → run → validate → parse timing.
  * Returns execution results JSON and writes execution_results.json to iterDir.
- * This is the only step that needs the execution semaphore.
  */
 async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, resultsDir) {
   const binaryPath = resolve(iterDir, query.id.toLowerCase());
@@ -1182,11 +1272,12 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
 
   await mkdir(resultsDir, { recursive: true });
 
-  // Step 1: Compile
+  // Step 1: Compile (with -fopenmp)
   console.log(`[Executor] [${query.id}] Compiling...`);
   try {
     const compileOutput = await runProcess("g++", [
-      "-O3", "-march=native", "-std=c++17", "-Wall", "-lpthread",
+      "-O3", "-march=native", "-std=c++17", "-Wall", "-lpthread", "-fopenmp",
+      "-DGENDB_PROFILE",
       "-o", binaryPath, cppPath,
     ], { cwd: iterDir, timeout: 120000 });
     results.compile = { status: "pass", output: compileOutput };
@@ -1232,10 +1323,16 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
     results.operation_timings[match[1]] = parseFloat(match[2]);
   }
 
-  // Extract total timing
-  const totalMatch = stdout.match(/(?:\[TIMING\]\s+total:\s+([\d.]+)\s*ms|Execution time:\s*([\d.]+)\s*ms)/);
-  if (totalMatch) {
-    results.timing_ms = parseFloat(totalMatch[1] || totalMatch[2]);
+  // Extract timing_ms: use total minus output (excludes file I/O)
+  if (results.operation_timings.total != null && results.operation_timings.output != null) {
+    results.timing_ms = results.operation_timings.total - results.operation_timings.output;
+  } else if (results.operation_timings.total != null) {
+    results.timing_ms = results.operation_timings.total;
+  } else {
+    const totalMatch = stdout.match(/Execution time:\s*([\d.]+)\s*ms/);
+    if (totalMatch) {
+      results.timing_ms = parseFloat(totalMatch[1]);
+    }
   }
 
   // Step 4: Validate against ground truth
@@ -1243,13 +1340,22 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
     console.log(`[Executor] [${query.id}] Validating results...`);
     try {
       const valOutput = await runProcess("python3", [
-        COMPARE_TOOL_PATH, groundTruthDir, resultsDir,
+        COMPARE_TOOL_PATH, groundTruthDir, resultsDir, "--tpch",
       ], { cwd: iterDir, timeout: 60000 });
-      results.validation = { status: "pass", output: valOutput.stdout || valOutput };
-      // Check if comparison tool reported failures
-      const valStr = typeof results.validation.output === "string" ? results.validation.output : "";
-      if (valStr.includes('"status": "fail"') || valStr.includes("FAIL")) {
-        results.validation.status = "fail";
+      const valStr = valOutput.stdout || valOutput;
+      results.validation = { status: "pass", output: valStr };
+      // Parse JSON output from compare_results.py and check the "match" field
+      try {
+        const valJson = JSON.parse(typeof valStr === "string" ? valStr : "{}");
+        if (valJson.match === false) {
+          results.validation.status = "fail";
+          results.validation.details = valJson;
+        }
+      } catch {
+        // If JSON parse fails, fall back to string matching
+        if (typeof valStr === "string" && (valStr.includes('"match": false') || valStr.includes("FAIL"))) {
+          results.validation.status = "fail";
+        }
       }
       console.log(`[Executor] [${query.id}] Validation: ${results.validation.status}`);
     } catch (err) {
@@ -1292,102 +1398,6 @@ function runProcess(cmd, cmdArgs, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Learner Runner (LLM-only analysis, receives execution_results.json)
-// ---------------------------------------------------------------------------
-
-async function runLearner(query, args, iterDir, cppPath, evalPath, workloadAnalysisPath, storageDesignPath, historyPath, previousOutcome, iteration) {
-  const learnerSystemPrompt = await readFile(learnerConfig.promptPath, "utf-8");
-  const execResultsPath = resolve(iterDir, "execution_results.json");
-
-  // Read hardware info from storage design for hardware-aware recommendations
-  const storageDesignData = await readJSON(storageDesignPath);
-  const hwLearner = storageDesignData?.hardware_config || {};
-
-  const learnerUserPrompt = [
-    `Analyze execution results and recommend optimizations for ${query.id} (iteration ${iteration}).`,
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    "",
-    `## Hardware Configuration`,
-    `- CPU cores: ${hwLearner.cpu_cores || 'unknown'}`,
-    `- Disk type: ${hwLearner.disk_type || 'unknown'}`,
-    `- L3 cache: ${hwLearner.l3_cache_mb || 'unknown'} MB`,
-    `- Total memory: ${hwLearner.total_memory_gb || 'unknown'} GB`,
-    "",
-    `## Execution Results (from Executor)`,
-    `Read execution results from: ${execResultsPath}`,
-    `This contains compile status, run output, validation results, and per-operation timing.`,
-    "",
-    `## Query Code`,
-    `${cppPath}`,
-    "",
-    `## Original SQL`,
-    "```sql",
-    query.sql,
-    "```",
-    "",
-    previousOutcome ? `## Previous Iteration Outcome\n${previousOutcome}` : "",
-    "",
-    "## Input Files",
-    `- Workload analysis: ${workloadAnalysisPath}`,
-    `- Storage design: ${storageDesignPath}`,
-    `- Optimization history: ${historyPath}`,
-    formatBenchmarkContext(args.benchmarkResults),
-    "",
-    `## Output`,
-    `Write combined evaluation + recommendations to: ${evalPath}`,
-    `Set "iteration" to ${iteration}.`,
-  ].join("\n");
-
-  return await runAgent(learnerConfig.name, {
-    systemPrompt: learnerSystemPrompt,
-    userPrompt: learnerUserPrompt,
-    allowedTools: learnerConfig.allowedTools,
-    model: getAgentModel("learner", args),
-    cwd: iterDir,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Improvement Check
-// ---------------------------------------------------------------------------
-
-function checkImprovement(prevEval, newEval) {
-  if (!prevEval || !newEval) return false;
-
-  const prevResults = prevEval.evaluation?.query_results || prevEval.query_results || {};
-  const newResults = newEval.evaluation?.query_results || newEval.query_results || {};
-
-  // Check overall status
-  const newOverall = newEval.evaluation?.overall_status || newEval.overall_status;
-  if (newOverall === "fail") return false;
-
-  let prevTotal = 0, newTotal = 0;
-  let prevCount = 0, newCount = 0;
-
-  for (const qId of Object.keys({ ...prevResults, ...newResults })) {
-    const prevQ = prevResults[qId];
-    const newQ = newResults[qId];
-
-    const prevTime = prevQ ? parseFloat(prevQ.timing_ms) : NaN;
-    const newTime = newQ ? parseFloat(newQ.timing_ms) : NaN;
-
-    // If prev query worked but new one crashes, reject
-    if (prevQ && prevQ.status === "pass" && newQ && newQ.status !== "pass") return false;
-
-    if (!isNaN(prevTime) && prevQ?.status === "pass") { prevTotal += prevTime; prevCount++; }
-    if (!isNaN(newTime) && newQ?.status === "pass") { newTotal += newTime; newCount++; }
-  }
-
-  // More queries working = improvement
-  if (newCount > prevCount) return true;
-  // Same queries, check time
-  if (newCount === prevCount && newCount > 0) return newTotal < prevTotal;
-  return false;
-}
-
-// ---------------------------------------------------------------------------
 // Final Assembly
 // ---------------------------------------------------------------------------
 
@@ -1406,7 +1416,6 @@ async function assembleFinalBuild(results, runDir, args) {
       const content = await readFile(r.bestCppPath, "utf-8");
       // Wrap internal helper types/functions in anonymous namespace to prevent
       // ODR violations when multiple query .cpp files define same-named templates
-      // (e.g. MmapColumn in both q3.cpp and q6.cpp with different layouts).
       const funcName = `run_${r.queryId.toLowerCase()}`;
       const lines = content.split("\n");
       const funcLineIdx = lines.findIndex(l =>
@@ -1511,12 +1520,12 @@ async function assembleFinalBuild(results, runDir, args) {
   ].join("\n");
   await writeFile(resolve(finalDir, "main.cpp"), mainCpp);
 
-  // Generate Makefile
+  // Generate Makefile (with -fopenmp)
   const queryTargets = queryEntries.map(q => q.toLowerCase());
   const querySources = queryTargets.map(q => `queries/${q}.cpp`);
   const makefile = [
     "CXX = g++",
-    "CXXFLAGS = -O3 -march=native -flto -std=c++17 -Wall -lpthread -DGENDB_LIBRARY",
+    "CXXFLAGS = -O3 -march=native -flto -std=c++17 -Wall -lpthread -fopenmp -DGENDB_LIBRARY",
     "",
     `QUERY_SRCS = ${querySources.join(" ")}`,
     "",
@@ -1575,6 +1584,91 @@ async function assembleFinalBuild(results, runDir, args) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-Query Summary Table
+// ---------------------------------------------------------------------------
+
+async function printPerQuerySummary(runDir, parsedQueries) {
+  console.log(`\n[Orchestrator] === Per-Query Results ===\n`);
+
+  // Collect results for each query and iteration
+  const queryData = [];
+  let maxIter = 0;
+
+  for (const query of parsedQueries) {
+    const qDir = resolve(runDir, "queries", query.id);
+    const iters = [];
+    for (let i = 0; ; i++) {
+      const execPath = resolve(qDir, `iter_${i}`, "execution_results.json");
+      const exec = await readJSON(execPath);
+      if (!exec) break;
+      iters.push({
+        timing_ms: exec.timing_ms,
+        validation: exec.validation?.status || "-",
+      });
+    }
+    if (iters.length > maxIter) maxIter = iters.length;
+    queryData.push({ id: query.id, iters });
+  }
+
+  if (queryData.length === 0 || maxIter === 0) return;
+
+  // Build header
+  const colW = 14;
+  const qColW = 9;
+  let header = "Query".padEnd(qColW) + "|";
+  let sep = "-".repeat(qColW - 1) + "|";
+  for (let i = 0; i < maxIter; i++) {
+    header += `Iter ${i}`.padStart(colW) + " |";
+    sep += "-".repeat(colW) + "-|";
+  }
+  header += "Best".padStart(colW) + " |";
+  sep += "-".repeat(colW) + "-|";
+
+  console.log(header);
+  console.log(sep);
+
+  // Print each query
+  for (const q of queryData) {
+    // Timing row
+    let timingRow = q.id.padEnd(qColW) + "|";
+    let validRow = " ".repeat(qColW) + "|";
+    let bestTiming = null;
+    let bestValidation = "-";
+
+    for (let i = 0; i < maxIter; i++) {
+      if (i < q.iters.length && q.iters[i].timing_ms != null) {
+        const t = q.iters[i].timing_ms;
+        const v = q.iters[i].validation;
+        timingRow += `${Math.round(t)}ms`.padStart(colW) + " |";
+        validRow += v.toUpperCase().padStart(colW) + " |";
+        if (v === "pass" && (bestTiming === null || t < bestTiming)) {
+          bestTiming = t;
+          bestValidation = v;
+        }
+      } else if (i < q.iters.length) {
+        timingRow += "-".padStart(colW) + " |";
+        validRow += (q.iters[i].validation || "-").toUpperCase().padStart(colW) + " |";
+      } else {
+        timingRow += "-".padStart(colW) + " |";
+        validRow += "-".padStart(colW) + " |";
+      }
+    }
+
+    // Best column
+    if (bestTiming !== null) {
+      timingRow += `${Math.round(bestTiming)}ms`.padStart(colW) + " |";
+      validRow += bestValidation.toUpperCase().padStart(colW) + " |";
+    } else {
+      timingRow += "-".padStart(colW) + " |";
+      validRow += "-".padStart(colW) + " |";
+    }
+
+    console.log(timingRow);
+    console.log(validRow);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1605,7 +1699,7 @@ async function main() {
     console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline v12");
+  console.log("[Orchestrator] GenDB Pipeline v16");
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
@@ -1635,6 +1729,10 @@ async function main() {
   });
 
   await updateLatestSymlink(workload, runId);
+
+  // Print per-query summary table
+  const parsedQueries = parseQueryFile(queries);
+  await printPerQuerySummary(runDir, parsedQueries);
 
   // Write telemetry
   telemetryData.total_wall_clock_ms = Date.now() - runStartTime;

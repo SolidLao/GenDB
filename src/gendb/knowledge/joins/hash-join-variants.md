@@ -17,3 +17,14 @@ Hash join builds a hash table on the smaller relation (build side) and probes it
 - **SIMD-optimized probing**: Vectorize hash computation and key comparison for throughput on modern CPUs
 - **Adaptive hash join**: Monitor build-side size during execution and switch from simple to partitioned strategy if memory is exceeded
 - **Perfect hashing for low-cardinality keys**: When key domain is small and known, use direct-mapped arrays instead of hash tables
+
+## Compact Hash Tables for Joins
+
+**IMPORTANT**: Never use `std::unordered_map` for join hash tables in performance-critical code. Open-addressing hash tables are 2-5x faster due to:
+- Cache-friendly linear probing (no pointer chasing)
+- Lower memory overhead (~16 bytes/entry vs ~80 bytes for unordered_map)
+- Better prefetching behavior
+
+See `patterns/parallel-hash-join.md` for a complete open-addressing template.
+
+For 1:N joins where multiple build rows match a single probe key, use `std::unordered_map<K, std::vector<uint32_t>>` with `.reserve()` pre-sizing, or a custom multi-map with open addressing.

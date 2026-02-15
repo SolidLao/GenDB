@@ -1,0 +1,26 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_0/q6.cpp:84:13: warning: ‘std::string {anonymous}::epoch_to_date(int32_t)’ defined but not used [-Wunused-function]\n   84 | std::string epoch_to_date(int32_t epoch_days) {\n      |             ^~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_0/q6.cpp:17:8: warning: ‘size_t {anonymous}::get_file_size(const string&)’ defined but not used [-Wunused-function]\n   17 | size_t get_file_size(const std::string& path) {\n      |        ^~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] Q6 start\n[TIMING] load: 0.05 ms\nProcessing 59986052 lineitem rows\n[TIMING] filter_aggregate: 398.55 ms\n[TIMING] output: 0.19 ms\n[TIMING] total: 453.93 ms\nResult: revenue = 1230113636.0101\n",
+    "stderr": "",
+    "duration_ms": 460
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.05,
+    "filter_aggregate": 398.55,
+    "output": 0.19,
+    "total": 453.93
+  },
+  "timing_ms": 453.93
+}

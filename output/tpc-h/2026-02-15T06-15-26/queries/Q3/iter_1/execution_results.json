@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q3/iter_1/q3.cpp: In function ‘std::string days_to_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q3/iter_1/q3.cpp:107:38: warning: ‘%02d’ directive output may be truncated writing between 2 and 9 bytes into a region of size between 1 and 6 [-Wformat-truncation=]\n  107 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, m, d);\n      |                                      ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q3/iter_1/q3.cpp:107:32: note: directive argument in the range [-14035849, 14035843]\n  107 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, m, d);\n      |                                ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q3/iter_1/q3.cpp:107:32: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q3/iter_1/q3.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 32 bytes into a destination of size 11\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.13 ms\n[TIMING] dictionary_lookup: 0.00 ms\n[TIMING] filter_customer: 10.88 ms\n[TIMING] custkey_set: 29.69 ms\n[TIMING] filter_orders: 612.73 ms\n[TIMING] aggregate: 70.77 ms\n[TIMING] build_result: 2.23 ms\n[TIMING] sort: 9.98 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 736.67 ms\n",
+    "stderr": "",
+    "duration_ms": 1010
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.13,
+    "dictionary_lookup": 0,
+    "filter_customer": 10.88,
+    "custkey_set": 29.69,
+    "filter_orders": 612.73,
+    "aggregate": 70.77,
+    "build_result": 2.23,
+    "sort": 9.98,
+    "output": 0.17,
+    "total": 736.67
+  },
+  "timing_ms": 736.5
+}

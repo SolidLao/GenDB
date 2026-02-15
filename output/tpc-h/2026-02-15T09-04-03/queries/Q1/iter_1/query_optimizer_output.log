@@ -1,0 +1,47 @@
+Perfect! Compilation successful. Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations Applied
+
+**Compilation Status: ✅ SUCCESS**
+
+### Optimization 1: Parallel Partial Aggregation (Critical Impact)
+**Problem:** The original code used `#pragma omp critical` around every aggregation update, serializing all 60M rows through a single critical section. This completely eliminated parallelism despite using `#pragma omp parallel for`.
+
+**Solution:** 
+- Create thread-local aggregate arrays (one per thread) instead of shared global arrays
+- Each thread processes its assigned row ranges independently without any synchronization
+- After scan completes, merge all thread-local results into final aggregate in a single merge phase
+- Expected impact: Near-linear speedup (48-64x on 64 cores, currently achieving ~1x due to critical section bottleneck)
+
+**Code changes:**
+- Added `thread_groups` and `thread_group_seen` vectors for thread-local state
+- Modified loop to use `omp_get_thread_num()` to access thread-local aggregates
+- Added merge phase to combine thread results
+
+### Optimization 2: Zone Map Block Pruning (High Impact for I/O)
+**Problem:** Code performs full scan of 60M rows even though the date filter (`l_shipdate <= 1998-09-02`) likely filters blocks early in the sorted order.
+
+**Solution:**
+- Load pre-built zone map index (`lineitem_shipdate_zone.bin`) - 120 zones with min/max bounds
+- Analyze zone ranges: skip entire zones where `zone.min_val > DATE_CUTOFF`
+- Process only valid row ranges that intersect with the filter predicate
+- Expected impact: Skip 30-40% of blocks on sorted HDD (reduces I/O by ~30-40%)
+
+**Code changes:**
+- Added `ZoneMapEntry` struct matching binary layout
+- Added `load_zone_map()` function to parse zone map index
+- Calculate `valid_ranges` before scan to identify blocks to process
+
+### Expected Performance Improvements
+- **Parallelism fix:** 48-64x improvement (currently 1x due to critical section)
+- **Zone map pruning:** 1.3-1.4x improvement (skip ~30% of blocks)
+- **Combined:** Target **40-80x speedup** → ~1200-2400 ms (vs current 94,584 ms)
+- **Closing gap to DuckDB:** 86 ms (DuckDB min) is achievable with additional SIMD/vectorization in future iterations
+
+### Correctness Validation
+✅ Code structure preserves all `[TIMING]` markers inside `#ifdef GENDB_PROFILE` guards
+✅ Kahan summation logic preserved for accurate floating-point aggregation
+✅ Zone map filtering logic correct: skip if `zone.min_val > DATE_CUTOFF`
+✅ CSV output format unchanged (comma-delimited)
+
+The Executor will now run this optimized version and report actual execution time and validation results.

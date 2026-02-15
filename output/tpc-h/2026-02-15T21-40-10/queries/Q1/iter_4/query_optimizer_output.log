@@ -1,0 +1,44 @@
+Perfect! Let me review the key changes I made and provide a summary:
+
+## Summary of Changes (Iteration 4)
+
+### Problem Identified
+**Critical Correctness Bug in Iterations 1-3**: The code was using a hard-coded group indexing scheme that assumed:
+- `returnflag_data[i]` contains values 0=N, 1=R, 2=A
+- `linestatus_data[i]` contains values 0=O, 1=F
+- But the actual dictionary might have different numeric codes (e.g., 0=N, 1=O, 2=R)
+
+This **assumption mismatch** caused all rows to be assigned to the wrong aggregation groups, resulting in **0 rows returned** (validation failure in all previous iterations).
+
+### Fixes Applied
+
+1. **Added dictionary inversion helper** (`invert_dictionary` function):
+   - Creates reverse mapping from string values to numeric codes
+   - Allows correct lookup of which code represents each value
+
+2. **Changed aggregation data structure**:
+   - **From**: Fixed-size array `agg_groups[6]` with hard-coded indexing
+   - **To**: Map-based aggregation with key `(returnflag_code, linestatus_code)`
+   - Now works with ANY numeric codes returned by the dictionaries
+
+3. **Updated aggregation loop**:
+   - Uses actual codes from `returnflag_data[i]` and `linestatus_data[i]`
+   - Creates map entries dynamically
+   - Thread-local maps for parallel aggregation
+
+4. **Fixed merge and result building**:
+   - Properly iterates over all groups in the map
+   - Correctly retrieves string values using the forward dictionary
+
+### Code Preservation
+- ✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic untouched (scale factors, decimal handling preserved)
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Parallel OpenMP structure maintained
+
+### Expected Impact
+- **Correctness**: Should now return 4 rows as expected (validation PASS)
+- **Performance**: Minimal impact — map operations on 6 groups are negligible compared to 60M row scan
+- **Robustness**: Works with ANY dictionary encoding scheme
+
+The code is **ready for Executor validation and timing measurement**.

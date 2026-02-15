@@ -1,0 +1,17 @@
+[METADATA CHECK] Q6 Query
+[METADATA CHECK] Table: lineitem, Columns: l_shipdate(DATE), l_discount(DECIMAL,scale=100), l_quantity(DECIMAL,scale=100), l_extendedprice(DECIMAL,scale=100)
+[METADATA CHECK] Predicates: l_shipdate >= 1994-01-01 AND l_shipdate < 1995-01-01 AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24
+[METADATA CHECK] Aggregation: SUM(l_extendedprice * l_discount)
+[METADATA CHECK] Date range: 8767 to 9132
+[METADATA CHECK] Discount range (scaled): 5 to 7
+[METADATA CHECK] Quantity max (scaled): 2400
+[TIMING] Loading columns...
+[TIMING] load: 0.07 ms
+[METADATA CHECK] Total rows: 59986052
+[TIMING] Starting scan-filter-aggregate...
+[TIMING] scan_filter_aggregate: 31.84 ms
+[TIMING] Writing output...
+[TIMING] output: 1.11 ms
+[TIMING] total: 33.08 ms
+Result written to results/Q6.csv
+Revenue: 1230113636.0101

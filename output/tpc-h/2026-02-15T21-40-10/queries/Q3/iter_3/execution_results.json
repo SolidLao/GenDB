@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/q3.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/q3.cpp:259:29: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 1 and 7 [-Wformat-truncation=]\n  259 |     snprintf(buf, 12, \"%04d-%02d-%02d\", year, month, day);\n      |                             ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/q3.cpp:259:23: note: directive argument in the range [1, 12]\n  259 |     snprintf(buf, 12, \"%04d-%02d-%02d\", year, month, day);\n      |                       ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/q3.cpp:259:23: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/istream:38,\n                 from /usr/include/c++/11/fstream:38,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/q3.cpp:3:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 12\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.20 ms\n[TIMING] customer_filter: 69.69 ms\n[TIMING] orders_filter: 124.06 ms\n[TIMING] join_and_aggregate: 2092.13 ms\n[TIMING] output_prep: 63.18 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 2349.32 ms\nQ3 executed successfully. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/queries/Q3/iter_3/results/Q3.csv\nRows in result set: 10\n",
+    "stderr": "",
+    "duration_ms": 2424
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.2,
+    "customer_filter": 69.69,
+    "orders_filter": 124.06,
+    "join_and_aggregate": 2092.13,
+    "output_prep": 63.18,
+    "output": 0.17,
+    "total": 2349.32
+  },
+  "timing_ms": 2349.15
+}

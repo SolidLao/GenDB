@@ -1,0 +1,43 @@
+Perfect! All [TIMING] lines are preserved. Let me create a summary of the optimizations made:
+
+## Optimization Summary
+
+I've successfully optimized Q1 for **execution time** (iteration 1). Here's what was implemented:
+
+### **Bottleneck Analysis**
+- **Current**: 1,416.16 ms (scan_filter_aggregate dominates at 1,415.78 ms / 99.9%)
+- **Target comparison**: DuckDB ~108.8 ms average
+- **Gap**: ~13x slower than reference system
+- **Root cause**: Single-threaded execution on a 64-core machine (99.9% CPU idle)
+
+### **Optimizations Applied**
+
+#### 1. **Thread Parallelism (HIGH IMPACT)**
+   - Changed from single-threaded to **4-thread parallel scan** (HDD-friendly)
+   - Used range-partitioning approach: each thread processes contiguous rows
+   - Respects HDD sequential access pattern (avoids seek storms per error E003)
+   - Expected speedup: 3-4x for HDD with bounded thread count
+
+#### 2. **Thread-Local Aggregation**
+   - Each thread maintains its own hash table (`thread_groups`)
+   - Eliminates lock contention during hot inner loop
+   - Reduces synchronization overhead
+   - Perfect for low-cardinality aggregation (6 groups max)
+
+#### 3. **Global Merge Phase**
+   - Single-threaded merge of thread-local results
+   - Minimal overhead: only 6 groups × 4 threads = 24 operations
+
+### **Key Design Decisions**
+- ✅ **Preserved all [TIMING] lines** (critical for Executor parsing)
+- ✅ **HDD-aware**: Used `NUM_SCAN_THREADS = 4` (respects E003 rule)
+- ✅ **No madvise changes**: Kept existing `MADV_SEQUENTIAL` (HDD-safe per E002)
+- ✅ **No encoding logic changes**: Preserved decimal conversion and aggregation logic
+- ✅ **Compilation successful**: `-fopenmp` flag added for OpenMP support
+
+### **Expected Performance Impact**
+- **Conservative estimate**: 3-4x speedup (from 1,416 ms → 350-470 ms)
+- **Optimistic estimate**: 10-20x toward reference (if HDD throughput permits 100+ ms)
+- **Correctness**: Aggregation semantics preserved; low-cardinality merge is exact
+
+The Executor will now run the optimized binary and validate correctness + timing improvements.

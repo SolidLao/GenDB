@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-12-19/queries/Q1/iter_1/q1.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-12-19/queries/Q1/iter_1/q1.cpp:154:34: warning: ‘%02d’ directive output may be truncated writing between 2 and 11 bytes into a region of size between 2 and 8 [-Wformat-truncation=]\n  154 |     snprintf(buf, 16, \"%04d-%02d-%02d\", year, month, day);\n      |                                  ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-12-19/queries/Q1/iter_1/q1.cpp:154:23: note: directive argument in the range [-2147483647, 2147483647]\n  154 |     snprintf(buf, 16, \"%04d-%02d-%02d\", year, month, day);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-15T21-12-19/queries/Q1/iter_1/q1.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 16\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.09 ms\n[TIMING] load_columns: 0.08 ms\n[TIMING] scan_filter_aggregate: 45.15 ms\n[TIMING] merge_aggregates: 0.01 ms\n[TIMING] format_results: 0.00 ms\n[TIMING] output: 0.20 ms\n[TIMING] total: 45.61 ms\nQ1 results written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T21-12-19/queries/Q1/iter_1/results/Q1.csv\nProcessed 59986052 rows, 4 groups\n",
+    "stderr": "",
+    "duration_ms": 94
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.09,
+    "load_columns": 0.08,
+    "scan_filter_aggregate": 45.15,
+    "merge_aggregates": 0.01,
+    "format_results": 0,
+    "output": 0.2,
+    "total": 45.61
+  },
+  "timing_ms": 45.41
+}

@@ -1,0 +1,43 @@
+Excellent! The code compiles successfully. Let me summarize the optimization strategy:
+
+## **Iteration 7 Optimization Summary**
+
+### **Strategy: CPU-bound + Data Structure Optimization**
+
+**Rationale**: Previous 6 iterations all attempted io_bound optimizations (zone maps, indexing) and failed or regressed. Time to switch optimization categories to focus on the aggregation overhead.
+
+### **Changes Made:**
+
+1. **Replaced `std::map` with flat array indexing (PRIMARY OPTIMIZATION)**
+   - **Before**: Thread-local aggregation used `std::map<std::pair<int32_t, int32_t>, AggregateRow>` 
+   - **After**: Use flat `std::vector<std::vector<AggregateRow>>` with direct indexing
+   - **Index formula**: `group_idx = rf * 2 + ls` (where rf ∈ {0,1,2}, ls ∈ {0,1})
+   - **Impact**: Eliminates map lookup overhead, improves cache locality
+   - **Expected speedup**: 15-25% (map operations are O(log n) with pointer chasing)
+
+2. **Simplified merge phase**
+   - Changed from iterating over map entries to direct array indexing
+   - Eliminates iterator overhead and map traversal
+   - More cache-friendly: sequential access to flat arrays
+   - **Expected speedup**: 5-10%
+
+3. **Cleaner dictionary lookup handling**
+   - Build results by reverse-indexing groups (divmod on group_idx)
+   - Pre-cache dictionary references
+   - **Expected speedup**: Minor but cleaner logic
+
+### **Preserved Elements:**
+- ✅ All [TIMING] lines within `#ifdef GENDB_PROFILE` guards
+- ✅ All encoding logic (decimal scaling, date threshold, disc_price/charge computation)
+- ✅ Parallel OpenMP scan with thread-local aggregation
+- ✅ CSV output format (comma-delimited)
+
+### **Expected Impact:**
+- **scan_filter**: 61.67 ms → ~50-55 ms (from reduced aggregation overhead)
+- **merge**: 0.05 ms → ~0.05 ms (negligible change, array access is very fast)
+- **Total**: 61.94 ms → ~50-56 ms (18-25% improvement)
+
+### **Compilation:**
+✅ **Compiles successfully** with: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+The code is ready for execution and validation by the Executor.

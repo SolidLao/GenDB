@@ -1,0 +1,36 @@
+Perfect! Now let me print a brief summary:
+
+## ✅ Workload Analysis Complete
+
+**TPC-H SF10 Analysis Summary:**
+
+### Hardware Profile
+- **CPU**: 64 cores (32 physical × 2 threads), L3: 44 MiB
+- **Memory**: 376 GB
+- **Storage**: HDD
+- **SIMD**: AVX2, AVX512 (avx512f, avx512dq)
+
+### Data Profile
+| Table | Row Count | Role | Access Freq |
+|-------|-----------|------|-------------|
+| lineitem | 59,986,052 | fact | 3 (all queries) |
+| orders | 15,000,000 | fact | 1 (Q3) |
+| customer | 1,500,000 | dimension | 1 (Q3) |
+| part/supplier/partsupp | 2-8M | dimension | 0 |
+
+### Query Patterns
+
+**Q1 (Pricing Summary)**: Full scan of lineitem with high-selectivity date filter (98%), aggregated into 4 groups. Memory-bound OLAP query.
+
+**Q3 (Shipping Priority)**: Multi-table join cascade (customer → orders → lineitem) with selective predicates (customer.c_mktsegment=21%, orders.o_orderdate=8%), output limited to top-10 by revenue.
+
+**Q6 (Revenue Forecasting)**: Highly selective compound filter (2%) on single lineitem table spanning date range + discount/quantity ranges. No joins.
+
+### Critical Optimization Levers
+1. **Parallelism** (morsel-driven, 64 cores) on Q1/Q3 large scans/aggregations
+2. **Vectorized execution** with SIMD filtering on date/numeric predicates
+3. **Zone maps** on l_shipdate for block-level pruning
+4. **Hash aggregation** (Q1: 4 groups, Q3: ~15M groups pre-limit)
+5. **Join ordering** (Q3): Apply customer.c_mktsegment filter before join to minimize probe cardinality
+
+**JSON Analysis written to**: `/home/jl4492/GenDB/output/tpc-h/2026-02-15T20-05-55/workload_analysis.json`

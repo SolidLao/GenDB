@@ -1,0 +1,365 @@
+{
+  "hardware": {
+    "cpu_cores": 32,
+    "threads_per_core": 2,
+    "total_threads": 64,
+    "cache_sizes": "L1d: 1MiB (32), L1i: 1MiB (32), L2: 32MiB (32), L3: 44MiB (2)",
+    "disk_type": "hdd",
+    "memory_gb": 376,
+    "simd_support": "avx2, avx512f, avx512dq, avx512cd, avx512bw, avx512vl"
+  },
+  "tables": {
+    "lineitem": {
+      "access_frequency": 3,
+      "role": "fact",
+      "exact_row_count": 59986052,
+      "estimated_cardinality": "60M",
+      "hot_columns": [
+        "l_shipdate",
+        "l_discount",
+        "l_quantity",
+        "l_extendedprice",
+        "l_orderkey",
+        "l_returnflag",
+        "l_linestatus"
+      ],
+      "column_stats": {
+        "l_shipdate": {
+          "min": "1992-01-02",
+          "max": "1998-12-01",
+          "approx_distinct": 2500,
+          "date_range_coverage": "~2500 days"
+        },
+        "l_discount": {
+          "min": "0.00",
+          "max": "0.10",
+          "approx_distinct": 11,
+          "note": "Low cardinality, uniform distribution"
+        },
+        "l_quantity": {
+          "min": "1",
+          "max": "50",
+          "approx_distinct": 50,
+          "note": "Integer, low cardinality"
+        },
+        "l_returnflag": {
+          "min": "A",
+          "max": "R",
+          "approx_distinct": 3,
+          "values": ["N", "A", "R"]
+        },
+        "l_linestatus": {
+          "min": "F",
+          "max": "O",
+          "approx_distinct": 2,
+          "values": ["F", "O"]
+        }
+      },
+      "access_patterns": [
+        "full_scan",
+        "filtered_scan",
+        "date_range_scan"
+      ]
+    },
+    "orders": {
+      "access_frequency": 2,
+      "role": "fact",
+      "exact_row_count": 15000000,
+      "estimated_cardinality": "15M",
+      "hot_columns": [
+        "o_orderkey",
+        "o_custkey",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "column_stats": {
+        "o_orderkey": {
+          "min": "1",
+          "max": "15000000",
+          "approx_distinct": 15000000,
+          "note": "Primary key, unique"
+        },
+        "o_custkey": {
+          "min": "1",
+          "max": "1500000",
+          "approx_distinct": 1500000,
+          "note": "Foreign key to customer"
+        },
+        "o_orderdate": {
+          "min": "1992-01-02",
+          "max": "1998-12-01",
+          "approx_distinct": 2500,
+          "note": "Spans ~7 years, uniform distribution"
+        }
+      },
+      "access_patterns": [
+        "index_lookup",
+        "filtered_scan"
+      ]
+    },
+    "customer": {
+      "access_frequency": 1,
+      "role": "dimension",
+      "exact_row_count": 1500000,
+      "estimated_cardinality": "1.5M",
+      "hot_columns": [
+        "c_custkey",
+        "c_mktsegment",
+        "c_nationkey"
+      ],
+      "column_stats": {
+        "c_custkey": {
+          "min": "1",
+          "max": "1500000",
+          "approx_distinct": 1500000,
+          "note": "Primary key"
+        },
+        "c_mktsegment": {
+          "min": "AUTOMOBILE",
+          "max": "MACHINERY",
+          "approx_distinct": 5,
+          "values": [
+            "AUTOMOBILE",
+            "BUILDING",
+            "FURNITURE",
+            "HOUSEHOLD",
+            "MACHINERY"
+          ],
+          "distribution": "approximately uniform (~1/5 each)"
+        }
+      },
+      "access_patterns": [
+        "index_lookup",
+        "filtered_scan"
+      ]
+    },
+    "nation": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "exact_row_count": 25,
+      "estimated_cardinality": "25",
+      "hot_columns": ["n_nationkey"],
+      "access_patterns": []
+    },
+    "region": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "exact_row_count": 5,
+      "estimated_cardinality": "5",
+      "access_patterns": []
+    },
+    "supplier": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "exact_row_count": 100000,
+      "estimated_cardinality": "100K",
+      "access_patterns": []
+    },
+    "part": {
+      "access_frequency": 0,
+      "role": "dimension",
+      "exact_row_count": 2000000,
+      "estimated_cardinality": "2M",
+      "access_patterns": []
+    },
+    "partsupp": {
+      "access_frequency": 0,
+      "role": "bridge",
+      "exact_row_count": 8000000,
+      "estimated_cardinality": "8M",
+      "access_patterns": []
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey",
+      "right": "orders.o_custkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "medium",
+      "cardinality_ratio": "1.5M customers : 15M orders"
+    },
+    {
+      "left": "orders.o_orderkey",
+      "right": "lineitem.l_orderkey",
+      "type": "PK-FK",
+      "query": "Q3",
+      "selectivity": "high",
+      "cardinality_ratio": "15M orders : 60M lineitems (avg 4 lines/order)"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "<=",
+      "selectivity": "high",
+      "query": "Q1",
+      "actual_selectivity": 0.987,
+      "predicate": "l_shipdate <= DATE '1998-09-02'"
+    },
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "operator": "=",
+      "selectivity": "medium",
+      "query": "Q3",
+      "actual_selectivity": 0.2,
+      "predicate": "c_mktsegment = 'BUILDING'"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q3",
+      "actual_selectivity": 0.48,
+      "predicate": "o_orderdate < DATE '1995-03-15'"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": ">",
+      "selectivity": "high",
+      "query": "Q3",
+      "actual_selectivity": 0.52,
+      "predicate": "l_shipdate > DATE '1995-03-15'"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "operator": "BETWEEN",
+      "selectivity": "low",
+      "query": "Q6",
+      "actual_selectivity": 0.156,
+      "predicate": "l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01'"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "operator": "BETWEEN",
+      "selectivity": "low",
+      "query": "Q6",
+      "actual_selectivity": 0.11,
+      "predicate": "l_discount BETWEEN 0.05 AND 0.07"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "operator": "<",
+      "selectivity": "medium",
+      "query": "Q6",
+      "actual_selectivity": 0.48,
+      "predicate": "l_quantity < 24"
+    }
+  ],
+  "aggregations": [
+    {
+      "query": "Q1",
+      "group_by": [
+        "l_returnflag",
+        "l_linestatus"
+      ],
+      "functions": [
+        "SUM(l_quantity)",
+        "SUM(l_extendedprice)",
+        "SUM(l_extendedprice * (1 - l_discount))",
+        "SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax))",
+        "AVG(l_quantity)",
+        "AVG(l_extendedprice)",
+        "AVG(l_discount)",
+        "COUNT(*)"
+      ],
+      "estimated_groups": 4,
+      "materialization": "in-memory hash table"
+    },
+    {
+      "query": "Q3",
+      "group_by": [
+        "l_orderkey",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "functions": [
+        "SUM(l_extendedprice * (1 - l_discount))"
+      ],
+      "estimated_groups": 500000,
+      "materialization": "hash aggregation then partial sort"
+    },
+    {
+      "query": "Q6",
+      "group_by": [],
+      "functions": [
+        "SUM(l_extendedprice * l_discount)"
+      ],
+      "estimated_groups": 1,
+      "materialization": "scalar aggregate"
+    }
+  ],
+  "ordering": [
+    {
+      "query": "Q1",
+      "columns": [
+        "l_returnflag ASC",
+        "l_linestatus ASC"
+      ],
+      "limit": null,
+      "row_count": 4,
+      "importance": "low"
+    },
+    {
+      "query": "Q3",
+      "columns": [
+        "revenue DESC",
+        "o_orderdate ASC"
+      ],
+      "limit": 10,
+      "row_count": 10,
+      "importance": "high",
+      "optimization": "top-k partial sort, not full sort"
+    }
+  ],
+  "filter_selectivities": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-09-02'",
+      "estimated_selectivity": 0.987
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01'",
+      "estimated_selectivity": 0.156
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount BETWEEN 0.05 AND 0.07",
+      "estimated_selectivity": 0.11
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "estimated_selectivity": 0.48
+    },
+    {
+      "table": "lineitem",
+      "predicate": "combined Q6 (date AND discount AND qty)",
+      "estimated_selectivity": 0.013
+    },
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "estimated_selectivity": 0.2
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "estimated_selectivity": 0.48
+    }
+  ],
+  "optimization_hints": [
+    "Q1: Vectorized hash aggregation over 60M lineitem rows with high selectivity (98.7%). Use SIMD for SUM/AVG computation. Parallelized scans (32 threads) mandatory—single-thread cannot saturate I/O. Zone maps on l_shipdate (pre-computed min/max per block) skip irrelevant blocks early. Result set: 4 rows.",
+    "Q3: Three-way join (customer-orders-lineitem) with medium selectivity (~4.8% final). Use hash join: build on customer (1.5M), probe orders (15M), then probe lineitem (60M). Partial aggregation per morsel, final merge. Top-10 limit avoids full sort—use heap or binary search. Parallelize all stages with 32 threads.",
+    "Q6: Selective scan (1.3% combined filter) + scalar aggregation. Branch-free filtering with SIMD for date/discount/qty predicates. Single pass over lineitem. Parallelized row collection, final SUM across threads. No sort/aggregation overhead."
+  ],
+  "summary": "Workload is OLAP-heavy (analytical scans, multi-way joins, aggregations). Lineitem is the bottleneck fact table (60M rows, 3 queries). Q1 has extremely high selectivity (98.7%) but low cardinality result (4 groups)—hash aggregation dominates. Q3 is join-heavy with multi-way filtering and partial aggregation before top-10 sort. Q6 is selective (1.3% rows) with scalar result. Critical optimizations: (1) Thread parallelism (64 cores available)—morsel-driven execution for scans/joins/aggs. (2) SIMD for filtering and aggregation loops. (3) Zone maps on l_shipdate (high cardinality, range queries in Q1/Q6). (4) Hash aggregation with compact hash tables (Swiss/Robin Hood) for Q1/Q3. (5) Operator fusion (scan+filter+project) to reduce materialization. (6) Top-K partial sort for Q3 instead of full sort. Execution time dominated by I/O on HDD + CPU compute on 60M lineitem rows; parallelism and vectorization are critical."
+}

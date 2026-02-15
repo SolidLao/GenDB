@@ -1,0 +1,45 @@
+Perfect! Now let me create a summary of the optimizations:
+
+## ✅ Optimization Summary — Iteration 2
+
+### **Optimizations Applied**
+
+I've made **2 targeted optimizations** to replace the failed iteration 1 (which was `io_bound`-focused). These focus on **CPU-bound execution** and **data structure efficiency**:
+
+#### **1. Flat Aggregation Table (Data Structure Optimization)**
+- **Problem**: Original code used `std::unordered_map` for each thread's aggregation. Hash tables have overhead for insertions, collisions, and cache misses.
+- **Solution**: Replaced with `FlatAggTable` — a flat array indexed by compound key (returnflag_code × 256 + linestatus_code).
+  - Max 6 possible groups (3 returnflags × 2 linestatuses)
+  - Direct array indexing: O(1) with zero hash computation
+  - Better cache locality: All accesses are sequential
+  - Eliminates memory allocation during scan phase
+- **Expected Impact**: 5-15% faster aggregation due to eliminated hash lookups and better memory locality
+
+#### **2. Memory Efficiency in Merge Phase**
+- **Problem**: Merging thread-local aggregates requires iterating through hash table entries.
+- **Solution**: Store non-empty key list (`keys` vector) in `FlatAggTable`. Merge loop only processes the 6 actual groups instead of searching through the entire hash table.
+- **Expected Impact**: Marginally faster merge phase (negligible, but cleaner)
+
+### **Code Changes**
+- Added `#include <immintrin.h>` (for future SIMD, currently unused)
+- Added `FlatAggTable` struct with flat arrays and key tracking
+- Replaced all `std::unordered_map` instances with `FlatAggTable`
+- Updated merge logic to iterate only over non-empty keys
+- Updated result collection to iterate over non-empty keys
+
+### **Compilation Status**
+✅ **Successful** — no warnings or errors
+
+### **Expected Performance**
+- **Baseline**: 51.3 ms (iter_0)
+- **Target**: ~45 ms (5-10% improvement)
+- **DuckDB target**: 86 ms (current gap: +51%)
+- This optimization targets the hot path (60M rows × 7 aggregations), so even small improvements compound
+
+### **Strategy**
+- Differentiated from iteration 1 (which failed on `io_bound` with zone maps)
+- Focused on **data structure overhead** in the tight loop
+- **Conservative approach**: No SIMD or aggressive vector operations that might break correctness
+- Preserves all [TIMING] markers and output format
+
+The Executor will now run this version, benchmark it against iteration 0, and validate correctness. If successful, we can layer on additional optimizations (SIMD filtering, vectorized arithmetic) in future iterations.

@@ -1,0 +1,44 @@
+Perfect! The fix is in place. Now let me create a summary of what was done:
+
+## Summary: Correctness Fix for Q6 (Iteration 3)
+
+### **Issue Identified**
+The code had a critical **decimal scaling bug** in the aggregation calculation:
+- **Expected result**: 1230113636.01
+- **Actual result**: 123013622935.61  
+- **Error factor**: ~100x too large
+
+### **Root Cause**
+In the product calculation on line 153, the code divided by 100 instead of 10,000:
+
+**Incorrect:**
+```cpp
+double product = ((double)eprice * (double)disc) / 100.0;
+```
+
+Both `eprice` and `discount` are scaled by 100 (stored as integers):
+- `eprice = 100000` represents `$1000.00`
+- `disc = 5` represents `0.05` (5%)
+
+When multiplying two scaled values, you must divide by the product of their scale factors (100 × 100 = 10,000), not just 100.
+
+**Correct:**
+```cpp
+double product = ((double)eprice * (double)disc) / 10000.0;
+```
+
+**Example:**
+- eprice = 100000, disc = 5
+- Correct: (100000 × 5) / 10000 = 50.0 (represents $50.00 revenue after 5% discount)
+- Incorrect: (100000 × 5) / 100 = 5000 (100x too large)
+
+### **Changes Made**
+- Modified line 153: Changed divisor from `100.0` to `10000.0`
+- Updated comments to clarify the decimal scaling logic
+- Preserved all [TIMING] lines and code structure
+
+### **Compilation**
+✓ Code compiles successfully with: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`
+
+### **Next Steps**
+The Executor will validate the corrected output. Once correctness is confirmed, performance optimizations can be applied if needed.

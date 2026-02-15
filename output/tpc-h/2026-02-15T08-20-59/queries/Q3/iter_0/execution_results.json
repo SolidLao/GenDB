@@ -1,0 +1,101 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q3: Customer->Orders->Lineitem join\n[METADATA CHECK] Customer: c_mktsegment (dict), c_custkey\n[METADATA CHECK] Orders: o_orderkey, o_custkey, o_orderdate (DATE), o_shippriority\n[METADATA CHECK] Lineitem: l_orderkey, l_extendedprice (DECIMAL:100), l_discount (DECIMAL:100), l_shipdate (DATE)\n[METADATA CHECK] Filters: c_mktsegment='BUILDING'(0), o_orderdate<9204, l_shipdate>9204\n[TIMING] zone_map_load: 1.57 ms\n[METADATA CHECK] Using on-the-fly hash index construction (zone maps pre-loaded)\n[METADATA CHECK] Loaded customer: 1500000 rows\n[TIMING] customer_filter: 281.39 ms (300276 rows)\n[METADATA CHECK] Loaded orders: 15000000 rows\n[TIMING] orders_filter: 799.12 ms (1460668 rows)\n[TIMING] orders_hash_build: 323.35 ms\n[METADATA CHECK] Loaded lineitem: 59986052 rows\n[METADATA CHECK] Lineitem blocks: 458\n[TIMING] lineitem_join: 1295.88 ms (302234 rows joined, 458 blocks scanned, 0 skipped)\n[TIMING] sort_limit: 8.93 ms\n[TIMING] output: 0.22 ms\n[TIMING] total: 2736.43 ms\n[METADATA CHECK] Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T08-20-59/queries/Q3/iter_0/results/Q3.csv (10 rows)\n",
+    "stderr": "",
+    "duration_ms": 2858
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": false,\n      \"error\": \"2 row(s) differ across 3 column(s)\",\n      \"column_failures\": {\n        \"l_orderkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"23906758\",\n              \"actual\": \"3355202\",\n              \"abs_diff\": 20551556.0,\n              \"rel_diff_pct\": 85.9655,\n              \"row\": 3\n            },\n            {\n              \"expected\": \"3355202\",\n              \"actual\": \"46020097\",\n              \"abs_diff\": 42664895.0,\n              \"rel_diff_pct\": 1271.6044,\n              \"row\": 4\n            }\n          ]\n        },\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"432728.5737\",\n              \"actual\": \"425100.6300\",\n              \"abs_diff\": 7627.94,\n              \"rel_diff_pct\": 1.7628,\n              \"tolerance\": \"$100\",\n              \"row\": 3\n            },\n            {\n              \"expected\": \"425100.6657\",\n              \"actual\": \"462131.4200\",\n              \"abs_diff\": 37030.75,\n              \"rel_diff_pct\": 8.7111,\n              \"tolerance\": \"$100\",\n              \"row\": 4\n            }\n          ]\n        },\n        \"o_orderdate\": {\n          \"category\": \"exact\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"1995-03-14\",\n              \"actual\": \"1995-03-04\",\n              \"row\": 3\n            },\n            {\n              \"expected\": \"1995-03-04\",\n              \"actual\": \"1995-03-03\",\n              \"row\": 4\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 10,
+          "rows_actual": 10,
+          "match": false,
+          "error": "2 row(s) differ across 3 column(s)",
+          "column_failures": {
+            "l_orderkey": {
+              "category": "exact",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "23906758",
+                  "actual": "3355202",
+                  "abs_diff": 20551556,
+                  "rel_diff_pct": 85.9655,
+                  "row": 3
+                },
+                {
+                  "expected": "3355202",
+                  "actual": "46020097",
+                  "abs_diff": 42664895,
+                  "rel_diff_pct": 1271.6044,
+                  "row": 4
+                }
+              ]
+            },
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "432728.5737",
+                  "actual": "425100.6300",
+                  "abs_diff": 7627.94,
+                  "rel_diff_pct": 1.7628,
+                  "tolerance": "$100",
+                  "row": 3
+                },
+                {
+                  "expected": "425100.6657",
+                  "actual": "462131.4200",
+                  "abs_diff": 37030.75,
+                  "rel_diff_pct": 8.7111,
+                  "tolerance": "$100",
+                  "row": 4
+                }
+              ]
+            },
+            "o_orderdate": {
+              "category": "exact",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "1995-03-14",
+                  "actual": "1995-03-04",
+                  "row": 3
+                },
+                {
+                  "expected": "1995-03-04",
+                  "actual": "1995-03-03",
+                  "row": 4
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "zone_map_load": 1.57,
+    "customer_filter": 281.39,
+    "orders_filter": 799.12,
+    "orders_hash_build": 323.35,
+    "lineitem_join": 1295.88,
+    "sort_limit": 8.93,
+    "output": 0.22,
+    "total": 2736.43
+  },
+  "timing_ms": 2736.21
+}

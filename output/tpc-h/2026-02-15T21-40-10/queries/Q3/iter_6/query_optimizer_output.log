@@ -1,0 +1,37 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations (Iteration 6)
+
+I've implemented **zone map pruning** for both orders and lineitem filtering to reduce unnecessary block scans.
+
+### Changes Made:
+
+**1. Zone Map Pruning for Orders Filter (Step 2)**
+- Load `zone_map_o_orderdate` index from storage
+- Pre-compute which blocks satisfy predicate `o_orderdate < 9204` (DATE_CUTOFF)
+- Skip blocks where `min_val >= DATE_CUTOFF` (all dates in block are too large)
+- Apply block-level check before per-row filtering in the parallel loop
+
+**2. Zone Map Pruning for Lineitem Scan (Step 3)**
+- Load `zone_map_l_shipdate` index from storage
+- Pre-compute which blocks satisfy predicate `l_shipdate > 9204` (DATE_CUTOFF)
+- Skip blocks where `max_val <= DATE_CUTOFF` (all dates in block are too small)
+- Apply block-level check before per-row filtering in the parallel loop
+
+### Expected Impact:
+
+- **Orders Table**: The date filter `o_orderdate < 1995-03-15` has ~33% selectivity. Blocks are sorted by `o_orderkey` (not by date), but zone maps still capture min/max. Expects **moderate skip rate** (~20-30% of blocks skipped).
+- **Lineitem Table**: The date filter `l_shipdate > 1995-03-15` is very selective (~0.4% of rows). Lineitem is **sorted by l_shipdate**, so zone maps should be highly effective. Expects **high skip rate** (~60-70% of blocks skipped).
+
+The lineitem optimization should yield the greatest improvement (reducing the dominant `join_and_aggregate` phase by skipping 60%+ of blocks).
+
+### Preserved Elements:
+- ✅ All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ All encoding logic unchanged
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Thread parallelism and CompactHashTable optimizations preserved
+- ✅ OpenMP scheduling strategies maintained
+
+**Compilation Status**: ✓ Success (warnings are pre-existing)
+
+The code is ready for execution by the Executor system.

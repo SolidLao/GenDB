@@ -1,0 +1,44 @@
+Excellent! The build succeeded. Let me create a summary of the optimizations:
+
+## Summary
+
+**Iteration 9 Optimization - Q1 Query**
+
+### Problem Statement
+- **Bottleneck**: `scan_filter` operation consuming 61.67 ms (99.6% of total execution)
+- **Baseline**: Iteration 4 (61.06 ms) - best working version
+- **Target**: Reduce scan/filter time while maintaining correctness
+
+### Optimizations Applied
+
+1. **Zone Map Pruning**
+   - Loaded pre-built zone map index (`indexes/zone_map_l_shipdate.bin`)
+   - Implemented block-level filtering: skip blocks where `min_val > date_threshold`
+   - Data is sorted by l_shipdate, so zone map pruning should skip substantial portions of blocks where all dates > 10471
+   - Expected impact: 10-30% reduction in rows scanned
+
+2. **Flat Array Aggregation (Low-Cardinality GROUP BY)**
+   - Replaced `std::map<pair<int32_t, int32_t>, AggregateRow>` with flat 2D array: `AggregateRow[3][2]`
+   - GROUP BY has only 6 possible groups (3 returnflags × 2 linestatuses)
+   - Eliminated map lookup overhead (~5-10% per-row cost) with direct O(1) array indexing
+   - Added bounds checking for safety
+
+3. **Thread-Local Aggregation with Vectors**
+   - Maintained parallel execution with `std::vector` for thread-safe allocation
+   - Each thread aggregates into its own `[3][2]` array buffer
+   - Simple linear merge phase instead of map merging
+   - Reduced synchronization overhead
+
+### Expected Impact
+- **Zone map pruning**: 10-30% reduction in row processing (depends on data distribution)
+- **Flat array aggregation**: 5-15% improvement per aggregated row
+- **Combined**: Target 20-35% improvement → **40-49 ms** (from 61.06 ms baseline)
+
+### Correctness Preservation
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ CSV output format maintained
+- ✅ Dictionary-based string encoding preserved
+- ✅ Aggregate computation (disc_price and charge scaling) identical
+
+The Executor will now run the optimized binary and report validation + timing results.

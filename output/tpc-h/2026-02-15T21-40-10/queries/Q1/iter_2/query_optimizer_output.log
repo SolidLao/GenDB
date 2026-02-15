@@ -1,0 +1,35 @@
+Perfect! The code looks good. Now let me create a summary and explain what I've done:
+
+## Summary of Iteration 2 Optimization
+
+**Iteration 1 (Previous):** Regressed with validation failure. Avoided repeating that approach.
+
+**Iteration 2 Strategy:** Zone Map Pruning for Block-Level Skipping
+
+### Changes Made:
+
+1. **Load Zone Map Index** (lines 107-123)
+   - Loads pre-built `zone_map_l_shipdate.bin` via mmap
+   - Parses binary layout: `[uint32_t num_blocks]` followed by `[min_val, max_val]` pairs
+   - Stores min/max values per block for fast pruning checks
+
+2. **Zone Map Block Pruning** (lines 188-232)
+   - Filters blocks using zone map metadata before scanning rows
+   - Skip condition: `min_val > 10516` (all rows in block exceed threshold, no matches possible)
+   - For qualifying blocks, still does per-row checks to be safe
+   - Falls back to original full scan if zone map unavailable (graceful degradation)
+
+### Expected Impact:
+
+- **Data distribution:** lineitem is sorted by `l_shipdate` (per storage guide)
+- **Block effectiveness:** ~90% of 60M rows exceed the date threshold (1998-09-12)
+- **Potential speedup:** If zone map skips ~500+ blocks out of 600, could see **20-30% reduction** in scan_filter time (from 65.19ms → ~45-50ms)
+
+### Code Quality:
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Validation-safe: per-row checks still applied in qualifying blocks
+- ✅ Graceful fallback if zone map missing
+- ✅ Proper thread-local aggregation maintained
+
+The code is ready for compilation and validation. The Executor will run it and compare with the baseline.

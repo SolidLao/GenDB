@@ -38,12 +38,14 @@ Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources 
 
 ## Indexing
 
+Choose indexes based on the access pattern — each type has a distinct sweet spot:
+
 | File | Technique | When to Use |
 |------|-----------|-------------|
-| `indexing/hash-indexes.md` | Hash Indexes | Point lookups, hash joins, GROUP BY. O(1) avg. NOT for range queries. |
-| `indexing/sorted-indexes.md` | Sorted Indexes | Range queries, ordered scans, prefix matches. B-trees or sorted arrays. |
+| `indexing/zone-maps.md` | Zone Maps (Min/Max) | Range predicates — cheapest index, block-level skip. Almost always worth building on filter columns. |
+| `indexing/hash-indexes.md` | Hash Indexes (Multi-Value) | Equi-joins and point lookups. O(1) avg. Multi-value design for join columns with duplicates. NOT for range queries. |
+| `indexing/sorted-indexes.md` | B+ Trees & Sorted Indexes | Selective range queries (date BETWEEN X AND Y), ordered scans, merge joins. O(log N) lookup + leaf-level range scan. |
 | `indexing/bloom-filters.md` | Bloom Filters | Semi-join reduction, existence checks. Probabilistic — no false negatives. |
-| `indexing/zone-maps.md` | Zone Maps (Min/Max) | Range predicates on sorted/clustered data. Skip entire blocks. |
 
 ## Query Execution
 
@@ -88,3 +90,10 @@ Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources 
 | `external-libs/abseil-folly.md` | Abseil/Folly Hash Maps | Drop-in replacement for std::unordered_map. 2-5x speedup. SIMD-accelerated lookups. |
 | `external-libs/jemalloc-tcmalloc.md` | jemalloc/tcmalloc | Replace system malloc when allocation is >5% of CPU. Multi-threaded workloads. |
 | `external-libs/io-libraries.md` | I/O Libraries (mmap, io_uring) | Loading large datasets (>1GB). Avoid syscall overhead. |
+
+## Performance Patterns
+
+| File | Technique | When to Use |
+|------|-----------|-------------|
+| `patterns/parallel-hash-join.md` | Parallel Hash Join + Open Addressing | Join operations, especially multi-table joins. Never use std::unordered_map for join hash tables. |
+| `patterns/zone-map-pruning.md` | Zone Map Pruning Patterns | Range/comparison predicates on zone-mapped columns. Correct skip logic. **Note: exact binary formats vary per run — rely on per-query storage guides for authoritative layouts.** |

@@ -1,0 +1,46 @@
+Perfect! The binary was created successfully. Now let me create a summary of the optimizations:
+
+## Optimization Summary for Q3 Iteration 3
+
+I've applied **three high-impact optimizations** targeting the dominant bottleneck (`join_and_aggregate` at 64% of execution time):
+
+### 1. **Zone Map Pruning for Lineitem (`l_shipdate > 9204`)**
+   - **What**: Load zone map index file and skip entire 100K-row blocks where `max(l_shipdate) <= DATE_CUTOFF`
+   - **How**: 
+     - Added `load_and_compute_zone_map_skip_mask()` function to precompute which blocks can be skipped
+     - Modified lineitem scan loop to iterate by block, checking zone map skip mask first
+     - Blocks marked as "skip" never enter the inner loop
+   - **Impact**: Lineitem has 599 blocks. Zone map pruning can skip ~30-50% of blocks (blocks where all shipdates are ≤ 9204), reducing the inner loop iterations by millions of rows
+   - **Expected speedup**: 15-30% reduction in join+aggregate phase
+
+### 2. **Optimized Hash Table Merge**
+   - **What**: Pre-compute total occupied entries before merging to better size the global aggregation hash tables
+   - **How**: 
+     - Count total occupied entries across all thread-local tables
+     - Use this count to properly size the global `CompactHashTable` with correct load factor
+     - Reduces hash table collisions and improves probe efficiency
+   - **Impact**: Merger step now has better hash table density, reducing collision chains
+   - **Expected speedup**: 5-10% reduction in merge time
+
+### 3. **Structural Optimization via Block-Level Iteration**
+   - **What**: Reorganized the parallel loop to iterate by block ID rather than raw row index
+   - **How**: 
+     - Outer loop processes `num_lineitem_blocks` instead of `num_lineitems`
+     - Each thread processes a contiguous block, improving cache locality
+     - Zone map pruning happens at block granularity (zero overhead for skipped blocks)
+   - **Impact**: Better CPU cache utilization and predictable memory access patterns
+   - **Expected speedup**: 5-10% from improved L3 cache hit rate
+
+### Code Changes Summary:
+- Added `#include <immintrin.h>` for SIMD support (future vectorization)
+- Added `ZoneMapEntry` struct and `load_and_compute_zone_map_skip_mask()` function
+- Reorganized lineitem scan loop to be block-aware with zone map pruning
+- Optimized hash table merge with pre-sizing
+- Preserved all [TIMING] lines and validation logic
+
+### Expected Overall Impact:
+- **Current**: 705.21 ms
+- **Target after iter 3**: ~550-600 ms (20-25% improvement)
+- **Final target (DuckDB)**: 77-112 ms (9-10x from current, multi-iteration goal)
+
+The optimizations preserve correctness while focusing on the join+aggregate critical path. The Executor will validate results and measure the actual speedup.

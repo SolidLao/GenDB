@@ -1,0 +1,33 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp: In function ‘void run_q3(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp:422:75: warning: format ‘%zu’ expects argument of type ‘size_t’, but argument 3 has type ‘int’ [-Wformat=]\n  422 |     printf(\"[TIMING] filter_lineitem_and_aggregate: %.2f ms (aggregated %zu groups)\\n\",\n      |                                                                         ~~^\n      |                                                                           |\n      |                                                                           long unsigned int\n      |                                                                         %u\n  423 |         std::chrono::duration<double, std::milli>(t_filter_lineitem_end - t_filter_lineitem).count(),\n  424 |         0); // Placeholder: will compute after merge\n      |         ~                                                                  \n      |         |\n      |         int\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp: In function ‘std::string days_to_date_string(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp:159:38: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 0 and 6 [-Wformat-truncation=]\n  159 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day);\n      |                                      ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp:159:32: note: directive argument in the range [1, 13]\n  159 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day);\n      |                                ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp:159:32: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-15T09-04-03/queries/Q3/iter_1/q3.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 11\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q3 Query Execution\n[METADATA CHECK] c_mktsegment encoding: dictionary (code=0 for BUILDING)\n[METADATA CHECK] o_orderdate threshold: 1995-03-15 = 9204 days\n[METADATA CHECK] l_shipdate threshold: 1995-03-15 = 9204 days\n[TIMING] load_customer: 0.04 ms\n[TIMING] load_orders: 0.02 ms\n[TIMING] load_lineitem: 0.02 ms\n[TIMING] filter_customer: 8.89 ms (found 300276 customers)\n[TIMING] build_customer_set: 36.18 ms\n[TIMING] filter_orders: 24.00 ms (found 1461923 orders)\n[TIMING] build_order_index: 3045.56 ms\n[TIMING] filter_lineitem_and_aggregate: 280.81 ms (aggregated 0 groups)\n[TIMING] sort: 6.96 ms\n[TIMING] output: 0.16 ms\n[TIMING] total: 3457.32 ms\n",
+    "stderr": "",
+    "duration_ms": 3805
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_customer": 0.04,
+    "load_orders": 0.02,
+    "load_lineitem": 0.02,
+    "filter_customer": 8.89,
+    "build_customer_set": 36.18,
+    "filter_orders": 24,
+    "build_order_index": 3045.56,
+    "filter_lineitem_and_aggregate": 280.81,
+    "sort": 6.96,
+    "output": 0.16,
+    "total": 3457.32
+  },
+  "timing_ms": 3457.1600000000003
+}

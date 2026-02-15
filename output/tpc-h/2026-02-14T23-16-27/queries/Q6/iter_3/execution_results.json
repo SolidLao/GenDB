@@ -1,0 +1,26 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_3/q6.cpp: In function ‘void run_q6(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_3/q6.cpp:186:9: warning: unused variable ‘num_threads’ [-Wunused-variable]\n  186 |     int num_threads = std::min(4, (int)std::thread::hardware_concurrency());\n      |         ^~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_3/q6.cpp: At global scope:\n/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_3/q6.cpp:90:13: warning: ‘std::string {anonymous}::epoch_to_date(int32_t)’ defined but not used [-Wunused-function]\n   90 | std::string epoch_to_date(int32_t epoch_days) {\n      |             ^~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-14T23-16-27/queries/Q6/iter_3/q6.cpp:20:8: warning: ‘size_t {anonymous}::get_file_size(const string&)’ defined but not used [-Wunused-function]\n   20 | size_t get_file_size(const std::string& path) {\n      |        ^~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] Q6 start\n[TIMING] load: 0.06 ms\nProcessing 59986052 lineitem rows\n[TIMING] filter_aggregate: 450.34 ms\n[TIMING] output: 0.62 ms\n[TIMING] total: 489.82 ms\nResult: revenue = 1230113636.0101\n",
+    "stderr": "",
+    "duration_ms": 496
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.06,
+    "filter_aggregate": 450.34,
+    "output": 0.62,
+    "total": 489.82
+  },
+  "timing_ms": 489.82
+}

@@ -1,0 +1,26 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q6 Query\n[METADATA CHECK] Table: lineitem, Columns: l_shipdate(DATE), l_discount(DECIMAL,scale=100), l_quantity(DECIMAL,scale=100), l_extendedprice(DECIMAL,scale=100)\n[METADATA CHECK] Predicates: l_shipdate >= 1994-01-01 AND l_shipdate < 1995-01-01 AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24\n[METADATA CHECK] Aggregation: SUM(l_extendedprice * l_discount)\n[METADATA CHECK] Date range: 8767 to 9132\n[METADATA CHECK] Discount range (scaled): 5 to 7\n[METADATA CHECK] Quantity max (scaled): 2400\n[TIMING] Loading columns...\n[TIMING] load: 0.05 ms\n[METADATA CHECK] Total rows: 59986052\n[TIMING] Starting scan-filter-aggregate...\n[TIMING] scan_filter_aggregate: 30.08 ms\n[TIMING] Writing output...\n[TIMING] output: 0.25 ms\n[TIMING] total: 30.45 ms\nResult written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T06-15-26/queries/Q6/iter_0/results/Q6.csv\nRevenue: 1230113636.0101\n",
+    "stderr": "",
+    "duration_ms": 63
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.05,
+    "scan_filter_aggregate": 30.08,
+    "output": 0.25,
+    "total": 30.45
+  },
+  "timing_ms": 30.2
+}

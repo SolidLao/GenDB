@@ -1,0 +1,32 @@
+Excellent! Now let me print a brief summary:
+
+## TPC-H Workload Analysis Complete ✓
+
+**File written to:** `/home/jl4492/GenDB/output/tpc-h/2026-02-15T21-40-10/workload_analysis.json`
+
+### Key Findings:
+
+**Hardware Profile:**
+- 64 cores (Intel Xeon Gold 5218 @ 2.30GHz) with AVX-512 support
+- 376 GB memory, HDD storage
+- 44MB L3 cache (multi-socket) — suggests ~500K-1M morsel size per thread
+
+**Data Characteristics:**
+- **lineitem** (59.9M rows): Fact table dominating workload, accessed in all 3 queries
+- **orders** (15M rows): Secondary fact table, used in join (Q3)
+- **customer** (1.5M rows): Dimension, small scan with 20% selectivity on c_mktsegment (Q3)
+- Unused tables: region, supplier, part, partsupp (optimization target: skip loading)
+
+**Query Patterns:**
+1. **Q1 (Pricing Summary):** 60M row scan, 98.8% selectivity on l_shipdate, 6 GROUP BY groups → Fast aggregation
+2. **Q3 (Shipping Priority):** Three-way join (customer→orders→lineitem) with pre-filtering, 10 result LIMIT → Join optimization critical
+3. **Q6 (Revenue Forecasting):** 60M row scan, 2.4% combined filter selectivity (date + discount + quantity) → Vectorized filtering wins
+
+**Optimization Priorities:**
+1. **Parallelism (CRITICAL):** Thread morsel-driven execution across 64 cores for scans/joins
+2. **Vectorization:** SIMD filtering on l_discount (BETWEEN 0.05-0.07) and l_quantity (<24)
+3. **Zone Maps:** Range filtering on l_shipdate and o_orderdate (2500+ distinct values)
+4. **Join Strategy (Q3):** Hash join with customer as small build side, orders+lineitem probe
+5. **Operator Fusion:** Fuse scan+filter+aggregate for Q1/Q6 to minimize intermediate materialization
+
+All data profiling completed in <5 seconds with actual row counts and column statistics from sampling.

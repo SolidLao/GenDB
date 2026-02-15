@@ -1,0 +1,42 @@
+Excellent! Here's a summary of the TPC-H workload analysis:
+
+## TPC-H Workload Analysis Summary
+
+**File written to:** `/home/jl4492/GenDB/output/tpc-h/2026-02-15T08-20-59/workload_analysis.json`
+
+### Hardware Profile
+- **CPU:** 64 cores, AVX-512 support
+- **Cache:** L3 44 MiB (efficient for morsel-driven parallelism)
+- **Memory:** 376 GB
+- **Storage:** HDD (rotational)
+
+### Key Findings
+
+**Data Cardinalities (Exact):**
+- `lineitem`: 59,986,052 rows (fact table, largest)
+- `orders`: 15,000,000 rows (fact table)
+- `customer`: 1,500,000 rows (dimension)
+- `partsupp`: 8,000,000 rows (bridge)
+- Smaller dimensions: part (2M), supplier (100K), nation (25), region (5)
+
+**Filter Selectivities:**
+- **Q1** (`l_shipdate ≤ 1998-09-01`): **98.7%** → High-pass, no pruning benefit
+- **Q3** (multi-predicate): **5-20%** per-stage selectivity → Good opportunity for zone-map pruning
+- **Q6** (complex combo): **5.2%** → Selective, benefits from early filter ordering
+- **Q3 customer mktsegment**: **20%** (1 of 5 segments)
+
+**Query Patterns:**
+- **Q1:** Linear scan + simple 6-group aggregation (returnflag × linestatus)
+- **Q3:** 3-way join (customer → orders → lineitem) with sequential filtering
+- **Q6:** Single-table selective scan (5% output)
+
+### Top Optimization Strategies
+
+1. **Parallel Execution:** Use 64 cores with morsel-driven parallelism for lineitem scans/joins
+2. **Zone Maps:** Prune on `l_shipdate` (high-cardinality filter column, 2526 distinct values)
+3. **Hash Aggregation:** Q1 has only 6 groups → use perfect hash/direct-array indexing
+4. **Filter Ordering:** Q6 should evaluate in SIMD order (discount, quantity → date range)
+5. **Hash Joins:** Build on smallest filtered side (customer with 20% selectivity), probe larger tables
+6. **Encoding:** Compress low-cardinality columns (returnflag, linestatus, mktsegment) to reduce memory pressure
+
+The analysis is complete and ready for downstream agents (Storage/Index Designer, Code Generator) to make optimization decisions.

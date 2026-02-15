@@ -1,0 +1,167 @@
+================================================================================
+Q3 (Shipping Priority) - GenDB Iteration 0 Implementation Summary
+================================================================================
+
+QUERY: Three-way join with aggregation and sorting
+- Customer → Orders → Lineitem
+- Filter by market segment (BUILDING), order date, and ship date
+- Aggregate revenue by (l_orderkey, o_orderdate, o_shippriority)
+- Return top 10 by revenue DESC, o_orderdate ASC
+
+================================================================================
+CORRECTNESS VERIFICATION
+================================================================================
+
+Validation Status: ✓ PASSED
+- Ground truth rows: 10
+- Generated rows: 10
+- All numeric values match exactly to 4 decimal places
+- Date formatting: YYYY-MM-DD (correct conversion from epoch days)
+- Row ordering: Correct (revenue DESC, date ASC)
+
+Sample match verification:
+  Row 0: l_orderkey=4791171, revenue=440715.2185, date=1995-02-23, priority=0 ✓
+  Row 1: l_orderkey=46678469, revenue=439855.3250, date=1995-01-27, priority=0 ✓
+  Row 9: l_orderkey=52974151, revenue=415367.1195, date=1995-02-05, priority=0 ✓
+
+================================================================================
+KEY IMPLEMENTATION DECISIONS
+================================================================================
+
+1. DATE HANDLING (CRITICAL)
+   - Dates stored as int32_t days since 1970-01-01 (epoch)
+   - 1995-03-15 = 9204 days (computed via epoch algorithm)
+   - Predicates: o_orderdate < 9204, l_shipdate > 9204
+   - Output: Converted to YYYY-MM-DD string format for CSV
+
+2. DECIMAL PRECISION (CRITICAL)
+   - l_extendedprice and l_discount stored as int64_t scaled by 100
+   - Revenue computation: l_extendedprice * (100 - l_discount)
+   - Kept at scale 10000 during accumulation for precision
+   - Divided by 10000.0 only during output
+   - Formatted to 4 decimal places for CSV output
+   - This avoids truncation errors in integer division
+
+3. DICTIONARY ENCODING
+   - c_mktsegment: dictionary-encoded as int32_t codes
+   - Code 0 = "BUILDING" (loaded dynamically from _dict.txt)
+   - Never hardcoded the code value (loaded at runtime)
+
+4. JOIN STRATEGY
+   - Phase 1: Filter customers by mktsegment = 0, store in unordered_set
+   - Phase 2: Filter orders by (orderdate < 9204 AND custkey in customer_set)
+   - Phase 3: Build hash map from o_orderkey → (o_orderdate, o_shippriority)
+   - Phase 4: Filter lineitem by shipdate > 9204, probe order map for each row
+   - This minimizes intermediate materialization
+
+5. AGGREGATION
+   - Hash aggregation with composite key (l_orderkey, o_orderdate, o_shippriority)
+   - Group key hashed using combined bit pattern (40 + 20 + 20 bits)
+   - Accumulates revenue at scale 10000, divided at output
+
+6. SORTING & LIMITING
+   - Sort by revenue DESC (descending), then o_orderdate ASC
+   - Lambda comparator correctly handles both conditions
+   - Limit to top 10 by simple vector resize
+
+================================================================================
+PERFORMANCE METRICS (WITH PROFILING)
+================================================================================
+
+Total execution: ~4077 ms (excluding CSV output)
+
+Breakdown:
+  Load data:              0.19 ms (mmap, negligible overhead)
+  Filter customer:       13.13 ms (scan ~1.5M rows)
+  Build customer hash:   36.91 ms (300K unique customers)
+  Filter orders:        534.98 ms (scan 15M rows with join)
+  Build order map:      182.19 ms (hash map of 1.46M orders)
+  Filter lineitem:     3276.99 ms (scan 60M lineitem rows with join)
+  Aggregation:          21.05 ms (hash agg ~114K groups)
+  Sort:                 11.33 ms (sort ~114K rows)
+  Output CSV:            0.20 ms (write 10 rows)
+
+Bottleneck: Lineitem scan (80% of time) due to 60M row table
+  Optimization opportunity: Use pre-built hash indexes (iter_1+)
+
+================================================================================
+FILE STRUCTURE
+================================================================================
+
+q3.cpp (360 lines)
+├── Includes: Standard C++17 libraries, mmap for binary I/O
+├── Utilities:
+│   ├── MmapFile RAII wrapper for safe mmap handling
+│   ├── load_dict_code() for dictionary lookup
+│   ├── format_date() for epoch day → YYYY-MM-DD conversion
+├── Data structures:
+│   ├── AggResult (for final output)
+│   ├── OrderInfo (for order metadata)
+│   ├── LineitemOrderJoin (for intermediate joined rows)
+│   ├── GroupKey + GroupKeyHash (for aggregation)
+├── Main execution: run_q3()
+│   └── 8 timing points for profiling
+└── Entry point: main() with command-line args
+
+TIMING INSTRUMENTATION
+├── All major operations wrapped in #ifdef GENDB_PROFILE guards
+├── Times reported to stdout using printf("[TIMING] operation_name: %.2f ms")
+├── Output timing excluded from total (measured separately)
+
+================================================================================
+COMPILATION NOTES
+================================================================================
+
+Compile (with profiling):
+  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE \
+      -o q3 q3.cpp
+
+Compile (final):
+  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp \
+      -o q3 q3.cpp
+
+Warnings (non-fatal):
+  - snprintf buffer size warning in format_date() (conservative, safe)
+  - No functional errors
+
+================================================================================
+ESSENTIALS COMPLIANCE CHECKLIST
+================================================================================
+
+✓ Correctness (PRIMARY): All 10 output rows match ground truth exactly
+✓ DATE columns: Correctly handled as int32_t epoch days, converted for output
+✓ DECIMAL columns: Properly scaled (preserved full precision during aggregation)
+✓ Dictionary-encoded strings: Loaded at runtime, never hardcoded
+✓ [TIMING] instrumentation: All major operations timed with guards
+✓ CSV output: Comma-delimited, header row, correct numeric precision
+✓ Self-contained: All includes at top, mmap for direct file access
+✓ No STL abuse: Proper hash maps with std::unordered_set for set operations
+✓ No intermediate errors: Code compiles and runs successfully
+
+================================================================================
+ITERATION 0 vs ITERATION 1+ NOTES
+================================================================================
+
+This implementation prioritizes CORRECTNESS and simplicity (iteration 0).
+Possible optimizations for future iterations:
+
+1. Use pre-built multi-value hash indexes for joins (lineitem_orderkey_hash)
+   - Could reduce lineitem probe phase from 3.3s to <500ms
+   
+2. Parallelize lineitem scan with OpenMP + morsel-driven approach
+   - 32 cores available; could achieve ~10-15x speedup with proper partitioning
+   
+3. Implement zone map pruning on l_shipdate
+   - Skip blocks where min(l_shipdate) <= 9204
+   
+4. Use more efficient aggregation (e.g., open-addressing hash table)
+   - Current implementation uses std::unordered_map (chaining)
+   - Switch to robin hood or swiss table for better cache locality
+
+5. Sort acceleration:
+   - Current: std::sort on 114K items (negligible, already fast)
+   - Top-10 could use partial_sort or priority queue, but not a bottleneck
+
+Priority for optimization: Lineitem scan (3.3s) >> everything else
+
+================================================================================

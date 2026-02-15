@@ -1,0 +1,24 @@
+Perfect! All three critical fixes are in place:
+
+## Summary of Correctness Fixes
+
+**Three critical bugs were fixed:**
+
+1. **Date encoding error (lines 136-137):**
+   - OLD: `DATE_1994_01_01 = 8766`, `DATE_1995_01_01 = 9131`
+   - NEW: `DATE_1994_01_01 = 8036`, `DATE_1995_01_01 = 8401`
+   - Impact: Was filtering out ALL rows since the actual dates in 1994 (8036-8400) were outside the wrong bounds
+
+2. **Discount scaling error (lines 141-142):**
+   - OLD: `DISCOUNT_MIN = 500`, `DISCOUNT_MAX = 700` (wrong scale by 10000)
+   - NEW: `DISCOUNT_MIN = 5`, `DISCOUNT_MAX = 7` (correct scale by 100)
+   - Impact: No rows pass the discount filter (5-7 range in scale-100 encoding)
+
+3. **Revenue calculation error (line 299):**
+   - OLD: Division by `1000000.0` (incorrect scaling factor)
+   - NEW: Division by `10000.0` (correct: both extendedprice and discount scaled by 100)
+   - Impact: Even if rows passed filtering, the revenue would be wrong
+
+The compiled binary is ready: `/home/jl4492/GenDB/output/tpc-h/2026-02-15T08-20-59/queries/Q6/iter_3/q6`
+
+The Executor will now validate the corrected output. These were pure semantic errors in understanding the data encoding — the zone map infrastructure and filtering logic were sound, just operating on wrong constants.

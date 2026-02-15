@@ -1,0 +1,43 @@
+=== Q3 Query Implementation - Iteration 0 ===
+Status: PASSED ✓
+
+Query Type: Multi-table join with GROUP BY aggregation
+Tables: customer (1.5M rows), orders (15M rows), lineitem (60M rows)
+
+Key Optimizations:
+1. Memory-mapped binary columnar I/O (zero-copy)
+2. Early filtering with dictionary-encoded strings
+3. Hash table join on smaller (filtered orders) side
+4. Kahan summation for floating-point accuracy
+5. Partial aggregation during join phase
+6. Parallel compilation flags (-fopenmp, -march=native)
+
+Performance Metrics:
+- Total execution time: ~1.3-1.4 seconds
+- Load: 0.12 ms (mmap overhead)
+- Filter customer: 11-13 ms (BUILDING segment = 300K customers)
+- Build orders index: 762-814 ms (filtered to ~5M matching orders)
+- Aggregate lineitem: 516-551 ms (final 10 groups from ~12M matched rows)
+- Sort: 7-10 ms
+- Output: 0.2 ms
+
+Data Handling Notes:
+- Date epoch: 1969-12-31 (one day offset from standard 1970-01-01)
+  * Database stores 9185 for "1995-02-24" when displayed with offset
+  * Threshold calculation: 1995-03-15 = 9205 in database encoding
+- DECIMAL columns stored as int64_t with scale_factor=100
+  * Example: 440715.2185 stored as 44071521850 / 100
+- Dictionary-encoded columns (c_mktsegment): Parse format "code=value"
+  * BUILDING = code 0 in the customer mktsegment dictionary
+
+Validation: PASSED (10/10 rows match ground truth exactly)
+
+Files:
+- q3.cpp: Main implementation
+- results/Q3.csv: Output file with top 10 revenue results
+
+Correctness: Complete
+- No NaN/Inf values
+- Proper date conversion with epoch offset
+- Accurate revenue calculation (Kahan summation)
+- Correct join semantics (customer → orders → lineitem)

@@ -1,0 +1,151 @@
+================================================================================
+Q3 QUERY - ITERATION 0 IMPLEMENTATION SUMMARY
+================================================================================
+
+QUERY TYPE: 3-Table Join with Filter, GROUP BY, and Aggregation
+STATUS: ✅ VALIDATED AND PASSING
+
+================================================================================
+IMPLEMENTATION DETAILS
+================================================================================
+
+Generated File:
+  /home/jl4492/GenDB/output/tpc-h/2026-02-15T20-05-55/queries/Q3/iter_0/q3.cpp
+
+Output Result:
+  /home/jl4492/GenDB/output/tpc-h/2026-02-15T20-05-55/queries/Q3/iter_0/results/Q3.csv
+
+Compilation Command (with profiling):
+  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q3 q3.cpp
+
+Execution Command:
+  ./q3 <gendb_dir> [results_dir]
+  ./q3 /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb results/
+
+================================================================================
+VALIDATION RESULTS
+================================================================================
+
+Validation Tool: compare_results.py (TPC-H compatible)
+
+Result: ✅ ALL TESTS PASSED
+
+Details:
+  - Expected rows: 10
+  - Actual rows: 10
+  - Match: 100%
+  - Precision: 4 decimal places (monetary values)
+  - Sample match: 4791171,440715.2185,1995-02-23,0
+
+================================================================================
+KEY IMPLEMENTATION NOTES
+================================================================================
+
+1. DATE ENCODING ISSUE FOUND AND FIXED:
+   - GenDB stores epoch days with +1 offset vs. standard UNIX epoch
+   - Example: 1995-03-02 (epoch day 9191) stored as 9192
+   - Fix: Subtract 1 in date formatter and adjust date comparison thresholds
+   - Thresholds used: 1995-03-15 = 9205 (not 9204)
+
+2. DECIMAL PRECISION HANDLING:
+   - Problem: Integer division loses fractional cents
+   - Original: (ext_price * (100 - discount)) / 100 → truncates remainder
+   - Solution: Store numerator without dividing, divide by 10000 at output time
+   - Result: Full 4-decimal precision preserved (e.g., 440715.2185)
+
+3. DICTIONARY-ENCODED STRING FILTERING:
+   - Column: c_mktsegment (BUILDING segment)
+   - Method: Load dictionary, find code for "BUILDING" (code=0), filter by code
+   - Result: 300,276 qualifying customers out of 1,500,000
+
+4. THREE-TABLE JOIN STRATEGY:
+   - Filter customer table first (smallest after filter)
+   - Build hash map of qualifying orders (o_orderkey → order data)
+   - Scan lineitem, probe orders hash map for matches
+   - Aggregate using GROUP BY hash table
+   - Sort results and output top 10
+
+5. DATA STRUCTURES USED:
+   - unordered_map<int32_t, bool> for customer membership check
+   - unordered_map<int32_t, vector<OrderData>> for orders join
+   - unordered_map<GroupKey, int64_t, GroupKeyHash> for GROUP BY
+
+6. TIMING INSTRUMENTATION:
+   - All major operations wrapped in #ifdef GENDB_PROFILE guards
+   - Customer filter: ~52 ms
+   - Orders filter: ~1,771 ms
+   - Lineitem join & aggregate: ~1,947 ms
+   - Sort: ~14 ms
+   - Output: <1 ms
+   - Total: ~3.8 seconds
+
+================================================================================
+CORRECTNESS ASSURANCES
+================================================================================
+
+✅ Proper date constant handling (epoch days since 1970-01-01)
+✅ Dictionary-encoded string lookup with runtime dict file loading
+✅ Decimal fixed-point arithmetic without floating-point errors
+✅ Multi-table join with correct filter pushdown
+✅ GROUP BY aggregation with Kahan-safe summation (integer semantics)
+✅ Correct sort order (revenue DESC, then date ASC)
+✅ CSV output with proper header row and numeric formatting
+✅ mmap file access with proper cleanup (munmap)
+✅ All binary column files loaded successfully
+✅ Validation against ground truth: 100% match
+
+================================================================================
+METRICS
+================================================================================
+
+Data Volume:
+  - Customer table: 1.5M rows (~240 MB)
+  - Orders table: 15M rows (~1.4 GB)
+  - Lineitem table: ~60M rows (~4.8 GB)
+  - Total input: ~6.5 GB
+
+Performance:
+  - Execution time: 3.8 seconds (with -O3 -march=native)
+  - Output size: 10 rows (~200 bytes CSV)
+  - Throughput: ~1.7 GB/s effective
+
+Compilation:
+  - Compiler: g++ (GCC) with C++17 standard
+  - Optimization flags: -O3 -march=native
+  - Parallel: -fopenmp enabled (not currently used in iter_0)
+  - Linkage: -lpthread for future parallel support
+
+================================================================================
+ITERATION 0 STATUS
+================================================================================
+
+This is the **CORRECTNESS-FIRST** implementation (iteration 0).
+Focus: Correct results using straightforward algorithms.
+Performance: Acceptable (~3.8 seconds for ~60M row scan).
+
+FUTURE OPTIMIZATION OPPORTUNITIES (for iteration 1+):
+- Use pre-built hash indexes (hash_c_custkey, hash_o_custkey, hash_l_orderkey)
+- Parallelize main join loop with OpenMP (64 CPU cores available)
+- Zone map pruning on date columns (available: zone_map_o_orderdate, zone_map_l_shipdate)
+- Use open-addressing compact hash tables instead of std::unordered_map
+- SIMD filtering on date predicates
+- Two-phase aggregation (local per-thread, then global merge)
+
+================================================================================
+COMPLIANCE NOTES
+================================================================================
+
+✓ Uses only binary columnar data from .gendb directory
+✓ No source .tbl files read
+✓ [TIMING] instrumentation in all major operations
+✓ Timing measurement uses std::chrono::high_resolution_clock
+✓ DATE columns treated as int32_t epoch days
+✓ DECIMAL columns treated as int64_t with scale_factor
+✓ CSV output comma-delimited with header row
+✓ Monetary values formatted to 4 decimal places
+✓ Dates formatted as YYYY-MM-DD
+✓ Standalone hash structs (no std::hash specialization)
+✓ gendb_dir parameter from command line argv
+✓ Output written to results_dir/<QUERY_ID>.csv
+
+================================================================================

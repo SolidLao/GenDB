@@ -1,0 +1,36 @@
+Perfect! The changes look correct. All [TIMING] lines are preserved, and the logic is sound. Now let me create a summary of the optimization:
+
+## Optimization Summary for Q3 Iteration 2
+
+### Changes Made
+
+I've applied **one high-impact optimization** targeting the dominant bottleneck:
+
+#### 1. **Replace `std::unordered_map` with Open-Addressing Hash Table** (Pattern: `patterns/parallel-hash-join.md`)
+
+**Bottleneck Identified:**
+- `build_order_map`: 193.09 ms (41.7% of total execution time)
+- This operation builds a hash table to store order information (o_orderdate, o_shippriority) keyed by o_orderkey for lineitem join lookups
+
+**Change:**
+- Implemented `CompactHashTable<K, V>` template using **open-addressing** (linear probing) instead of chaining
+- Uses **Fibonacci hashing** for good distribution: `hash(key) = key * 0x9E3779B97F4A7C15ULL`
+- Pre-sizes to ~75% load factor to minimize collisions
+- Replaced `std::unordered_map<int32_t, OrderInfo>` with `CompactHashTable<int32_t, OrderInfo>`
+
+**Expected Performance Impact:**
+- **2-3x speedup** on hash table build and lookup operations
+- Eliminates pointer chasing overhead of chaining-based hash tables
+- Better cache locality due to contiguous storage
+- Expected improvement: 193 ms → ~65-97 ms (**~96-130 ms saved**, ~21-28% total reduction)
+
+**Correctness:**
+- All [TIMING] lines preserved in #ifdef GENDB_PROFILE guards
+- Encoding logic unchanged
+- CSV output format unchanged
+- Results validation remains the same
+
+### Compilation Status
+✅ **Compiled successfully** with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+The binary is ready for execution and validation by the Executor.
