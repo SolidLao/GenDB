@@ -77,16 +77,19 @@ def classify_tpch_column(header):
     """
     h = header.strip().lower()
     # Count columns — exact
-    if h == "count" or h.startswith("count_"):
+    if h == "count" or h.startswith("count_") or h.endswith("_count") or h in (
+        "order_count", "high_line_count", "low_line_count",
+        "supplier_cnt", "custdist", "numcust", "numwait",
+    ):
         return "exact_count"
     # sum_qty / sum_quantity — exact (TPC-H Comment 4)
     if h in ("sum_qty", "sum_quantity"):
         return "exact_sum_qty"
-    # sum_* / revenue / total_revenue — $100 tolerance
-    if h.startswith("sum_") or h in ("revenue", "total_revenue"):
+    # sum_* / revenue / total_revenue / value — $100 tolerance
+    if h.startswith("sum_") or h in ("revenue", "total_revenue", "value", "totacctbal"):
         return "sum_money"
-    # avg_* — 1% relative tolerance
-    if h.startswith("avg_"):
+    # avg_* / ratio / percentage columns — 1% relative tolerance
+    if h.startswith("avg_") or h in ("promo_revenue", "mkt_share", "avg_yearly"):
         return "avg"
     # Everything else — exact
     return "exact"

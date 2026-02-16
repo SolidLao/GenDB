@@ -113,9 +113,15 @@ def main():
 
     # Parse and run queries
     queries = parse_queries(queries_path)
-    print(f"\nFound {len(queries)} queries: {', '.join(sorted(queries.keys()))}")
 
-    for name, sql in sorted(queries.items()):
+    # Q11 scale-factor substitution: threshold = 0.0001/SF
+    if args.sf != 1 and "Q11" in queries:
+        sf_threshold = f"{0.0001 / args.sf:.10f}"
+        queries["Q11"] = queries["Q11"].replace("0.0001000000", sf_threshold)
+
+    print(f"\nFound {len(queries)} queries: {', '.join(sorted(queries.keys(), key=lambda q: int(q[1:])))}")
+
+    for name, sql in sorted(queries.items(), key=lambda x: int(x[0][1:])):
         print(f"\nRunning {name}...")
         try:
             result = con.execute(sql)

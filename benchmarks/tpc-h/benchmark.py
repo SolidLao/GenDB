@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB
+TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB vs ClickHouse vs Umbra vs MonetDB
 
 Usage:
     python3 benchmarks/tpc-h/benchmark.py --sf <N> [options]
@@ -12,13 +12,20 @@ Options:
     --runs <N>            Number of runs per query (default: 3)
     --setup               Force database setup/reload (default: skip if DB exists)
     --output <path>       Output plot path (default: results/sf{N}/figures/benchmark_results_per_query.png)
-    --gendb-only          Skip PostgreSQL and DuckDB benchmarks
+    --gendb-only          Skip all baseline benchmarks
+    --skip-clickhouse     Skip ClickHouse benchmark
+    --skip-umbra          Skip Umbra benchmark
+    --skip-monetdb        Skip MonetDB benchmark
+    --timeout <N>         Per-query timeout in seconds (default: 300)
 """
 
 import argparse
+import io
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -38,56 +45,465 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
+# Number of threads for all systems (set to core count for fair comparison)
+BENCHMARK_THREADS = os.cpu_count() or 64
+
 # ---------------------------------------------------------------------------
-# TPC-H queries (standard SQL, compatible with both PostgreSQL and DuckDB)
+# TPC-H queries (standard SQL, cross-system compatible)
 # ---------------------------------------------------------------------------
 
-QUERIES = {
-    "Q1": """
-        SELECT
-            l_returnflag,
-            l_linestatus,
-            SUM(l_quantity) AS sum_qty,
-            SUM(l_extendedprice) AS sum_base_price,
-            SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
-            SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
-            AVG(l_quantity) AS avg_qty,
-            AVG(l_extendedprice) AS avg_price,
-            AVG(l_discount) AS avg_disc,
-            COUNT(*) AS count_order
-        FROM lineitem
-        WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY
-        GROUP BY l_returnflag, l_linestatus
-        ORDER BY l_returnflag, l_linestatus
-    """,
-    "Q3": """
-        SELECT
-            l_orderkey,
-            SUM(l_extendedprice * (1 - l_discount)) AS revenue,
-            o_orderdate,
-            o_shippriority
-        FROM customer, orders, lineitem
-        WHERE
-            c_mktsegment = 'BUILDING'
-            AND c_custkey = o_custkey
-            AND l_orderkey = o_orderkey
-            AND o_orderdate < DATE '1995-03-15'
-            AND l_shipdate > DATE '1995-03-15'
-        GROUP BY l_orderkey, o_orderdate, o_shippriority
-        ORDER BY revenue DESC, o_orderdate
-        LIMIT 10
-    """,
-    "Q6": """
-        SELECT
-            SUM(l_extendedprice * l_discount) AS revenue
-        FROM lineitem
-        WHERE
-            l_shipdate >= DATE '1994-01-01'
-            AND l_shipdate < DATE '1994-01-01' + INTERVAL '1' YEAR
-            AND l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01
-            AND l_quantity < 24
-    """,
-}
+def get_queries(scale_factor: int = 1) -> dict:
+    """Return all 22 TPC-H queries with default parameter substitutions.
+
+    Q11's HAVING threshold is parameterized by scale factor (0.0001/SF).
+    """
+    q11_threshold = 0.0001 / scale_factor
+
+    return {
+        "Q1": """
+            SELECT
+                l_returnflag,
+                l_linestatus,
+                SUM(l_quantity) AS sum_qty,
+                SUM(l_extendedprice) AS sum_base_price,
+                SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+                SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+                AVG(l_quantity) AS avg_qty,
+                AVG(l_extendedprice) AS avg_price,
+                AVG(l_discount) AS avg_disc,
+                COUNT(*) AS count_order
+            FROM lineitem
+            WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY
+            GROUP BY l_returnflag, l_linestatus
+            ORDER BY l_returnflag, l_linestatus
+        """,
+        "Q2": """
+            SELECT
+                s_acctbal, s_name, n_name, p_partkey, p_mfgr,
+                s_address, s_phone, s_comment
+            FROM part, supplier, partsupp, nation, region
+            WHERE
+                p_partkey = ps_partkey
+                AND s_suppkey = ps_suppkey
+                AND p_size = 15
+                AND p_type LIKE '%BRASS'
+                AND s_nationkey = n_nationkey
+                AND n_regionkey = r_regionkey
+                AND r_name = 'EUROPE'
+                AND ps_supplycost = (
+                    SELECT MIN(ps_supplycost)
+                    FROM partsupp, supplier, nation, region
+                    WHERE
+                        p_partkey = ps_partkey
+                        AND s_suppkey = ps_suppkey
+                        AND s_nationkey = n_nationkey
+                        AND n_regionkey = r_regionkey
+                        AND r_name = 'EUROPE'
+                )
+            ORDER BY s_acctbal DESC, n_name, s_name, p_partkey
+            LIMIT 100
+        """,
+        "Q3": """
+            SELECT
+                l_orderkey,
+                SUM(l_extendedprice * (1 - l_discount)) AS revenue,
+                o_orderdate,
+                o_shippriority
+            FROM customer, orders, lineitem
+            WHERE
+                c_mktsegment = 'BUILDING'
+                AND c_custkey = o_custkey
+                AND l_orderkey = o_orderkey
+                AND o_orderdate < DATE '1995-03-15'
+                AND l_shipdate > DATE '1995-03-15'
+            GROUP BY l_orderkey, o_orderdate, o_shippriority
+            ORDER BY revenue DESC, o_orderdate
+            LIMIT 10
+        """,
+        "Q4": """
+            SELECT
+                o_orderpriority,
+                COUNT(*) AS order_count
+            FROM orders
+            WHERE
+                o_orderdate >= DATE '1993-07-01'
+                AND o_orderdate < DATE '1993-07-01' + INTERVAL '3' MONTH
+                AND EXISTS (
+                    SELECT * FROM lineitem
+                    WHERE l_orderkey = o_orderkey
+                      AND l_commitdate < l_receiptdate
+                )
+            GROUP BY o_orderpriority
+            ORDER BY o_orderpriority
+        """,
+        "Q5": """
+            SELECT
+                n_name,
+                SUM(l_extendedprice * (1 - l_discount)) AS revenue
+            FROM customer, orders, lineitem, supplier, nation, region
+            WHERE
+                c_custkey = o_custkey
+                AND l_orderkey = o_orderkey
+                AND l_suppkey = s_suppkey
+                AND c_nationkey = s_nationkey
+                AND s_nationkey = n_nationkey
+                AND n_regionkey = r_regionkey
+                AND r_name = 'ASIA'
+                AND o_orderdate >= DATE '1994-01-01'
+                AND o_orderdate < DATE '1994-01-01' + INTERVAL '1' YEAR
+            GROUP BY n_name
+            ORDER BY revenue DESC
+        """,
+        "Q6": """
+            SELECT
+                SUM(l_extendedprice * l_discount) AS revenue
+            FROM lineitem
+            WHERE
+                l_shipdate >= DATE '1994-01-01'
+                AND l_shipdate < DATE '1994-01-01' + INTERVAL '1' YEAR
+                AND l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01
+                AND l_quantity < 24
+        """,
+        "Q7": """
+            SELECT
+                supp_nation, cust_nation, l_year,
+                SUM(volume) AS revenue
+            FROM (
+                SELECT
+                    n1.n_name AS supp_nation,
+                    n2.n_name AS cust_nation,
+                    EXTRACT(YEAR FROM l_shipdate) AS l_year,
+                    l_extendedprice * (1 - l_discount) AS volume
+                FROM supplier, lineitem, orders, customer, nation n1, nation n2
+                WHERE
+                    s_suppkey = l_suppkey
+                    AND o_orderkey = l_orderkey
+                    AND c_custkey = o_custkey
+                    AND s_nationkey = n1.n_nationkey
+                    AND c_nationkey = n2.n_nationkey
+                    AND (
+                        (n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+                        OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')
+                    )
+                    AND l_shipdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
+            ) AS shipping
+            GROUP BY supp_nation, cust_nation, l_year
+            ORDER BY supp_nation, cust_nation, l_year
+        """,
+        "Q8": """
+            SELECT
+                o_year,
+                SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END) / SUM(volume) AS mkt_share
+            FROM (
+                SELECT
+                    EXTRACT(YEAR FROM o_orderdate) AS o_year,
+                    l_extendedprice * (1 - l_discount) AS volume,
+                    n2.n_name AS nation
+                FROM part, supplier, lineitem, orders, customer, nation n1, nation n2, region
+                WHERE
+                    p_partkey = l_partkey
+                    AND s_suppkey = l_suppkey
+                    AND l_orderkey = o_orderkey
+                    AND o_custkey = c_custkey
+                    AND c_nationkey = n1.n_nationkey
+                    AND n1.n_regionkey = r_regionkey
+                    AND r_name = 'AMERICA'
+                    AND s_nationkey = n2.n_nationkey
+                    AND o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
+                    AND p_type = 'ECONOMY ANODIZED STEEL'
+            ) AS all_nations
+            GROUP BY o_year
+            ORDER BY o_year
+        """,
+        "Q9": """
+            SELECT
+                nation, o_year,
+                SUM(amount) AS sum_profit
+            FROM (
+                SELECT
+                    n_name AS nation,
+                    EXTRACT(YEAR FROM o_orderdate) AS o_year,
+                    l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity AS amount
+                FROM part, supplier, lineitem, partsupp, orders, nation
+                WHERE
+                    s_suppkey = l_suppkey
+                    AND ps_suppkey = l_suppkey
+                    AND ps_partkey = l_partkey
+                    AND p_partkey = l_partkey
+                    AND o_orderkey = l_orderkey
+                    AND s_nationkey = n_nationkey
+                    AND p_name LIKE '%green%'
+            ) AS profit
+            GROUP BY nation, o_year
+            ORDER BY nation, o_year DESC
+        """,
+        "Q10": """
+            SELECT
+                c_custkey, c_name,
+                SUM(l_extendedprice * (1 - l_discount)) AS revenue,
+                c_acctbal, n_name, c_address, c_phone, c_comment
+            FROM customer, orders, lineitem, nation
+            WHERE
+                c_custkey = o_custkey
+                AND l_orderkey = o_orderkey
+                AND o_orderdate >= DATE '1993-10-01'
+                AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH
+                AND l_returnflag = 'R'
+                AND c_nationkey = n_nationkey
+            GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+            ORDER BY revenue DESC
+            LIMIT 20
+        """,
+        "Q11": f"""
+            SELECT
+                ps_partkey,
+                SUM(ps_supplycost * ps_availqty) AS value
+            FROM partsupp, supplier, nation
+            WHERE
+                ps_suppkey = s_suppkey
+                AND s_nationkey = n_nationkey
+                AND n_name = 'GERMANY'
+            GROUP BY ps_partkey
+            HAVING SUM(ps_supplycost * ps_availqty) > (
+                SELECT SUM(ps_supplycost * ps_availqty) * {q11_threshold:.10f}
+                FROM partsupp, supplier, nation
+                WHERE
+                    ps_suppkey = s_suppkey
+                    AND s_nationkey = n_nationkey
+                    AND n_name = 'GERMANY'
+            )
+            ORDER BY value DESC
+        """,
+        "Q12": """
+            SELECT
+                l_shipmode,
+                SUM(CASE
+                    WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1
+                    ELSE 0
+                END) AS high_line_count,
+                SUM(CASE
+                    WHEN o_orderpriority <> '1-URGENT' AND o_orderpriority <> '2-HIGH' THEN 1
+                    ELSE 0
+                END) AS low_line_count
+            FROM orders, lineitem
+            WHERE
+                o_orderkey = l_orderkey
+                AND l_shipmode IN ('MAIL', 'SHIP')
+                AND l_commitdate < l_receiptdate
+                AND l_shipdate < l_commitdate
+                AND l_receiptdate >= DATE '1994-01-01'
+                AND l_receiptdate < DATE '1994-01-01' + INTERVAL '1' YEAR
+            GROUP BY l_shipmode
+            ORDER BY l_shipmode
+        """,
+        "Q13": """
+            SELECT
+                c_count,
+                COUNT(*) AS custdist
+            FROM (
+                SELECT
+                    c_custkey,
+                    COUNT(o_orderkey) AS c_count
+                FROM customer LEFT OUTER JOIN orders ON
+                    c_custkey = o_custkey
+                    AND o_comment NOT LIKE '%special%requests%'
+                GROUP BY c_custkey
+            ) AS c_orders
+            GROUP BY c_count
+            ORDER BY custdist DESC, c_count DESC
+        """,
+        "Q14": """
+            SELECT
+                100.00 * SUM(CASE
+                    WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount)
+                    ELSE 0
+                END) / SUM(l_extendedprice * (1 - l_discount)) AS promo_revenue
+            FROM lineitem, part
+            WHERE
+                l_partkey = p_partkey
+                AND l_shipdate >= DATE '1995-09-01'
+                AND l_shipdate < DATE '1995-09-01' + INTERVAL '1' MONTH
+        """,
+        "Q15": """
+            WITH revenue0 AS (
+                SELECT
+                    l_suppkey AS supplier_no,
+                    SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+                FROM lineitem
+                WHERE
+                    l_shipdate >= DATE '1996-01-01'
+                    AND l_shipdate < DATE '1996-01-01' + INTERVAL '3' MONTH
+                GROUP BY l_suppkey
+            )
+            SELECT
+                s_suppkey, s_name, s_address, s_phone, total_revenue
+            FROM supplier, revenue0
+            WHERE
+                s_suppkey = supplier_no
+                AND total_revenue = (
+                    SELECT MAX(total_revenue) FROM revenue0
+                )
+            ORDER BY s_suppkey
+        """,
+        "Q16": """
+            SELECT
+                p_brand, p_type, p_size,
+                COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+            FROM partsupp, part
+            WHERE
+                p_partkey = ps_partkey
+                AND p_brand <> 'Brand#45'
+                AND p_type NOT LIKE 'MEDIUM POLISHED%'
+                AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
+                AND ps_suppkey NOT IN (
+                    SELECT s_suppkey FROM supplier
+                    WHERE s_comment LIKE '%Customer%Complaints%'
+                )
+            GROUP BY p_brand, p_type, p_size
+            ORDER BY supplier_cnt DESC, p_brand, p_type, p_size
+        """,
+        "Q17": """
+            SELECT
+                SUM(l_extendedprice) / 7.0 AS avg_yearly
+            FROM lineitem, part
+            WHERE
+                p_partkey = l_partkey
+                AND p_brand = 'Brand#23'
+                AND p_container = 'MED BOX'
+                AND l_quantity < (
+                    SELECT 0.2 * AVG(l_quantity)
+                    FROM lineitem
+                    WHERE l_partkey = p_partkey
+                )
+        """,
+        "Q18": """
+            SELECT
+                c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,
+                SUM(l_quantity) AS sum_qty
+            FROM customer, orders, lineitem
+            WHERE
+                o_orderkey IN (
+                    SELECT l_orderkey FROM lineitem
+                    GROUP BY l_orderkey
+                    HAVING SUM(l_quantity) > 300
+                )
+                AND c_custkey = o_custkey
+                AND o_orderkey = l_orderkey
+            GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+            ORDER BY o_totalprice DESC, o_orderdate
+            LIMIT 100
+        """,
+        "Q19": """
+            SELECT
+                SUM(l_extendedprice * (1 - l_discount)) AS revenue
+            FROM lineitem, part
+            WHERE
+                (
+                    p_partkey = l_partkey
+                    AND p_brand = 'Brand#12'
+                    AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+                    AND l_quantity >= 1 AND l_quantity <= 1 + 10
+                    AND p_size BETWEEN 1 AND 5
+                    AND l_shipmode IN ('AIR', 'AIR REG')
+                    AND l_shipinstruct = 'DELIVER IN PERSON'
+                )
+                OR (
+                    p_partkey = l_partkey
+                    AND p_brand = 'Brand#23'
+                    AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+                    AND l_quantity >= 10 AND l_quantity <= 10 + 10
+                    AND p_size BETWEEN 1 AND 10
+                    AND l_shipmode IN ('AIR', 'AIR REG')
+                    AND l_shipinstruct = 'DELIVER IN PERSON'
+                )
+                OR (
+                    p_partkey = l_partkey
+                    AND p_brand = 'Brand#34'
+                    AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+                    AND l_quantity >= 20 AND l_quantity <= 20 + 10
+                    AND p_size BETWEEN 1 AND 15
+                    AND l_shipmode IN ('AIR', 'AIR REG')
+                    AND l_shipinstruct = 'DELIVER IN PERSON'
+                )
+        """,
+        "Q20": """
+            SELECT s_name, s_address
+            FROM supplier, nation
+            WHERE
+                s_suppkey IN (
+                    SELECT ps_suppkey FROM partsupp
+                    WHERE
+                        ps_partkey IN (
+                            SELECT p_partkey FROM part WHERE p_name LIKE 'forest%'
+                        )
+                        AND ps_availqty > (
+                            SELECT 0.5 * SUM(l_quantity)
+                            FROM lineitem
+                            WHERE
+                                l_partkey = ps_partkey
+                                AND l_suppkey = ps_suppkey
+                                AND l_shipdate >= DATE '1994-01-01'
+                                AND l_shipdate < DATE '1994-01-01' + INTERVAL '1' YEAR
+                        )
+                )
+                AND s_nationkey = n_nationkey
+                AND n_name = 'CANADA'
+            ORDER BY s_name
+        """,
+        "Q21": """
+            SELECT
+                s_name,
+                COUNT(*) AS numwait
+            FROM supplier, lineitem l1, orders, nation
+            WHERE
+                s_suppkey = l1.l_suppkey
+                AND o_orderkey = l1.l_orderkey
+                AND o_orderstatus = 'F'
+                AND l1.l_receiptdate > l1.l_commitdate
+                AND EXISTS (
+                    SELECT * FROM lineitem l2
+                    WHERE l2.l_orderkey = l1.l_orderkey
+                      AND l2.l_suppkey <> l1.l_suppkey
+                )
+                AND NOT EXISTS (
+                    SELECT * FROM lineitem l3
+                    WHERE l3.l_orderkey = l1.l_orderkey
+                      AND l3.l_suppkey <> l1.l_suppkey
+                      AND l3.l_receiptdate > l3.l_commitdate
+                )
+                AND s_nationkey = n_nationkey
+                AND n_name = 'SAUDI ARABIA'
+            GROUP BY s_name
+            ORDER BY numwait DESC, s_name
+            LIMIT 100
+        """,
+        "Q22": """
+            SELECT
+                cntrycode,
+                COUNT(*) AS numcust,
+                SUM(c_acctbal) AS totacctbal
+            FROM (
+                SELECT
+                    SUBSTRING(c_phone, 1, 2) AS cntrycode,
+                    c_acctbal
+                FROM customer
+                WHERE
+                    SUBSTRING(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
+                    AND c_acctbal > (
+                        SELECT AVG(c_acctbal) FROM customer
+                        WHERE
+                            c_acctbal > 0.00
+                            AND SUBSTRING(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
+                    )
+                    AND NOT EXISTS (
+                        SELECT * FROM orders WHERE o_custkey = c_custkey
+                    )
+            ) AS custsale
+            GROUP BY cntrycode
+            ORDER BY cntrycode
+        """,
+    }
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL benchmark
@@ -161,22 +577,13 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
             print(f"  Warning: {tbl_file} not found, skipping")
             continue
         print(f"  Loading {table}...", end="", flush=True)
-        try:
-            cur.execute(
-                f"COPY {table} FROM PROGRAM 'sed ''s/|$//' {tbl_file}' WITH (DELIMITER '|')"
-            )
-        except Exception as e:
-            print(f"\n  Note: Using fallback method for {table} ({e})")
-            import io
-            with open(tbl_file, "r") as f:
-                cleaned = io.StringIO()
-                for line in f:
-                    line = line.rstrip("\n")
-                    if line.endswith("|"):
-                        line = line[:-1]
-                    cleaned.write(line + "\n")
-                cleaned.seek(0)
-                cur.copy_expert(f"COPY {table} FROM STDIN WITH (DELIMITER '|')", cleaned)
+        # Pipe through sed to strip trailing '|' from TPC-H .tbl files
+        proc = subprocess.Popen(
+            ["sed", "s/|$//", str(tbl_file)],
+            stdout=subprocess.PIPE,
+        )
+        cur.copy_expert(f"COPY {table} FROM STDIN WITH (DELIMITER '|')", proc.stdout)
+        proc.wait()
         cur.execute(f"SELECT COUNT(*) FROM {table}")
         count = cur.fetchone()[0]
         print(f" {count:,} rows")
@@ -185,23 +592,42 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def pg_benchmark(scale_factor: int, num_runs: int, query_ids: list) -> dict:
+def pg_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+                 queries: dict, timeout: int = 300) -> dict:
     conn = psycopg2.connect(**get_pg_conn_params(scale_factor))
     cur = conn.cursor()
+    cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
+    cur.execute(f"SET max_parallel_workers_per_gather = {BENCHMARK_THREADS}")
+    cur.execute(f"SET max_parallel_workers = {BENCHMARK_THREADS}")
     results = {}
     for qname in query_ids:
-        if qname not in QUERIES:
+        if qname not in queries:
             continue
         times = []
+        timed_out = False
         for _ in range(num_runs):
-            start = time.perf_counter()
-            cur.execute(QUERIES[qname])
-            cur.fetchall()
-            elapsed = (time.perf_counter() - start) * 1000
-            times.append(elapsed)
-        results[qname] = times
-        avg_time = sum(times) / len(times)
-        print(f"  PostgreSQL {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            try:
+                start = time.perf_counter()
+                cur.execute(queries[qname])
+                cur.fetchall()
+                elapsed = (time.perf_counter() - start) * 1000
+                times.append(elapsed)
+            except psycopg2.errors.QueryCanceled:
+                conn.rollback()
+                cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
+                print(f"  PostgreSQL {qname}: TIMEOUT ({timeout}s)")
+                timed_out = True
+                break
+            except Exception as e:
+                conn.rollback()
+                cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
+                print(f"  PostgreSQL {qname}: ERROR - {e}")
+                timed_out = True
+                break
+        if not timed_out and times:
+            results[qname] = times
+            avg_time = sum(times) / len(times)
+            print(f"  PostgreSQL {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
     cur.close()
     conn.close()
     return results
@@ -262,26 +688,763 @@ def duckdb_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def duckdb_benchmark(scale_factor: int, num_runs: int, query_ids: list) -> dict:
+def duckdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+                     queries: dict, timeout: int = 300) -> dict:
     duckdb_dir = Path(__file__).parent / "duckdb"
     db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
     if not db_path.exists():
         print(f"  Error: DuckDB database not found at {db_path}")
         return {}
     conn = duckdb.connect(str(db_path), read_only=True)
+    conn.execute(f"SET threads = {BENCHMARK_THREADS}")
     results = {}
     for qname in query_ids:
-        if qname not in QUERIES:
+        if qname not in queries:
             continue
         times = []
+        timed_out = False
         for _ in range(num_runs):
-            start = time.perf_counter()
-            conn.execute(QUERIES[qname]).fetchall()
-            elapsed = (time.perf_counter() - start) * 1000
-            times.append(elapsed)
-        results[qname] = times
-        avg_time = sum(times) / len(times)
-        print(f"  DuckDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            try:
+                start = time.perf_counter()
+                conn.execute(queries[qname]).fetchall()
+                elapsed = (time.perf_counter() - start) * 1000
+                if elapsed > timeout * 1000:
+                    print(f"  DuckDB {qname}: TIMEOUT ({timeout}s)")
+                    timed_out = True
+                    break
+                times.append(elapsed)
+            except Exception as e:
+                print(f"  DuckDB {qname}: ERROR - {e}")
+                timed_out = True
+                break
+        if not timed_out and times:
+            results[qname] = times
+            avg_time = sum(times) / len(times)
+            print(f"  DuckDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+    conn.close()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# ClickHouse benchmark
+# ---------------------------------------------------------------------------
+
+CLICKHOUSE_TABLES = {
+    "nation": "n_nationkey Int32, n_name String, n_regionkey Int32, n_comment String",
+    "region": "r_regionkey Int32, r_name String, r_comment String",
+    "supplier": "s_suppkey Int32, s_name String, s_address String, s_nationkey Int32, s_phone String, s_acctbal Decimal(15,2), s_comment String",
+    "part": "p_partkey Int32, p_name String, p_mfgr String, p_brand String, p_type String, p_size Int32, p_container String, p_retailprice Decimal(15,2), p_comment String",
+    "partsupp": "ps_partkey Int32, ps_suppkey Int32, ps_availqty Int32, ps_supplycost Decimal(15,2), ps_comment String",
+    "customer": "c_custkey Int32, c_name String, c_address String, c_nationkey Int32, c_phone String, c_acctbal Decimal(15,2), c_mktsegment String, c_comment String",
+    "orders": "o_orderkey Int32, o_custkey Int32, o_orderstatus String, o_totalprice Decimal(15,2), o_orderdate Date, o_orderpriority String, o_clerk String, o_shippriority Int32, o_comment String",
+    "lineitem": "l_orderkey Int32, l_partkey Int32, l_suppkey Int32, l_linenumber Int32, l_quantity Decimal(15,2), l_extendedprice Decimal(15,2), l_discount Decimal(15,2), l_tax Decimal(15,2), l_returnflag String, l_linestatus String, l_shipdate Date, l_commitdate Date, l_receiptdate Date, l_shipinstruct String, l_shipmode String, l_comment String",
+}
+
+CLICKHOUSE_ORDER_KEYS = {
+    "nation": "n_nationkey",
+    "region": "r_regionkey",
+    "supplier": "s_suppkey",
+    "part": "p_partkey",
+    "partsupp": "(ps_partkey, ps_suppkey)",
+    "customer": "c_custkey",
+    "orders": "o_orderkey",
+    "lineitem": "(l_orderkey, l_linenumber)",
+}
+
+
+def clickhouse_install():
+    """Download ClickHouse single binary."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    ch_dir.mkdir(exist_ok=True)
+    binary = ch_dir / "clickhouse"
+    if binary.exists() and os.access(str(binary), os.X_OK):
+        print("  ClickHouse binary already installed.")
+        return True
+    print("  Downloading ClickHouse...")
+    try:
+        subprocess.run(
+            ["bash", "-c", f"cd {ch_dir} && curl -fsSL https://clickhouse.com/ | sh"],
+            check=True, capture_output=True, timeout=120,
+        )
+        if binary.exists():
+            print("  ClickHouse installed successfully.")
+            return True
+        # Try alternative: the script may name it differently
+        for f in ch_dir.iterdir():
+            if f.name.startswith("clickhouse") and os.access(str(f), os.X_OK):
+                if f.name != "clickhouse":
+                    f.rename(binary)
+                print("  ClickHouse installed successfully.")
+                return True
+        print("  ClickHouse installation failed: binary not found after download.")
+        return False
+    except Exception as e:
+        print(f"  ClickHouse installation failed: {e}")
+        return False
+
+
+def clickhouse_available() -> bool:
+    binary = Path(__file__).parent / "clickhouse" / "clickhouse"
+    return binary.exists() and os.access(str(binary), os.X_OK)
+
+
+def clickhouse_server_start(scale_factor: int):
+    """Start a ClickHouse server process for the given SF."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    binary = ch_dir / "clickhouse"
+    data_path = ch_dir / f"data_sf{scale_factor}"
+    data_path.mkdir(parents=True, exist_ok=True)
+    log_path = ch_dir / f"server_sf{scale_factor}.log"
+
+    # ClickHouse uses -- --key=value syntax for config overrides
+    proc = subprocess.Popen(
+        [str(binary), "server",
+         "--daemon",
+         "--",
+         f"--path={data_path}",
+         "--tcp_port=9000",
+         "--http_port=8123",
+         "--mysql_port=0",
+         "--interserver_http_port=0",
+         f"--logger.log={log_path}",
+         f"--logger.errorlog={log_path}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # Wait for server to be ready
+    for attempt in range(30):
+        time.sleep(1)
+        try:
+            result = subprocess.run(
+                [str(binary), "client", "--port", "9000", "-q", "SELECT 1"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                print(f"  ClickHouse server started.")
+                return proc
+        except Exception:
+            pass
+    print("  Warning: ClickHouse server may not be ready.")
+    return proc
+
+
+def clickhouse_server_stop(proc):
+    """Stop ClickHouse server."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    binary = ch_dir / "clickhouse"
+    try:
+        # Graceful shutdown via SQL
+        subprocess.run(
+            [str(binary), "client", "--port", "9000", "-q", "SYSTEM SHUTDOWN"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+    if proc:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    print("  ClickHouse server stopped.")
+
+
+def clickhouse_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
+    """Create tables and load data into ClickHouse."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    binary = ch_dir / "clickhouse"
+
+    def ch_query(sql):
+        subprocess.run(
+            [str(binary), "client", "--port", "9000", "-q", sql],
+            check=True, capture_output=True, text=True, timeout=300,
+        )
+
+    if not force_setup:
+        try:
+            result = subprocess.run(
+                [str(binary), "client", "--port", "9000", "-q",
+                 "SELECT count() FROM lineitem"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and int(result.stdout.strip()) > 0:
+                print("  ClickHouse already has data, skipping setup.")
+                print("  Use --setup flag to force data reload.")
+                return
+        except Exception:
+            pass
+
+    # Create tables
+    for table, cols in CLICKHOUSE_TABLES.items():
+        order_key = CLICKHOUSE_ORDER_KEYS[table]
+        ch_query(f"DROP TABLE IF EXISTS {table}")
+        ch_query(f"CREATE TABLE {table} ({cols}) ENGINE = MergeTree() ORDER BY {order_key}")
+
+    # Load data
+    tables_to_load = ["nation", "region", "supplier", "part", "partsupp", "customer", "orders", "lineitem"]
+    for table in tables_to_load:
+        tbl_file = data_dir / f"{table}.tbl"
+        if not tbl_file.exists():
+            print(f"  Warning: {tbl_file} not found, skipping")
+            continue
+        print(f"  Loading {table}...", end="", flush=True)
+        # Pipe through sed to strip trailing | then load as CSV with | delimiter
+        subprocess.run(
+            f"sed 's/|$//' '{tbl_file}' | '{binary}' client --port 9000 "
+            f"--query='INSERT INTO {table} FORMAT CSV' "
+            f"--format_csv_delimiter='|'",
+            shell=True, check=True, capture_output=True, timeout=600,
+        )
+        result = subprocess.run(
+            [str(binary), "client", "--port", "9000", "-q",
+             f"SELECT count() FROM {table}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        count = result.stdout.strip()
+        print(f" {int(count):,} rows")
+
+
+def adapt_query_for_clickhouse(sql: str) -> str:
+    """Adapt standard SQL for ClickHouse compatibility."""
+    # INTERVAL 'N' UNIT -> INTERVAL N UNIT (ClickHouse doesn't quote interval values)
+    sql = re.sub(
+        r"INTERVAL\s+'(\d+)'\s+(DAY|MONTH|YEAR)",
+        r"INTERVAL \1 \2",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    return sql
+
+
+def clickhouse_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+                         queries: dict, timeout: int = 300) -> dict:
+    """Run benchmark queries on ClickHouse using clickhouse-driver."""
+    try:
+        from clickhouse_driver import Client
+    except ImportError:
+        print("  clickhouse-driver not installed. Run: pip install clickhouse-driver")
+        return {}
+
+    client = Client(host="localhost", port=9000,
+                    settings={"max_execution_time": timeout,
+                              "max_threads": BENCHMARK_THREADS})
+    results = {}
+    for qname in query_ids:
+        if qname not in queries:
+            continue
+        sql = adapt_query_for_clickhouse(queries[qname])
+        times = []
+        timed_out = False
+        for _ in range(num_runs):
+            try:
+                start = time.perf_counter()
+                client.execute(sql)
+                elapsed = (time.perf_counter() - start) * 1000
+                times.append(elapsed)
+            except Exception as e:
+                err_str = str(e)
+                if "TIMEOUT" in err_str.upper() or "exceeded" in err_str.lower():
+                    print(f"  ClickHouse {qname}: TIMEOUT ({timeout}s)")
+                else:
+                    print(f"  ClickHouse {qname}: ERROR - {e}")
+                timed_out = True
+                break
+        if not timed_out and times:
+            results[qname] = times
+            avg_time = sum(times) / len(times)
+            print(f"  ClickHouse {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Umbra benchmark (Docker-based)
+# ---------------------------------------------------------------------------
+
+def umbra_install():
+    """Pull the Umbra Docker image."""
+    if not shutil.which("docker"):
+        print("  Docker not available, cannot install Umbra.")
+        return False
+    print("  Pulling Umbra Docker image...")
+    try:
+        subprocess.run(
+            ["docker", "pull", "umbradb/umbra:latest"],
+            check=True, capture_output=True, timeout=600,
+        )
+        print("  Umbra image pulled successfully.")
+        return True
+    except Exception as e:
+        print(f"  Umbra pull failed: {e}")
+        return False
+
+
+def umbra_available() -> bool:
+    """Check if Docker is available and Umbra image is pulled."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "images", "-q", "umbradb/umbra"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except Exception:
+        return False
+
+
+UMBRA_HOST_PORT = 5440  # Use a high port to avoid conflicts with existing PG instances
+
+
+def umbra_start(data_dir: Path, scale_factor: int) -> str:
+    """Start Umbra Docker container. Reuses existing container if running."""
+    container_name = f"umbra_tpch_sf{scale_factor}"
+
+    # Check if container exists (running or stopped)
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", container_name],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        status = result.stdout.strip()
+        if status == "running":
+            # Already running — check if it accepts connections
+            try:
+                conn = psycopg2.connect(
+                    host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                    password="postgres", dbname="postgres", connect_timeout=3,
+                )
+                conn.close()
+                print(f"  Umbra container '{container_name}' already running (port {UMBRA_HOST_PORT}).")
+                return container_name
+            except Exception:
+                pass  # Running but not accepting connections, restart below
+        if status in ("exited", "created"):
+            # Stopped container with data — just restart it
+            print(f"  Restarting existing Umbra container '{container_name}'...")
+            subprocess.run(
+                ["docker", "start", container_name],
+                capture_output=True, timeout=30,
+            )
+            for attempt in range(60):
+                time.sleep(1)
+                try:
+                    conn = psycopg2.connect(
+                        host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                        password="postgres", dbname="postgres", connect_timeout=3,
+                    )
+                    conn.close()
+                    print(f"  Umbra container restarted and ready (port {UMBRA_HOST_PORT}).")
+                    return container_name
+                except Exception:
+                    pass
+            print("  Warning: Umbra may not be ready after restart.")
+            return container_name
+
+    # No existing container — remove any broken remnant and create fresh
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        capture_output=True, timeout=10,
+    )
+    print(f"  Starting Umbra container '{container_name}'...")
+    # Umbra needs --privileged for io_uring and memlock.
+    # Use port mapping (not --net=host) to avoid conflicts with existing PG instances.
+    # The entrypoint sets password='postgres' and umbra-server listens on port 5432 inside container.
+    subprocess.run(
+        ["docker", "run", "-d",
+         "--name", container_name,
+         "--privileged",
+         "--ulimit", "memlock=-1:-1",
+         "--shm-size=4g",
+         "-p", f"{UMBRA_HOST_PORT}:5432",
+         "-v", f"{data_dir}:/data",
+         "umbradb/umbra:latest"],
+        check=True, capture_output=True, timeout=30,
+    )
+    # Wait for Umbra to accept connections
+    for attempt in range(60):
+        time.sleep(1)
+        try:
+            conn = psycopg2.connect(
+                host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                password="postgres", dbname="postgres", connect_timeout=3,
+            )
+            conn.close()
+            print(f"  Umbra container started and ready (port {UMBRA_HOST_PORT}).")
+            return container_name
+        except Exception:
+            pass
+    print("  Warning: Umbra may not be ready.")
+    return container_name
+
+
+def umbra_stop(container_name: str):
+    """Stop Umbra container (keep it so data persists for next run)."""
+    subprocess.run(
+        ["docker", "stop", container_name],
+        capture_output=True, timeout=30,
+    )
+    print(f"  Umbra container '{container_name}' stopped (data preserved).")
+
+
+def umbra_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
+    """Create tables and load data into Umbra."""
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+        password="postgres", dbname="postgres",
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+
+    if not force_setup:
+        try:
+            cur.execute("SELECT COUNT(*) FROM lineitem")
+            count = cur.fetchone()[0]
+            if count > 0:
+                print("  Umbra already has data, skipping setup.")
+                print("  Use --setup flag to force data reload.")
+                cur.close()
+                conn.close()
+                return
+        except Exception:
+            conn.rollback()
+
+    schema_path = Path(__file__).parent / "schema.sql"
+    schema_sql = schema_path.read_text()
+    schema_no_fk = _strip_fk_constraints(schema_sql)
+    for stmt in schema_no_fk.split(";"):
+        stmt = stmt.strip()
+        if stmt and stmt.upper().startswith("CREATE"):
+            try:
+                cur.execute(f"DROP TABLE IF EXISTS {stmt.split()[2]}")
+            except Exception:
+                conn.rollback()
+            cur.execute(stmt)
+
+    tables_to_load = ["nation", "region", "supplier", "part", "partsupp", "customer", "orders", "lineitem"]
+    for table in tables_to_load:
+        tbl_file = data_dir / f"{table}.tbl"
+        if not tbl_file.exists():
+            print(f"  Warning: {tbl_file} not found, skipping")
+            continue
+        print(f"  Loading {table}...", end="", flush=True)
+        # Load via COPY from mounted data dir
+        try:
+            cur.execute(
+                f"COPY {table} FROM '/data/{table}.tbl' WITH (DELIMITER '|')"
+            )
+        except Exception:
+            conn.rollback()
+            # Fallback: pipe cleaned data via STDIN
+            with open(tbl_file, "r") as f:
+                cleaned = io.StringIO()
+                for line in f:
+                    line = line.rstrip("\n")
+                    if line.endswith("|"):
+                        line = line[:-1]
+                    cleaned.write(line + "\n")
+                cleaned.seek(0)
+                cur.copy_expert(f"COPY {table} FROM STDIN WITH (DELIMITER '|')", cleaned)
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cur.fetchone()[0]
+        print(f" {count:,} rows")
+
+    cur.close()
+    conn.close()
+
+
+def umbra_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+                    queries: dict, timeout: int = 300) -> dict:
+    """Run benchmark queries on Umbra (PostgreSQL-compatible wire protocol)."""
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+        password="postgres", dbname="postgres",
+    )
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
+    except Exception:
+        conn.rollback()
+
+    results = {}
+    for qname in query_ids:
+        if qname not in queries:
+            continue
+        times = []
+        timed_out = False
+        for _ in range(num_runs):
+            try:
+                start = time.perf_counter()
+                cur.execute(queries[qname])
+                cur.fetchall()
+                elapsed = (time.perf_counter() - start) * 1000
+                times.append(elapsed)
+            except Exception as e:
+                conn.rollback()
+                try:
+                    cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
+                except Exception:
+                    conn.rollback()
+                err_str = str(e).lower()
+                if "timeout" in err_str or "cancel" in err_str:
+                    print(f"  Umbra {qname}: TIMEOUT ({timeout}s)")
+                else:
+                    print(f"  Umbra {qname}: ERROR - {e}")
+                timed_out = True
+                break
+        if not timed_out and times:
+            results[qname] = times
+            avg_time = sum(times) / len(times)
+            print(f"  Umbra {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+    cur.close()
+    conn.close()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# MonetDB benchmark
+# ---------------------------------------------------------------------------
+
+def monetdb_install():
+    """Install MonetDB via apt."""
+    if shutil.which("monetdbd") or shutil.which("mserver5"):
+        print("  MonetDB already installed.")
+        return True
+    print("  Installing MonetDB...")
+    try:
+        # Detect suite name
+        result = subprocess.run(
+            ["lsb_release", "-cs"], capture_output=True, text=True, timeout=10,
+        )
+        suite = result.stdout.strip() if result.returncode == 0 else "focal"
+
+        # Add repo
+        list_content = f"deb https://dev.monetdb.org/downloads/deb/ {suite} monetdb\n"
+        subprocess.run(
+            ["sudo", "tee", "/etc/apt/sources.list.d/monetdb.list"],
+            input=list_content, capture_output=True, text=True, check=True, timeout=10,
+        )
+        subprocess.run(
+            ["sudo", "bash", "-c",
+             "wget -qO /etc/apt/trusted.gpg.d/monetdb.gpg "
+             "https://dev.monetdb.org/downloads/MonetDB-GPG-KEY.gpg"],
+            check=True, capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["sudo", "apt-get", "update", "-y"],
+            check=True, capture_output=True, timeout=60,
+        )
+        subprocess.run(
+            ["sudo", "apt-get", "install", "-y", "monetdb5-sql", "monetdb-client"],
+            check=True, capture_output=True, timeout=120,
+        )
+        print("  MonetDB installed successfully.")
+        return True
+    except Exception as e:
+        print(f"  MonetDB installation failed: {e}")
+        return False
+
+
+def monetdb_available() -> bool:
+    return shutil.which("monetdbd") is not None or shutil.which("mserver5") is not None
+
+
+def monetdb_server_start(scale_factor: int):
+    """Start MonetDB server for the given SF."""
+    farm_dir = Path(__file__).parent / "monetdb" / f"farm_sf{scale_factor}"
+    farm_dir.mkdir(parents=True, exist_ok=True)
+    dbname = f"tpch_sf{scale_factor}"
+
+    # Check if already running by trying to connect
+    try:
+        import pymonetdb
+        conn = pymonetdb.connect(database=dbname, hostname="localhost",
+                                 port=50000, username="monetdb", password="monetdb")
+        conn.close()
+        print(f"  MonetDB already running with database '{dbname}'.")
+        return farm_dir
+    except Exception:
+        pass
+
+    # Create farm if needed
+    try:
+        subprocess.run(
+            ["monetdbd", "create", str(farm_dir)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass  # May already exist
+
+    # Set port
+    subprocess.run(
+        ["monetdbd", "set", "port=50000", str(farm_dir)],
+        capture_output=True, timeout=10,
+    )
+
+    # Start farm — monetdbd daemonizes and may send signals to the process group,
+    # so use os.system() which is isolated from signal propagation.
+    os.system(f"monetdbd start '{farm_dir}'")
+
+    # Wait for daemon to be ready
+    for attempt in range(30):
+        time.sleep(1)
+        try:
+            result = subprocess.run(
+                ["monetdb", "-p", "50000", "status"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                break
+        except Exception:
+            pass
+
+    # Create database if needed
+    try:
+        subprocess.run(
+            ["monetdb", "-p", "50000", "create", dbname],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+    subprocess.run(
+        ["monetdb", "-p", "50000", "release", dbname],
+        capture_output=True, text=True, timeout=10,
+    )
+    time.sleep(1)
+    print(f"  MonetDB server started with database '{dbname}'.")
+    return farm_dir
+
+
+def monetdb_server_stop(farm_dir):
+    """Stop MonetDB server."""
+    if farm_dir:
+        os.system(f"monetdbd stop '{farm_dir}'")
+        time.sleep(2)
+        print("  MonetDB server stopped.")
+
+
+def monetdb_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
+    """Create tables and load data into MonetDB."""
+    try:
+        import pymonetdb
+    except ImportError:
+        print("  pymonetdb not installed. Run: pip install pymonetdb")
+        return
+
+    dbname = f"tpch_sf{scale_factor}"
+    conn = pymonetdb.connect(database=dbname, hostname="localhost",
+                             port=50000, username="monetdb", password="monetdb")
+    conn.autocommit = False  # Use explicit commits for COPY INTO durability
+    cur = conn.cursor()
+
+    if not force_setup:
+        try:
+            cur.execute("SELECT COUNT(*) FROM lineitem")
+            count = cur.fetchone()[0]
+            if count > 0:
+                print("  MonetDB already has data, skipping setup.")
+                print("  Use --setup flag to force data reload.")
+                cur.close()
+                conn.close()
+                return
+        except Exception:
+            conn.rollback()
+
+    # Create tables (standard SQL, no FK constraints)
+    schema_path = Path(__file__).parent / "schema.sql"
+    schema_sql = schema_path.read_text()
+    schema_no_fk = _strip_fk_constraints(schema_sql)
+    for stmt in schema_no_fk.split(";"):
+        stmt = stmt.strip()
+        if stmt and stmt.upper().startswith("CREATE"):
+            table_name = stmt.split()[2]
+            try:
+                cur.execute(f"DROP TABLE {table_name}")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            cur.execute(stmt)
+            conn.commit()
+
+    # TPC-H .tbl files have a trailing '|' on each line. MonetDB interprets
+    # this as an extra column, causing COPY INTO to silently load 0 rows.
+    # Strip trailing '|' into temp files before loading.
+    tables_to_load = ["nation", "region", "supplier", "part", "partsupp", "customer", "orders", "lineitem"]
+    tmp_dir = data_dir / "_monetdb_clean"
+    tmp_dir.mkdir(exist_ok=True)
+
+    for table in tables_to_load:
+        tbl_file = data_dir / f"{table}.tbl"
+        if not tbl_file.exists():
+            print(f"  Warning: {tbl_file} not found, skipping")
+            continue
+        print(f"  Loading {table}...", end="", flush=True)
+
+        # Strip trailing '|' from each line
+        clean_file = tmp_dir / f"{table}.tbl"
+        if not clean_file.exists():
+            subprocess.run(
+                ["sed", "s/|$//", str(tbl_file)],
+                stdout=open(str(clean_file), "w"),
+                check=True, timeout=120,
+            )
+
+        abs_path = str(clean_file.resolve())
+        cur.execute(
+            f"COPY INTO {table} FROM '{abs_path}' "
+            f"USING DELIMITERS '|','\\n','\"' NULL AS ''"
+        )
+        conn.commit()  # Explicit commit after each COPY INTO
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cur.fetchone()[0]
+        print(f" {count:,} rows")
+
+    cur.close()
+    conn.close()
+
+
+def monetdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+                      queries: dict, timeout: int = 300) -> dict:
+    """Run benchmark queries on MonetDB."""
+    try:
+        import pymonetdb
+    except ImportError:
+        print("  pymonetdb not installed. Run: pip install pymonetdb")
+        return {}
+
+    dbname = f"tpch_sf{scale_factor}"
+    conn = pymonetdb.connect(database=dbname, hostname="localhost",
+                             port=50000, username="monetdb", password="monetdb")
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SET nthreads = {BENCHMARK_THREADS}")
+    except Exception:
+        conn.rollback()  # MonetDB aborts transaction on failed SET
+
+    results = {}
+    for qname in query_ids:
+        if qname not in queries:
+            continue
+        times = []
+        timed_out = False
+        for _ in range(num_runs):
+            try:
+                start = time.perf_counter()
+                cur.execute(queries[qname])
+                cur.fetchall()
+                elapsed = (time.perf_counter() - start) * 1000
+                if elapsed > timeout * 1000:
+                    print(f"  MonetDB {qname}: TIMEOUT ({timeout}s)")
+                    timed_out = True
+                    break
+                times.append(elapsed)
+            except Exception as e:
+                print(f"  MonetDB {qname}: ERROR - {e}")
+                timed_out = True
+                break
+        if not timed_out and times:
+            results[qname] = times
+            avg_time = sum(times) / len(times)
+            print(f"  MonetDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+    cur.close()
     conn.close()
     return results
 
@@ -432,10 +1595,8 @@ def print_iteration_table(history: dict):
         cells = [f"{'Total':<{Q_COL_W}}"]
         for _ in range(num_iters):
             cells.append(f"{'':>{COL_W}}")
-        cells.append(f"{BOLD}{int(round(total))} ms{RESET}".rjust(COL_W + len(BOLD) + len(RESET)))
-        # Simpler: just build it manually
         total_cell = f"{int(round(total))} ms"
-        cells[-1] = f"{BOLD}{total_cell:>{COL_W}}{RESET}"
+        cells.append(f"{BOLD}{total_cell:>{COL_W}}{RESET}")
         print(" | ".join(cells))
 
 
@@ -528,7 +1689,14 @@ def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 QUERY_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0", "#00BCD4", "#FF5722", "#795548"]
-SYSTEM_COLORS = {"GenDB": "#2196F3", "PostgreSQL": "#4CAF50", "DuckDB": "#FF9800"}
+SYSTEM_COLORS = {
+    "GenDB": "#2196F3",
+    "PostgreSQL": "#4CAF50",
+    "DuckDB": "#FF9800",
+    "ClickHouse": "#E91E63",
+    "Umbra": "#9C27B0",
+    "MonetDB": "#00BCD4",
+}
 
 
 def _compute_best_so_far(data: dict, query_ids: list, num_iters: int) -> dict:
@@ -670,7 +1838,8 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
 
 def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     """Create per-query and total execution time comparison plots."""
-    queries = sorted(set(q for results in all_results.values() for q in results))
+    queries = sorted(set(q for results in all_results.values() for q in results),
+                     key=lambda q: int(q[1:]))
     systems = list(all_results.keys())
 
     data = {}
@@ -680,8 +1849,9 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
             times = all_results[system].get(q, [])
             data[system].append(sum(times) / len(times) if times else 0)
 
-    # Per-query grouped bar chart
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # Per-query grouped bar chart (wider for 22 queries)
+    fig_width = max(20, len(queries) * 0.9)
+    fig, ax = plt.subplots(figsize=(fig_width, 7))
     x = range(len(queries))
     width = 0.8 / max(len(systems), 1)
     offsets = [(i - len(systems) / 2 + 0.5) * width for i in range(len(systems))]
@@ -694,14 +1864,15 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
         for bar, val in zip(bars, data[system]):
             if val > 0:
                 ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                        f"{val:.1f}", ha="center", va="bottom", fontsize=9)
+                        f"{val:.1f}", ha="center", va="bottom", fontsize=7,
+                        rotation=45)
 
     ax.set_xlabel("TPC-H Query", fontsize=12)
     ax.set_ylabel("Execution Time (ms, log scale)", fontsize=12)
     ax.set_title(f"TPC-H Per-Query Execution Time (SF={scale_factor})", fontsize=14)
     ax.set_xticks(list(x))
-    ax.set_xticklabels(queries, fontsize=11)
-    ax.legend(fontsize=11)
+    ax.set_xticklabels(queries, fontsize=10, rotation=45, ha="right")
+    ax.legend(fontsize=10)
     ax.set_yscale("log")
     ax.grid(axis="y", alpha=0.3)
 
@@ -711,7 +1882,7 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     print(f"  Per-query plot saved to: {output_path}")
 
     # Total execution time bar chart
-    fig2, ax2 = plt.subplots(figsize=(8, 6))
+    fig2, ax2 = plt.subplots(figsize=(max(8, len(systems) * 1.5), 6))
     totals = {s: sum(data[s]) for s in systems}
     x_pos = range(len(systems))
     bars = ax2.bar(x_pos, [totals[s] for s in systems],
@@ -742,7 +1913,8 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB")
+    parser = argparse.ArgumentParser(
+        description="TPC-H Benchmark: GenDB vs PostgreSQL vs DuckDB vs ClickHouse vs Umbra vs MonetDB")
     parser.add_argument("--sf", type=int, required=True, help="Scale factor (e.g., 1, 10)")
     parser.add_argument("--gendb-run", type=Path, default=None,
                         help="Path to GenDB run directory (default: output/tpc-h/latest/)")
@@ -752,7 +1924,15 @@ def main():
     parser.add_argument("--setup", action="store_true", help="Force database setup/reload")
     parser.add_argument("--output", type=Path, default=None, help="Output plot path")
     parser.add_argument("--gendb-only", action="store_true",
-                        help="Skip PostgreSQL and DuckDB benchmarks")
+                        help="Skip all baseline benchmarks")
+    parser.add_argument("--skip-clickhouse", action="store_true",
+                        help="Skip ClickHouse benchmark")
+    parser.add_argument("--skip-umbra", action="store_true",
+                        help="Skip Umbra benchmark")
+    parser.add_argument("--skip-monetdb", action="store_true",
+                        help="Skip MonetDB benchmark")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="Per-query timeout in seconds (default: 300)")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent.parent
@@ -791,8 +1971,13 @@ def main():
     if gendb_dir is None:
         gendb_dir = benchmark_root / "gendb" / f"tpch_sf{args.sf}.gendb"
 
+    # Build query dict
+    queries = get_queries(args.sf)
+
     print(f"Scale factor:   {args.sf}")
     print(f"Runs per query: {args.runs}")
+    print(f"Query timeout:  {args.timeout}s")
+    print(f"Queries:        {len(queries)} (Q1-Q22)")
     if args.gendb_run:
         print(f"GenDB run:      {args.gendb_run}")
         print(f"GenDB storage:  {gendb_dir}")
@@ -800,7 +1985,7 @@ def main():
 
     all_results = {}
     gendb_history = None
-    gendb_query_ids = list(QUERIES.keys())
+    gendb_query_ids = sorted(queries.keys(), key=lambda q: int(q[1:]))
 
     # --- GenDB: iteration history (from JSON, no re-execution) ---
     if args.gendb_run and args.gendb_run.exists():
@@ -840,7 +2025,8 @@ def main():
         try:
             pg_setup(data_dir, args.sf, args.setup)
             print("\n=== PostgreSQL Benchmark ===")
-            all_results["PostgreSQL"] = pg_benchmark(args.sf, args.runs, gendb_query_ids)
+            all_results["PostgreSQL"] = pg_benchmark(
+                args.sf, args.runs, gendb_query_ids, queries, args.timeout)
         except Exception as e:
             print(f"  PostgreSQL error: {e}")
 
@@ -849,19 +2035,86 @@ def main():
         try:
             duckdb_setup(data_dir, args.sf, args.setup)
             print("\n=== DuckDB Benchmark ===")
-            all_results["DuckDB"] = duckdb_benchmark(args.sf, args.runs, gendb_query_ids)
+            all_results["DuckDB"] = duckdb_benchmark(
+                args.sf, args.runs, gendb_query_ids, queries, args.timeout)
         except Exception as e:
             print(f"  DuckDB error: {e}")
+
+        # --- ClickHouse ---
+        ch_proc = None
+        if not args.skip_clickhouse:
+            print("\n=== ClickHouse Setup ===")
+            try:
+                if not clickhouse_available():
+                    clickhouse_install()
+                if clickhouse_available():
+                    ch_proc = clickhouse_server_start(args.sf)
+                    clickhouse_setup(data_dir, args.sf, args.setup)
+                    print("\n=== ClickHouse Benchmark ===")
+                    all_results["ClickHouse"] = clickhouse_benchmark(
+                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                else:
+                    print("  ClickHouse not available, skipping.")
+            except Exception as e:
+                print(f"  ClickHouse error: {e}")
+            finally:
+                if ch_proc:
+                    clickhouse_server_stop(ch_proc)
+
+        # --- Umbra ---
+        umbra_container = None
+        if not args.skip_umbra:
+            print("\n=== Umbra Setup ===")
+            try:
+                if not umbra_available():
+                    umbra_install()
+                if umbra_available():
+                    umbra_container = umbra_start(data_dir, args.sf)
+                    umbra_setup(data_dir, args.sf, args.setup)
+                    print("\n=== Umbra Benchmark ===")
+                    all_results["Umbra"] = umbra_benchmark(
+                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                else:
+                    print("  Umbra not available, skipping.")
+            except Exception as e:
+                print(f"  Umbra error: {e}")
+            finally:
+                if umbra_container:
+                    umbra_stop(umbra_container)
+
+        # --- MonetDB ---
+        monetdb_farm = None
+        if not args.skip_monetdb:
+            print("\n=== MonetDB Setup ===")
+            try:
+                if not monetdb_available():
+                    monetdb_install()
+                if monetdb_available():
+                    monetdb_farm = monetdb_server_start(args.sf)
+                    monetdb_setup(data_dir, args.sf, args.setup)
+                    print("\n=== MonetDB Benchmark ===")
+                    all_results["MonetDB"] = monetdb_benchmark(
+                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                else:
+                    print("  MonetDB not available, skipping.")
+            except Exception as e:
+                print(f"  MonetDB error: {e}")
+            finally:
+                if monetdb_farm:
+                    monetdb_server_stop(monetdb_farm)
 
     # --- Results summary ---
     print("\n" + "=" * 60)
     print("RESULTS SUMMARY (average of N runs, in ms)")
     print("=" * 60)
-    queries = sorted(set(q for results in all_results.values() for q in results))
+    all_queries = sorted(
+        set(q for results in all_results.values() for q in results),
+        key=lambda q: int(q[1:]),
+    )
     header = f"{'Query':<8}" + "".join(f"{s:<15}" for s in all_results.keys())
     print(header)
     print("-" * len(header))
-    for q in queries:
+    for q in all_queries:
         row = f"{q:<8}"
         for system in all_results:
             times = all_results[system].get(q, [])
@@ -875,7 +2128,7 @@ def main():
     for system in all_results:
         total = sum(
             sum(all_results[system].get(q, [0])) / max(len(all_results[system].get(q, [1])), 1)
-            for q in queries
+            for q in all_queries
         )
         row += f"{total:<15.2f}"
     print(row)
