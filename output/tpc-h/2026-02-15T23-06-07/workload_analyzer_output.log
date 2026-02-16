@@ -1,0 +1,28 @@
+## Workload Analysis Complete
+
+**Summary:** TPC-H SF10 workload analysis written to `workload_analysis.json`
+
+### Key Findings:
+
+**Hardware:** 64 cores, 376 GB RAM, AVX512 support, HDD storage, 44 MB L3 cache
+
+**Data Profile:**
+- Lineitem: 59,986,052 rows (dominant fact table)
+- Orders: 15,000,000 rows
+- Customer: 1,500,000 rows
+- Other dimension tables: <2M rows
+
+**Workload Characteristics:**
+- **Q1**: Scan-heavy aggregation (98.8% of lineitem), 4 groups (returnflag × linestatus)
+- **Q3**: 3-way hash join (customer→orders→lineitem) with date filters, ~300K output groups, TOP-10
+- **Q6**: Highly selective scan (2.4% selectivity), single scalar aggregate
+
+**Critical Optimizations:**
+1. **Thread parallelism** (64 cores) for lineitem scans - expect ~50-60x speedup
+2. **Zone maps** on l_shipdate, o_orderdate for block-level pruning
+3. **Dictionary encoding** for l_returnflag, l_linestatus, c_mktsegment (low cardinality)
+4. **SIMD** (AVX512) for vectorized filtering and aggregation arithmetic
+5. **Parallel hash join** for Q3 with morsel size ~70K rows (L3 cache-aligned)
+6. **Partial aggregation** to reduce data volume before Q3 sort/top-K
+
+**Bottleneck:** Lineitem table scans account for 100% of Q1/Q6 time and majority of Q3 time.

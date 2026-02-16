@@ -1,0 +1,42 @@
+Good! The compilation succeeded with only warnings (same warnings as before). Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations for Q3 Iteration 5
+
+### Changes Applied:
+
+1. **Better Hash Table Sizing** (Category: `join`, `cpu_bound`)
+   - **Before**: Over-allocated hash tables with conservative estimates (`o_count / (4 * num_threads)`)
+   - **After**: Calculate better estimates based on zone map block counts and expected selectivity
+   - **Expected Impact**: Reduced memory footprint, better cache locality → 5-10ms improvement
+
+2. **Parallel Hash Table Merge** (Category: `join`, `parallelism`)
+   - **Before**: Sequential merge of thread-local order hash tables
+   - **After**: Parallel merge using OpenMP `parallel for`
+   - **Expected Impact**: Faster merge phase → 5-10ms improvement
+
+3. **Improved Aggregation Merge Strategy** (Category: `aggregation`, `cpu_bound`)
+   - **Before**: Sequential insertion into final aggregation map while iterating thread-local tables
+   - **After**: Two-phase approach - collect all entries first, then merge (better memory access pattern)
+   - **Expected Impact**: Better cache efficiency during merge → 5-10ms improvement
+
+4. **Better Aggregation Table Sizing** (Category: `aggregation`)
+   - **Before**: Allocated based on `orders_matched.load() * 4 / num_threads`
+   - **After**: More accurate estimate: `orders_matched.load() / 4` (fewer unique groups expected)
+   - **Expected Impact**: Reduced memory overhead, better load factor
+
+### Total Expected Improvement: 15-30ms (target: ~443-458ms from 473ms baseline)
+
+### Code Quality:
+- ✅ Preserves all `[TIMING]` lines inside `#ifdef GENDB_PROFILE` guards
+- ✅ No changes to encoding logic
+- ✅ Zone map pruning logic unchanged
+- ✅ Comma-delimited CSV output unchanged
+- ✅ Compilation successful
+
+### Approach Rationale:
+These optimizations focus on:
+- **Memory efficiency**: Better sizing reduces memory pressure and improves cache locality
+- **Parallelism**: Leveraging more parallel operations where possible
+- **Data locality**: Better merge strategies for improved cache performance
+
+The optimizations are conservative and focus on improving existing parallel code rather than radical restructuring, which reduces risk of correctness issues (learned from iter_4 regression with validation failure).

@@ -1,0 +1,54 @@
+Perfect! The code compiled successfully. Let me create a summary of the optimizations applied:
+
+## Summary of Iteration 9 Optimizations
+
+### Optimizations Applied:
+
+**1. Batched Processing for Lineitem Scan (scan_filter_join_aggregate phase)**
+   - **Category**: `cpu_bound` / memory optimization
+   - **Technique**: Batch qualifying rows before hash probes to improve locality
+   - **Implementation**: 
+     - Added 256-element batch buffer for rows passing the shipdate filter
+     - Process hash lookups and aggregation in batches to improve cache utilization
+     - Reduces random access patterns during hash probes
+   - **Expected Impact**: Better cache hit rates during hash table probes, reduced memory stalls
+
+**2. Vector-Based Parallel Collection (filter_join_orders phase)**
+   - **Category**: `cpu_bound` / data structure optimization
+   - **Technique**: Use thread-local vectors instead of hash tables during parallel phase
+   - **Implementation**:
+     - Changed from thread-local hash tables to thread-local vectors
+     - Parallel threads append to vectors (no hash overhead)
+     - Single hash table build after parallel phase (serial but fast)
+   - **Expected Impact**: Eliminates hash table contention and overhead during parallel phase
+   - **Rationale**: ~1.5M matched orders → building one hash table from vectors is faster than merging multiple hash tables
+
+**3. Improved Scheduling**
+   - Increased dynamic scheduling chunk size for orders from 1 to 2 blocks
+   - Better load balancing with reduced scheduling overhead
+
+### Why These Are Different from Previous Iterations:
+
+- **Previous iterations** (3-8): Likely focused on parallel algorithms or different join strategies
+- **This iteration**: Focuses on **memory access patterns** and **reducing overhead**
+  - Batching improves cache locality
+  - Vectors eliminate hash table overhead during parallel collection
+  - Different optimization category: memory/cache optimization rather than algorithmic changes
+
+### Current Performance Context:
+
+- **Baseline (iter_2)**: 473.5 ms
+  - filter_join_orders: 196.08 ms
+  - scan_filter_join_aggregate: 246.58 ms
+- **Target (DuckDB)**: ~86-97 ms
+- **Gap**: 3.3-5.5x slower
+
+### Expected Improvements:
+
+1. **Batched processing**: 5-15% speedup in scan_filter_join_aggregate (better cache utilization)
+2. **Vector collection**: 10-20% speedup in filter_join_orders (reduced hash overhead)
+3. **Combined**: 10-25% overall improvement if both optimizations succeed
+
+---
+
+The code has been successfully compiled. The Executor will now run and validate the results.

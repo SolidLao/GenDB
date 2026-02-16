@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q1 - Pricing Summary Report\n  Table: lineitem (59,986,052 rows)\n  Encodings:\n    l_shipdate: int32_t (DATE, days since epoch)\n    l_returnflag: int32_t (dictionary-encoded STRING)\n    l_linestatus: int32_t (dictionary-encoded STRING)\n    l_quantity: int64_t (DECIMAL, scale=100)\n    l_extendedprice: int64_t (DECIMAL, scale=100)\n    l_discount: int64_t (DECIMAL, scale=100)\n    l_tax: int64_t (DECIMAL, scale=100)\n  Predicate: l_shipdate <= 10471 (1998-09-02)\n  Loaded 59986052 rows\n[TIMING] load: 0.17 ms\n[TIMING] scan_filter: 47.44 ms\n[TIMING] aggregation: 0.00 ms\n[TIMING] sort: 0.00 ms\n[TIMING] total: 47.70 ms\nResults written to /home/jl4492/GenDB/output/tpc-h/2026-02-15T23-06-07/queries/Q1/iter_4/results/Q1.csv\n[TIMING] output: 0.92 ms\n",
+    "stderr": "",
+    "duration_ms": 91
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.17,
+    "scan_filter": 47.44,
+    "aggregation": 0,
+    "sort": 0,
+    "total": 47.7,
+    "output": 0.92
+  },
+  "timing_ms": 46.78
+}

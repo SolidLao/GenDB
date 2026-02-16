@@ -7,13 +7,13 @@ export const defaults = {
   maxOptimizationIterations: 10,
   scaleFactor: 10,
   targetBenchmark: "tpc-h",
-  model: "haiku",
+  model: "sonnet",
   optimizationTarget: "execution_time",
   maxConcurrentQueries: 5,
   agentModels: {
-    workload_analyzer: "haiku",
-    storage_designer: "haiku",
-    code_generator: "haiku",
-    query_optimizer: "haiku",
+    workload_analyzer: "sonnet",
+    storage_designer: "sonnet",
+    code_generator: "sonnet",
+    query_optimizer: "sonnet",
   },
 };

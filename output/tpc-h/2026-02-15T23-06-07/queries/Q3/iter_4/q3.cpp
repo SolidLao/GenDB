@@ -1,0 +1,583 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cstring>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <chrono>
+#include <unordered_map>
+#include <iomanip>
+#include <cstdint>
+#include <thread>
+#include <atomic>
+#include <omp.h>
+#include <immintrin.h>  // AVX2 intrinsics
+
+// Zone map entry structure (based on storage guide)
+struct ZoneMapEntry {
+    int32_t min_val;
+    int32_t max_val;
+    uint32_t start_row;
+    uint32_t row_count;
+};
+
+// Pre-built hash index entry structure (for hash_multi_value indexes)
+struct HashIndexEntry {
+    int32_t key;
+    uint32_t offset;
+    uint32_t count;
+};
+
+// Default hash for int32_t
+struct DefaultHash {
+    size_t operator()(int32_t key) const {
+        // Fibonacci hashing for good distribution
+        return (size_t)key * 0x9E3779B97F4A7C15ULL;
+    }
+};
+
+// Compact open-addressing hash table for joins
+template<typename K, typename V, typename Hash = DefaultHash>
+struct CompactHashTable {
+    struct Entry { K key; V value; bool occupied = false; };
+
+    std::vector<Entry> table;
+    size_t mask;
+    Hash hasher;
+
+    CompactHashTable(size_t expected_size) {
+        // Size to next power of 2, ~75% load factor
+        size_t sz = 1;
+        while (sz < expected_size * 4 / 3) sz <<= 1;
+        table.resize(sz);
+        mask = sz - 1;
+    }
+
+    void insert(K key, V value) {
+        size_t idx = hasher(key) & mask;
+        while (table[idx].occupied) {
+            if (table[idx].key == key) { table[idx].value = value; return; }
+            idx = (idx + 1) & mask;
+        }
+        table[idx] = {key, value, true};
+    }
+
+    V* find(K key) {
+        size_t idx = hasher(key) & mask;
+        while (table[idx].occupied) {
+            if (table[idx].key == key) return &table[idx].value;
+            idx = (idx + 1) & mask;
+        }
+        return nullptr;
+    }
+};
+
+// Helper function to mmap a file
+template<typename T>
+T* mmap_file(const std::string& path, size_t& count) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        std::cerr << "Failed to open " << path << std::endl;
+        return nullptr;
+    }
+    struct stat sb;
+    if (fstat(fd, &sb) < 0) {
+        std::cerr << "Failed to stat " << path << std::endl;
+        close(fd);
+        return nullptr;
+    }
+    count = sb.st_size / sizeof(T);
+    void* addr = mmap(nullptr, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (addr == MAP_FAILED) {
+        std::cerr << "Failed to mmap " << path << std::endl;
+        return nullptr;
+    }
+    return static_cast<T*>(addr);
+}
+
+// Helper function to compute epoch days from date
+inline int32_t date_to_epoch(int year, int month, int day) {
+    // Days since 1970-01-01
+    int days = 0;
+    // Count days for complete years (1970 to year-1)
+    for (int y = 1970; y < year; ++y) {
+        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        days += leap ? 366 : 365;
+    }
+    // Days in each month (non-leap year)
+    int month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap_year = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    if (leap_year) month_days[1] = 29;
+
+    // Count days for complete months (1 to month-1)
+    for (int m = 1; m < month; ++m) {
+        days += month_days[m - 1];
+    }
+    // Add remaining days (day is 1-indexed, so subtract 1)
+    days += (day - 1);
+    return days;
+}
+
+// Helper function to convert epoch days to YYYY-MM-DD
+std::string epoch_to_date(int32_t epoch_days) {
+    int year = 1970;
+    int days_left = epoch_days;
+
+    while (true) {
+        bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        int year_days = leap ? 366 : 365;
+        if (days_left < year_days) break;
+        days_left -= year_days;
+        year++;
+    }
+
+    int month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap_year = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    if (leap_year) month_days[1] = 29;
+
+    int month = 1;
+    for (int m = 0; m < 12; ++m) {
+        if (days_left < month_days[m]) {
+            month = m + 1;
+            break;
+        }
+        days_left -= month_days[m];
+    }
+
+    int day = days_left + 1;
+
+    char buf[11];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+    return std::string(buf);
+}
+
+// Result tuple for aggregation
+struct GroupKey {
+    int32_t l_orderkey;
+    int32_t o_orderdate;
+    int32_t o_shippriority;
+
+    bool operator==(const GroupKey& other) const {
+        return l_orderkey == other.l_orderkey &&
+               o_orderdate == other.o_orderdate &&
+               o_shippriority == other.o_shippriority;
+    }
+};
+
+// Hash function for GroupKey
+struct GroupKeyHash {
+    size_t operator()(const GroupKey& k) const {
+        // Combine hashes
+        size_t h1 = std::hash<int32_t>()(k.l_orderkey);
+        size_t h2 = std::hash<int32_t>()(k.o_orderdate);
+        size_t h3 = std::hash<int32_t>()(k.o_shippriority);
+        return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+};
+
+struct AggResult {
+    int64_t revenue_scaled;  // Keep at scale_factor^2 precision during aggregation
+};
+
+void run_q3(const std::string& gendb_dir, const std::string& results_dir) {
+    #ifdef GENDB_PROFILE
+    auto t_total_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    // 1. Load dictionary for c_mktsegment
+    #ifdef GENDB_PROFILE
+    auto t_dict_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    std::string dict_path = gendb_dir + "/customer/c_mktsegment_dict.txt";
+    std::ifstream dict_file(dict_path);
+    if (!dict_file.is_open()) {
+        std::cerr << "Failed to open dictionary file: " << dict_path << std::endl;
+        return;
+    }
+
+    std::vector<std::string> mktsegment_dict;
+    std::string line;
+    while (std::getline(dict_file, line)) {
+        mktsegment_dict.push_back(line);
+    }
+    dict_file.close();
+
+    // Find code for 'BUILDING'
+    int32_t building_code = -1;
+    for (size_t i = 0; i < mktsegment_dict.size(); ++i) {
+        if (mktsegment_dict[i] == "BUILDING") {
+            building_code = static_cast<int32_t>(i);
+            break;
+        }
+    }
+
+    if (building_code < 0) {
+        std::cerr << "BUILDING not found in dictionary!" << std::endl;
+        return;
+    }
+
+    #ifdef GENDB_PROFILE
+    auto t_dict_end = std::chrono::high_resolution_clock::now();
+    double dict_ms = std::chrono::duration<double, std::milli>(t_dict_end - t_dict_start).count();
+    printf("[TIMING] load_dictionary: %.2f ms\n", dict_ms);
+    #endif
+
+    // 2. Load customer data and zone maps
+    #ifdef GENDB_PROFILE
+    auto t_load_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    size_t c_count, o_count, l_count;
+
+    int32_t* c_custkey = mmap_file<int32_t>(gendb_dir + "/customer/c_custkey.bin", c_count);
+    int32_t* c_mktsegment = mmap_file<int32_t>(gendb_dir + "/customer/c_mktsegment.bin", c_count);
+
+    int32_t* o_orderkey = mmap_file<int32_t>(gendb_dir + "/orders/o_orderkey.bin", o_count);
+    int32_t* o_orderdate = mmap_file<int32_t>(gendb_dir + "/orders/o_orderdate.bin", o_count);
+    int32_t* o_shippriority = mmap_file<int32_t>(gendb_dir + "/orders/o_shippriority.bin", o_count);
+
+    int32_t* l_orderkey = mmap_file<int32_t>(gendb_dir + "/lineitem/l_orderkey.bin", l_count);
+    int32_t* l_shipdate = mmap_file<int32_t>(gendb_dir + "/lineitem/l_shipdate.bin", l_count);
+    int64_t* l_extendedprice = mmap_file<int64_t>(gendb_dir + "/lineitem/l_extendedprice.bin", l_count);
+    int64_t* l_discount = mmap_file<int64_t>(gendb_dir + "/lineitem/l_discount.bin", l_count);
+
+    // Load zone maps (binary format: [uint32_t num_entries] then [ZoneMapEntry...]
+    int fd_l_zone = open((gendb_dir + "/indexes/lineitem_l_shipdate_zonemap.bin").c_str(), O_RDONLY);
+
+    struct stat st_l_zone;
+    fstat(fd_l_zone, &st_l_zone);
+
+    void* l_zone_addr = mmap(nullptr, st_l_zone.st_size, PROT_READ, MAP_PRIVATE, fd_l_zone, 0);
+    close(fd_l_zone);
+
+    uint32_t l_zonemap_count = *(uint32_t*)l_zone_addr;
+    ZoneMapEntry* l_shipdate_zonemap = (ZoneMapEntry*)((char*)l_zone_addr + sizeof(uint32_t));
+
+    #ifdef GENDB_PROFILE
+    auto t_load_end = std::chrono::high_resolution_clock::now();
+    double load_ms = std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
+    printf("[TIMING] load_data: %.2f ms\n", load_ms);
+    #endif
+
+    // Compute date thresholds
+    int32_t date_1995_03_15 = date_to_epoch(1995, 3, 15);
+
+    // 3. Filter customer: c_mktsegment = 'BUILDING'
+    #ifdef GENDB_PROFILE
+    auto t_filter_cust_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    std::vector<int32_t> filtered_custkeys;
+    filtered_custkeys.reserve(c_count / 5);  // Estimate 1/5 for one segment
+
+    for (size_t i = 0; i < c_count; ++i) {
+        if (c_mktsegment[i] == building_code) {
+            filtered_custkeys.push_back(c_custkey[i]);
+        }
+    }
+
+    #ifdef GENDB_PROFILE
+    auto t_filter_cust_end = std::chrono::high_resolution_clock::now();
+    double filter_cust_ms = std::chrono::duration<double, std::milli>(t_filter_cust_end - t_filter_cust_start).count();
+    printf("[TIMING] filter_customer: %.2f ms (filtered to %zu rows)\n", filter_cust_ms, filtered_custkeys.size());
+    #endif
+
+    // 4. Build hash set for filtered customer keys
+    #ifdef GENDB_PROFILE
+    auto t_hash_cust_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    CompactHashTable<int32_t, bool> cust_set(filtered_custkeys.size());
+    for (int32_t key : filtered_custkeys) {
+        cust_set.insert(key, true);
+    }
+
+    #ifdef GENDB_PROFILE
+    auto t_hash_cust_end = std::chrono::high_resolution_clock::now();
+    double hash_cust_ms = std::chrono::duration<double, std::milli>(t_hash_cust_end - t_hash_cust_start).count();
+    printf("[TIMING] build_customer_hash: %.2f ms\n", hash_cust_ms);
+    #endif
+
+    // 5. Load pre-built hash index for orders_o_custkey and filter by customer + date
+    #ifdef GENDB_PROFILE
+    auto t_filter_orders_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    // Load pre-built hash index for o_custkey (hash_multi_value)
+    int fd_o_custkey_hash = open((gendb_dir + "/indexes/orders_o_custkey_hash.bin").c_str(), O_RDONLY);
+    struct stat st_o_custkey_hash;
+    fstat(fd_o_custkey_hash, &st_o_custkey_hash);
+    void* o_custkey_hash_addr = mmap(nullptr, st_o_custkey_hash.st_size, PROT_READ, MAP_PRIVATE, fd_o_custkey_hash, 0);
+    close(fd_o_custkey_hash);
+
+    uint32_t o_custkey_table_size = *((uint32_t*)o_custkey_hash_addr + 1);
+    HashIndexEntry* o_custkey_hash_table = (HashIndexEntry*)((char*)o_custkey_hash_addr + 8);
+
+    // Positions array starts after hash table (table_size * 12 bytes per entry)
+    uint32_t* o_custkey_positions_header = (uint32_t*)((char*)o_custkey_hash_table + o_custkey_table_size * 12);
+    uint32_t* o_custkey_positions = o_custkey_positions_header + 1;
+
+    // Build order_map by iterating through filtered customers and looking up orders via hash index
+    // Then filter by o_orderdate < date_1995_03_15
+    CompactHashTable<int32_t, std::pair<int32_t, int32_t>> order_map(filtered_custkeys.size() * 10);  // Estimate ~10 orders per customer
+
+    size_t orders_scanned = 0;
+    size_t orders_matched = 0;
+
+    DefaultHash hasher;
+    uint32_t mask = o_custkey_table_size - 1;
+
+    for (int32_t custkey : filtered_custkeys) {
+        // Probe hash index for this customer
+        size_t idx = hasher(custkey) & mask;
+        while (true) {
+            HashIndexEntry* entry = &o_custkey_hash_table[idx];
+            if (entry->count == 0) break;  // Empty slot
+            if (entry->key == custkey) {
+                // Found matching customer - iterate through all their orders
+                uint32_t offset = entry->offset;
+                uint32_t count = entry->count;
+
+                for (uint32_t i = 0; i < count; ++i) {
+                    uint32_t order_pos = o_custkey_positions[offset + i];
+                    orders_scanned++;
+
+                    // Filter by date
+                    if (o_orderdate[order_pos] < date_1995_03_15) {
+                        order_map.insert(o_orderkey[order_pos], {o_orderdate[order_pos], o_shippriority[order_pos]});
+                        orders_matched++;
+                    }
+                }
+                break;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    #ifdef GENDB_PROFILE
+    auto t_filter_orders_end = std::chrono::high_resolution_clock::now();
+    double filter_orders_ms = std::chrono::duration<double, std::milli>(t_filter_orders_end - t_filter_orders_start).count();
+    printf("[TIMING] filter_join_orders: %.2f ms (scanned %zu, matched %zu orders)\n", filter_orders_ms, orders_scanned, orders_matched);
+    #endif
+
+    // 6. Scan lineitem with filter l_shipdate > '1995-03-15' and join + aggregate
+    // Use zone map to skip blocks where l_shipdate <= date_1995_03_15
+    // PARALLEL VERSION with SIMD filtering and prefetching
+    #ifdef GENDB_PROFILE
+    auto t_scan_agg_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    // Collect blocks that pass zone map pruning
+    std::vector<size_t> valid_lineitem_blocks;
+    for (size_t z = 0; z < l_zonemap_count; ++z) {
+        if (l_shipdate_zonemap[z].max_val > date_1995_03_15) {
+            valid_lineitem_blocks.push_back(z);
+        }
+    }
+
+    // Thread-local aggregation hash tables
+    int num_threads = omp_get_max_threads();
+    std::vector<CompactHashTable<GroupKey, AggResult, GroupKeyHash>*> thread_agg_maps(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        thread_agg_maps[t] = new CompactHashTable<GroupKey, AggResult, GroupKeyHash>(orders_matched * 4 / num_threads);
+    }
+
+    std::atomic<size_t> lineitem_scanned(0);
+    std::atomic<size_t> lineitem_joined(0);
+
+    // Prepare SIMD constants for date filtering
+    __m256i threshold_vec = _mm256_set1_epi32(date_1995_03_15);
+
+    // Parallel block processing
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        size_t local_scanned = 0;
+        size_t local_joined = 0;
+
+        #pragma omp for schedule(dynamic, 4)
+        for (size_t idx = 0; idx < valid_lineitem_blocks.size(); ++idx) {
+            size_t z = valid_lineitem_blocks[idx];
+            uint32_t start_row = l_shipdate_zonemap[z].start_row;
+            uint32_t end_row = start_row + l_shipdate_zonemap[z].row_count;
+
+            // Process in batches of 8 for SIMD
+            uint32_t i = start_row;
+            for (; i + 7 < end_row; i += 8) {
+                local_scanned += 8;
+
+                // SIMD: Load 8 shipdates and compare with threshold
+                __m256i dates = _mm256_loadu_si256((__m256i*)&l_shipdate[i]);
+                // l_shipdate[i] > date_1995_03_15 means we need GT comparison
+                // AVX2 has _mm256_cmpgt_epi32(a, b) which checks a > b
+                __m256i gt_mask = _mm256_cmpgt_epi32(dates, threshold_vec);
+                int mask = _mm256_movemask_ps(_mm256_castsi256_ps(gt_mask));
+
+                // Process each matching row
+                for (int bit = 0; bit < 8; ++bit) {
+                    if (mask & (1 << bit)) {
+                        uint32_t row_idx = i + bit;
+
+                        // Prefetch hash table entry for next iteration
+                        if (bit < 7 && (mask & (1 << (bit + 1)))) {
+                            DefaultHash h;
+                            size_t next_idx = h(l_orderkey[i + bit + 1]) & order_map.mask;
+                            __builtin_prefetch(&order_map.table[next_idx], 0, 1);
+                        }
+
+                        auto* match = order_map.find(l_orderkey[row_idx]);
+                        if (match != nullptr) {
+                            local_joined++;
+                            GroupKey key{l_orderkey[row_idx], match->first, match->second};
+
+                            // Compute revenue: l_extendedprice * (1 - l_discount)
+                            int64_t revenue = l_extendedprice[row_idx] * (100 - l_discount[row_idx]);
+
+                            auto* agg = thread_agg_maps[tid]->find(key);
+                            if (agg != nullptr) {
+                                agg->revenue_scaled += revenue;
+                            } else {
+                                thread_agg_maps[tid]->insert(key, {revenue});
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle remaining rows (scalar tail)
+            for (; i < end_row; ++i) {
+                local_scanned++;
+                if (l_shipdate[i] > date_1995_03_15) {
+                    auto* match = order_map.find(l_orderkey[i]);
+                    if (match != nullptr) {
+                        local_joined++;
+                        GroupKey key{l_orderkey[i], match->first, match->second};
+
+                        int64_t revenue = l_extendedprice[i] * (100 - l_discount[i]);
+
+                        auto* agg = thread_agg_maps[tid]->find(key);
+                        if (agg != nullptr) {
+                            agg->revenue_scaled += revenue;
+                        } else {
+                            thread_agg_maps[tid]->insert(key, {revenue});
+                        }
+                    }
+                }
+            }
+        }
+
+        lineitem_scanned += local_scanned;
+        lineitem_joined += local_joined;
+    }
+
+    // Merge thread-local aggregation results
+    CompactHashTable<GroupKey, AggResult, GroupKeyHash> agg_map(lineitem_joined.load() / 2);
+    for (int t = 0; t < num_threads; ++t) {
+        for (const auto& entry : thread_agg_maps[t]->table) {
+            if (entry.occupied) {
+                auto* existing = agg_map.find(entry.key);
+                if (existing != nullptr) {
+                    existing->revenue_scaled += entry.value.revenue_scaled;
+                } else {
+                    agg_map.insert(entry.key, entry.value);
+                }
+            }
+        }
+        delete thread_agg_maps[t];
+    }
+
+    #ifdef GENDB_PROFILE
+    auto t_scan_agg_end = std::chrono::high_resolution_clock::now();
+    double scan_agg_ms = std::chrono::duration<double, std::milli>(t_scan_agg_end - t_scan_agg_start).count();
+    printf("[TIMING] scan_filter_join_aggregate: %.2f ms (scanned %zu, joined %zu rows)\n", scan_agg_ms, lineitem_scanned.load(), lineitem_joined.load());
+    #endif
+
+    // 7. Convert to vector and sort
+    #ifdef GENDB_PROFILE
+    auto t_sort_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    std::vector<std::tuple<int32_t, double, int32_t, int32_t>> results;
+    results.reserve(lineitem_joined / 4);  // Estimate number of unique groups
+
+    // Iterate through compact hash table
+    for (const auto& entry : agg_map.table) {
+        if (entry.occupied) {
+            // Scale down from 10000 to get actual revenue with 2 decimal places
+            double revenue = static_cast<double>(entry.value.revenue_scaled) / 10000.0;
+            results.push_back({entry.key.l_orderkey, revenue, entry.key.o_orderdate, entry.key.o_shippriority});
+        }
+    }
+
+    // Sort by revenue DESC, o_orderdate ASC
+    std::sort(results.begin(), results.end(),
+        [](const auto& a, const auto& b) {
+            if (std::get<1>(a) != std::get<1>(b)) {
+                return std::get<1>(a) > std::get<1>(b);  // revenue DESC
+            }
+            return std::get<2>(a) < std::get<2>(b);  // o_orderdate ASC
+        });
+
+    #ifdef GENDB_PROFILE
+    auto t_sort_end = std::chrono::high_resolution_clock::now();
+    double sort_ms = std::chrono::duration<double, std::milli>(t_sort_end - t_sort_start).count();
+    printf("[TIMING] sort: %.2f ms\n", sort_ms);
+    #endif
+
+    #ifdef GENDB_PROFILE
+    auto t_total_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration<double, std::milli>(t_total_end - t_total_start).count();
+    printf("[TIMING] total: %.2f ms\n", total_ms);
+    #endif
+
+    // 8. Write output (LIMIT 10)
+    #ifdef GENDB_PROFILE
+    auto t_output_start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    std::string output_path = results_dir + "/Q3.csv";
+    std::ofstream out(output_path);
+    if (!out.is_open()) {
+        std::cerr << "Failed to open output file: " << output_path << std::endl;
+        return;
+    }
+
+    out << "l_orderkey,revenue,o_orderdate,o_shippriority\n";
+
+    size_t limit = std::min<size_t>(10, results.size());
+    for (size_t i = 0; i < limit; ++i) {
+        out << std::get<0>(results[i]) << ","
+            << std::fixed << std::setprecision(4) << std::get<1>(results[i]) << ","
+            << epoch_to_date(std::get<2>(results[i])) << ","
+            << std::get<3>(results[i]) << "\n";
+    }
+
+    out.close();
+
+    #ifdef GENDB_PROFILE
+    auto t_output_end = std::chrono::high_resolution_clock::now();
+    double output_ms = std::chrono::duration<double, std::milli>(t_output_end - t_output_start).count();
+    printf("[TIMING] output: %.2f ms\n", output_ms);
+    #endif
+
+    std::cout << "Query Q3 completed. Results written to " << output_path << std::endl;
+}
+
+#ifndef GENDB_LIBRARY
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <gendb_dir> [results_dir]" << std::endl;
+        return 1;
+    }
+    std::string gendb_dir = argv[1];
+    std::string results_dir = argc > 2 ? argv[2] : ".";
+    run_q3(gendb_dir, results_dir);
+    return 0;
+}
+#endif

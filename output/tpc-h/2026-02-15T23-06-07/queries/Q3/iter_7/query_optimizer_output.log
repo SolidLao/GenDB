@@ -1,0 +1,35 @@
+Perfect! The code compiles successfully. Now let me create a summary of the optimizations:
+
+## Optimization Summary - Q3 Iteration 7
+
+**Optimizations Applied:**
+
+1. **Pre-built Hash Index for Orders Join** (Category: `join`, `io_bound`)
+   - Replaced full orders table scan with pre-built `orders_o_custkey_hash` multi-value index
+   - Changed approach: Instead of scanning all orders rows, we now iterate through filtered customer keys and use the hash index to directly locate their orders
+   - Expected impact: Eliminates orders table scan overhead, reduces I/O from 15M rows to only positions matching filtered customers (~300K customer groups)
+
+2. **Optimized Hash Index Probing** (Category: `join`, `cpu_bound`)
+   - Used Fibonacci hashing matching the pre-built index structure
+   - Direct memory access to hash table and positions array via mmap
+   - Linear probing with cache-friendly sequential access pattern
+   - Expected impact: Faster hash lookups with better cache locality
+
+3. **Improved Parallel Scheduling** (Category: `parallelism`)
+   - Changed orders processing from zone-map blocks (dynamic, 1) to customer keys (dynamic, 128)
+   - Better work distribution across threads for customer-based iteration
+   - Increased lineitem block schedule chunk size from 4 to 8 for better cache reuse
+   - Expected impact: Better load balancing and reduced scheduling overhead
+
+**Key Technical Details:**
+- Preserved all [TIMING] instrumentation inside `#ifdef GENDB_PROFILE` guards
+- Maintained correct encoding logic (no changes to date/decimal encoding)
+- Maintained comma-delimited CSV output format
+- Used open-addressing CompactHashTable for all hash structures
+- Preserved zone map pruning for both orders (orderdate) and lineitem (shipdate)
+
+**Expected Performance Impact:**
+- Orders processing: Should see significant reduction in time (~50-70% faster) due to index-driven access vs full scan
+- Overall: Target ~30-40% speedup (from ~473ms to ~280-330ms range)
+
+The compilation succeeded with only benign format-truncation warnings (same as baseline).
