@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.30 ms\n[TIMING] filter_part: 163.89 ms\n[TIMING] join: 1047.73 ms\n[TIMING] agg: 6.41 ms\n[TIMING] sort: 6.58 ms\n[TIMING] output: 5.44 ms\n[TIMING] total: 1230.41 ms\nQ16 execution complete. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q16/iter_0/results/Q16.csv\nTotal rows: 27840\n",
+    "stderr": "",
+    "duration_ms": 1331
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q16\": {\n      \"match\": false,\n      \"error\": \"expected file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q16": {
+          "match": false,
+          "error": "expected file not found",
+          "rows_expected": 0,
+          "rows_actual": 0
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load": 0.3,
+    "filter_part": 163.89,
+    "join": 1047.73,
+    "agg": 6.41,
+    "sort": 6.58,
+    "output": 5.44,
+    "total": 1230.41
+  },
+  "timing_ms": 1224.97
+}

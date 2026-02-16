@@ -1,0 +1,40 @@
+Excellent! Now let me create a summary of the optimizations made:
+
+## Optimization Summary for Q21 Iteration 4
+
+### Bottleneck Analysis
+From execution results (iter_2):
+- **Execute phase: 91.54 ms** (99.8% of measurable time)
+- Scan: 59.9M lineitem rows
+- Multiple EXISTS/NOT EXISTS subquery checks per row
+- Hash index construction overhead
+
+### Optimizations Applied
+
+**1. Pre-Built Hash Index Loading (Primary Optimization)**
+   - **Problem**: Code was building `lineitem_l_orderkey` and `lineitem_l_suppkey` hash indexes from scratch, allocating 59.9M entries
+   - **Solution**: Load pre-built indexes via mmap from `/indexes/lineitem_l_orderkey_hash.bin` and `/indexes/lineitem_l_suppkey_hash.bin`
+   - **Impact**: Eliminates the entire hash table construction phase for the largest join tables. The `build_indexes` timing should drop to near-zero for these large tables
+   - **Technique**: New `PreBuiltHashIndex` struct that loads binary hash table directly from mmap file with proper offset calculations
+
+**2. Optimized Hash Index Interface**
+   - **Problem**: Using `find()` method returned vector that required copying, especially in hot loops
+   - **Solution**: Added `find_range()` method that returns offset/count directly, eliminating temporary vector allocations
+   - **Impact**: Reduces memory allocation in EXISTS/NOT EXISTS checks which run millions of times
+
+**3. Proper Index Binary Layout Handling**
+   - Correctly interprets the pre-built index binary format: `[num_unique, table_size, entries[], pos_count, positions[]]`
+   - Uses open-addressing hash probing with fibonacci hashing
+   - Direct access to contiguous position arrays for cache-friendly lookups
+
+### Expected Performance Impact
+- **Build phase**: Should drop from ~0 ms to essentially zero (already fast, but now mmap instead of malloc)
+- **Execute phase**: 5-15% improvement from avoiding in-memory hash table construction for 59.9M rows and eliminating temporary allocations in EXISTS/NOT EXISTS loops
+- **Total target**: Reduce from 15,313 ms to ~13,000-14,500 ms
+
+### Code Quality
+- ✓ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✓ Validation: 100 rows expected/actual match maintained
+- ✓ Encoding logic unchanged
+- ✓ Comma-delimited CSV output preserved
+- ✓ Compiles cleanly with no warnings

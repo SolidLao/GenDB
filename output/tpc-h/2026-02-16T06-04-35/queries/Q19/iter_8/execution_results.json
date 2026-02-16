@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q19: Discounted Revenue\n[METADATA CHECK] Encoding: l_quantity (DECIMAL, scale=100), l_discount (DECIMAL, scale=100), l_extendedprice (DECIMAL, scale=100)\n[METADATA CHECK] Encoding: l_shipmode (DICTIONARY), l_shipinstruct (DICTIONARY)\n[METADATA CHECK] Encoding: p_brand (DICTIONARY), p_container (DICTIONARY)\n[TIMING] load_dicts: 0.16 ms\n[METADATA CHECK] Dictionary codes: AIR=3, REG_AIR=2, DELIVER=0\n[METADATA CHECK] Dictionary codes: Brand#12=14, Brand#23=13, Brand#34=2\n[TIMING] load_columns: 0.12 ms\n[METADATA CHECK] Lineitem rows: 59986052, Part rows: 2000000\n[TIMING] filter_part: 16.11 ms\n[METADATA CHECK] Filtered part rows: 4754\n[TIMING] scan_filter: 33.98 ms\n[METADATA CHECK] Matched rows: 1134\n[TIMING] aggregation: 0.01 ms\n[TIMING] output: 0.93 ms\n[TIMING] total: 51.42 ms\n[METADATA CHECK] Result: revenue = 30104433.5800\n",
+    "stderr": "",
+    "duration_ms": 100
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q19\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dicts": 0.16,
+    "load_columns": 0.12,
+    "filter_part": 16.11,
+    "scan_filter": 33.98,
+    "aggregation": 0.01,
+    "output": 0.93,
+    "total": 51.42
+  },
+  "timing_ms": 50.49
+}

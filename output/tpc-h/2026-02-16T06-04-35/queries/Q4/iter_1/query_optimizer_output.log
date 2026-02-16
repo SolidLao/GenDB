@@ -1,0 +1,26 @@
+Good - the compilation was done in the right directory already. Now let me create a summary of what was fixed:
+
+## Summary of Correctness Fix for Q4
+
+**Problem Identified:**
+The original code used a fixed-size vector `count_by_priority(8, 0)` to accumulate counts, indexed by int8_t priority codes. This approach has multiple issues:
+1. **Array bounds vulnerability**: If priority codes are >= 8 or negative, indexing would cause out-of-bounds access or undefined behavior
+2. **Atomic operation overhead**: Using `#pragma omp atomic` on array indices can lead to false sharing and contention
+3. **Unsafe casting**: int8_t values get implicitly converted to size_t when used as array indices
+
+**Solution Implemented:**
+1. Replaced the fixed-size array with `std::unordered_map<int8_t, int32_t>`
+2. Implemented thread-local accumulation pattern:
+   - Each thread maintains its own local map
+   - At the end of the parallel region, thread-local results are merged using critical section
+3. This avoids false sharing, bounds issues, and handles any valid int8_t code value
+
+**Changes Made:**
+- Modified the filtering and grouping section (lines 211-240)
+- Updated the output collection section (lines 268-273)
+- Preserved all [TIMING] annotations within `#ifdef GENDB_PROFILE` guards
+- Maintained semantic correctness of the semi-join and date filtering logic
+
+**Compilation:** ✓ Successful with g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE
+
+The code is now ready for execution and validation by the Executor. The correctness fix should resolve the discrepancies in `order_count` values across all priority groups.

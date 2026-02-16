@@ -17,6 +17,8 @@ Options:
     --skip-umbra          Skip Umbra benchmark
     --skip-monetdb        Skip MonetDB benchmark
     --timeout <N>         Per-query timeout in seconds (default: 300)
+    --plot-only           Skip all benchmarks; read existing metrics and re-plot figures
+    --first-run           Use only the first run's timing (avoids cache benefits)
 """
 
 import argparse
@@ -1738,40 +1740,42 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
     if not query_ids or num_iters == 0:
         return
 
-    q_colors = {q: QUERY_COLORS[i % len(QUERY_COLORS)] for i, q in enumerate(query_ids)}
+    cmap = plt.cm.get_cmap("tab20", max(len(query_ids), 20))
+    q_colors = {q: cmap(i) for i, q in enumerate(query_ids)}
     best_so_far = _compute_best_so_far(data, query_ids, num_iters)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 7))
 
     iter_labels = [f"Iter {i}" for i in range(num_iters)]
     x_pos = list(range(num_iters))
 
     # --- Left: Total execution time (sum of best-so-far per query at each iteration) ---
-    # Only plot iteration i if ALL queries have at least one valid result by iter i
-    total_x, total_y = [], []
+    # Only consider queries that eventually produce a valid result
+    valid_qids = [qid for qid in query_ids if any(s == "valid" for _, _, s in best_so_far.get(qid, []))]
+    total_x, total_y, total_n = [], [], []
     for i in range(num_iters):
         total = 0
-        all_have_data = True
-        for qid in query_ids:
+        n_queries = 0
+        for qid in valid_qids:
             # Find best-so-far at iteration i
-            found = False
             for (si, st, _) in best_so_far.get(qid, []):
                 if si == i:
                     total += st
-                    found = True
+                    n_queries += 1
                     break
-            if not found:
-                all_have_data = False
-                break
-        if all_have_data:
+        if n_queries > 0:
             total_x.append(i)
             total_y.append(total)
+            total_n.append(n_queries)
 
     if total_y:
         ax1.plot(total_x, total_y, marker="o", linewidth=2.5, markersize=10,
-                 color="#9C27B0", label="Total")
-        for x, y in zip(total_x, total_y):
-            ax1.text(x, y * 1.02, f"{y:.0f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
+                 color="#9C27B0", label=f"Total ({len(valid_qids)} queries)")
+        for x, y, n in zip(total_x, total_y, total_n):
+            label = f"{y:.0f}"
+            if n < len(valid_qids):
+                label += f"\n({n}/{len(valid_qids)})"
+            ax1.text(x, y * 1.02, label, ha="center", va="bottom", fontsize=9, fontweight="bold")
 
     ax1.set_xlabel("Iteration", fontsize=12)
     ax1.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
@@ -1812,11 +1816,6 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
             ax2.scatter(fail_x, fail_y, marker="x", s=120, linewidths=2.5,
                         color="red", zorder=5)
 
-        # Add time labels on valid points only
-        for xi, yi, status in series:
-            if status == "valid":
-                ax2.text(xi, yi * 1.05, f"{yi:.0f}", ha="center", va="bottom", fontsize=9)
-
     # Add legend entries for fail and skipped markers
     ax2.scatter([], [], marker="x", s=120, linewidths=2.5, color="red", label="Failed iteration")
     ax2.plot([], [], linestyle="--", linewidth=1.5, color="gray", alpha=0.4, label="Not optimized")
@@ -1827,27 +1826,47 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(iter_labels, fontsize=9, rotation=45 if num_iters > 6 else 0)
     ax2.set_yscale("log")
-    ax2.legend(fontsize=10)
+    ax2.legend(fontsize=8, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
     ax2.grid(axis="y", alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+    plt.tight_layout(rect=[0, 0, 0.88, 1])
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  GenDB iteration plot saved to: {output_path}")
 
 
-def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
-    """Create per-query and total execution time comparison plots."""
-    queries = sorted(set(q for results in all_results.values() for q in results),
-                     key=lambda q: int(q[1:]))
+def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
+                 timeout_ms: float = 300000, all_query_ids: list = None):
+    """Create per-query and total execution time comparison plots.
+
+    Args:
+        all_results: {system: {qid: [times_ms]}}
+        output_path: Path to save per-query plot
+        scale_factor: Scale factor label
+        timeout_ms: Timeout in milliseconds; missing queries are shown at this value
+        all_query_ids: Full list of query IDs (e.g. Q1-Q22); if provided, missing
+                       queries are plotted at timeout_ms with a red cross marker
+    """
+    if all_query_ids:
+        queries = sorted(all_query_ids, key=lambda q: int(q[1:]))
+    else:
+        queries = sorted(set(q for results in all_results.values() for q in results),
+                         key=lambda q: int(q[1:]))
     systems = list(all_results.keys())
 
     data = {}
+    is_timeout = {}  # (system, query_index) -> True if timed out
     for system in systems:
         data[system] = []
+        is_timeout[system] = []
         for q in queries:
             times = all_results[system].get(q, [])
-            data[system].append(sum(times) / len(times) if times else 0)
+            if times:
+                data[system].append(sum(times) / len(times))
+                is_timeout[system].append(False)
+            else:
+                data[system].append(timeout_ms)
+                is_timeout[system].append(True)
 
     # Per-query grouped bar chart (wider for 22 queries)
     fig_width = max(20, len(queries) * 0.9)
@@ -1856,13 +1875,25 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     width = 0.8 / max(len(systems), 1)
     offsets = [(i - len(systems) / 2 + 0.5) * width for i in range(len(systems))]
 
+    timeout_marker_added = False
     for i, system in enumerate(systems):
         bars = ax.bar(
             [xi + offsets[i] for xi in x], data[system], width,
             label=system, color=SYSTEM_COLORS.get(system, "#999999"),
         )
-        for bar, val in zip(bars, data[system]):
-            if val > 0:
+        for j, (bar, val, timedout) in enumerate(zip(bars, data[system], is_timeout[system])):
+            if timedout:
+                # Red cross marker for timed-out queries
+                cx = bar.get_x() + bar.get_width() / 2
+                cy = bar.get_height()
+                if not timeout_marker_added:
+                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
+                               color="red", zorder=5, label="Timeout")
+                    timeout_marker_added = True
+                else:
+                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
+                               color="red", zorder=5)
+            elif val > 0:
                 ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
                         f"{val:.1f}", ha="center", va="bottom", fontsize=7,
                         rotation=45)
@@ -1881,9 +1912,12 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
     plt.close()
     print(f"  Per-query plot saved to: {output_path}")
 
-    # Total execution time bar chart
+    # Total execution time bar chart — only queries successful across ALL systems
+    common_queries = [j for j, q in enumerate(queries)
+                      if all(not is_timeout[s][j] for s in systems)]
+    common_query_names = [queries[j] for j in common_queries]
     fig2, ax2 = plt.subplots(figsize=(max(8, len(systems) * 1.5), 6))
-    totals = {s: sum(data[s]) for s in systems}
+    totals = {s: sum(data[s][j] for j in common_queries) for s in systems}
     x_pos = range(len(systems))
     bars = ax2.bar(x_pos, [totals[s] for s in systems],
                    color=[SYSTEM_COLORS.get(s, "#999999") for s in systems])
@@ -1894,7 +1928,8 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?"):
 
     ax2.set_xlabel("System", fontsize=12)
     ax2.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
-    ax2.set_title(f"TPC-H Total Execution Time (SF={scale_factor})", fontsize=14)
+    n_common = len(common_queries)
+    ax2.set_title(f"TPC-H Total Execution Time (SF={scale_factor}, {n_common} common queries)", fontsize=14)
     ax2.set_xticks(list(x_pos))
     ax2.set_xticklabels(systems, fontsize=11)
     ax2.set_yscale("log")
@@ -1933,6 +1968,10 @@ def main():
                         help="Skip MonetDB benchmark")
     parser.add_argument("--timeout", type=int, default=300,
                         help="Per-query timeout in seconds (default: 300)")
+    parser.add_argument("--plot-only", action="store_true",
+                        help="Skip all benchmarks; read existing metrics JSON and re-plot figures")
+    parser.add_argument("--first-run", action="store_true",
+                        help="Use only the first run's timing (avoids cache benefits from repeated runs)")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent.parent
@@ -1942,7 +1981,7 @@ def main():
         args.data_dir = benchmark_root / "data" / f"sf{args.sf}"
     data_dir = args.data_dir.resolve()
 
-    if not args.gendb_only and not (data_dir / "lineitem.tbl").exists():
+    if not args.plot_only and not args.gendb_only and not (data_dir / "lineitem.tbl").exists():
         print(f"Error: TPC-H data not found at {data_dir}")
         print(f"Run: bash benchmarks/tpc-h/setup_data.sh {args.sf}")
         sys.exit(1)
@@ -1987,8 +2026,47 @@ def main():
     gendb_history = None
     gendb_query_ids = sorted(queries.keys(), key=lambda q: int(q[1:]))
 
+    # --- Plot-only mode: load existing metrics and skip all benchmarks ---
+    if args.plot_only:
+        metrics_dir = benchmark_root / "results" / f"sf{args.sf}" / "metrics"
+        json_path = metrics_dir / "benchmark_results.json"
+        if not json_path.exists():
+            print(f"Error: metrics file not found: {json_path}")
+            sys.exit(1)
+        print(f"=== Plot-only mode: loading metrics from {json_path} ===")
+        with open(json_path) as f:
+            saved_data = json.load(f)
+        # Reconstruct all_results from saved JSON
+        for system, system_data in saved_data.items():
+            all_results[system] = {}
+            for qid, qdata in system_data.items():
+                if args.first_run:
+                    # Use only the first run to avoid cache benefits
+                    all_results[system][qid] = [qdata["all_ms"][0]]
+                else:
+                    all_results[system][qid] = qdata["all_ms"]
+
+        # Load GenDB iteration history if available
+        iter_json_path = metrics_dir / "gendb_iteration_history.json"
+        if iter_json_path.exists():
+            with open(iter_json_path) as f:
+                iter_data = json.load(f)
+            # Convert string keys back to int keys
+            data = {}
+            for qid, iters in iter_data["data"].items():
+                data[qid] = {int(k): v for k, v in iters.items()}
+            gendb_history = {
+                "query_ids": iter_data["query_ids"],
+                "num_iters": iter_data["num_iters"],
+                "data": data,
+                "best": iter_data["best"],
+            }
+
+        # Jump to results summary and plotting
+        print()
+
     # --- GenDB: iteration history (from JSON, no re-execution) ---
-    if args.gendb_run and args.gendb_run.exists():
+    if not args.plot_only and args.gendb_run and args.gendb_run.exists():
         print("=== GenDB Iteration History ===")
         gendb_history = read_gendb_iteration_history(args.gendb_run)
         if gendb_history["query_ids"]:
@@ -2016,10 +2094,10 @@ def main():
         best_results = gendb_benchmark_best(args.gendb_run, gendb_dir, args.runs)
         if best_results:
             all_results["GenDB"] = best_results
-    else:
+    elif not args.plot_only:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 
-    if not args.gendb_only:
+    if not args.plot_only and not args.gendb_only:
         # --- PostgreSQL ---
         print("\n=== PostgreSQL Setup ===")
         try:
@@ -2105,7 +2183,10 @@ def main():
 
     # --- Results summary ---
     print("\n" + "=" * 60)
-    print("RESULTS SUMMARY (average of N runs, in ms)")
+    if args.first_run:
+        print("RESULTS SUMMARY (first run only, in ms)")
+    else:
+        print("RESULTS SUMMARY (average of N runs, in ms)")
     print("=" * 60)
     all_queries = sorted(
         set(q for results in all_results.values() for q in results),
@@ -2134,29 +2215,33 @@ def main():
     print(row)
     print()
 
-    # --- Save JSON results ---
-    metrics_dir = benchmark_root / "results" / f"sf{args.sf}" / "metrics"
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    json_path = metrics_dir / "benchmark_results.json"
-    json_data = {}
-    for system, results in all_results.items():
-        json_data[system] = {
-            q: {
-                "all_ms": times,
-                "average_ms": sum(times) / len(times) if times else 0,
-                "min_ms": min(times) if times else 0,
-                "max_ms": max(times) if times else 0,
+    # --- Save JSON results (skip in plot-only mode to preserve original data) ---
+    if not args.plot_only:
+        metrics_dir = benchmark_root / "results" / f"sf{args.sf}" / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        json_path = metrics_dir / "benchmark_results.json"
+        json_data = {}
+        for system, results in all_results.items():
+            json_data[system] = {
+                q: {
+                    "all_ms": times,
+                    "average_ms": sum(times) / len(times) if times else 0,
+                    "min_ms": min(times) if times else 0,
+                    "max_ms": max(times) if times else 0,
+                }
+                for q, times in results.items()
             }
-            for q, times in results.items()
-        }
-    with open(json_path, "w") as f:
-        json.dump(json_data, f, indent=2)
-    print(f"Results saved to: {json_path}")
+        with open(json_path, "w") as f:
+            json.dump(json_data, f, indent=2)
+        print(f"Results saved to: {json_path}")
 
     # --- Plots ---
-    if len(all_results) >= 2:
+    min_systems = 1 if args.plot_only else 2
+    all_query_ids = sorted(queries.keys(), key=lambda q: int(q[1:]))
+    if len(all_results) >= min_systems:
         print()
-        plot_results(all_results, args.output, scale_factor=str(args.sf))
+        plot_results(all_results, args.output, scale_factor=str(args.sf),
+                     timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids)
 
     if gendb_history and gendb_history["num_iters"] > 0:
         base_name = args.output.stem.replace("_per_query", "")

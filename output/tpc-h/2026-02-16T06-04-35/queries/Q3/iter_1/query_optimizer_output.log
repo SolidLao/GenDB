@@ -1,0 +1,36 @@
+Perfect! Compilation successful. Let me create a summary of the optimizations:
+
+## Optimization Summary
+
+**Iteration 1 Optimizations for Q3:**
+
+### Identified Bottleneck
+- **join_and_aggregate: 1677.8 ms (51.8% of total 3240 ms)** — dominant bottleneck
+- **filter_and_build_orders: 1499.8 ms (46.3%)** — secondary bottleneck
+- Hardware: 64 CPU cores available, query was single-threaded
+
+### Optimizations Applied
+
+1. **Thread Parallelism with OpenMP** (primary optimization)
+   - Converted the dominant `join_and_aggregate` phase from single-threaded to parallel
+   - Uses `omp_get_thread_num()` to detect available CPU cores (typically 64)
+   - Morsel-driven approach with dynamic scheduling (`schedule(dynamic, 8192)`) for load balancing
+   - Each thread maintains thread-local aggregation hash maps to eliminate contention
+   - Merge phase combines results from all threads
+   - **Expected speedup**: ~16-32x on 64 cores (accounting for Amdahl's law with ~5% sequential overhead)
+
+2. **Pre-sizing orders hash table** 
+   - Added `.reserve(2000000)` to `orders_map` to avoid rehashing during insertion
+   - Reduces hash table growth overhead
+
+3. **Code structure**
+   - Preserved all `[TIMING]` instrumentation inside `#ifdef GENDB_PROFILE` guards
+   - No changes to encoding logic or output format (CSV remains comma-delimited)
+   - Added `#include <omp.h>` for OpenMP support
+
+### Expected Performance Impact
+- The join_and_aggregate phase (1677.8 ms) should see **8-32x speedup** depending on actual parallelization efficiency
+- Orders filtering phase will see minor speedup from hash table pre-sizing
+- **Target**: Reduce Q3 total time from **3240 ms to ~400-600 ms** (targeting DuckDB's ~92 ms as longer-term goal)
+
+The code compiles successfully with `-fopenmp` flag and is ready for validation by the Executor.

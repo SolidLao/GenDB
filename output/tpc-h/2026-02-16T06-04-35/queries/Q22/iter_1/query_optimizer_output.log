@@ -1,0 +1,31 @@
+Perfect! The code now compiles successfully. Let me provide a summary of the correctness fix:
+
+## Summary: Q22 Correctness Fix (Iteration 1)
+
+### **Root Cause Identified**
+The original code had a **critical memory management bug**: `MmapFile` objects were being destroyed immediately after assignment to pointers, causing all mmapped memory regions to be unmapped before use.
+
+```cpp
+// OLD CODE: MmapFile goes out of scope immediately
+MmapFile custkey_file(gendb_dir + "/customer/c_custkey.bin");
+const int32_t* c_custkey = (const int32_t*)custkey_file.ptr;
+// custkey_file.~MmapFile() called here → munmap() invalidates c_custkey pointer!
+```
+
+### **Fix Applied**
+1. **Declared all MmapFile objects as local variables** in the function scope (lines 156-159) so they remain alive throughout the entire function execution.
+2. **Refactored `OrdersHashIndex` constructor** to accept a pre-mapped pointer instead of opening its own file, preventing double-mmap issues.
+3. **Updated the hash index loading call** to use the already-mmapped `orders_hash_file.ptr` (line 178).
+
+### **Key Changes**
+- All four MmapFile objects (`custkey_file`, `acctbal_file`, `phone_file`, `orders_hash_file`) now have function-scope lifetime
+- The OrdersHashIndex constructor now takes `const void* mmap_ptr` instead of a file path
+- No changes to timing instrumentation, encoding logic, or output format
+
+### **Compilation Status**
+✅ **PASSED** — Code compiles cleanly with no warnings using:
+```bash
+g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE
+```
+
+The code is now ready for the Executor to validate correctness. All memory pointers are valid throughout execution, and the query logic should produce the expected results.

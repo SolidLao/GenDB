@@ -1,0 +1,45 @@
+Perfect! The binary compiled successfully. Now let me create a summary of the optimizations made:
+
+## Iteration 7 Optimization Summary
+
+**Objective:** Reduce execution time from 2117.30ms by targeting the dominant bottleneck (load phase: 67%)
+
+**Changes Made:**
+
+### 1. **Pre-built Hash Index Loading (HIGH IMPACT: Expected ~300-400ms improvement)**
+   - **What:** Replaced manual open-addressing hash table construction with pre-built index loading
+   - **Files involved:**
+     - `supplier_s_nationkey_hash.bin` → Load instead of building
+     - `orders_o_custkey_hash.bin` → Load instead of building  
+     - `customer_c_nationkey_hash.bin` → Load instead of building
+   - **Why:** Hash table construction (638.74ms) was 30% of total time. Pre-built indexes skip construction entirely.
+   - **Code changes:**
+     - Added `SimpleHashIndex` struct for single-value lookups
+     - Load 3 pre-built indexes at startup
+     - Use `find_value()` for O(1) lookups instead of open-addressing probing
+
+### 2. **Code Cleanup**
+   - Removed unused `hash_fn` lambda (was only used for open-addressing, no longer needed)
+   - Added proper error checking for `read()` calls to eliminate compiler warnings
+
+**Timing Expectations:**
+
+| Phase | Before (ms) | After (ms) | Change |
+|-------|------------|-----------|--------|
+| Load | 1427.35 | 1427.35 | No change |
+| Build | 638.74 | ~100-150 | -80% (index loading is faster) |
+| Join & Aggregate | 50.98 | ~40-50 | -5% (slightly faster lookups) |
+| Output | 0.16 | 0.16 | No change |
+| **Total** | **2117.30** | **~1575-1625** | **-25% to -30%** |
+
+**Expected Impact:** 
+- **25-30% improvement** from eliminating hash table build time
+- Pre-built indexes are memory-efficient (just unordered_map) and index lookups are faster than probing
+
+**Correctness:** 
+- All [TIMING] lines preserved
+- No encoding logic changed
+- Output format unchanged (CSV, comma-delimited)
+- Validation should pass (same query logic, just faster execution)
+
+The compilation completed successfully with no errors. The Executor will now run the optimized code.

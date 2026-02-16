@@ -1,0 +1,44 @@
+Perfect! The binary compiled successfully. Let me create a summary of the optimizations made:
+
+## Summary: Q2 Optimization - Iteration 6
+
+**Current Bottleneck (from Iteration 4 baseline: 272.45 ms):**
+- **compute_min_costs**: 244.43 ms (71.6% of total) — PRIMARY BOTTLENECK
+- **output**: 67.57 ms (19.8% of total) — SECONDARY BOTTLENECK
+
+**Optimizations Applied:**
+
+### 1. **Replace `std::unordered_map` with `CompactHashTable` for `min_cost_by_part`**
+   - **Category**: CPU-bound data structure optimization
+   - **Technique**: Open-addressing hash table with Fibonacci hashing
+   - **Expected Impact**: 2-5x faster lookups due to improved cache locality
+   - **Why it helps**: 
+     - The `compute_min_costs` loop scans all 8M partsupp rows and does a hash table lookup per row
+     - `std::unordered_map` uses chaining with pointer indirection → poor cache locality
+     - `CompactHashTable` uses open-addressing → contiguous memory, better CPU cache utilization
+     - Reduced per-entry overhead: ~80 bytes/entry (unordered_map) → ~16 bytes/entry (open-addressing)
+
+### 2. **Optimize Output Stage with Pre-Loaded String Columns**
+   - **Category**: I/O optimization
+   - **Technique**: Pre-load entire string column files once, then access via direct offset lookup
+   - **Expected Impact**: 30-50% faster string loading (eliminate repeated file seek overhead)
+   - **Why it helps**:
+     - Previous code called `load_string_at_index()` via StringColumn cache on each output row
+     - This caused repeated lazy loads and file seeks
+     - New approach: Pre-load all 6 string columns once before the output loop
+     - Direct indexing into pre-loaded data → O(1) string access, no I/O latency
+
+**Code Changes:**
+- Added `CompactHashTable<K, V>` template with Fibonacci hashing and open-addressing probe sequence
+- Replaced `std::unordered_map<int32_t, int64_t>` with `CompactHashTable<int32_t, int64_t>` for `min_cost_by_part`
+- Pre-load all 6 string columns in output stage to avoid repeated lazy loading
+- Updated hash table API calls: `.find()` returns `V*` instead of iterator
+
+**Compilation**: ✅ Successful (88 KB binary)
+
+**Expected Outcome:**
+- Iteration 5 crashed/regressed → Iteration 6 focuses on targeted optimizations avoiding previous mistakes
+- **Target**: Reduce from 272.45 ms baseline to ~150-180 ms (45-50% improvement)
+- **Mechanism**: CompactHashTable should eliminate 30-40% of compute_min_costs overhead; string pre-loading should cut output time in half
+
+The Executor will now run and validate the results.

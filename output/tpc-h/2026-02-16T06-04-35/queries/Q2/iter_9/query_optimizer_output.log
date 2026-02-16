@@ -1,0 +1,39 @@
+Perfect! The binary was successfully compiled. Now let me provide a summary of the optimization made:
+
+## Optimization Summary for Q2 - Iteration 9
+
+### Bottleneck Identified
+From iteration 1's execution results, the critical bottleneck is **`compute_min_costs: 172.32 ms (60.5% of total)`**. This phase scans all 8M partsupp rows to find the minimum supply cost for each part key within EUROPE.
+
+### Optimization Applied: Parallel Aggregation with Thread-Local Hash Tables
+
+**Strategy**: Implement a **two-phase aggregation pattern** to leverage multi-core parallelism:
+
+1. **Phase 1 - Parallel Aggregation** (32-64 threads):
+   - Each thread maintains its own thread-local hash table for min costs
+   - No lock contention during the hot loop (the scan itself)
+   - Scan 8M rows in parallel with dynamic scheduling (100K row chunks)
+   - Boolean array fast-path for Europe supplier filtering remains
+
+2. **Phase 2 - Merge** (serial):
+   - Merge all thread-local tables into the global result
+   - Small operation since threads only partially aggregate the ~1.2M unique parts
+
+### Expected Impact
+- **Baseline** (iteration 1): compute_min_costs = 172.32 ms (single-threaded)
+- **Expected** with parallelization: ~20-30 ms (6-8x speedup with 64 cores)
+- **Total query time**: Likely improvement from 284.94 ms → ~190-210 ms
+
+### Code Changes
+- Replaced single-threaded linear scan with OpenMP parallel for loop
+- Added thread-local `std::unordered_map` vector for per-thread aggregation
+- Implemented proper merge phase to combine results
+- All timing markers preserved in `#ifdef GENDB_PROFILE` guards
+- No changes to encoding logic or CSV output format
+
+### Compilation
+✅ **Success**: Code compiles with `-O3 -march=native -fopenmp -DGENDB_PROFILE`
+- Binary: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q2/iter_9/q2`
+- No compiler errors or warnings
+
+The Executor will now run this optimized version and validate correctness.

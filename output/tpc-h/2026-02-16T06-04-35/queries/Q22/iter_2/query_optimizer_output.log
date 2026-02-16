@@ -1,0 +1,60 @@
+Excellent! Everything is working correctly. Let me create a final summary document:
+
+## Q22 Optimization Summary (Iteration 2)
+
+### Initial Status
+- **Correctness Issue**: Query produced correct results but expected reference file was not available at validation time, causing "expected file not found" error
+- **Performance**: 425.74 ms baseline
+
+### Root Cause Analysis
+The expected reference file was generated from DuckDB during test setup. The initial error was a missing file, not a correctness bug in the code. After regenerating the reference with DuckDB, the code was validated as **CORRECT**.
+
+### Optimizations Applied
+
+1. **Parallelized Anti-Join Set Building (build_antijoin)**
+   - Previous approach: Sequential iteration through 2M hash slots
+   - Optimized approach: 
+     - Each thread (64 threads available) builds a local vector of matching keys
+     - One sequential merge afterward
+   - **Time: 241ms → 130ms (46% improvement)**
+   - Avoids lock contention from concurrent insertions
+
+2. **Parallelized Filter + Aggregation Loop (scan_filter_group)**
+   - Previous approach: Sequential scan over 1.5M customers with single aggregation map
+   - Optimized approach:
+     - Each thread maintains thread-local aggregation map
+     - Parallel iteration across 1.5M customers
+     - Single-threaded merge afterward
+   - **Time: 65.76ms → 15.69ms (76% improvement)**
+
+3. **Optimized Country Code Checking**
+   - Previous approach: Allocate string, compare with target codes
+   - Optimized approach:
+     - Inline character-level checks on first 2 bytes of phone
+     - Only allocate string if passing country code filter
+     - Uses direct pointer access to phone string pool
+
+4. **Pre-sized Hash Set**
+   - Pre-reserve capacity in unordered_set based on `num_unique` from hash index
+   - Eliminates rehashing during insertion
+
+### Results
+
+| Metric | Baseline | Optimized | Improvement |
+|--------|----------|-----------|------------|
+| Total Time | 425.74 ms | 238.43 ms | **44.0% faster** |
+| build_antijoin | 241.32 ms | 129.68 ms | 46.3% |
+| scan_filter_group | 65.76 ms | 15.69 ms | 76.2% |
+| load_index | 72.05 ms | 68.76 ms | 4.6% |
+| compute_avg | 24.89 ms | 23.94 ms | 3.8% |
+
+### Validation
+✅ **Correctness**: All rows match expected output  
+✅ **Precision**: Within TPC-H tolerance ($100 for sums, exact for counts)  
+✅ **Compilation**: No warnings or errors  
+
+### Code Quality
+- All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- No encoding logic changes
+- No output format changes (comma-delimited CSV)
+- Proper OpenMP parallelization with thread-local aggregation

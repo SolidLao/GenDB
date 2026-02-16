@@ -1,0 +1,27 @@
+Perfect! The fix is in place. Now let me create a summary of the changes made:
+
+## Summary of Changes
+
+### **CORRECTNESS FIX — Iteration 2**
+
+**Root Cause**: The zone map file (`orders_o_orderdate_zone.bin`) has a 4-byte count prefix that was not being handled correctly. The original code used `mmap_column` which divides file size by struct size, causing it to read corrupted data and filter zero orders.
+
+**What Was Fixed**:
+1. Changed from `mmap_column` to direct file I/O with `open()` and `read()` syscalls
+2. Properly reads the zone map count prefix (4 bytes) before reading zone entries
+3. Validates file size against expected zone data size
+4. Implements proper fallback to full scan if zone map loading fails
+5. All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+
+**Code Changes** (lines 400-466):
+- Replaced mmap-based zone map loading with count-prefix-aware binary read
+- Added validation of zone file structure before processing
+- Proper error handling with fallback to full scan
+- No changes to encoding logic, aggregation logic, or output format
+
+**Expected Result**: 
+- Orders table now properly filters to the date range 1995-01-01 to 1996-12-31
+- Should find qualifying rows for Brazil and other nations
+- Validation should pass with 2 rows in output
+
+The compilation succeeded without errors. The Executor will now validate the correctness and run the binary to confirm the fix works.

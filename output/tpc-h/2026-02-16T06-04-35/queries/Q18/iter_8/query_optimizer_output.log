@@ -1,0 +1,39 @@
+Perfect! Compilation successful. Now let me summarize the optimizations made:
+
+## Summary of Optimizations for Q18 Iteration 8
+
+### Changes Made
+I've applied **parallel aggregation with thread-local hash tables** across three major aggregation bottlenecks:
+
+1. **Step 2 - Lineitem Aggregation (PRIMARY BOTTLENECK)**: 
+   - Changed from single-threaded aggregation over 59.9M rows to **OpenMP parallel aggregation**
+   - Each thread builds its own local hash table of `orderkey → sum(quantity)`
+   - Merge phase combines all thread-local results
+   - **Expected speedup**: ~7-8x on 64 cores (from 2676.91 ms → ~340-380 ms)
+
+2. **Step 4 - Orders Filter/Join (SECONDARY BOTTLENECK)**:
+   - Parallelized order matching and hash table build
+   - Each thread filters orders independently into thread-local maps
+   - Merge phase consolidates results
+   - **Expected speedup**: ~4-5x (from 268.08 ms → ~60-70 ms)
+
+3. **Step 6 - Result Aggregation (TERTIARY BOTTLENECK)**:
+   - Parallelized second aggregation phase over lineitem
+   - Each thread maintains thread-local result hash table
+   - Merge phase combines final results
+   - **Expected speedup**: ~4-5x (from 859.41 ms → ~170-200 ms)
+
+### Why This Approach
+- **Avoids lock contention**: Thread-local hash tables have zero synchronization during the hot inner loop
+- **Leverages 64 CPU cores**: Previous iterations tried other techniques that regressed; parallel aggregation is a different category (parallelism vs. index/compression)
+- **Preserves all [TIMING] lines**: All modifications keep profiling instrumentation intact
+- **Maintains correctness**: No changes to encoding logic or output format
+
+### Expected Total Impact
+- Old: 3839.63 ms
+- Optimistic estimate: ~500-600 ms (combining all three parallelizations)
+- Conservative estimate: ~1000-1200 ms (if some phases don't scale as well)
+
+**Compilation status**: ✅ Successful (warnings only, binary created)
+
+The code is ready for execution. The Executor will run it and report the actual timing improvements.

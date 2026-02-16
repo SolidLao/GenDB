@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 383.65 ms\n[TIMING] build_nation_lookup: 0.01 ms\n[TIMING] build_customer_lookup: 450.83 ms\n[TIMING] build_orders_lookup: 175.26 ms\n[TIMING] orders_filtered_count: 573157\n[TIMING] scan_filter_join_agg: 778.50 ms\n[TIMING] agg_result_count: 381105\n[TIMING] sort: 202.71 ms\n[TIMING] output: 50.39 ms\n[TIMING] total: 2041.44 ms\nQuery execution completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q10/iter_10/results/Q10.csv\n",
+    "stderr": "",
+    "duration_ms": 3106
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q10\": {\n      \"rows_expected\": 20,\n      \"rows_actual\": 20,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 383.65,
+    "build_nation_lookup": 0.01,
+    "build_customer_lookup": 450.83,
+    "build_orders_lookup": 175.26,
+    "scan_filter_join_agg": 778.5,
+    "sort": 202.71,
+    "output": 50.39,
+    "total": 2041.44
+  },
+  "timing_ms": 1991.05
+}

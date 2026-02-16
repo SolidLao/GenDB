@@ -1,0 +1,60 @@
+Perfect! Now let me create a summary of the optimization:
+
+## Optimization Summary for Q4 - Iteration 4
+
+### Bottleneck Analysis
+From execution results, the dominant bottleneck is **`build_semijoin_set`** at **1153.17 ms (98.5% of total time)**.
+
+The semi-join set requires:
+1. Scan 60M lineitem rows to find rows where `l_commitdate < l_receiptdate`
+2. Collect matching `l_orderkey` values (13.7M keys, with duplicates)
+3. Deduplicate to create lookup set
+
+### Root Cause
+The previous iteration used a **sorted vector + binary search** approach:
+- Collected keys into thread-local vectors
+- Merged all 13.7M keys into single vector
+- Sorted them: **O(n log n) = 13.7M × log(13.7M) ≈ 330M comparisons**
+- Used `std::lower_bound` for lookups: O(log n) per lookup
+
+### Optimizations Applied
+
+#### **Optimization 1: Hash Set Instead of Sorted Vector** (Primary)
+- **Change**: Replace sorted vector + binary search with `std::unordered_set`
+- **Reason**: 
+  - Sorted vector requires expensive O(n log n) sort operation
+  - Hash set deduplicates during insertion: O(1) average per insert
+  - Lookup becomes O(1) average instead of O(log n)
+- **Expected Impact**: ~30-40% reduction in `build_semijoin_set` time
+  - Eliminates sort: saves ~400+ ms
+  - Faster lookups: saves ~50+ ms on 15M filter operations
+
+#### **Optimization 2: Thread-Local Hash Sets**
+- **Change**: Use `std::vector<std::unordered_set<int32_t>>` instead of `std::vector<std::vector<int32_t>>`
+- **Reason**: Deduplication happens per-thread before merge, reducing final set size
+- **Expected Impact**: Better scalability; threads don't all insert into single critical section
+
+#### **Optimization 3: Pre-Sized Hash Set for Merge**
+- **Change**: Reserve capacity based on estimated total size before merge
+- **Reason**: Reduces rehashing during merge phase
+- **Expected Impact**: ~10% reduction in merge overhead
+
+### Expected Performance Impact
+- **Previous (iter 3)**: 1170.75 ms
+- **Expected (iter 4)**: 700-800 ms
+- **Target reduction**: 35-40% overall (primarily from eliminating O(n log n) sort)
+
+### Code Changes
+- Lines 177-209: Replaced `std::vector<std::vector<int32_t>>` with `std::vector<std::unordered_set<int32_t>>`
+- Removed sort and unique operations entirely
+- Changed lookup wrapper from binary search (`lower_bound`) to hash set (`count`)
+- All [TIMING] markers preserved within `#ifdef GENDB_PROFILE` guards
+- No changes to encoding logic, data loading, or output format
+
+### Validation
+- ✅ Code compiles successfully with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`
+- ✅ All [TIMING] lines preserved
+- ✅ No changes to CSV output format or encoding logic
+- ✅ Ready for Executor to run and validate correctness
+
+The Executor will now run this optimized code and validate that results match expected output. If successful, this should show significant improvement in Q4 execution time.

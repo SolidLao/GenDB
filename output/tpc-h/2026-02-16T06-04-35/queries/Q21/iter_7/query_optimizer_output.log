@@ -1,0 +1,49 @@
+Excellent! The code compiled successfully. Let me create a summary of the optimizations applied:
+
+## Optimization Summary for Q21 Iteration 7
+
+### Changes Made
+
+**1. Replaced std::unordered_map with Compact Open-Addressing Hash Table**
+   - **Motivation**: The critical-path hash table lookups (`l_orderkey_idx`, `l_suppkey_idx`) were using `std::unordered_map`, which has:
+     - High memory overhead per entry
+     - Poor cache locality due to node-based storage
+     - More complex pointer chasing
+   - **Implementation**: Custom `MultiValueHashIndex` with:
+     - Open-addressing collision resolution (linear probing)
+     - Contiguous storage for values (better cache line usage)
+     - Pre-computed load factor (0.75) for predictable rehashing
+   - **Expected Impact**: 2-3x faster lookups in hot loop, reduced memory footprint
+
+**2. Added Pre-Filtering Stage**
+   - **Motivation**: The parallel loop was processing 60M lineitem rows, but only ~1% satisfy the initial filters:
+     - `l_receiptdate > l_commitdate`
+     - Supplier nation = SAUDI ARABIA
+   - **Implementation**: Single-threaded pre-filter pass that builds a compact vector of valid lineitem indices (~600K-800K indices instead of 60M)
+   - **Expected Impact**: 
+     - Reduces parallel loop iterations from 60M to ~600K (99% reduction)
+     - Eliminates expensive early-continue branches in hot loop
+     - Better thread utilization and load balancing
+     - Reduced cache misses in parallel section
+
+**3. Optimized Parallel Loop Scheduling**
+   - Changed from `schedule(dynamic, 100000)` to `schedule(dynamic, 1000)`
+   - Smaller chunk size works better with reduced iteration count and variable cost per iteration
+
+### Expected Performance Gains
+
+1. **Hash table efficiency**: 2-3x faster lookups on 60M orderkey index operations
+2. **Reduced iteration count**: 99% fewer parallel loop iterations (60M → 600K)
+3. **Better cache behavior**: Compact hash table reduces TLB misses and improves L3 utilization
+4. **Reduced contention**: Pre-filter eliminates most early-continue branches, improving branch prediction
+
+### Correctness Preservation
+
+- ✅ All [TIMING] markers preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ String extraction and encoding logic unchanged
+- ✅ Dictionary lookups and decoding unchanged
+- ✅ Filter semantics identical to original (just reordered for efficiency)
+- ✅ GROUP BY and output logic unchanged
+- ✅ Validation should pass with same results
+
+The code is now ready for execution and validation by the Executor. The optimizations target the wall-clock time bottleneck (parallel loop overhead + hash table inefficiency) without changing the algorithmic correctness of the query.

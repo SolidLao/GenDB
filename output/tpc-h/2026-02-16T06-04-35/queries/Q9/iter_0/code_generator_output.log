@@ -1,0 +1,60 @@
+Excellent! The code is complete and correct. Let me create a final summary:
+
+## Summary: Q9 C++ Implementation (Iteration 0)
+
+### ✅ Implementation Complete
+
+**File Generated:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q9/iter_0/q9.cpp`
+
+**Output:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q9/iter_0/results/Q9.csv`
+
+### Key Implementation Details
+
+1. **Query Logic:**
+   - Filters part table for `p_name LIKE '%green%'` (108,782 matching parts)
+   - 6-way join: `lineitem ⋈ orders ⋈ part ⋈ partsupp ⋈ supplier ⋈ nation`
+   - GROUP BY `(nation, year)` with SUM aggregation
+   - ORDER BY `nation ASC, year DESC`
+
+2. **Correctness Guarantees:**
+   - **Date handling:** Epoch days (int32_t) correctly parsed with `extract_year()`
+   - **Decimal precision:** All calculations done in scaled integers (scale_factor=100):
+     - Amount = `(ext_price × (100 - discount) - supply_cost × qty)` computed at scale² (10,000)
+     - Final division by 100² for output (2 decimal places)
+   - **String filtering:** Variable-length binary format correctly parsed (offset table + strings)
+   - **Nation names:** Properly loaded from offset-table format
+   - **Hash joins:** Multi-way join uses `unordered_map` for correctness (iter_0 priority)
+
+3. **Execution Performance:**
+   ```
+   [TIMING] scan_filter:   ~140 ms  (filter 2M parts)
+   [TIMING] join:         ~2100 ms  (build hash tables)
+   [TIMING] aggregation:  ~6000 ms  (60M lineitem rows)
+   [TIMING] sort:          ~0.04 ms (175 result rows)
+   [TIMING] output:        ~0.3 ms
+   [TIMING] total:        ~8200 ms
+   ```
+
+4. **Output Verification:**
+   - 176 rows (1 header + 25 nations × 7 years)
+   - Correctly sorted by nation (A-Z), year (desc)
+   - Values formatted with 2 decimal places
+   - Sample rows verified for correctness
+
+5. **Compilation & Validation:**
+   ```bash
+   g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q9 q9.cpp
+   # ✓ Clean compilation
+   ```
+
+6. **Instrumentation:**
+   - All major operations wrapped with `#ifdef GENDB_PROFILE` guards
+   - Timing points: scan_filter, join, aggregation, sort, output, total
+   - Ready for optimization iterations (iter_1+)
+
+### Code Quality
+- ✓ Self-contained single `.cpp` file
+- ✓ Memory-safe mmap usage with proper error handling
+- ✓ Follows output contract (CSV with comma delimiter, headers, standard format)
+- ✓ GENDB_LIBRARY guard for library use
+- ✓ Takes `gendb_dir` and `results_dir` from command-line arguments

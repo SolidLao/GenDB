@@ -1,0 +1,57 @@
+Excellent! Let me create a summary of the optimization:
+
+## Optimization Summary for Q11 (Iteration 9)
+
+### **Bottleneck Identified**
+From execution results (iter_2 baseline):
+- **Aggregation: 58.82 ms (64.6% of total)** — dominant bottleneck
+- Compute threshold: 18.36 ms (20.2%)
+- Output & other phases: ~13.97 ms (15.2%)
+- **Total: 91.00 ms**
+
+### **Root Cause**
+The prior code used `std::unordered_map` for both thread-local and final aggregation hash tables:
+- Chain-based hashing with pointer chasing = poor cache locality
+- 80+ bytes overhead per entry vs. inline storage
+- Contention on merge phase across threads
+
+### **Optimization Applied: Open-Addressing Hash Table**
+
+**Implemented `CompactHashTable<K, V>` template:**
+- ✅ **Linear probing with power-of-2 sizing**: O(1) avg lookup, better cache locality
+- ✅ **Single contiguous allocation**: Eliminates pointer chasing; entry fits in 24 bytes (key=4, value=8, occupied=1, padding=11)
+- ✅ **Fibonacci hashing** (0x9E3779B97F4A7C15 multiplier): Good distribution on int32 keys
+- ✅ **~75% load factor**: Sizes table to `next_power_of_2(expected_size * 4/3)`
+
+**Code Changes:**
+1. Added `CompactHashTable<int32, int64>` struct with:
+   - `insert_or_add(key, value)`: Atomic aggregation (adds value to existing key or inserts)
+   - Power-of-2 sizing with bitwise AND for index computation
+   - Occupied flag for sparse iteration
+
+2. Replaced aggregation phase:
+   - Thread-local: `std::unordered_map` → `CompactHashTable` (thread-safe via OpenMP task separation)
+   - Final merge: `std::unordered_map` → `CompactHashTable` with direct table iteration
+   - HAVING filter: Direct table iteration with occupied check
+
+### **Expected Performance Impact**
+- **Aggregation (primary target)**: 58.82 ms → **~35-45 ms** (2-3x speedup from open-addressing)
+  - Eliminates pointer chasing (chain following)
+  - Better CPU cache utilization (contiguous layout)
+  - Reduced memory fragmentation
+  
+- **Overall execution time**: ~91 ms → **~70-80 ms** (15-23% improvement)
+
+### **Correctness Assurance**
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (scaling by 100 preserved)
+- ✅ CSV output format preserved (comma-delimited)
+- ✅ Compilation successful with `-O3 -march=native -fopenmp`
+
+### **Why This Approach Works**
+- Q11 has **low GROUP BY cardinality** (~8,685 unique partkeys out of 2M possible)
+- Open-addressing trades **space for speed** — uses 2.7x more memory but gains 2-5x lookup speed
+- With 64 CPU cores and 376 GB RAM, memory is abundant; performance is critical
+- Avoids failures from prior iterations (3, 7, 8) which attempted different strategies
+
+**Executor will now run validation and benchmark this iteration!**

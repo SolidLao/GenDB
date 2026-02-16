@@ -1,0 +1,50 @@
+Excellent! The code compiles successfully. Now let me create a summary of what was optimized:
+
+## Optimization Summary for Q9 Iteration 10
+
+### Problem Analysis
+- **Iteration 9 Status**: FAILED (validation error at 1094.66ms) - rolled back
+- **Current Baseline (Iter 8)**: 1223.52 ms total
+  - Join operations: **1002.88 ms (82% of total)** ← DOMINANT BOTTLENECK
+  - Aggregation: 125.06 ms
+  - Scan/filter: 94.63 ms
+
+### Root Cause
+The join phase primarily consists of building three hash tables from scratch:
+1. **Supplier→Nation hash** (100K rows) - relatively fast
+2. **PartSupp→{PartKey, SupplyCost} hash** (8M rows with grouping by suppkey) - EXPENSIVE
+   - Requires two-pass construction: count occurrences, compute offsets, scatter positions
+   - Multiple hash table lookups during insertion
+3. **Orders→OrderDate hash** (15M rows) - moderately fast
+
+### Optimization Applied: Pre-Built Hash Index Loading
+
+**Strategy**: Load the pre-built `partsupp_ps_suppkey_hash.bin` index (33 MB) via mmap instead of building it from scratch.
+
+**Implementation Details**:
+1. Added `load_prebuilt_hash_index_partsupp()` function that:
+   - Memory-maps the pre-built index file
+   - Parses binary format: `[num_unique:u32][table_size:u32][hash_entries...][positions_array...]`
+   - Deserializes hash table entries and positions array
+   - Reconstructs partkey and supplycost arrays by indexing into original column data
+   
+2. Modified hash table building phase to:
+   - Attempt to load pre-built index first (fast, zero computation)
+   - Fall back to scratch building if index loading fails (safety fallback)
+   - Preserves all [TIMING] lines and profiling structure
+
+**Expected Impact**:
+- Eliminates ~200-300 ms of hash table construction overhead (expensive scan + counting + grouping operations)
+- PartSupp index size (33 MB) is ~50ms to load via mmap + deserialize vs ~250-300ms to build from scratch
+- **Expected new total**: ~973-1000 ms (down from 1223.52 ms)
+- **Expected improvement**: ~250-300 ms (~20% improvement)
+
+### Code Quality
+- Preserved all [TIMING] profiling guards and labels
+- No changes to encoding logic
+- No changes to query semantics or output format
+- Graceful fallback to scratch-building if pre-built index is unavailable
+- All joins and filters remain unchanged
+- Output remains comma-delimited CSV
+
+The Executor will handle validation and timing verification.

@@ -1,0 +1,42 @@
+Perfect! Now let me create a summary of the optimizations I made:
+
+## Summary of Optimizations for Q3 Iteration 8
+
+### Problem Analysis
+- **Current bottleneck**: `filter_and_build_orders` phase: 410.82 ms (71% of total time)
+- Zone map loading was failing due to improper mmap offset handling
+- Hash table allocations and merging in both orders filtering and lineitem join phases were suboptimal
+
+### Optimizations Applied
+
+**1. Fixed Zone Map Loading** (Critical Fix)
+   - **Issue**: mmap with offset `sizeof(uint32_t)` was failing because offsets must be page-aligned
+   - **Solution**: Mmap the entire file from offset 0, then cast to the data portion
+   - **Impact**: Enables zone map pruning, reducing scanned blocks
+
+**2. Optimized Orders Filtering Data Structure**
+   - **Changed**: From `unordered_map` per thread to vector-based buffering
+   - **Benefit**: Avoids expensive hash table operations during scan phase, faster inserts
+   - **Impact**: Reduced memory allocations and hash lookups during parallel scan
+
+**3. Pre-sized Join Hash Tables**
+   - **Added**: Reserve calls for thread-local aggregation maps based on orders_map size
+   - **Benefit**: Avoids rehashing during join_and_aggregate phase
+   - **Impact**: Faster aggregation with fewer allocations
+
+### Expected Impact
+- **Zone map fix**: Should prevent load failures and enable ~10-15% block skipping on orders
+- **Vector buffering**: Reduces hash table overhead in filtering phase
+- **Pre-sizing**: Eliminates rehashing in join phase, expected ~5-10% speedup in join_and_aggregate
+
+### Code Quality
+✅ All [TIMING] lines preserved inside #ifdef GENDB_PROFILE guards  
+✅ Encoding logic unchanged  
+✅ Zone map skip logic preserved  
+✅ Compilation successful (only pre-existing format warning)  
+✅ Correct variable naming and scope management  
+
+The optimizations focus on reducing the dominant bottleneck (filter_and_build_orders) through:
+1. Fixing zone map loading to enable pruning
+2. Using more efficient data structures for the scan phase
+3. Pre-allocating aggregation buffers to avoid rehashing

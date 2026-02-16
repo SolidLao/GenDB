@@ -1,0 +1,38 @@
+Perfect! Now let me provide a summary of the optimization:
+
+## Summary of Q7 Iteration 6 Optimization
+
+**Bottleneck Identified:**
+- **Build phase dominated at 56% (1.9s of 3.4s total)**
+  - Previous code used `std::unordered_map` with chaining for 3 hash tables
+  - Buildi supplier→nation, customer→nation, orders lookups from scratch each run
+
+**Optimization Applied:**
+Replaced `std::unordered_map` with **open-addressing (linear probing) hash tables** for all three join hash maps:
+1. `supplier_ht`: Maps `suppkey` → `nationkey` (100K rows)
+2. `customer_ht`: Maps `custkey` → `nationkey` (1.5M rows)
+3. `order_ht`: Maps `orderkey` → `custkey` (15M rows)
+
+**Why This Helps:**
+- **Pointer chasing eliminated**: std::unordered_map uses linked lists (chaining), requiring pointer dereferences that destroy cache locality
+- **Better cache locality**: Open-addressing stores key-value pairs contiguously in a single vector
+- **2-5x speedup expected**: From knowledge base, open-addressing is 2-5x faster than chaining for join workloads
+- **Memory efficiency**: No separate allocations per bucket
+
+**Technical Details:**
+- Uses fibonacci hashing: `(size_t)key * 0x9E3779B97F4A7C15ULL` for good distribution
+- Power-of-2 sizing with mask-based modulo: `idx & mask` (vs expensive % operator)
+- 75% load factor to minimize collision chains
+- Three separate structs for type safety and clarity
+
+**Expected Impact:**
+- Build time: 1900ms → ~500-600ms (3-4x improvement)
+- **Total execution time**: 3379ms → ~2000-2100ms (40% reduction)
+
+**Correctness Preserved:**
+- ✅ All [TIMING] macros preserved
+- ✅ No encoding logic changed
+- ✅ Comma-delimited CSV output unchanged
+- ✅ Validation should still pass (same join logic, just faster implementation)
+
+Compilation successful. The Executor will now run and validate this optimization.

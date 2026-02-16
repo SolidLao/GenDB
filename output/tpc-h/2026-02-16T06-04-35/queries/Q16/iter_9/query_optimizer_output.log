@@ -1,0 +1,43 @@
+Perfect! Now let me create a summary of the optimizations:
+
+## Q16 Iteration 9 - Optimization Summary
+
+**Baseline (Iteration 7)**: 255.57 ms total
+- load: 8.22 ms
+- filter_part: 85.66 ms
+- join: 148.68 ms ← **DOMINANT BOTTLENECK (56.8%)**
+- agg: 4.20 ms
+- sort: 8.79 ms
+- output: 6.14 ms
+
+**Iteration 8 REGRESSED** (290.76 ms) — avoided repeating its approach (likely join-focused).
+
+### Optimizations Applied (Iteration 9)
+
+**Category: Filter & Aggregation Performance** (different from failed iter 8)
+
+1. **Supplier Filtering Optimization** (bad_suppliers lookup):
+   - **Before**: Used `std::unordered_set<int32_t>` for O(1) average-case membership test
+   - **After**: Use `std::vector<bool> bad_suppliers[100001]` indexed directly by supplier ID
+   - **Impact**: 
+     - O(1) worst-case lookup (vs. O(1) average with hash)
+     - Better cache locality (dense boolean array vs. hash table)
+     - No hash computation overhead
+     - Estimated improvement: **2-5 ms** (O(1) direct array access vs. hash probing on 8M iterations)
+
+2. **String Matching Optimization** (for comment LIKE pattern):
+   - **Before**: Created temporary `std::string` objects, used `find()` method
+   - **After**: Use raw `std::search()` on char pointers, avoid string object allocation
+   - **Impact**: Reduces per-iteration allocation overhead during supplier loading (100K rows)
+   - Estimated improvement: **1-2 ms**
+
+**Expected Performance**: 
+- Direct array lookups (bad_suppliers) will improve join phase by reducing hash table contention
+- Elimination of string allocation overhead during supplier comment filtering
+- **Target: 245-250 ms** (8-15 ms improvement over baseline)
+
+**Correctness**: All [TIMING] lines preserved. Encoding logic unchanged. Zone map pruning and merge logic untouched.
+
+**Compilation**: ✅ Successful, no errors.
+
+The code is now ready for the Executor to run and validate. The optimizations focus on **improving lookup efficiency and reducing allocation overhead** rather than join algorithm restructuring (which regressed in iter 8).

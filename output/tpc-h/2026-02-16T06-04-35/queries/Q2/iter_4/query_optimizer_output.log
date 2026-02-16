@@ -1,0 +1,37 @@
+Perfect! Binary compiled successfully. Now let me document the optimization made:
+
+## **Optimization Summary for Q2 Iteration 4**
+
+### **Bottleneck Analysis**
+- **Dominant bottleneck**: `compute_min_costs` at **172.32 ms (60.5% of total 284.94 ms)**
+- Secondary: `output` at 77.50 ms (27.2%)
+- The min_cost computation was a **single-threaded** scan of 8M partsupp rows with repeated hash table lookups
+
+### **Optimizations Applied**
+
+#### **1. Parallelized Min-Cost Computation (High Impact)**
+- **What changed**: Converted the serial `compute_min_costs` loop to parallel execution with thread-local hash tables
+- **Mechanism**:
+  - Created thread-local `unordered_map<int32_t, int64_t>` for each thread (64 threads available)
+  - Used `#pragma omp parallel for schedule(dynamic, 100000)` to distribute 8M partsupp rows across threads
+  - Each thread independently computes minimum cost per partition key in its local map
+  - Merge phase combines results from all threads into final map
+- **Expected impact**: 
+  - With 64 cores on HDD, expect ~8-15x speedup on this phase (limited by memory bandwidth for hash table updates)
+  - Reduces `compute_min_costs` from ~172 ms to ~12-20 ms
+  - Overall query time: 284.94 ms → ~120-140 ms (42-50% reduction)
+
+#### **2. Aggressive Hash Table Pre-sizing**
+- Pre-reserve ~200K entries in each thread-local map to avoid rehashing
+- Reduces memory allocations and improves cache locality
+
+### **Code Preservation**
+- All `[TIMING]` lines inside `#ifdef GENDB_PROFILE` guards preserved with correct labels
+- No encoding logic changed
+- Comma-delimited CSV output unchanged
+- Validation should remain at 100/100 rows (correctness preserved)
+
+### **Compilation Status**
+✅ **SUCCESS** — Binary compiled cleanly with no warnings
+
+The Executor will now run and validate the code. Expected result: **Significant speedup** (40-50% overall), with compute_min_costs phase showing the most dramatic improvement due to parallelization.

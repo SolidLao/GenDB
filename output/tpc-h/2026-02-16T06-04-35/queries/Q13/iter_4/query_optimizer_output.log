@@ -1,0 +1,41 @@
+Perfect! The code compiles successfully. Let me create a summary of the optimizations made:
+
+## Summary of Optimizations for Q13 Iteration 4
+
+### **Optimization Strategy**
+Focused on the dominant bottleneck: **aggregation_1** (72% of execution time = 4455.87 ms)
+
+### **Changes Made**
+
+1. **Replaced `std::unordered_map` with `CompactHashTable` (open-addressing)**
+   - **Why**: std::unordered_map uses chaining (linked lists), causing pointer chasing and poor cache locality
+   - **Expected impact**: 2-5x faster lookups and insertions for the custkey→count aggregation
+   - **Implementation**: Added a CompactHashTable template with Fibonacci hashing and linear probing
+   - **Benefit**: All entries stored contiguously in a single array, much better cache locality
+
+2. **Optimized thread-local aggregation**
+   - Changed `std::vector<std::unordered_map>` to `std::vector<CompactHashTable>` for thread-local accumulators
+   - Improved merge phase by iterating directly over the compact table's entry array
+   - Reduced allocation overhead and improved cache performance
+
+3. **Preserved second aggregation** (count_to_custdist)
+   - Kept as `std::unordered_map` since this is a lower-cardinality aggregation (likely <2000 unique count values)
+   - The overhead is minimal here as it's only 1.5M → ~46 unique values
+
+4. **Maintained correctness**
+   - LEFT OUTER JOIN semantics preserved (all customers included, even with 0 orders)
+   - All [TIMING] lines remain intact within `#ifdef GENDB_PROFILE` guards
+   - Pattern matching logic unchanged
+
+### **Expected Performance Improvement**
+- **Target**: Reduce aggregation_1 time from 4455.87 ms by 30-40% through CompactHashTable speed
+- **Mechanism**: Linear probing and cache-friendly layout eliminate pointer chasing overhead of chaining
+- **Estimated new total**: ~4000-4500 ms (if optimization is effective), bringing total from 6153.52 ms to ~5500-6000 ms
+
+### **Correctness**
+✅ Code compiles successfully
+✅ All timing guards preserved
+✅ No encoding logic changes
+✅ Output format (comma-delimited CSV) unchanged
+
+The Executor will now run and validate the results.

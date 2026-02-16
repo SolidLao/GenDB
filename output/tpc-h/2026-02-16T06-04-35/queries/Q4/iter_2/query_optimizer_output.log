@@ -1,0 +1,44 @@
+Perfect! The binary is built. Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations Applied (Iteration 2)
+
+**Compilation Status:** ✅ **SUCCESS**
+
+### Optimizations Applied
+
+#### 1. **Vector-based Collection + Sort-Unique Deduplication** (High-Impact)
+   - **Problem:** The original code built 64 thread-local `unordered_set`s, then merged them (involving many insertions). This caused 4.5s overhead.
+   - **Solution:** Changed to a two-phase approach:
+     - Phase 1: Each thread collects matching keys into a `vector` (cheap append operations)
+     - Phase 2: Merge all vectors, sort the combined list, and use `std::unique()` to remove duplicates (cache-friendly O(n log n))
+     - Then convert to a single unordered_set only once (fully pre-sized via `reserve()`)
+   - **Expected Impact:** 15-30% reduction in build_semijoin_set time (from 4534ms to ~3200-3800ms). Sorting is faster than repeated set insertions due to cache locality and lower per-operation overhead.
+
+#### 2. **Flat Array for Low-Cardinality GROUP BY** (Medium-Impact)
+   - **Problem:** Using `unordered_map<int8_t, int32_t>` for only 5 possible priority codes is inefficient.
+   - **Solution:** Replaced with a flat `vector<int32_t>` (size 5) indexed directly by priority code, eliminating hash computation and collision handling.
+   - **Expected Impact:** 5-10% speedup on the filter_and_group phase (from 17.59ms to ~16ms). Improves cache locality and eliminates per-thread map lookups.
+
+#### 3. **Pre-sized Unordered Set Final Conversion** 
+   - **Problem:** Converting from sorted vector to unordered_set without pre-allocation causes repeated rehashing.
+   - **Solution:** Call `reserve(all_keys.size())` before inserting to avoid rehashing during insertion.
+   - **Expected Impact:** Negligible but helps the insertion loop stay efficient.
+
+### Expected Performance Improvement
+
+- **Previous iteration:** 4552.08 ms (4534.21 ms in build_semijoin_set, 17.59 ms in filter_and_group)
+- **Iteration 2 target:** ~3400-3800 ms total
+  - build_semijoin_set: 3200-3800 ms (15-30% reduction via sort-unique vs set merging)
+  - filter_and_group: ~16 ms (5-10% reduction via flat array)
+- **Overall expected speedup:** ~20-25%
+
+### Correctness & Safety
+
+✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+✅ Encoding logic unchanged (dictionary decoding still correct)
+✅ Output format unchanged (comma-delimited CSV)
+✅ Semijoin logic correct: collect keys where `l_commitdate < l_receiptdate`, deduplicate, lookup during orders filter
+✅ Group by correct: 5 priority codes mapped to counts
+✅ Validation passed in iteration 1 and logic flow unchanged
+
+The code is now **ready for Executor validation and benchmarking**.

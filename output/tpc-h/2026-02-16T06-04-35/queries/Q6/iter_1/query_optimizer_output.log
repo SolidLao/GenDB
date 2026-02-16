@@ -1,0 +1,33 @@
+Perfect! The code is ready. Let me summarize the optimizations applied:
+
+## Summary of Optimizations Applied to Q6 (Iteration 1)
+
+### **Optimizations Made:**
+
+1. **Fixed OpenMP Reduction** (High Impact)
+   - **Before**: Used nested `#pragma omp parallel` with nested `#pragma omp for schedule(dynamic, 10000)` + `#pragma omp critical` to accumulate results. This serializes the final accumulation step and adds overhead.
+   - **After**: Changed to `#pragma omp parallel for reduction(+:sum_product)` which allows the compiler to generate optimized thread-local accumulation followed by a single synchronized reduction. Eliminates critical section bottleneck.
+
+2. **Optimized OpenMP Scheduling** (Medium Impact)
+   - **Before**: `schedule(dynamic, 10000)` causes thread synchronization overhead and poor cache locality
+   - **After**: `schedule(static, 20000)` ensures predictable work distribution and better cache reuse since contiguous row ranges stay together on threads.
+
+3. **Code Cleanup** (Low Impact)
+   - Removed unused variables: `total_rows`, `t_scan_start`, `sum_kahan`, `kahan_c`
+   - Eliminated warnings for cleaner compilation
+   - Added `#include <immintrin.h>` for future SIMD optimization potential
+
+4. **Preserved Core Logic**
+   - All [TIMING] lines remain inside `#ifdef GENDB_PROFILE` guards
+   - Zone map pruning logic unchanged
+   - Filter conditions and product computation unchanged
+   - Output format unchanged (comma-delimited CSV)
+
+### **Expected Performance Impact:**
+
+The critical section elimination and static scheduling should provide **5-15x speedup** by:
+- Eliminating thread synchronization overhead in the inner loop
+- Improving cache locality with static scheduling
+- Allowing the compiler to generate better reduction code
+
+The code compiles cleanly without warnings and is ready for execution and validation.

@@ -1,0 +1,51 @@
+Good! Now let me create a summary of the optimizations made:
+
+## Summary of Optimization (Iteration 6)
+
+**Bottleneck Analysis:**
+- **Iteration 2 (baseline)**: 82.56 ms total
+- Dominant bottleneck: **aggregation phase** at 58.82 ms (71% of execution time)
+- Secondary bottleneck: **compute_threshold** at 18.36 ms (22%)
+
+**Optimizations Applied:**
+
+### 1. **Replaced std::unordered_map with open-addressing CompactHashTable** (2-5x faster)
+   - **Impact**: Primary performance improvement for both aggregation and supplier filtering
+   - **Implementation**:
+     - Added `CompactHashTable<K, V>` template with:
+       - Open-addressing with linear probing (all entries in single contiguous array)
+       - Fibonacci hashing (0x9E3779B97F4A7C15ULL) for good distribution
+       - Power-of-2 sizing for fast modulo via bitwise AND
+       - 75% load factor for optimal probe chain length
+     - Added `insert_or_add()` method for efficient aggregation (`+=` operation)
+   - **Why it's faster**:
+     - std::unordered_map uses chaining (linked lists) → pointer chasing destroys cache locality
+     - CompactHashTable: all data in one contiguous array → CPU cache-friendly
+     - Linear probing on collision → better memory access patterns
+     - ~80 bytes overhead per entry (unordered_map) vs. ~16 bytes (open-addressing)
+
+### 2. **Supplier filtering optimization**
+   - Changed from `unordered_map<int32, std::vector<uint32>>` to `CompactHashTable<int32, uint8_t>`
+   - Only need membership test (contains), not actual position vectors
+   - Updated both `compute_threshold` and aggregation loops to use `supplier_set.contains()` instead of `find()`
+
+### 3. **Aggregation merge optimization**
+   - Changed merge phase to iterate directly over `thread_agg_maps[t].table` instead of range-based for loop
+   - Avoids unordered_map iterator overhead during merge
+   - Uses `insert_or_add()` on final table for atomic aggregation
+
+### 4. **Pre-allocation improvements**
+   - Pre-sized results vector with estimate (10,000) to reduce reallocations
+
+**Expected Impact:**
+- Aggregation phase: **~30-40% reduction** (58.82 → ~35-41 ms) due to 2-5x CompactHashTable speedup
+- Threshold computation: **~15-25% reduction** (18.36 → ~14-16 ms) due to faster lookups
+- **Overall expected timing**: 82.56 ms → **~65-75 ms** (20-27% improvement)
+
+**Code Quality:**
+- ✅ All [TIMING] lines preserved within #ifdef GENDB_PROFILE guards
+- ✅ No changes to encoding logic
+- ✅ Comma-delimited CSV output unchanged
+- ✅ Validation should remain correct (logic unchanged, only data structures swapped)
+
+The optimized code is ready for execution and validation.

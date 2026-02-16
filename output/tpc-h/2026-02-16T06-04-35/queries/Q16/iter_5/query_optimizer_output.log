@@ -1,0 +1,54 @@
+Perfect! The compilation succeeded. Now let me write a comprehensive summary of the optimizations:
+
+## **Optimization Summary - Q16 Iteration 5**
+
+### **Bottleneck Analysis**
+Current state (Iteration 4):
+- **Total execution time: 694.41 ms**
+- **Join operation: 558.51 ms (80.5% of total)** ← Dominant bottleneck
+- Other operations: 135.9 ms (filter, agg, sort, load, output)
+
+### **Optimizations Applied**
+
+#### **1. Open-Addressing Hash Table for Aggregation**
+- **Change**: Replaced `std::unordered_map<EncodedKey, std::unordered_set<int32_t>>` with a custom open-addressing hash table
+- **Why**: Standard unordered_map uses chaining (pointer-chasing), creating poor cache locality (~80 bytes overhead per entry). Open-addressing stores all data contiguously in a single array
+- **Impact**: 2-5x speedup on hash table insertion/lookup operations (per `patterns/parallel-hash-join.md`)
+- **Implementation**: 
+  - Sized to ~75% load factor (power-of-2 sizing with bitwise AND masking)
+  - Uses fibonacci hashing instead of `std::hash` (avoids clustering)
+  - Eliminates per-entry pointer overhead
+
+#### **2. Simplified Supplier Aggregation**
+- **Change**: Replaced individual `std::unordered_set<int32_t>` insertions with vector push_back
+- **Why**: Each unordered_set insert involves hash computation and bucket management. By collecting all suppkeys in a vector and deduplicating once at the end, we avoid per-insertion overhead
+- **Impact**: Reduces insertion cost from O(log n) per item to O(1) amortized, batch deduplication via sort+unique is more cache-friendly
+- **Trade-off**: Adds O(n log n) cost to aggregation phase (sort+unique) but join phase is much larger, so net benefit is positive
+
+#### **3. Better Hash Function**
+- **Change**: Switched from `std::hash` composition to fibonacci hashing (`x * 0x9E3779B97F4A7C15ULL`)
+- **Why**: `std::hash` on integers is often the identity function, causing severe clustering and long probe chains in open-addressing. Fibonacci hashing provides better distribution
+- **Impact**: Reduces average probe distance, faster lookups, fewer collisions
+
+#### **4. Lock-Based Parallel Aggregation**
+- **Change**: Uses OMP lock instead of thread-local maps + merge
+- **Why**: Avoids the sequential merge phase (which was not parallelized in iter_4). Lock contention is low because we're inserting into ~200K buckets with 75% load factor
+- **Impact**: Simpler code, no merge overhead, lock wait time minimal due to large hash table
+
+### **Expected Performance Impact**
+
+The join phase dominated at 558 ms. The three optimizations target different aspects:
+1. **Open-addressing table**: ~2-3x speedup on hash operations
+2. **Vector-based supplier collection**: Eliminates per-insertion unordered_set overhead
+3. **Better hash function**: Reduces collision chains, faster probing
+
+**Conservative estimate**: 15-25% improvement in join phase → ~85-140 ms savings → **Total: ~550-610 ms** (from 694 ms)
+
+### **Code Quality**
+- ✅ All [TIMING] lines preserved inside #ifdef guards
+- ✅ No encoding logic changes
+- ✅ Comma-delimited CSV output unchanged
+- ✅ Compilation successful (0 errors, 0 warnings)
+- ✅ Correctness verification: distinct counting via sort+unique is mathematically equivalent to previous unordered_set approach
+
+The Executor will now run this optimized version and compare results.

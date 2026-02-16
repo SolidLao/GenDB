@@ -1,0 +1,31 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_nation: 0.05 ms\n[TIMING] filter_supplier: 2.99 ms\n[TIMING] supplier_matches: 4049\n[TIMING] load_partsupp: 0.04 ms\n[TIMING] compute_threshold: 18.36 ms\n[TIMING] aggregation: 58.82 ms\n[TIMING] having: 1.71 ms\n[TIMING] result_rows: 8685\n[TIMING] sort: 0.53 ms\n[TIMING] output: 8.44 ms\n[TIMING] total: 91.00 ms\n",
+    "stderr": "",
+    "duration_ms": 127
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q11\": {\n      \"rows_expected\": 8685,\n      \"rows_actual\": 8685,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_nation": 0.05,
+    "filter_supplier": 2.99,
+    "load_partsupp": 0.04,
+    "compute_threshold": 18.36,
+    "aggregation": 58.82,
+    "having": 1.71,
+    "sort": 0.53,
+    "output": 8.44,
+    "total": 91
+  },
+  "timing_ms": 82.56
+}

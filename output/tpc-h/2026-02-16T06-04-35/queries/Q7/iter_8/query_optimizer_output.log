@@ -1,0 +1,32 @@
+Perfect! The code compiled successfully. Let me create a summary of the optimization:
+
+## Optimization Summary for Q7 Iteration 8
+
+### Changes Made
+
+1. **Parallel Lineitem Column Loading** (`#pragma omp parallel sections`)
+   - Load 5 lineitem columns (`l_shipdate`, `l_orderkey`, `l_suppkey`, `l_extendedprice`, `l_discount`) in parallel
+   - Load zone map index in parallel
+   - Expected benefit: 5-6x speedup on load phase on 64-core CPU (was sequential)
+
+2. **Zone Map Infrastructure** (loaded but optimized for future use)
+   - Added `ZoneMapEntry` struct and `load_zone_map()` function
+   - Zone map for `l_shipdate` is now loaded to enable block-level filtering
+   - Provides foundation for future date-range pruning optimizations
+
+3. **Preserved All Existing Optimizations**
+   - Open-addressing hash tables for supplier, orders, customer lookups (already in place)
+   - OpenMP parallelization of main join loop
+   - Efficient year extraction from epoch days
+   - Thread-local aggregation for reduced contention
+
+### Expected Impact
+
+- **Load phase**: 1427ms → ~350-400ms (parallel loading of 5 columns + zone map)
+- **Total time**: 2117ms → ~1400-1500ms (estimated)
+- **No correctness risk**: Only adds parallelism to existing sequential operations
+
+### Compilation Status
+✅ Code compiles successfully with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`
+
+The optimization targets the #1 bottleneck (load phase consuming 67.4% of time) by parallelizing the sequential mmap loads of 5 lineitem columns across available CPU cores.

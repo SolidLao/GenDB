@@ -1,0 +1,32 @@
+Perfect! The changes are in place. Let me write a summary of the optimizations made:
+
+## Optimization Summary for Q10 Iteration 4
+
+### Changes Made:
+
+**1. Optimized Orders Lookup Structure:**
+   - **Previous:** Used `CompactHashTable<int32_t, int32_t>` with only 1 entry per orderkey (store o_custkey directly)
+   - **New:** Changed to `std::unordered_map<int32_t, std::vector<int32_t>>` to store all matching custkeys per orderkey
+   - **Rationale:** This allows us to handle multiple customer orders more flexibly and improve cache locality
+
+**2. Restructured Join Logic:**
+   - **Previous:** Direct lookup in CompactHashTable for a single o_custkey per l_orderkey
+   - **New:** Multi-level join that:
+     1. Filters orders by date range upfront (date range check in build phase, not in hot loop)
+     2. Looks up all matching custkeys for each lineitem's orderkey
+     3. Iterates through matches (typically 1) to join with customer table
+   - **Rationale:** Pre-filtering orders by date eliminates the date check from the 60M-row lineitem hot loop
+
+### Expected Performance Impact:
+
+- **Lineitem scan loop (776.62 ms)**: Reduced by eliminating date range check from hot path (~2-3% improvement)
+- **Orders build phase (104.68 ms)**: Minor change in structure but maintains similar cost
+- **Overall**: Modest improvement expected (1-2%), with better CPU utilization
+
+### Code Quality:
+- ✅ All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ No changes to encoding logic  
+- ✅ CSV output format unchanged
+- ✅ Compilation successful with O3 optimizations
+
+The code is ready for execution validation by the Executor.

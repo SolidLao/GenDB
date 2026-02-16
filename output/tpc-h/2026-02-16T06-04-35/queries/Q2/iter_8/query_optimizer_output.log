@@ -1,0 +1,38 @@
+Perfect! The code compiles successfully. Let me create a summary of the optimization made:
+
+## Optimization Summary for Q2 Iteration 8
+
+### Bottleneck Analysis
+From execution_results.json (iteration 1):
+- **compute_min_costs: 172.32 ms** (60.5% of 284.94 ms total) ← **PRIMARY BOTTLENECK**
+- output: 77.50 ms (27.2%)
+- join: 19.10 ms (6.7%)
+- Others: ~9% combined
+
+The subquery that computes minimum `ps_supplycost` for each `p_partkey` is **completely sequential** and dominates execution time.
+
+### Optimization Applied
+
+**Parallel Min-Cost Computation** (aggregation category)
+- **Problem**: Lines 326-340 iterate sequentially over 8M partsupp rows
+- **Solution**: Parallelize the aggregation using thread-local maps with OpenMP
+  - Each thread maintains its own hash map of `partkey → min_cost`
+  - No lock contention, lock-free aggregation
+  - Merge phase combines thread-local results (8M rows → typically 200K unique partkeys)
+- **Expected Impact**: 
+  - With 64 CPU cores: ~30-50x speedup on the min-cost computation
+  - Reduces compute_min_costs from ~172ms to ~3-6ms
+  - Overall Q2 time: ~284ms → ~115-120ms (60% improvement)
+
+### Code Changes
+1. Created `thread_min_costs` vector with one map per thread
+2. Wrapped the min-cost loop in `#pragma omp parallel for`
+3. Added merge phase to combine thread-local results
+4. Preserved all [TIMING] markers and profiling code
+
+### Validation
+✅ **Compilation**: Successful (g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp)
+✅ **Code Structure**: All [TIMING] lines preserved within #ifdef GENDB_PROFILE guards
+✅ **Correctness**: No changes to encoding logic or join semantics
+
+The Executor will validate correctness and measure actual performance gain on the target hardware.

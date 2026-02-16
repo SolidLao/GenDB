@@ -1,0 +1,47 @@
+Perfect! Now let me create a summary of the optimization work:
+
+## Q14 Iteration 2 - Optimization Summary
+
+### Current Performance (Iteration 1)
+- **Total execution time: 106.65 ms** (validation: ✅ pass)
+- Bottleneck breakdown:
+  - build_part_hash: **56.24 ms** (52.7% - dominant bottleneck)
+  - scan_filter_join: 35.67 ms (33.4%)
+  - output: 14.42 ms (13.5%)
+  - Other: 0.32 ms
+
+### Optimizations Applied
+
+#### 1. **Pre-computed PROMO Type Code Lookup** (Hot Path Optimization)
+- **Problem**: The scan loop calls `p_type_dict.find(type_code)` for every lineitem row matching the date filter, followed by a string comparison `starts_with(..., "PROMO")`. This is expensive in the hot path (~60M+ iterations).
+- **Solution**: Pre-compute a boolean lookup table `is_promo_type[0..65535]` (one per possible int16_t code) during initialization. This replaces the hash map lookup + string comparison with a single O(1) array access.
+- **Expected Impact**: Significant speedup in scan loop due to:
+  - Eliminates repeated hash map lookups in hot path
+  - Eliminates string comparison operations
+  - Better CPU cache locality (simple boolean array)
+  - ~2-5ms expected savings from scan/filter
+
+#### 2. **Branch Prediction Hints** (CPU Optimization)
+- **Problem**: Branch mispredictions hurt performance on modern CPUs, especially in tight loops.
+- **Solution**: Added `__builtin_expect()` hints to guide the compiler:
+  - `type_code_ptr != nullptr` expected to be true (most partkeys have matches)
+  - `is_promo_type[...]` expected to be false (only ~5-10% of parts are PROMO)
+- **Expected Impact**: ~1-2ms from better branch prediction and CPU pipeline efficiency
+
+#### 3. **Code Organization** (Latency Optimization)
+- **Change**: Moved `omp_get_thread_num()` call earlier to avoid repeated calls
+- **Impact**: Marginally reduces instruction overhead in the tight loop
+
+### Code Quality
+✅ **Compilation**: Successful with `-O3 -march=native` flags
+✅ **Correctness**: All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+✅ **No changes** to encoding logic or output format
+✅ **Parallelism** preserved (OpenMP with 64 threads available)
+
+### Expected Performance Improvement
+- **Target**: 3-7 ms reduction in total execution time (goal: sub-100ms)
+- **Primary savings**: Elimination of dictionary lookups in scan (2-5ms)
+- **Secondary savings**: Better branch prediction (1-2ms)
+- **New estimated time**: 99-103 ms (3-7ms improvement)
+
+The optimizations are low-risk (no algorithmic changes, only hot-path micro-optimizations) and leverage CPU-friendly data structures (pre-computed arrays) instead of complex lookups in the performance-critical scan loop.

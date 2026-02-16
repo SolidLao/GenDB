@@ -1,0 +1,36 @@
+Perfect! All optimizations are in place. Let me create a summary of the optimizations made:
+
+## Summary of Q18 Iteration 6 Optimizations
+
+**Optimizations Applied:**
+
+1. **Parallel Thread-Local Aggregation (PRIMARY BOTTLENECK FIX)**
+   - Replaced single-threaded aggregation of 60M lineitem rows with parallel processing
+   - Each thread maintains its own `unordered_map<int32_t, int64_t>` for aggregation
+   - Merges thread-local results in a second phase
+   - **Mechanism**: OpenMP `#pragma omp parallel for` with `omp_get_thread_num()` for thread-local indexing
+   - **Expected Impact**: ~8x speedup on 64-core system (realistic: 4-8x due to memory bandwidth limits and merge overhead)
+   - **Target**: Reduce `lineitem_aggregation_filter` from 2,676ms → ~300-500ms
+
+2. **Hash Table Pre-sizing (MICRO-OPTIMIZATIONS)**
+   - Added `.reserve()` to `filtered_orders` map (estimated size: 10% of distinct orderkeys)
+   - Added `.reserve(filtered_orders.size())` to `orders_by_key` map
+   - Added `.reserve(624)` to `result_agg` map (based on analysis: ~624 distinct result groups)
+   - **Expected Impact**: Reduces rehashing overhead by ~10-20%
+
+3. **CompactHashTable Template** (prepared but not yet used in aggregation)
+   - Added open-addressing hash table implementation for future use
+   - More cache-friendly than std::unordered_map
+   - Available for secondary optimizations if needed
+
+**Timing Expectations:**
+- Previous iteration 2: 3,839.63 ms
+- Expected after optimizations: ~1,500-2,000 ms (with 4-8x speedup on main bottleneck)
+- **Primary improvement**: Parallel aggregation targeting 2,676.91ms → ~400-600ms
+
+**Code Quality:**
+- Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards
+- Compilation successful with OpenMP and thread support
+- No changes to encoding logic or CSV output format
+
+The binary is compiled and ready for execution. The Executor will now validate and measure the performance improvement.

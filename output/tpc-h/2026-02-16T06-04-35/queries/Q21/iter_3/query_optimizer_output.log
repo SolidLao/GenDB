@@ -1,0 +1,44 @@
+Excellent! The binary was created. Now let me create a summary of the optimization changes:
+
+## Optimization Summary
+
+**Iteration 3 Optimization for Q21: Pre-built Hash Index Loading**
+
+### Changes Made
+
+1. **Added PreBuiltHashIndex struct** - A wrapper class to load and manage pre-built hash indexes via mmap
+   - Loads index files with zero-copy access via mmap
+   - Parses binary format: `[num_unique][table_size][hash_entries...][positions_array...]`
+   - Implements linear probing lookup using the same hash function as the index builder
+
+2. **Replaced in-memory hash table construction with pre-built index loading**
+   - **Removed**: `l_orderkey_idx` construction loop (60M rows)
+   - **Removed**: `l_suppkey_idx` construction loop (60M rows)
+   - **Added**: Direct mmap loading of `lineitem_l_orderkey_hash.bin`
+   - **Added**: Direct mmap loading of `lineitem_l_suppkey_hash.bin`
+   - Kept in-memory construction for small tables (supplier_idx: 100K rows, order_idx: 15M rows)
+
+3. **Updated query execution to use pre-built indexes**
+   - Changed from vector-based lookups to direct array access via positions buffer
+   - Used `get_positions()` method to retrieve offset and count for each key
+   - Replaced vector iteration with direct positional array access
+
+### Expected Benefits
+
+1. **Eliminates expensive hash table construction** - The 120M row hash table build is now replaced with mmap file loading, which is much faster
+2. **Zero-copy memory access** - Using mmap avoids memory allocation and memcpy overhead
+3. **Better memory locality** - Pre-built indexes are optimized by the index builder
+4. **Expected speedup**: 15-30% improvement from eliminating hash table build time
+
+### Implementation Details
+
+- Binary format matches the index builder's output (verified against similar Q3 implementation)
+- Hash function uses Fibonacci hashing: `(key * 0x9E3779B97F4A7C15ULL) & (table_size - 1)`
+- Linear probing termination: when both key==0 and count==0, the slot is empty
+- Positions array is 1-indexed (skip count field at header)
+
+### Compilation
+
+✅ Code compiles successfully with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`
+
+The optimized binary is ready for execution and validation by the Executor.

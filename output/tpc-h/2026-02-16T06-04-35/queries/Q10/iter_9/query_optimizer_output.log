@@ -1,0 +1,42 @@
+Perfect! The binary compiled successfully. Now let me create a summary of the optimizations made:
+
+## Summary of Q10 Iteration 9 Optimizations
+
+### Changes Made:
+
+1. **Replaced `std::unordered_map` with `CompactHashTable` for customer_map**
+   - Changed from chaining-based hash table to open-addressing for better cache locality
+   - Expected improvement: 2-5x faster hash table operations
+   - Impact on `build_customer_lookup`: Should reduce from 426.30 ms (currently 22.2% of total)
+   - Benefit: Eliminates pointer chasing and reduces per-entry overhead
+
+2. **Optimized orders hash table pre-sizing**
+   - Changed reserve from `orders_count / 2` to `orders_count / 100` (more realistic estimate)
+   - The filtered date range typically contains ~5% of orders (573K out of 15M in baseline)
+   - This reduces unnecessary memory allocation and improves memory efficiency
+
+3. **Preserved all correctness-critical code paths:**
+   - All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+   - Encoding logic unchanged (date, decimal scaling)
+   - Zone map pruning logic unchanged
+   - Thread-local aggregation pattern maintained
+   - Output format (comma-delimited CSV) unchanged
+
+### Expected Performance Impact:
+
+- **Primary optimization**: CompactHashTable replacement should reduce `build_customer_lookup` time by ~100-150 ms (25-40% improvement based on literature showing 2-5x speedup)
+- **Secondary benefit**: Better cache locality in scan_filter_join_agg loop when accessing customer_map during multi-threaded probing
+- **Baseline timing**: 1919.40 ms (iteration 4 reference)
+- **Target**: ~1750-1800 ms (estimate of 4-6% overall improvement)
+
+### Why This Approach:
+
+After iteration 8 regressed, this takes a **conservative, proven approach**:
+- CompactHashTable with open addressing is a well-documented, widely-tested optimization
+- Changes only the implementation of customer_map, not the algorithm or logic
+- No changes to join order, filtering logic, or aggregation logic
+- All modifications are localized to single data structure type changes
+
+**Compilation**: ✅ Success (128KB binary)
+
+The code is ready for execution and validation by the Executor.

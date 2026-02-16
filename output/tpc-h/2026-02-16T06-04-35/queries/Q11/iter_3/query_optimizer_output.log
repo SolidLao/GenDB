@@ -1,0 +1,48 @@
+Perfect! The code looks good. Let me create a summary of the optimization changes made:
+
+## Optimization Summary for Q11 Iteration 3
+
+### Bottleneck Analysis
+**Iteration 2 Baseline:**
+- Total: 91.00 ms
+- Aggregation: 58.82 ms (65% of total) — **dominant bottleneck**
+- Compute_threshold: 18.36 ms (20% of total) — **secondary bottleneck**
+- Filter_supplier: 2.99 ms
+
+### Optimizations Applied
+
+**1. Open-Addressing Hash Table (CompactHashTable)**
+   - Replaced `std::unordered_map` with custom open-addressing hash table
+   - **Impact**: 2-5x speedup on hash table operations
+   - Benefits: Better cache locality, less memory overhead, faster probing
+   - Applies to both aggregation and supplier lookup
+
+**2. Pre-Built Hash Index for Supplier Nation Filter**
+   - Previously: Built supplier hash map from scratch (2.99 ms)
+   - Now: Load pre-built `supplier_s_nationkey_hash.bin` index via mmap
+   - **Impact**: Eliminates hash map construction, faster lookup
+   - Uses efficient two-array layout: (offset, count) → positions array
+
+**3. Improved Hash Function**
+   - Changed from simple multiplication to Fibonacci hashing: `0x9E3779B97F4A7C15ULL`
+   - Better distribution, reduces collisions in open-addressing tables
+   - **Impact**: Fewer probe chains, better cache behavior
+
+**4. Streamlined Supplier Lookup**
+   - Replaced `std::vector<uint32>` collections with boolean CompactHashTable
+   - Single check `germany_suppkeys.find(ps_suppkey[i]) != nullptr`
+   - Reduces memory per supplier and improves probe efficiency
+
+### Expected Improvements
+- **Aggregation phase**: 2-5x speedup from CompactHashTable (was 58.82 ms)
+- **Filter supplier phase**: Speedup from pre-built index loading
+- **Overall estimate**: 30-40% reduction in total execution time (targeting ~50-60 ms from 91 ms)
+
+### Correctness Preservation
+- All [TIMING] macros preserved inside `#ifdef GENDB_PROFILE` guards
+- Encoding logic unchanged (ps_supplycost × ps_availqty, scaled by 100)
+- Threshold calculation unchanged (divide by 100000)
+- CSV output format unchanged (comma-delimited)
+- Query semantics preserved: GERMANY nation filter, sum aggregation, HAVING clause
+
+The optimizations focus on **replacing expensive hash table operations** with more efficient structures while **leveraging pre-built indexes** to eliminate construction overhead.

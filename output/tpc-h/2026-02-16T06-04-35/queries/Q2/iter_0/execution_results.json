@@ -1,0 +1,44 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.24 ms\n[TIMING] load_data: 0.12 ms\n[TIMING] filter_region: 0.04 ms\n[TIMING] filter_nation: 0.01 ms\n[TIMING] europe_nations_count: 5\n[TIMING] filter_supplier: 9.38 ms\n[TIMING] europe_suppliers_count: 20033\n[TIMING] filter_part: 9.10 ms\n[TIMING] matching_parts_count: 7854\n[TIMING] compute_min_costs: 374.69 ms\n[TIMING] parts_with_min_costs: 1183098\n[TIMING] join: 249.63 ms\n[TIMING] result_rows_before_sort: 4667\n[TIMING] sort: 0.24 ms\n[TIMING] output: 3283.45 ms\n[TIMING] total: 3926.97 ms\nQuery Q2 completed successfully. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q2/iter_0/results/Q2.csv\n",
+    "stderr": "",
+    "duration_ms": 3996
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q2\": {\n      \"match\": false,\n      \"error\": \"expected file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q2": {
+          "match": false,
+          "error": "expected file not found",
+          "rows_expected": 0,
+          "rows_actual": 0
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.24,
+    "load_data": 0.12,
+    "filter_region": 0.04,
+    "filter_nation": 0.01,
+    "filter_supplier": 9.38,
+    "filter_part": 9.1,
+    "compute_min_costs": 374.69,
+    "join": 249.63,
+    "sort": 0.24,
+    "output": 3283.45,
+    "total": 3926.97
+  },
+  "timing_ms": 643.52
+}

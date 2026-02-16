@@ -1,0 +1,39 @@
+Excellent! The code looks correct. Let me create a summary of what was optimized:
+
+## Summary of Optimizations (Iteration 3)
+
+I've applied **three high-impact optimizations** to Q3 targeting the dominant bottlenecks identified in the previous iteration:
+
+### **1. Pre-built Hash Index Loading (orders_o_custkey_hash)**
+- **Previous**: Built hash table from scratch during filter_and_build_orders phase (1499.82 ms)
+- **Optimization**: Load pre-built `orders_o_custkey_hash.bin` via mmap, probe with linear addressing to find all orders for each BUILDING customer
+- **Expected impact**: ~500-800ms savings by eliminating hash table construction overhead
+- **Correctness**: Uses correct hash function (multiply-shift) and linear probing to handle open addressing
+
+### **2. Zone Map Pruning on lineitem l_shipdate**
+- **Previous**: Scanned all 60M lineitem rows
+- **Optimization**: Load `lineitem_l_shipdate_zone.bin` zone map and skip blocks where `max_value <= DATE_1995_03_15`
+- **Expected impact**: ~200-300ms savings by skipping unnecessary block scans (lineitem is sorted by l_shipdate)
+- **Correctness**: Proper skip logic - `l_shipdate > DATE_1995_03_15` means skip if `block_max <= DATE_1995_03_15`
+
+### **3. Parallel Lineitem Scan with Thread-Local Aggregation**
+- **Previous**: Single-threaded join_and_aggregate (1677.80 ms) on 64-core CPU
+- **Optimization**: 
+  - OpenMP parallel for over zone blocks with dynamic scheduling
+  - Thread-local `unordered_map<int32_t, OrderData>` per thread (64 threads)
+  - Single merge phase at end to combine results
+- **Expected impact**: ~8-16x speedup on scan/join/aggregate (64 cores), reduced to ~10-30% overhead due to merge
+- **Correctness**: Avoids race conditions via thread-local aggregation; merge is sequential but very fast (only ~1500 unique orders)
+
+### **Code Quality**
+- ✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (still using __int128 for precision, SCALE_FACTOR correctly)
+- ✅ Comma-delimited CSV output preserved
+- ✅ Compiled successfully with `-fopenmp -O3 -march=native`
+
+### **Expected Overall Performance**
+- **Baseline (iter 0)**: 3240 ms
+- **Target**: ~600-900 ms (from parallelism + index usage + zone pruning)
+- **Speedup**: ~3.6-5.4x improvement
+
+The binary is ready at `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_3/q3` for validation by the Executor.

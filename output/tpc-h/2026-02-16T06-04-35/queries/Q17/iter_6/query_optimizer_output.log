@@ -1,0 +1,52 @@
+Perfect! Let me create a comprehensive summary of the optimization:
+
+## Summary of Optimization (Iteration 6)
+
+### Problem Analysis
+**Bottleneck Identified:** The `build_lineitem_index` phase dominated execution time at **16,902.18 ms (63% of total)**, building a hash table mapping l_partkey → row indices from scratch.
+
+**Current Performance (Iter 4):** 26,652.61 ms
+- compute_avg_quantity: 9,733.10 ms (36%)
+- build_lineitem_index: 16,902.18 ms (63%) ← **PRIMARY TARGET**
+- All other phases: ~16.2 ms combined
+
+### Optimization Strategy
+Replaced the manual hash table construction with **pre-built index loading via mmap**. The Storage & Index Guide provides a binary `lineitem_l_partkey_hash` index with multi-value hash design.
+
+### Changes Made
+
+1. **New PreBuiltHashIndex struct** (lines 132-195):
+   - Loads the pre-built index via mmap (already loaded, just parse)
+   - Implements efficient `find(key)` returning `{offset, count}` tuple
+   - Provides `getPosition(idx)` to read from contiguous positions array
+   - Binary layout: header (2×uint32) → hash entries → position array
+
+2. **Load pre-built index at startup** (line 262-264):
+   - Memory-map `indexes/lineitem_l_partkey_hash.bin`
+   - Gracefully fallback if index unavailable
+
+3. **PHASE 2: Conditional building** (lines 360-373):
+   - Skip building hash table if pre-built index is valid
+   - Only build on-the-fly if index unavailable (rare case)
+   - Timing still recorded; difference will show dramatic drop
+
+4. **PHASE 4: Index-based lookup** (lines 396-420):
+   - Use pre-built index for O(1) partkey lookup + contiguous position reads
+   - Direct array access instead of pointer chasing in unordered_map
+   - Fallback to built hash table for safety
+
+### Expected Impact
+- **build_lineitem_index phase:** 16,902 ms → ~5-50 ms (eliminated hash construction, just mmap parsing)
+- **Total execution time:** ~26,652 ms → ~9,700-10,000 ms
+- **Speedup:** ~2.6-2.8x
+
+### Why This Works
+- Pre-built indexes are created offline (not included in query timing)
+- Loading via mmap is O(1) — just pointer arithmetic over mmapped data
+- Multi-value hash design provides contiguous position reads (cache-friendly)
+- Eliminates the 16.9s bottleneck without any algorithmic changes
+
+### Compilation Status
+✅ **Compiles successfully** with `-O3 -march=native -fopenmp -DGENDB_PROFILE`
+
+All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards. The Executor will validate correctness and report the new timing breakdown.

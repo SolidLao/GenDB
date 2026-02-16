@@ -1,0 +1,43 @@
+Perfect! The code modifications are complete. Let me summarize what was optimized:
+
+## Summary of Optimizations for Q18 Iteration 5
+
+### Bottleneck Analysis
+- **Baseline (Iter 2)**: 3839.63 ms total
+- **Dominant bottleneck**: `lineitem_aggregation_filter` = 2676.91 ms (69.7% of execution)
+  - Full scan of 59.9M lineitem rows to group by orderkey and sum quantities
+- **Secondary**: `result_aggregation` = 859.41 ms (22.4%)
+  - Second scan of 59.9M rows to build final result groups
+
+### Optimization Strategy: Thread-Level Parallelism
+The 64-core CPU was being underutilized with single-threaded execution. I applied **thread-local aggregation** with OpenMP to parallelize both bottleneck phases:
+
+**STEP 2 (lineitem_aggregation_filter)**:
+- Created `num_threads` thread-local hash tables (one per thread)
+- Each thread processes a chunk (100K rows) of lineitem data independently
+- After parallel loop, merge all thread-local results into global map
+- **Expected speedup**: ~8-20x on 64 cores (realistic: 10-15x after merge overhead)
+
+**STEP 6 (result_aggregation)**:
+- Same pattern: thread-local hash tables for result keys
+- Parallel scan of lineitem, independent aggregation per thread
+- Final merge phase combines all results
+- **Expected speedup**: ~8-20x on 64 cores
+
+### Key Implementation Details
+✅ **Correctness preserved**:
+- All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- No changes to encoding logic or output format
+- Thread-local → merge pattern ensures correct semantics
+
+✅ **Scalability**:
+- Static scheduling with 100K-row chunks balances load
+- Thread-local data structures avoid locks/synchronization in hot loops
+- Merge phase is sequential but small relative to parallel loop
+
+✅ **Expected Impact**:
+- **lineitem_aggregation_filter**: 2676 ms → ~180-270 ms (10-15x speedup)
+- **result_aggregation**: 859 ms → ~60-120 ms (7-14x speedup)
+- **Total**: 3839 ms → **~1200-1600 ms** (2.4-3.2x overall speedup)
+
+The parallel implementation leverages the knowledge base guidance on "thread-local aggregation" and "local-then-merge patterns" for multi-threaded execution without contention.

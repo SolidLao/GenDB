@@ -1,0 +1,34 @@
+Perfect! Now let me create a summary of the optimizations I made:
+
+## Summary of Optimizations Applied (Iteration 3)
+
+**Target:** execution_time (2030.26 ms in iter_2)
+
+**Bottlenecks Identified:**
+1. **scan_filter_join_agg (776.62 ms, 38.2%)** — Lineitem scan with joins and aggregation
+2. **build_customer_lookup (529.90 ms, 26.1%)** — Building customer hash map
+
+**Optimizations Applied:**
+
+1. **Replaced std::unordered_map with open-addressing CompactHashTable for customer lookup**
+   - `std::unordered_map` uses chaining with pointer chasing (poor cache locality)
+   - Open-addressing hash table is 2-5x faster with better cache performance
+   - Expected impact: **~100-150 ms improvement** (20-30% reduction in build_customer_lookup phase)
+
+2. **Increased OpenMP morsel size from 10K to 100K rows**
+   - Reduces thread synchronization and scheduling overhead
+   - Better cache utilization per thread
+   - Expected impact: **~50-80 ms improvement** in scan_filter_join_agg (less parallelism overhead)
+
+3. **Optimized customer data storage with pointer-based strings**
+   - Stores pointer + length for string fields to avoid extra allocations during lookup
+   - Reduces memory indirection in hot loop
+   - Expected impact: **~30-50 ms improvement** (less memory traffic in join phase)
+
+**Expected Total Speedup:**
+- Combined optimizations targeting ~180-280 ms reduction
+- Target new time: **~1750-1850 ms** (13-16% improvement)
+
+**Correctness:** All [TIMING] lines preserved, output format unchanged, no encoding changes.
+
+The code is ready for Executor validation!

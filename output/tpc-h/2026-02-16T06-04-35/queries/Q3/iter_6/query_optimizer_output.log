@@ -1,0 +1,51 @@
+Excellent! Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations Applied (Iteration 6)
+
+### **Bottleneck Identified**
+- **filter_and_build_orders: 411.88 ms (69% of total 594.31 ms)**
+
+### **Root Cause**
+1. Use of `std::unordered_map` for orders filtering and aggregation
+   - Chaining-based hash table → poor cache locality, pointer chasing
+   - Multiple heap allocations and rehashing during merges
+   - 2-3x slower than open-addressing alternatives
+
+### **Optimizations Applied**
+
+**1. Replaced `std::unordered_map` with CompactHashTable (Open-Addressing)**
+   - Implemented custom `CompactHashTable<K, V>` template with:
+     - **Fibonacci hashing** (0x9E3779B97F4A7C15ULL) for good distribution
+     - **Linear probing** for cache-friendly collision resolution
+     - **Power-of-2 sizing** with 75% load factor for O(1) avg-case lookup
+     - Single contiguous vector vs scattered heap allocations
+   - Applied to:
+     - `orders_map`: stores filtered orders (orderdate, shippriority)
+     - `thread_results`: aggregation buffer per thread
+     - `result_groups`: final merged aggregations
+   - **Expected Impact:** 2-3x speedup on hash operations
+     - Estimated savings: 411ms → ~120-150ms (260-290ms reduction)
+
+**2. Optimized Hash Table Merging**
+   - Changed from iterating over `unordered_map` entries to iterating over `table` array
+   - Direct insertion into destination table vs element-by-element rehashing
+   - Linear scan of occupied entries is faster than chained bucket traversal
+
+**3. Preserved Parallelism & Zone Map Logic**
+   - Thread-local compact tables maintain parallel processing benefits
+   - Zone map pruning logic unchanged (still filters blocks based on min/max values)
+   - OpenMP scheduling remains intact
+
+### **Code Quality**
+- ✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic untouched
+- ✅ CSV output format unchanged
+- ✅ Compilation successful (no errors, only pre-existing warnings)
+
+### **Expected Performance Impact**
+- **Previous:** 594.31 ms total
+- **Estimated New:** ~320-350 ms total (46-41% reduction)
+- **Primary win:** 260-290ms from replacing unordered_map with CompactHashTable
+- **Secondary wins:** Reduced merge overhead, better cache locality in aggregation
+
+The system's automatic rollback will verify correctness. If the optimization regresses, the system will revert this change.

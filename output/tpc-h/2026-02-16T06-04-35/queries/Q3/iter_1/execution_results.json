@@ -1,0 +1,123 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/q3.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/q3.cpp:69:38: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 1 and 7 [-Wformat-truncation=]\n   69 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month + 1, day);\n      |                                      ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/q3.cpp:69:32: note: directive argument in the range [1, 12]\n   69 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month + 1, day);\n      |                                ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/q3.cpp:69:32: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/q3.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 12\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_customer: 0.07 ms\n[TIMING] filter_building_customers: 8.21 ms (count=300276)\n[TIMING] load_orders: 0.03 ms\n[TIMING] filter_and_build_orders: 2093.90 ms (count=1461923)\n[TIMING] load_lineitem: 0.04 ms\n[TIMING] join_and_aggregate: 162.56 ms\n[TIMING] group_and_sum: 11.17 ms\n[TIMING] sort_and_limit: 11.18 ms\n[TIMING] output: 0.16 ms\n[TIMING] total: 2287.37 ms\nQuery Q3 executed successfully. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q3/iter_1/results/Q3.csv\nResult count: 10\n",
+    "stderr": "",
+    "duration_ms": 2454
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": false,\n      \"error\": \"10 row(s) differ across 3 column(s)\",\n      \"column_failures\": {\n        \"l_orderkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 10,\n          \"samples\": [\n            {\n              \"expected\": \"1188320\",\n              \"actual\": \"16384100\",\n              \"abs_diff\": 15195780.0,\n              \"rel_diff_pct\": 1278.7616,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"2300070\",\n              \"actual\": \"22810436\",\n              \"abs_diff\": 20510366.0,\n              \"rel_diff_pct\": 891.7279,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"2435712\",\n              \"actual\": \"23861382\",\n              \"abs_diff\": 21425670.0,\n              \"rel_diff_pct\": 879.6471,\n              \"row\": 2\n            }\n          ]\n        },\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 10,\n          \"samples\": [\n            {\n              \"expected\": \"384537.9359\",\n              \"actual\": \"421478.7294\",\n              \"abs_diff\": 36940.79,\n              \"rel_diff_pct\": 9.6065,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"367371.1452\",\n              \"actual\": \"423231.9690\",\n              \"abs_diff\": 55860.82,\n              \"rel_diff_pct\": 15.2056,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"378673.0558\",\n              \"actual\": \"428739.1368\",\n              \"abs_diff\": 50066.08,\n              \"rel_diff_pct\": 13.2215,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_orderdate\": {\n          \"category\": \"exact\",\n          \"failure_count\": 10,\n          \"samples\": [\n            {\n              \"expected\": \"1995-03-09\",\n              \"actual\": \"1995-03-02\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"1995-03-13\",\n              \"actual\": \"1995-01-02\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1995-02-26\",\n              \"actual\": \"1995-03-09\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 10,
+          "rows_actual": 10,
+          "match": false,
+          "error": "10 row(s) differ across 3 column(s)",
+          "column_failures": {
+            "l_orderkey": {
+              "category": "exact",
+              "failure_count": 10,
+              "samples": [
+                {
+                  "expected": "1188320",
+                  "actual": "16384100",
+                  "abs_diff": 15195780,
+                  "rel_diff_pct": 1278.7616,
+                  "row": 0
+                },
+                {
+                  "expected": "2300070",
+                  "actual": "22810436",
+                  "abs_diff": 20510366,
+                  "rel_diff_pct": 891.7279,
+                  "row": 1
+                },
+                {
+                  "expected": "2435712",
+                  "actual": "23861382",
+                  "abs_diff": 21425670,
+                  "rel_diff_pct": 879.6471,
+                  "row": 2
+                }
+              ]
+            },
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 10,
+              "samples": [
+                {
+                  "expected": "384537.9359",
+                  "actual": "421478.7294",
+                  "abs_diff": 36940.79,
+                  "rel_diff_pct": 9.6065,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "367371.1452",
+                  "actual": "423231.9690",
+                  "abs_diff": 55860.82,
+                  "rel_diff_pct": 15.2056,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "378673.0558",
+                  "actual": "428739.1368",
+                  "abs_diff": 50066.08,
+                  "rel_diff_pct": 13.2215,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "o_orderdate": {
+              "category": "exact",
+              "failure_count": 10,
+              "samples": [
+                {
+                  "expected": "1995-03-09",
+                  "actual": "1995-03-02",
+                  "row": 0
+                },
+                {
+                  "expected": "1995-03-13",
+                  "actual": "1995-01-02",
+                  "row": 1
+                },
+                {
+                  "expected": "1995-02-26",
+                  "actual": "1995-03-09",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_customer": 0.07,
+    "filter_building_customers": 8.21,
+    "load_orders": 0.03,
+    "filter_and_build_orders": 2093.9,
+    "load_lineitem": 0.04,
+    "join_and_aggregate": 162.56,
+    "group_and_sum": 11.17,
+    "sort_and_limit": 11.18,
+    "output": 0.16,
+    "total": 2287.37
+  },
+  "timing_ms": 2287.21
+}

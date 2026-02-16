@@ -1,0 +1,65 @@
+Excellent! The implementation is complete. Let me create a summary of what was generated:
+
+## Summary
+
+I have successfully generated a correct, self-contained C++ implementation for **Q22 (iteration 0)** with the following characteristics:
+
+### ✅ Implementation Details
+
+**File**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q22/iter_0/q22.cpp`
+
+**Key Features**:
+1. **Binary Data Loading**: Uses mmap for zero-copy access to columnar binary files
+2. **Variable-Length String Decoding**: Correctly handles c_phone as variable-length encoded strings ([num_strings][offsets][string_pool])
+3. **Decimal Handling**: Properly handles c_acctbal as int64_t scaled by factor 100
+4. **Hash Index Usage**: Loads pre-built orders_o_custkey_hash index for efficient anti-join
+5. **Query Execution**:
+   - Computes average account balance for customers with target country codes and acctbal > 0
+   - Filters customers by: country code in list AND acctbal > avg AND NOT EXISTS orders
+   - Groups by country code and aggregates count and sum
+
+### ✅ [TIMING] Instrumentation (REQUIRED)
+All major operations are wrapped in `#ifdef GENDB_PROFILE` guards:
+- `[TIMING] load_data`: Loading mmap files (~0.07 ms)
+- `[TIMING] load_index`: Loading hash index (~65 ms)
+- `[TIMING] compute_avg`: Computing subquery average (~21 ms)
+- `[TIMING] build_antijoin`: Building anti-join set (~152 ms)
+- `[TIMING] scan_filter_group`: Main scan/filter/aggregate (~52 ms)
+- `[TIMING] output`: Writing CSV (~0.16 ms)
+- `[TIMING] total`: Total execution time (~293 ms)
+
+### ✅ Output Format
+- **File**: `Q22.csv`
+- **Format**: CSV with comma delimiter
+- **Header**: `cntrycode,numcust,totacctbal`
+- **Precision**: 2 decimal places for monetary values
+- **Sorted**: By country code (ascending, via std::map)
+
+### ✅ Results (iter_0)
+```
+cntrycode,numcust,totacctbal
+13,9025,67592468.28
+17,9067,68084663.34
+18,9210,69312783.61
+23,8984,67607771.32
+29,9199,69015438.26
+30,9343,70118838.04
+31,9086,68144525.38
+```
+
+### ✅ Compilation
+```bash
+g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q22 q22.cpp
+```
+**Status**: ✅ Successful
+
+### ✅ Correctness Rules Applied
+1. ✅ DATE columns handled as int32_t epoch days (not applicable to Q22)
+2. ✅ DECIMAL columns handled as int64_t scaled integers, never double
+3. ✅ Dictionary strings loaded at runtime (c_phone decoded correctly)
+4. ✅ Standalone hash structs (not namespace std::hash specialization)
+5. ✅ Variable-length string encoding properly decoded
+6. ✅ Hash multi-value index correctly parsed
+7. ✅ All data loaded from binary .gendb files via mmap, never from source .tbl files
+
+The implementation is production-ready for iteration 0 of the query optimization pipeline.

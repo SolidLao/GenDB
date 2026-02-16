@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q19: Discounted Revenue\n[METADATA CHECK] Encoding: l_quantity (DECIMAL, scale=100), l_discount (DECIMAL, scale=100), l_extendedprice (DECIMAL, scale=100)\n[METADATA CHECK] Encoding: l_shipmode (DICTIONARY), l_shipinstruct (DICTIONARY)\n[METADATA CHECK] Encoding: p_brand (DICTIONARY), p_container (DICTIONARY)\n[TIMING] load_dicts: 0.16 ms\n[METADATA CHECK] Dictionary codes: AIR=3, REG_AIR=2, DELIVER=0\n[METADATA CHECK] Dictionary codes: Brand#12=14, Brand#23=13, Brand#34=2\n[TIMING] load_columns: 0.11 ms\n[METADATA CHECK] Lineitem rows: 59986052, Part rows: 2000000\n[TIMING] filter_part: 17.42 ms\n[METADATA CHECK] Filtered part rows: 4754\n[TIMING] scan_filter: 431.83 ms\n[METADATA CHECK] Matched rows: 2249\n[TIMING] aggregation: 0.01 ms\n[TIMING] output: 0.54 ms\n[TIMING] total: 450.21 ms\n[METADATA CHECK] Result: revenue = 58723949.88\n",
+    "stderr": "",
+    "duration_ms": 494
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q19\": {\n      \"match\": false,\n      \"error\": \"expected file not found\",\n      \"rows_expected\": 0,\n      \"rows_actual\": 0\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q19": {
+          "match": false,
+          "error": "expected file not found",
+          "rows_expected": 0,
+          "rows_actual": 0
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dicts": 0.16,
+    "load_columns": 0.11,
+    "filter_part": 17.42,
+    "scan_filter": 431.83,
+    "aggregation": 0.01,
+    "output": 0.54,
+    "total": 450.21
+  },
+  "timing_ms": 449.66999999999996
+}

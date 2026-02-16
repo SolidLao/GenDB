@@ -1,0 +1,27 @@
+Excellent! The code compiles successfully. Let me now create a summary of the fix:
+
+## Summary
+
+**Correctness Issue Fixed: Missing Join Condition**
+
+### Root Cause
+The code was missing the critical join condition `c_nationkey = s_nationkey` from the SQL query. Lines 252-254 had a TODO comment indicating this was skipped. This caused the query to include revenue from orders/customers whose nations didn't match the supplier's nation, resulting in incorrect (inflated) values.
+
+### Changes Made (Iteration 10)
+
+1. **Phase 4 - Enhanced Order Filtering**: 
+   - Now builds a `cust_to_nation` map from the customer table for quick nation lookups
+   - Modified `filtered_orders` to store `pair<custkey, c_nationkey>` instead of just custkey
+   - This pre-joins customer nation data with orders during the filtering phase
+
+2. **Phase 5 - Lineitem Scan with Correct Joins**:
+   - Added explicit check: `if (c_nk != s_nk) continue;`
+   - This enforces the missing join condition: supplier nation must equal customer nation
+   - Only revenue from matching nation pairs is aggregated
+
+### Expected Outcome
+- The output revenue values should now match the reference data (~500M-550M per nation instead of ~13B)
+- Results should match the expected Q5.csv reference file
+- Query will return only nations in ASIA where customer and supplier are from the same nation
+
+The Executor will now validate the corrected output against the reference files.

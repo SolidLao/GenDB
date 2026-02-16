@@ -1,0 +1,31 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q18/iter_4/q18.cpp: In function ‘std::string epoch_day_to_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q18/iter_4/q18.cpp:115:43: warning: ‘%02d’ directive output may be truncated writing between 2 and 11 bytes into a region of size between 2 and 8 [-Wformat-truncation=]\n  115 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month + 1, day);\n      |                                           ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q18/iter_4/q18.cpp:115:32: note: directive argument in the range [-2147483647, 2147483647]\n  115 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month + 1, day);\n      |                                ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q18/iter_4/q18.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 16\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q18 Query Execution\n  Tables: customer (1.5M rows), orders (15M rows), lineitem (59.9M rows)\n  Key Columns:\n    - lineitem.l_orderkey: int32_t (no encoding)\n    - lineitem.l_quantity: int64_t (DECIMAL, scale_factor=100)\n    - orders.o_orderkey: int32_t (no encoding)\n    - orders.o_custkey: int32_t (no encoding)\n    - orders.o_orderdate: int32_t (DATE, epoch days)\n    - orders.o_totalprice: int64_t (DECIMAL, scale_factor=100)\n    - customer.c_custkey: int32_t (no encoding)\n    - customer.c_name: VARCHAR (requires mmap + output)\n  Indexes Available:\n    - lineitem_l_orderkey_hash.bin (hash_multi_value)\n    - orders_o_custkey_hash.bin (hash_multi_value)\n\n[METADATA CHECK] Loaded lineitem: 59986052 rows\n[TIMING] lineitem_load: 0.05 ms\n[METADATA CHECK] Filtered lineitem groups: 624 orders with qty > 300\n[TIMING] lineitem_aggregation_filter: 3675.30 ms\n[METADATA CHECK] Loaded orders: 15000000 rows\n[TIMING] orders_load: 0.05 ms\n[METADATA CHECK] Matched orders: 624\n[TIMING] orders_filter_join: 255.21 ms\n[METADATA CHECK] Customer names will be generated on-the-fly\n[TIMING] customer_load: 0.00 ms\n[METADATA CHECK] Result groups: 624\n[TIMING] result_aggregation: 39.69 ms\n[METADATA CHECK] Final results (after limit): 100 rows\n[TIMING] sort_limit: 0.20 ms\n[METADATA CHECK] Output written to: /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q18/iter_4/results/Q18.csv\n[TIMING] output: 0.40 ms\n[TIMING] total: 4007.29 ms\n",
+    "stderr": "",
+    "duration_ms": 5013
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "lineitem_load": 0.05,
+    "lineitem_aggregation_filter": 3675.3,
+    "orders_load": 0.05,
+    "orders_filter_join": 255.21,
+    "customer_load": 0,
+    "result_aggregation": 39.69,
+    "sort_limit": 0.2,
+    "output": 0.4,
+    "total": 4007.29
+  },
+  "timing_ms": 4006.89
+}

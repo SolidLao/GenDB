@@ -1,0 +1,55 @@
+Perfect! Let me create a summary of the optimizations:
+
+## Optimization Summary for Q10 Iteration 8
+
+### Bottleneck Analysis
+From execution results (iter_4 baseline = 1871.23 ms):
+- **scan_filter_join_agg: 713.63 ms (37%)** ← **Dominant bottleneck**
+- build_customer_lookup: 426.30 ms (22%)
+- load: 360.08 ms (19%)
+- build_orders_lookup: 195.51 ms (10%)
+- sort: 175.60 ms (9%)
+- output/other: ~51 ms (3%)
+
+### Root Cause
+The hot loop processes 59M lineitem rows with:
+1. Filter (l_returnflag == 'R')
+2. Two sequential hash table lookups (orders, customer)
+3. Thread-local aggregation
+
+The bottleneck is CPU-bound in the scan/join phase due to:
+- `std::unordered_map` using chaining (poor cache locality, pointer chasing)
+- 60M orders hash table build with vector allocations
+- Sub-optimal data structure for lookups in tight loop
+
+### Optimization Strategy (3 changes)
+Applied in iteration 8:
+
+**1. Replace std::unordered_map with CompactHashTable for customer_map**
+   - Benefit: 2-5x faster lookups via open-addressing (cache-friendly)
+   - Impact: ~100-150ms faster (customer lookups in 60M-iteration loop)
+
+**2. Rebuild orders lookup with CompactHashTable + two-array pattern**
+   - Old: `unordered_map<int32_t, vector<int32_t>>` with 573K filtered orders, one allocation per unique orderkey
+   - New: `CompactHashTable<int32_t, pair<offset, count>>` + contiguous `vector<int32_t>` positions
+   - Benefit: 
+     - Faster hash table construction (single array instead of 573K vector allocations)
+     - Cache-friendly position reads (contiguous memory)
+   - Impact: ~40-60ms faster (orders lookup + build)
+
+**3. Pre-allocated PreBuiltHashIndex struct (for future use)**
+   - Added mmap-based loader for pre-built hash indexes
+   - Can be activated if Storage & Index Guide provides `orders_o_orderkey_hash.bin`
+   - Would eliminate build time entirely (0ms)
+
+### Expected Performance Impact
+- **Estimated improvement: 150-250 ms** (8-13% speedup)
+- New expected total: ~1650-1720 ms (vs. 1871.23 ms baseline)
+
+### Correctness
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Aggregation logic unchanged (thread-local maps remain)
+- ✅ Output format unchanged (comma-delimited CSV)
+
+The binary is ready for execution. The Executor will validate correctness and measure actual performance.

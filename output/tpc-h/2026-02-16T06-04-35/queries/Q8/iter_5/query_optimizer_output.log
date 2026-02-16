@@ -1,0 +1,46 @@
+Perfect! The binary compiled successfully. Let me create a summary of the optimizations made:
+
+## Optimization Summary
+
+I've applied **3 high-impact optimizations** to Q8 iteration 5:
+
+### Bottleneck Analysis
+From iter_2 execution results:
+- **load_orders: 1437.49 ms (85.4% of total)** ← PRIMARY BOTTLENECK
+- **load_customer: 154.09 ms (9.2% of total)** ← SECONDARY BOTTLENECK
+- **join_aggregation: 70.63 ms (4.2% of total)**
+- **Total: 1683.02 ms**
+
+### Optimizations Applied
+
+**1. Parallel Orders Loading (targets 85% bottleneck)**
+- When zone maps are unavailable, the full scan now uses **OpenMP parallel `for` loop** with thread-local buffers
+- Morsel size: 200,000 rows per thread for cache efficiency
+- **Expected impact: 8-16x speedup** on 64-core system (near-linear)
+
+**2. Parallel Customer Loading (targets 9% bottleneck)**
+- Changed from sequential hash table insertion to **parallel scan + thread-local merge**
+- Each thread buffers its rows, then merges into the single hash map
+- Pre-reserved hash table capacity for better allocation
+- **Expected impact: 3-5x speedup**
+
+**3. Flat Array for Low-Cardinality Nation Lookups**
+- Replaced `std::unordered_map` hash maps for nation (25 rows) with **direct array indexing**
+- Direct access `nation_by_key[nkey]` instead of `map.find(nkey)`
+- **Expected impact: 2-3x faster per lookup in join loop** (lineitem is 59M rows)
+
+### Why These Changes Are Safe
+- ✅ **Correct parallelization**: Thread-local buffers avoid contention, then merge at end
+- ✅ **Preserved timing guards**: All `[TIMING]` lines remain inside `#ifdef GENDB_PROFILE`
+- ✅ **No encoding changes**: Date/decimal encoding untouched
+- ✅ **Flat array safe**: Nation keys are 0-24 (within bounds)
+- ✅ **Validation preserved**: Query logic unchanged, just execution reordered
+
+### Expected Overall Impact
+- **Orders loading**: 85% of 1683ms → targets ~1437ms → estimate **400-500ms** (28-35% reduction possible)
+- **Customer loading**: 9% of 1683ms → targets ~154ms → estimate **50-75ms** (35-50% reduction possible)
+- **Join loop**: Minor speedup from flat arrays
+
+**Estimated target: 900-1100 ms** (46-35% improvement), moving much closer to DuckDB/ClickHouse performance on Q8.
+
+The code is ready for execution testing by the Executor.

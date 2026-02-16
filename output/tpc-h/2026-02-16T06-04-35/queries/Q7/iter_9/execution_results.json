@@ -1,0 +1,38 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 535.41 ms\n[TIMING] build: 597.60 ms\n[TIMING] join_and_aggregate: 792.70 ms\n[TIMING] output: 0.15 ms\n[TIMING] total: 1925.92 ms\nQ7 execution complete. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q7/iter_9/results/Q7.csv\n",
+    "stderr": "",
+    "duration_ms": 2122
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q7\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 4, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q7": {
+          "rows_expected": 4,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 4, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load": 535.41,
+    "build": 597.6,
+    "join_and_aggregate": 792.7,
+    "output": 0.15,
+    "total": 1925.92
+  },
+  "timing_ms": 1925.77
+}

@@ -1,0 +1,48 @@
+Perfect! All [TIMING] lines are preserved within `#ifdef GENDB_PROFILE` guards, and the code structure is intact. Let me create a summary of the optimization:
+
+## Optimization Summary for Q17 Iteration 8
+
+**Bottleneck Identified:**
+- **Phase 1 (compute_avg_quantity)**: 9,733 ms (36.5% of total) — Sequential merge with critical section overhead
+- **Phase 2 (build_lineitem_index)**: 16,902 ms (63.4% of total) — **DOMINANT** Sequential iteration with repeated vector allocations
+
+**Root Causes:**
+1. **Phase 1**: Used critical section for merging thread-local hash tables, creating synchronization bottleneck
+2. **Phase 2**: Sequential construction of a single hash table for 59.9M rows with scattered memory allocations (vector push_back operations)
+
+**Optimizations Applied:**
+
+### 1. **Phase 1 - Parallel Partitioned Aggregation** 
+- Changed from: Single global `CompactAggregationTable` + parallel loop with critical section merge
+- Changed to: One per-thread `CompactAggregationTable` + lock-free parallel aggregation + sequential merge
+- **Expected Improvement**: Eliminates critical section bottleneck, improves cache locality, enables load balancing across cores
+
+### 2. **Phase 2 - Parallel Partitioned Index Construction**
+- Changed from: Sequential iteration through all 59.9M rows with single global hash table
+- Changed to: One per-thread `CompactHashTableWithVectors` + parallel loop with load balancing + sequential merge
+- **Expected Improvement**: 
+  - Thread-local construction stays in L3 cache (44MB with 64 cores = ~700KB per thread)
+  - Eliminates repeated memory allocations (each thread pre-allocates its table once)
+  - Reduces memory bandwidth pressure
+  - Expected speedup: 30-50% (limited by memory bandwidth and merge overhead)
+
+**Code Changes:**
+- Preserved all [TIMING] lines within `#ifdef GENDB_PROFILE` guards
+- Preserved all encoding logic (scaled decimals, dictionary codes)
+- Preserved correct threshold computation: `l_quantity * count_qty * 5 < sum_qty`
+- Maintained CSV output format
+
+**Compilation:**
+- ✅ Successfully compiled with `-O3 -march=native` and OpenMP
+- Binary size: 56K (same as baseline)
+
+**Expected Total Improvement:**
+- Iteration 4 baseline: 26,653 ms
+- Target: ~15,000-18,000 ms (28-33% speedup if both phases improve as expected)
+- Risk: If merge overhead becomes significant with 64 threads, speedup may be 15-20%
+
+The optimization leverages:
+- **Parallelism**: Utilizes all 64 CPU cores effectively
+- **Cache locality**: Thread-local data structures stay in L3 cache
+- **Lock-free design**: Eliminates synchronization overhead during hot loops
+- **Correct semantics**: Preserves all correctness checks and encoding handling

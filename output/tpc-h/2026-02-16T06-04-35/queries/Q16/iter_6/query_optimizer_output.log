@@ -1,0 +1,43 @@
+Perfect! Let me create a summary of the optimizations applied:
+
+## Optimization Summary for Q16 Iteration 6
+
+### Bottleneck Analysis
+- **Current bottleneck:** Join operation (80.4% of execution time = 558.51 ms / 694.41 ms total)
+- **Previous iteration (5):** Regressed heavily (-5934 ms), indicating join-focused approach backfired
+
+### Optimization Strategy
+Since iteration 5 failed with join optimizations, I applied a **different approach within the join operator**: replacing expensive set operations with **vectorized deduplication and set operations**.
+
+### Changes Applied
+
+**1. Replaced `std::unordered_set<int32_t>` with `std::vector<int32_t>`**
+   - **Rationale:** For distinct suppkey counting, vectors have better cache locality and lower allocation overhead than hash sets
+   - **Cost:** O(n log n) sort/dedup per thread-local group vs O(1) insert, but with better constants
+
+**2. Implemented Efficient Merge Phase**
+   - **Old:** Merge by inserting each suppkey individually into global set (O(m log n) per insert)
+   - **New:** Sort vectors locally, deduplicate, then merge sorted vectors using `std::set_union` (O(m + n) merge)
+   - **Impact:** Reduces merge bottleneck by avoiding hash table operations per suppkey
+
+**3. Reduced Memory Allocation Overhead**
+   - Changed from hash set allocations to vector push_back/move semantics
+   - Vectors have better memory access patterns during aggregation phase
+
+### Code Preservation
+- ✅ All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Output format (CSV) unchanged
+- ✅ Filter predicates and join correctness preserved
+
+### Expected Impact
+- **Join phase:** 5-15% improvement from reduced allocation overhead and better cache locality
+- **Overall execution:** ~30-50 ms improvement (4-7% reduction)
+- **Target:** ~640-660 ms total execution time
+
+### Risk Assessment
+- **Low risk:** Pure data structure optimization (vectors vs sets), merge semantics unchanged
+- **Validation:** Correctness preserved through sorted vector merge semantics
+- **Fallback:** If regression occurs, can quickly revert to set-based approach
+
+The code is now compiled and ready for execution by the Executor. The optimization focuses on micro-level efficiency improvements in the join and merge phases, a different angle than iteration 5's failed approach.

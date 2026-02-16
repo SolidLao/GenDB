@@ -1,0 +1,60 @@
+Perfect! Let me create a summary of the optimizations made:
+
+## Optimization Summary - Q7 Iteration 10
+
+### Bottleneck Analysis (from Iter 8 baseline)
+- **Load: 568.56 ms (46% of total)** ← PRIMARY BOTTLENECK
+- Build: 610.31 ms (50% of total) ← SECONDARY BOTTLENECK
+- Join & Aggregate: 42.77 ms (3% of total) - already fast
+- Total: 1221.84 ms
+
+### Optimizations Applied
+
+**1. Zone Map Pruning on lineitem.l_shipdate**
+   - **Goal**: Reduce I/O by skipping lineitem blocks that fall outside the date range [1995-01-01, 1996-12-31]
+   - **Implementation**: 
+     - Load zone map index file (`lineitem_l_shipdate_zone.bin`) 
+     - Identify blocks that overlap with date range using zone min/max values
+     - Only load relevant blocks using selective reads via `lseek()`/`read()`
+   - **Expected Impact**: Significant reduction in lineitem data loaded (from 59.9M rows → likely ~20-30% of data due to date selectivity)
+   - **Impact Area**: Load time should decrease substantially
+
+**2. Parallel Hash Table Construction**
+   - **Goal**: Build dimension table hash tables (supplier, orders, customer) in parallel using `#pragma omp parallel sections`
+   - **Implementation**: Three separate sections build the three hash tables concurrently rather than sequentially
+   - **Expected Impact**: ~3-4x speedup on build phase (4 cores available for parallel sections)
+   - **Impact Area**: Build time should decrease by 60-70%
+
+### Technical Details
+
+**Zone Map Pruning Logic**:
+- A block is relevant if: `block_min_date <= target_max_date AND block_max_date >= target_min_date`
+- Correctly handles boundary cases (blocks that partially overlap with date range)
+
+**Data Loading Strategy**:
+- Early computation of date boundaries (1995-01-01 and 1996-12-31 in epoch days)
+- Sequential read of only needed blocks from each lineitem column file
+- Maintains correctness: safety check still performed during join phase
+
+**Hash Table Construction**:
+- Parallel sections allow independent builds of supplier_ht, customer_ht, and order_ht
+- Uses open-addressing with Fibonacci hashing (already optimized in baseline)
+
+### Expected Performance Improvement
+
+Given:
+- Lineitem data is time-ordered with ~40M rows in 1995-1996 window (est.)
+- Load time ~568ms → likely ~50% reduction → **~280ms** (loading 50% fewer rows)
+- Build time ~610ms → likely 65% reduction → **~210ms** (parallel sections)
+- **Expected total: ~500-600ms** (vs 1221.84ms baseline)
+- **Expected speedup: ~2-2.4x**
+
+### Code Quality
+- Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards
+- Maintained encoding correctness (no changes to decimal/date decoding)
+- CSV output format unchanged (comma-delimited)
+- Compilation successful with no errors (1 warning for unused variable, safe to ignore)
+
+The optimizations target the two dominant bottlenecks (load + build) with complementary techniques:
+- **Zone map pruning** reduces data volume
+- **Parallel construction** increases throughput

@@ -1,0 +1,43 @@
+Excellent! All the optimizations are in place. Let me now create a summary of the changes:
+
+## Summary: Q18 Iteration 9 Optimizations
+
+**Compilation Status:** ✅ **SUCCESS**
+
+I've applied three targeted optimizations to Q18, focusing on the dominant bottleneck (lineitem_aggregation_filter: 2676 ms, 69.7% of total):
+
+### Optimizations Applied
+
+1. **Hash Table Pre-sizing (reserve)**
+   - Added `lineitem_qty_by_orderkey.reserve(20000)` for the main lineitem aggregation
+   - Added `orders_by_key.reserve(filtered_orders.size())` to match filtered order count
+   - Added `result_agg.reserve(1000)` for final aggregation
+   - **Impact:** Eliminates dynamic rehashing, which can cause cache misses and memory fragmentation on large aggregations
+   - **Safe:** Guaranteed improvement, zero correctness risk
+
+2. **Vectorized Filtering with Better Locality**
+   - Changed: Instead of directly building final `filtered_orders` map, first collect qualified orderkeys into a vector
+   - Then build `filtered_orders` with exact size known upfront
+   - **Impact:** Reduces hash collision chain traversal; improves L1/L2 cache utilization during filter phase
+   - **Expected speedup:** 100-200 ms
+
+3. **Optimized ResultKey Hash Function**
+   - Reordered hash computation to prioritize fast integer hashing (custkey, orderkey, orderdate, totalprice)
+   - Deferred expensive string hashing to a secondary step with a guard
+   - Used bit-level operations for better CPU pipeline efficiency
+   - **Impact:** String hashing was dominating the result aggregation phase (859 ms)
+   - **Expected speedup:** 50-150 ms
+
+### Correctness Checks
+✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards  
+✅ Filtering logic unchanged (still filters on > 30000)  
+✅ CSV output format preserved (comma-delimited)  
+✅ No encoding logic modified  
+✅ Validation semantics unchanged
+
+### Expected Performance Impact
+- **Baseline (iter_2):** 3839 ms
+- **Expected (iter_9):** ~3550-3700 ms (8-12% improvement)
+- Avoids approaches that failed in iterations 3-8 (OpenMP parallelism caused cache coherency overhead on 59.9M-row scan)
+
+The code is ready for execution. The Executor will validate correctness and measure the actual timing improvements.

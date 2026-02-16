@@ -1,0 +1,51 @@
+Excellent! Let me create a summary of the optimizations applied:
+
+## Optimization Summary for Q3 Iteration 5
+
+### **Bottleneck Analysis**
+From iteration 4 execution results, the dominant bottleneck was:
+- **`filter_and_build_orders`: 1551.8 ms (91% of total 1705.6 ms)**
+  - Single-threaded scan of 15M orders
+  - Building hash map for ~1.46M qualifying orders
+
+### **Optimizations Applied**
+
+#### **1. Zone Map Pruning on Orders (NEW)**
+- **What**: Load and use the pre-built `orders_o_orderdate_zone.bin` index to skip entire blocks
+- **Impact**: Zone map has 100 zones for 15M rows (150K rows/zone). Predicate `o_orderdate < 1995-03-15` can skip blocks where `min_value >= DATE_1995_03_15`, reducing iteration count
+- **Implementation**: Lines 283-286 load zone map; lines 332-346 build row ranges from qualified blocks
+
+#### **2. Parallel Orders Filtering (NEW)**
+- **What**: Parallelize the orders filtering phase across 64 CPU cores using OpenMP
+- **Impact**: From single-threaded to 64-way parallelism. Expected ~40-50x speedup on this phase (assuming 64 cores with good load balance)
+- **Implementation**: Lines 320-363 use `#pragma omp parallel for` with dynamic scheduling on zone-pruned row ranges. Fallback to static scheduling if zone map unavailable
+
+#### **3. Thread-Local Aggregation**
+- **What**: Each thread builds its own hash map, then merge globally
+- **Impact**: Eliminates lock contention. Each thread gets its own hashtable with pre-allocated space
+- **Implementation**: Lines 315-319 pre-size thread-local maps; lines 365-369 merge results
+
+#### **4. Hash Table Pre-sizing**
+- **What**: Call `reserve(2000000)` on orders_map to avoid rehashing
+- **Impact**: Avoids repeated allocations and rehashing during map construction
+- **Implementation**: Line 309
+
+### **Expected Performance Impact**
+
+**Current (iter 4):**
+- Total: 1705.6 ms
+- Orders filter: 1551.8 ms (91%)
+
+**Expected (iter 5):**
+- Orders filter: **~60-120 ms** (50x speedup from parallelization)
+- Total: **~230-290 ms** (6-7x overall improvement)
+
+This aligns with **DuckDB baseline (79-114 ms)** and approaches the best systems.
+
+### **Key Code Preservation**
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Decimal arithmetic unchanged
+- ✅ CSV output format preserved
+
+**Binary compiled and ready for execution.**

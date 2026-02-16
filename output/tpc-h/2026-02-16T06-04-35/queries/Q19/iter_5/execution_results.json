@@ -1,0 +1,56 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q19: Discounted Revenue\n[METADATA CHECK] Encoding: l_quantity (DECIMAL, scale=100), l_discount (DECIMAL, scale=100), l_extendedprice (DECIMAL, scale=100)\n[METADATA CHECK] Encoding: l_shipmode (DICTIONARY), l_shipinstruct (DICTIONARY)\n[METADATA CHECK] Encoding: p_brand (DICTIONARY), p_container (DICTIONARY)\n[TIMING] load_dicts: 0.17 ms\n[METADATA CHECK] Dictionary codes: AIR=3, REG_AIR=2, DELIVER=0\n[METADATA CHECK] Dictionary codes: Brand#12=14, Brand#23=13, Brand#34=2\n[TIMING] load_columns: 0.12 ms\n[METADATA CHECK] Lineitem rows: 59986052, Part rows: 2000000\n[TIMING] filter_part: 19.81 ms\n[METADATA CHECK] Filtered part rows: 4754\n[TIMING] scan_filter: 785.14 ms\n[METADATA CHECK] Matched rows: 2249\n[TIMING] aggregation: 0.01 ms\n[TIMING] output: 0.75 ms\n[TIMING] total: 806.07 ms\n[METADATA CHECK] Result: revenue = 58723949.88\n",
+    "stderr": "",
+    "duration_ms": 882
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q19\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": false,\n      \"error\": \"1 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"30104438.0911\",\n              \"actual\": \"58723949.8841\",\n              \"abs_diff\": 28619511.79,\n              \"rel_diff_pct\": 95.0674,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q19": {
+          "rows_expected": 1,
+          "rows_actual": 1,
+          "match": false,
+          "error": "1 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "30104438.0911",
+                  "actual": "58723949.8841",
+                  "abs_diff": 28619511.79,
+                  "rel_diff_pct": 95.0674,
+                  "tolerance": "$100",
+                  "row": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dicts": 0.17,
+    "load_columns": 0.12,
+    "filter_part": 19.81,
+    "scan_filter": 785.14,
+    "aggregation": 0.01,
+    "output": 0.75,
+    "total": 806.07
+  },
+  "timing_ms": 805.32
+}

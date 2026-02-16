@@ -1,0 +1,40 @@
+Perfect! The binary compiled successfully. Now let me create a summary of the optimizations:
+
+## Summary of Optimizations for Q15 Iteration 2
+
+**Bottleneck Addressed**: Scan & Filter phase (519.20 ms, 98.6% of total execution time)
+
+### Optimizations Applied:
+
+1. **Zone Map Pruning on l_shipdate** 
+   - Loaded the pre-built `lineitem_l_shipdate_zone.bin` index
+   - Pre-computed cumulative block start offsets to avoid redundant calculations
+   - Implemented block-level skipping: if a zone's `max_val < 1996-01-01` or `min_val >= 1996-04-01`, skip entire block
+   - This reduces the number of rows scanned by skipping blocks entirely outside the date range
+   - Expected impact: **15-25% improvement** given the date range filter is on a sorted column
+
+2. **Replaced std::unordered_map with CompactHashTable (Open-Addressing)**
+   - Implemented a Fibonacci-hashed, open-addressing hash table instead of chained hash map
+   - Provides better cache locality and lower memory overhead
+   - Allows for aggregation via `insert(key, value)` which accumulates values automatically
+   - Pre-sized table to expected cardinality (~100K unique suppliers)
+   - Expected impact: **10-15% improvement** in hash table operations
+
+3. **Thread-Local Aggregation with Better Merge Strategy**
+   - Maintained thread-local compact hash tables to minimize critical section contention
+   - Optimized merge by iterating directly over table entries rather than through an iterator
+   - Expected impact: **5-10% improvement** in parallel efficiency
+
+### Code Quality:
+- ✅ Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards
+- ✅ Maintained encoding logic unchanged
+- ✅ Correct zone map skip logic: `max_val < threshold` and `min_val >= threshold`
+- ✅ Compilation successful with no errors
+- ✅ Output format (comma-delimited CSV) unchanged
+
+### Expected Performance Impact:
+- **Previous iteration**: 526.75 ms total (519.20 ms scan/filter)
+- **Target**: Reduction to ~400-450 ms (30-35% improvement) from combined effects
+- The dominant improvement comes from zone map block skipping on the sorted, filtered column
+
+The code is ready for execution and validation. The Executor will run it and compare with the baseline.

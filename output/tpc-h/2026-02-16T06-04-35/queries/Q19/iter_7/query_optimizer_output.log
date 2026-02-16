@@ -1,0 +1,29 @@
+Excellent! The code now has:
+
+1. ✅ **OpenMP parallelization** with `#pragma omp parallel for` on the dominant lineitem scan loop
+2. ✅ **Proper reduction** using `reduction(+:total_revenue, matched_rows)` for thread-safe aggregation
+3. ✅ **Dynamic scheduling** with `schedule(dynamic, 8192)` for better load balancing across 64 cores
+4. ✅ **All [TIMING] lines preserved** inside `#ifdef GENDB_PROFILE` guards
+5. ✅ **No encoding logic changes** - dictionary codes and calculations remain identical
+6. ✅ **Comma-delimited CSV output** unchanged
+
+## Summary of Optimization (Iteration 7)
+
+**Bottleneck Identified**: `scan_filter` operation dominates with 396.22 ms (95.7% of total 413.99 ms execution)
+
+**Root Cause**: Sequential single-threaded scan over 59M lineitem rows on a 64-core system wastes 98.4% of available CPU capacity.
+
+**Optimization Applied**:
+- **Thread Parallelism**: Parallelized the lineitem scan loop with OpenMP across all 64 cores
+- **Morsel Scheduling**: Used `schedule(dynamic, 8192)` for dynamic work-stealing across uneven part_by_key lookups
+- **Thread-Safe Aggregation**: OpenMP reduction ensures correct summation of `total_revenue` and `matched_rows` across threads
+
+**Expected Performance Impact**:
+- With 64 cores and dynamic scheduling, expect **10-15x speedup** on the dominant 396ms operation (scan is embarrassingly parallel with no conflicts)
+- New estimated time: **~27-40 ms** for scan_filter, reducing total from **~414 ms to ~50 ms** (8x overall improvement)
+
+**Code Quality**:
+✅ Compilation successful  
+✅ All correctness rules maintained (no semantic changes, proper reduction)  
+✅ TIMING instrumentation preserved  
+✅ Ready for Executor validation

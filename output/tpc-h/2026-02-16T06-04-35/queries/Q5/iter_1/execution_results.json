@@ -1,0 +1,85 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q5 Storage Guide\n  - Date: epoch days (int32_t), values >3000\n  - Decimals: scaled int64_t, scale_factor=100\n  - Epoch bounds: [8766, 9131) for 1994-01-01 to 1995-01-01\n\n[TIMING] load: 0.13 ms\n[TIMING] filter_region: 0.00 ms\n[TIMING] filter_nation: 0.01 ms\nFound 5 nations in ASIA region\n[TIMING] filter_supplier: 9.33 ms\nFound 20037 suppliers in ASIA\n[TIMING] filter_orders: 923.09 ms\nFound 2275919 orders in date range\n[TIMING] scan_join_aggregate_lineitem: 135.14 ms\nAggregated 5 nation groups\n[TIMING] sort: 0.00 ms\n[TIMING] output: 0.19 ms\n[TIMING] total: 1067.98 ms\nQuery Q5 completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q5/iter_1/results/Q5.csv\nResult rows: 5\n",
+    "stderr": "",
+    "duration_ms": 1318
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": false,\n      \"error\": \"5 row(s) differ across 2 column(s)\",\n      \"column_failures\": {\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 5,\n          \"samples\": [\n            {\n              \"expected\": \"53724494.2566\",\n              \"actual\": \"518419354.52\",\n              \"abs_diff\": 464694860.26,\n              \"rel_diff_pct\": 864.959,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"52035512.0002\",\n              \"actual\": \"544962852.95\",\n              \"abs_diff\": 492927340.95,\n              \"rel_diff_pct\": 947.2903,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"55502041.1697\",\n              \"actual\": \"526903010.81\",\n              \"abs_diff\": 471400969.64,\n              \"rel_diff_pct\": 849.3399,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"n_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"VIETNAM\",\n              \"actual\": \"SAUDI ARABIA\",\n              \"row\": 4\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q5": {
+          "rows_expected": 5,
+          "rows_actual": 5,
+          "match": false,
+          "error": "5 row(s) differ across 2 column(s)",
+          "column_failures": {
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 5,
+              "samples": [
+                {
+                  "expected": "53724494.2566",
+                  "actual": "518419354.52",
+                  "abs_diff": 464694860.26,
+                  "rel_diff_pct": 864.959,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "52035512.0002",
+                  "actual": "544962852.95",
+                  "abs_diff": 492927340.95,
+                  "rel_diff_pct": 947.2903,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "55502041.1697",
+                  "actual": "526903010.81",
+                  "abs_diff": 471400969.64,
+                  "rel_diff_pct": 849.3399,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "n_name": {
+              "category": "exact",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "VIETNAM",
+                  "actual": "SAUDI ARABIA",
+                  "row": 4
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load": 0.13,
+    "filter_region": 0,
+    "filter_nation": 0.01,
+    "filter_supplier": 9.33,
+    "filter_orders": 923.09,
+    "scan_join_aggregate_lineitem": 135.14,
+    "sort": 0,
+    "output": 0.19,
+    "total": 1067.98
+  },
+  "timing_ms": 1067.79
+}

@@ -1,0 +1,48 @@
+Perfect! The binary is already in place. Let me create a summary of the optimizations:
+
+## Optimization Summary - Q8 Iteration 6
+
+### Changes Made
+
+**1. Compact Hash Tables (Open Addressing)**
+   - Replaced `std::unordered_map` with custom `CompactHashTable<K, V>` for:
+     - `part_filter` (bool flags, ~13K entries)
+     - `supplier_nationkey_map` (supplier → nation mapping, 100K entries)
+     - `customer_nationkey_map` (customer → nation mapping, 1.5M entries)
+     - `nation_regionkey_map` (nation → region mapping, 25 entries)
+     - `order_map` (large, hot, ~4.5M entries)
+   
+   **Expected Impact:** 2-5x speedup on hash table lookups due to:
+   - Open addressing (single contiguous array) vs chaining (linked lists)
+   - Better cache locality (no pointer chasing)
+   - Lower memory overhead (~80B per entry eliminated)
+   - Fibonacci hashing for better distribution
+
+**2. Compact Hash Table Implementation Details**
+   - Pre-sized tables with power-of-2 sizing for bitwise AND indexing
+   - Load factor tuned to 75% (4/3 multiplier)
+   - Linear probing with collision handling
+   - Added `size()` method for profiling output compatibility
+
+### Key Bottleneck Addressed
+
+The **load_orders phase (1437 ms, 85% of total)** was dominated by:
+- Building a hash map with 4.5M insertions via `unordered_map` 
+- Each insertion involves pointer chasing in chained buckets
+
+The compact hash table reduces this overhead significantly through better cache locality and fewer allocations.
+
+### Expected Performance Impact
+
+- **order_map lookups**: 2-5x faster (largest table, 4.5M entries, probed 59M+ times in join loop)
+- **Overall query time**: Estimated **300-500ms improvement** (18-30% speedup), targeting ~1150-1380ms from 1683ms baseline
+
+### Preserved Correctness
+
+✓ All [TIMING] lines preserved within #ifdef GENDB_PROFILE guards
+✓ Encoding logic unchanged
+✓ Zone map pruning logic unchanged
+✓ CSV output format unchanged
+✓ Validation expected to pass (structural changes only, no logic changes)
+
+The code compiles successfully with no errors. The Executor will now validate and run the optimized version.

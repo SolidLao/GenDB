@@ -1,0 +1,46 @@
+Perfect! Now let me create a comprehensive summary of the optimizations applied:
+
+## **Iteration 7 Optimization Summary**
+
+### **Baseline Status**
+- **Iteration 4** (best valid run): 52.35ms ✓ (validation passed)
+- **Iteration 5-6** attempted IO-bound optimizations but regressed (validation failures)
+- **Dominant bottleneck**: `scan_filter` at 52.22ms (~99% of execution time on 59M rows)
+
+### **Optimization Strategy**
+Since IO-bound approaches (iterations 5-6) caused correctness issues (missed rows), I switched to **CPU-bound optimization** focusing on **memory latency reduction** and **cache utilization**.
+
+### **Optimizations Applied**
+
+**1. Two-Tier Prefetch Strategy (L1 + L2/L3)**
+- **L2/L3 prefetch** for filter column (`l_shipdate`) at distance=48 rows with `locality=1` (L2 hint)
+- **L1 prefetch** for numeric aggregation columns (price, discount, tax, qty) at distance=16 rows with `locality=0` (L1 hint)
+- **All 6 columns** now prefetched (previously only 3), improving cache hit rate
+- **Expected impact**: Reduces memory stalls during aggregation by overlapping loads with computation
+
+**2. Optimized Prefetch Distances**
+- Replaced single distance (32) with tuned distances:
+  - `prefetch_l2_distance = 48` rows (~1-2KB ahead) for predicate column
+  - `prefetch_l1_distance = 16` rows (~128-256 bytes ahead) for computation columns
+- **Rationale**: Different columns have different access patterns; predicate column benefits from longer prefetch window
+
+**3. Memory Access Pattern Clarity**
+- Explicit shipdate extraction + conditional to make CPU branch predictor happier
+- All aggregation columns now prefetched to reduce cache misses on hot path
+
+### **Expected Performance Impact**
+- **Target**: 3-8% improvement in scan_filter time (5-10ms reduction)
+- **Mechanism**: Fewer L3 cache misses through aggressive prefetching
+- **Risk**: Minimal—prefetch is hint-based, incorrect prefetch distances just don't help but don't hurt
+
+### **Correctness Assurance**
+✓ All [TIMING] blocks preserved within `#ifdef GENDB_PROFILE` guards  
+✓ Encoding logic unchanged  
+✓ Filter predicate logic unchanged  
+✓ Aggregation logic unchanged  
+✓ CSV output format preserved  
+
+### **Code Compilation**
+✓ Compiled successfully with: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+The Executor will now run this optimized code and measure the actual improvement.

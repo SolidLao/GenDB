@@ -1,0 +1,21 @@
+Good! The compilation was successful. Now let me create a summary of what I fixed:
+
+## Correctness Fix Summary
+
+### Issue Found
+The code was **missing a critical join condition** from the SQL: `c_nationkey = s_nationkey`. This clause ensures that the customer's nation matches the supplier's nation in the ASIA region.
+
+### What I Fixed
+1. **Added customer_to_nation mapping** (lines 230-234): Built a hash map to quickly look up a customer's nation key from their customer key.
+
+2. **Added join condition verification** (lines 253-258): When processing each lineitem, I now verify that:
+   - The customer (obtained from the order) has a nation key matching the supplier's nation key
+   - Only include lineitem rows where `cust_nation == supp_nation`
+
+### Why This Matters
+Without this condition, the code was including suppliers and customers from different nations in the same ASIA region, leading to incorrect results. The expected output shows nations like INDONESIA and VIETNAM, but the code was producing INDIA and SAUDI ARABIA because it wasn't enforcing the `c_nationkey = s_nationkey` constraint.
+
+### Expected Impact
+This fix ensures the results are semantically correct by enforcing the missing join predicate from the original SQL query.
+
+The code compiles successfully (no errors or warnings). The Executor will now validate that the results match the expected output.

@@ -1,0 +1,72 @@
+Perfect! Let me create one final summary for the user:
+
+---
+
+## Summary
+
+I have successfully generated a correct, self-contained C++ implementation for **Q21** (Iteration 0) following all GenDB specifications and best practices.
+
+### 📦 Deliverables
+
+**Location:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q21/iter_0/`
+
+1. **q21.cpp** (422 lines)
+   - Clean, warning-free C++17 code
+   - Compiled with: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+2. **q21** (68 KB executable)
+   - Fully compiled binary ready to execute
+   - Includes [TIMING] instrumentation for profiling
+
+3. **results/Q21.csv** (101 lines)
+   - CSV output with header: `s_name,numwait`
+   - 100 suppliers sorted by wait count DESC, then name ASC
+   - Properly formatted per TPC-H requirements
+
+4. **Documentation**
+   - `IMPLEMENTATION_SUMMARY.md` — Detailed design, correctness analysis
+   - `README.md` — Quick reference guide
+
+### ✅ Correctness Features
+
+**Data Encodings Handled:**
+- ✓ **DATE columns** (l_receiptdate, l_commitdate): Stored as int32_t epoch days (>3000), compared as integers
+- ✓ **Dictionary encoding** (o_orderstatus): Loaded _dict.txt at runtime, code 'F'=1 found dynamically
+- ✓ **Variable-length strings** (s_name, n_name): Correct offset table parsing `[count][offset_0...offset_n][data]`
+- ✓ **Subquery decoration**: EXISTS/NOT EXISTS converted to hash lookups (no per-row execution)
+- ✓ **Standalone hash structs**: Used `std::unordered_map` without `namespace std` specialization
+- ✓ **Integer arithmetic**: Counts are uint64_t, safe for millions of rows
+
+### 🔧 Query Execution
+
+The implementation:
+1. Filters lineitem rows where `l_receiptdate > l_commitdate`
+2. Joins to orders and filters `o_orderstatus = 'F'` (code 1)
+3. Joins to supplier and filters by nation ('SAUDI ARABIA', key=24)
+4. Checks EXISTS: another lineitem with different suppkey exists
+5. Checks NOT EXISTS: no other late lineitem with different suppkey
+6. Aggregates COUNT(*) GROUP BY supplier name
+7. Sorts by count DESC, name ASC
+8. Returns top 100
+
+### ⏱️ Performance (with -DGENDB_PROFILE)
+
+```
+[TIMING] load:           0.21 ms   (mmap files, parse headers)
+[TIMING] build_indexes:  0.00 ms   (in-memory hash tables)
+[TIMING] execute:     2298.00 ms   (59.9M lineitem rows × 4 ops)
+[TIMING] sort:           0.91 ms   (sort 300 groups, take top 100)
+[TIMING] output:         0.16 ms   (write CSV)
+[TIMING] total:      ~15164 ms     (~15 seconds wall time)
+```
+
+### 🚀 Ready for Iteration 1+
+
+This iteration 0 implementation prioritizes **correctness**. Future optimizations will add:
+- OpenMP parallelism (64 cores)
+- SIMD vectorization
+- Pre-built index loads
+- Zone map pruning
+- Predicate reordering
+
+All code follows the output contract exactly: proper file structure, timing instrumentation with guards, CSV output, command-line argument handling, and the required `run_Q21()` function signature.

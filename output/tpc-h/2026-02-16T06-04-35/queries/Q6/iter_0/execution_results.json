@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/q6.cpp: In function ‘void run_q6(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/q6.cpp:152:14: warning: unused variable ‘total_rows’ [-Wunused-variable]\n  152 |     uint64_t total_rows = col_shipdate.size / sizeof(int32_t);\n      |              ^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/q6.cpp:165:10: warning: variable ‘t_scan_start’ set but not used [-Wunused-but-set-variable]\n  165 |     auto t_scan_start = std::chrono::high_resolution_clock::now();\n      |          ^~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/q6.cpp:194:12: warning: unused variable ‘sum_kahan’ [-Wunused-variable]\n  194 |     double sum_kahan = 0.0;\n      |            ^~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/q6.cpp:195:12: warning: unused variable ‘kahan_c’ [-Wunused-variable]\n  195 |     double kahan_c = 0.0;  // Compensation for lost low-order bits\n      |            ^~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_zone_map: 0.04 ms\n[TIMING] mmap_columns: 0.05 ms\n[TIMING] load_data: 0.16 ms\n[TIMING] zone_map_pruning: identified 300 valid blocks\n[TIMING] aggregation: 281.08 ms\n[TIMING] total: 281.27 ms\n[TIMING] output: 12.84 ms\nQuery Q6 completed. Result written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q6/iter_0/results/Q6.csv\n",
+    "stderr": "",
+    "duration_ms": 368
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_zone_map": 0.04,
+    "mmap_columns": 0.05,
+    "load_data": 0.16,
+    "aggregation": 281.08,
+    "total": 281.27,
+    "output": 12.84
+  },
+  "timing_ms": 268.43
+}

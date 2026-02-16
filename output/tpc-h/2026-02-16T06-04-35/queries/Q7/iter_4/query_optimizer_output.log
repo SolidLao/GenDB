@@ -1,0 +1,43 @@
+Perfect! The binary compiled successfully. Let me create a summary of the optimization:
+
+## Summary of Iteration 4 Optimization
+
+### Changes Made
+
+**Bottleneck Identified:** The `build` phase was consuming 1894.88 ms (56% of total execution time), dominated by constructing three large hash tables from scratch.
+
+**Optimization Strategy:** Replace manual hash table construction with **pre-built hash indexes** loaded via mmap, leveraging the Storage & Index Guide.
+
+### Specific Modifications
+
+1. **Removed manual hash table builds** (lines 263-299):
+   - Eliminated `std::unordered_map` construction for `supplier_to_nation`, `customer_to_nation`, and `orders_map`
+   - These were expensive operations iterating over 100K, 1.5M, and 15M rows respectively
+
+2. **Loaded pre-built hash indexes** (new lines 264-273):
+   - `supplier_s_nationkey_hash.bin` → `supplier_idx`
+   - `orders_o_custkey_hash.bin` → `orders_idx`
+   - `customer_c_nationkey_hash.bin` → `customer_idx`
+   - Loading via `HashMultiValueIndex::load()` with mmap (zero-copy)
+
+3. **Updated join probe logic** (lines 316-374):
+   - Changed from `unordered_map.find()` + vector iteration to pre-built index `.find()` calls
+   - Index returns array of row positions (uint32_t indices) directly
+   - Maintained all filtering logic and correctness checks (nation filters, nation pair validation, date range)
+   - Preserved parallel execution with thread-local aggregation
+
+### Expected Impact
+
+- **Build phase**: ~1.8 seconds → ~0.1-0.2 seconds (mmap load overhead only)
+- **Total execution time**: ~3.3 seconds → ~1.5-1.6 seconds (**~2x speedup**)
+- **Correctness**: Preserved — all filters and join logic unchanged
+
+### Code Quality
+
+- ✅ Preserved all `[TIMING]` lines in `#ifdef GENDB_PROFILE` guards
+- ✅ Maintained encoding logic (date computation, decimal scaling)
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Parallel execution preserved (OpenMP `parallel for`)
+- ✅ Compilation successful with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`
+
+The code is ready for execution and validation by the Executor.

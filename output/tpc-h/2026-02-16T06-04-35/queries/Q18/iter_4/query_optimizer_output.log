@@ -1,0 +1,38 @@
+Perfect! The code has been successfully modified. Let me summarize what was done:
+
+## Summary of Optimization (Iteration 4)
+
+### **Changes Made:**
+
+1. **Parallel aggregation of lineitem (Step 2)**:
+   - Added `#include <thread>` header
+   - Detected available CPU cores using `std::thread::hardware_concurrency()`
+   - Created thread-local hash tables: `std::vector<std::unordered_map<>>` (one per thread)
+   - Used OpenMP `#pragma omp parallel for` with `num_threads(num_threads)` to distribute lineitem scanning across all cores
+   - Each thread updates its own local aggregation buffer (zero contention)
+   - Merge phase collects results from all thread-local tables sequentially (after parallel region exits)
+
+2. **Parallel aggregation of results (Step 6)**:
+   - Same pattern: thread-local result aggregation maps
+   - Parallel scan of lineitem with per-thread result aggregation
+   - Sequential merge phase to build final result
+
+### **Expected Impact:**
+
+**Bottleneck reduction:**
+- **lineitem_aggregation_filter**: 2,676.91 ms → **Est. 260-350 ms** (8-10x speedup from 64-core parallelism)
+- **result_aggregation**: 859.41 ms → **Est. 90-120 ms** (8-10x speedup)
+- **Total**: 3,839.63 ms → **Est. 1,200-1,500 ms** (2.5-3.2x overall speedup)
+
+### **Why This Works:**
+
+- **High parallelism potential**: Lineitem scan (59.9M rows) and aggregation are CPU-bound with no cross-thread dependencies
+- **Zero lock contention**: Each thread owns its hash table, no atomic operations during scan
+- **Merge is fast**: ~600 unique orderkeys, merge cost is negligible
+- **Memory efficient**: Thread-local maps multiply memory by thread count (~num_threads × hash map overhead), which is acceptable on 376 GB system
+- **Correct semantics**: Aggregation is associative; merging partial results gives correct final answer
+
+### **Compilation Status:**
+✅ **Compilation successful** (code compiles with -O3 -march=native, OpenMP enabled)
+
+The code is ready for execution. The Executor will run it and provide validation/timing feedback.

@@ -1,0 +1,52 @@
+Perfect! The binary compiled successfully. Now let me create a summary of the optimizations applied:
+
+## Optimization Summary for Q9 Iteration 6
+
+### Bottleneck Analysis
+From iteration 4 results:
+- **Join operations**: 1128.83 ms (76.7% of total execution time) ← **PRIMARY BOTTLENECK**
+- Aggregation: 174.11 ms (11.8%)
+- Scan/Filter: 168.40 ms (11.4%)
+- Total: 1472.07 ms
+
+### Strategy
+Since iteration 5 regressed (focused on join optimization), I applied optimizations from a **DIFFERENT category**:
+1. **Memory efficiency**: Pre-sizing and early space reservation in hash tables
+2. **Thread-local aggregation**: Better locality and reduced contention by reserving capacity
+3. **Parallel loop scheduling**: Changed from static to dynamic scheduling for better load balancing
+4. **Data structure optimization**: Removed unnecessary allocations
+
+### Optimizations Applied
+
+1. **Thread-local Hash Table Pre-sizing** (aggregation efficiency):
+   - Each thread-local aggregation map now calls `reserve()` before use
+   - Reduces rehashing overhead during parallel aggregation
+   - Expected impact: ~5-10% reduction in aggregation time
+
+2. **Parallel Loop Scheduling** (load balancing):
+   - Changed from `schedule(static)` to `schedule(dynamic, 50000)` 
+   - Dynamic scheduling allows threads to pick up more work if they finish filtering early
+   - Reduces idle time and improves CPU utilization across the 64-core system
+   - Expected impact: ~5-15% improvement in overall execution time
+
+3. **Global Aggregation Map Pre-sizing** (merge efficiency):
+   - Pre-allocate final aggregation map with `reserve(10000)` before merging thread-local results
+   - Reduces rehashing during merge phase
+   - Expected impact: ~2-5% improvement
+
+4. **Hash Table Construction Pre-sizing**:
+   - Pre-reserve space for supplier_to_nation and orders_map tables
+   - Reduces allocation overhead during hash table building
+   - Expected impact: ~2-3% improvement
+
+5. **Green Parts List Structure**:
+   - Added tracking of matched green parts in a vector (for potential future optimizations)
+   - Better memory layout awareness
+   - Expected impact: negligible (but improves code maintainability)
+
+### Expected Overall Impact
+- **Conservative estimate**: 5-20% improvement (75-150ms reduction)
+- **Target**: Reduce total execution time from 1472ms toward 1300-1350ms
+- **Strategy rationale**: Focus on parallel efficiency and memory allocation rather than join structure (which failed in iter 5)
+
+The code compiles successfully and preserves all [TIMING] instrumentation. The Executor will validate correctness and measure actual performance improvements.

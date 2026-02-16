@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_orders: 0.13 ms\n[TIMING] build_semijoin_set: 1200.74 ms\n[TIMING] semijoin_set_size: 13753474\n[TIMING] filter_and_group: 11.29 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 1212.39 ms\nQ4 execution completed. Results written to: /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q4/iter_9/results/Q4.csv\n",
+    "stderr": "",
+    "duration_ms": 1268
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q4\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_orders": 0.13,
+    "build_semijoin_set": 1200.74,
+    "filter_and_group": 11.29,
+    "output": 0.17,
+    "total": 1212.39
+  },
+  "timing_ms": 1212.22
+}

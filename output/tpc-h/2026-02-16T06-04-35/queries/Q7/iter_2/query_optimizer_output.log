@@ -1,0 +1,45 @@
+Perfect! The compilation was successful. Now let me create a summary of the optimizations made:
+
+## Optimization Summary - Q7 Iteration 2
+
+### Compilation Status
+✅ **Success** - Compiled cleanly with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+### Changes Made
+
+#### 1. **Hash Table Pre-sizing (Build Phase Optimization)**
+- **Lines 275-278**: Added `.reserve()` calls before inserting into hash tables
+- **Impact**: Eliminates repeated rehashing allocations during table construction
+- **Technical Detail**: Pre-sized to `cardinality / 0.75` (75% load factor standard) to avoid dynamic resizing
+- **Benefit**: Reduces memory allocation overhead in the build phase
+
+#### 2. **Parallel Lineitem Scan with Thread-Local Aggregation (Join Phase Optimization)**
+- **Lines 313-314**: Initialize per-thread aggregation maps (one per OpenMP thread)
+- **Line 316**: Added `#pragma omp parallel for schedule(dynamic, 10000)` for work distribution
+- **Line 325**: Capture `thread_id = omp_get_thread_num()` to direct thread output
+- **Lines 370, 377-381**: Accumulate in thread-local maps, then merge results sequentially
+- **Impact**: Distributes 59M lineitem rows across 64 CPU cores with zero lock contention
+- **Benefit**: Expected speedup ~30-40x on join phase (from current 2912 ms)
+
+#### 3. **Date Extraction Loop Optimization**
+- **Line 359**: Changed loop condition from `while (true)` to `while (day_count >= 365)` 
+- **Impact**: Reduces unnecessary branch iterations for dates in nearby years
+- **Benefit**: Minor CPU speedup, ~1-2% on the per-tuple date parsing
+
+### Expected Performance Impact
+
+| Phase | Iteration 1 | Expected Iter 2 | Improvement |
+|-------|------------|-----------------|------------|
+| Load | 1410 ms | 1410 ms | - |
+| Build | 3256 ms | ~2500 ms | 23% (pre-sizing) |
+| Join & Aggregate | 2912 ms | ~500-700 ms | 75% (parallelism) |
+| Output | 0.87 ms | 0.87 ms | - |
+| **Total** | **7579 ms** | **~4700-4900 ms** | **~38% total** |
+
+### Preservation of Correctness
+✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards  
+✅ Encoding logic unchanged (no decimal or date encoding modifications)  
+✅ CSV output format unchanged (comma-delimited)  
+✅ Validation expected to pass (no semantic changes, only parallelization)
+
+The Executor will now run the code and compare results against the expected output. Automatic rollback is available if results differ.

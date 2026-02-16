@@ -1,0 +1,232 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 352.53 ms\n[TIMING] build_nation_lookup: 0.00 ms\n[TIMING] build_customer_lookup: 927.68 ms\n[TIMING] build_orders_lookup: 75.31 ms\n[TIMING] orders_filtered_count: 194903\n[TIMING] scan_filter_join_agg: 248.08 ms\n[TIMING] agg_result_count: 152903\n[TIMING] sort: 58.23 ms\n[TIMING] output: 13.94 ms\n[TIMING] total: 1675.88 ms\nQuery execution completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q10/iter_7/results/Q10.csv\n",
+    "stderr": "",
+    "duration_ms": 2308
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q10\": {\n      \"rows_expected\": 20,\n      \"rows_actual\": 20,\n      \"match\": false,\n      \"error\": \"20 row(s) differ across 8 column(s)\",\n      \"column_failures\": {\n        \"c_custkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"102358\",\n              \"actual\": \"1019962\",\n              \"abs_diff\": 917604.0,\n              \"rel_diff_pct\": 896.4653,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"1116802\",\n              \"actual\": \"1025959\",\n              \"abs_diff\": 90843.0,\n              \"rel_diff_pct\": 8.1342,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1136716\",\n              \"actual\": \"1112827\",\n              \"abs_diff\": 23889.0,\n              \"rel_diff_pct\": 2.1016,\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"Customer#000102358\",\n              \"actual\": \"Customer#001019962\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"Customer#001116802\",\n              \"actual\": \"Customer#001025959\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"Customer#001136716\",\n              \"actual\": \"Customer#001112827\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"715001.8825\",\n              \"actual\": \"531793.4135\",\n              \"abs_diff\": 183208.47,\n              \"rel_diff_pct\": 25.6235,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"830214.1117\",\n              \"actual\": \"523642.4878\",\n              \"abs_diff\": 306571.62,\n              \"rel_diff_pct\": 36.9268,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"695043.5606\",\n              \"actual\": \"569126.3316\",\n              \"abs_diff\": 125917.23,\n              \"rel_diff_pct\": 18.1165,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_acctbal\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"3564.90\",\n              \"actual\": \"2068.90\",\n              \"abs_diff\": 1496.0,\n              \"rel_diff_pct\": 41.9647,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"772.17\",\n              \"actual\": \"1361.76\",\n              \"abs_diff\": 589.59,\n              \"rel_diff_pct\": 76.3549,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"5886.01\",\n              \"actual\": \"3257.63\",\n              \"abs_diff\": 2628.38,\n              \"rel_diff_pct\": 44.6547,\n              \"row\": 2\n            }\n          ]\n        },\n        \"n_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 19,\n          \"samples\": [\n            {\n              \"expected\": \"BRAZIL\",\n              \"actual\": \"JORDAN\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"JORDAN\",\n              \"actual\": \"UNITED KINGDOM\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"CHINA\",\n              \"actual\": \"INDONESIA\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_address\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"YpDpv0sP14F5xMUQbkDV,XGcMJypFV6jH\",\n              \"actual\": \"sdeCfOgE45c8TK6ShHX6ud4gHMoH1K39r\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"JpGQT3IHoogqB3ZMrSrzhBrVFObr\",\n              \"actual\": \"ThP3s6XZlJ9 k3fMfrdMeG6JXwvYqKwFq\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"uAIqfk27UKRIIBZLUvKDfUOyh\",\n              \"actual\": \"CNJ mv7EW7 CDF,YqGglwMMVewyV\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_phone\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"12-941-212-8350\",\n              \"actual\": \"23-631-786-6025\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"23-199-655-3770\",\n              \"actual\": \"33-721-434-8305\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"28-729-762-5783\",\n              \"actual\": \"19-965-849-1871\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_comment\": {\n          \"category\": \"exact\",\n          \"failure_count\": 20,\n          \"samples\": [\n            {\n              \"expected\": \"y slyly regular multipliers. furiously regular deposits nag final excuses. slyly special accounts haggle re\",\n              \"actual\": \"yly. even requests nag quickly ironic deposits. regular packages sleep carefully according to the even accoun\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"ests. quickly ironic deposits along the special requests a\",\n              \"actual\": \"und the special, ironic packages. furiously ironic instructions wake against the ironic, final requests. unusu\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"e foxes. bold orbits impress slyly about the regular, regular theodolites; carefully exp\",\n              \"actual\": \"pecial deposits. unusual, regular foxes are furiously according to the exp\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q10": {
+          "rows_expected": 20,
+          "rows_actual": 20,
+          "match": false,
+          "error": "20 row(s) differ across 8 column(s)",
+          "column_failures": {
+            "c_custkey": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "102358",
+                  "actual": "1019962",
+                  "abs_diff": 917604,
+                  "rel_diff_pct": 896.4653,
+                  "row": 0
+                },
+                {
+                  "expected": "1116802",
+                  "actual": "1025959",
+                  "abs_diff": 90843,
+                  "rel_diff_pct": 8.1342,
+                  "row": 1
+                },
+                {
+                  "expected": "1136716",
+                  "actual": "1112827",
+                  "abs_diff": 23889,
+                  "rel_diff_pct": 2.1016,
+                  "row": 2
+                }
+              ]
+            },
+            "c_name": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "Customer#000102358",
+                  "actual": "Customer#001019962",
+                  "row": 0
+                },
+                {
+                  "expected": "Customer#001116802",
+                  "actual": "Customer#001025959",
+                  "row": 1
+                },
+                {
+                  "expected": "Customer#001136716",
+                  "actual": "Customer#001112827",
+                  "row": 2
+                }
+              ]
+            },
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "715001.8825",
+                  "actual": "531793.4135",
+                  "abs_diff": 183208.47,
+                  "rel_diff_pct": 25.6235,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "830214.1117",
+                  "actual": "523642.4878",
+                  "abs_diff": 306571.62,
+                  "rel_diff_pct": 36.9268,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "695043.5606",
+                  "actual": "569126.3316",
+                  "abs_diff": 125917.23,
+                  "rel_diff_pct": 18.1165,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "c_acctbal": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "3564.90",
+                  "actual": "2068.90",
+                  "abs_diff": 1496,
+                  "rel_diff_pct": 41.9647,
+                  "row": 0
+                },
+                {
+                  "expected": "772.17",
+                  "actual": "1361.76",
+                  "abs_diff": 589.59,
+                  "rel_diff_pct": 76.3549,
+                  "row": 1
+                },
+                {
+                  "expected": "5886.01",
+                  "actual": "3257.63",
+                  "abs_diff": 2628.38,
+                  "rel_diff_pct": 44.6547,
+                  "row": 2
+                }
+              ]
+            },
+            "n_name": {
+              "category": "exact",
+              "failure_count": 19,
+              "samples": [
+                {
+                  "expected": "BRAZIL",
+                  "actual": "JORDAN",
+                  "row": 0
+                },
+                {
+                  "expected": "JORDAN",
+                  "actual": "UNITED KINGDOM",
+                  "row": 1
+                },
+                {
+                  "expected": "CHINA",
+                  "actual": "INDONESIA",
+                  "row": 2
+                }
+              ]
+            },
+            "c_address": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "YpDpv0sP14F5xMUQbkDV,XGcMJypFV6jH",
+                  "actual": "sdeCfOgE45c8TK6ShHX6ud4gHMoH1K39r",
+                  "row": 0
+                },
+                {
+                  "expected": "JpGQT3IHoogqB3ZMrSrzhBrVFObr",
+                  "actual": "ThP3s6XZlJ9 k3fMfrdMeG6JXwvYqKwFq",
+                  "row": 1
+                },
+                {
+                  "expected": "uAIqfk27UKRIIBZLUvKDfUOyh",
+                  "actual": "CNJ mv7EW7 CDF,YqGglwMMVewyV",
+                  "row": 2
+                }
+              ]
+            },
+            "c_phone": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "12-941-212-8350",
+                  "actual": "23-631-786-6025",
+                  "row": 0
+                },
+                {
+                  "expected": "23-199-655-3770",
+                  "actual": "33-721-434-8305",
+                  "row": 1
+                },
+                {
+                  "expected": "28-729-762-5783",
+                  "actual": "19-965-849-1871",
+                  "row": 2
+                }
+              ]
+            },
+            "c_comment": {
+              "category": "exact",
+              "failure_count": 20,
+              "samples": [
+                {
+                  "expected": "y slyly regular multipliers. furiously regular deposits nag final excuses. slyly special accounts haggle re",
+                  "actual": "yly. even requests nag quickly ironic deposits. regular packages sleep carefully according to the even accoun",
+                  "row": 0
+                },
+                {
+                  "expected": "ests. quickly ironic deposits along the special requests a",
+                  "actual": "und the special, ironic packages. furiously ironic instructions wake against the ironic, final requests. unusu",
+                  "row": 1
+                },
+                {
+                  "expected": "e foxes. bold orbits impress slyly about the regular, regular theodolites; carefully exp",
+                  "actual": "pecial deposits. unusual, regular foxes are furiously according to the exp",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load": 352.53,
+    "build_nation_lookup": 0,
+    "build_customer_lookup": 927.68,
+    "build_orders_lookup": 75.31,
+    "scan_filter_join_agg": 248.08,
+    "sort": 58.23,
+    "output": 13.94,
+    "total": 1675.88
+  },
+  "timing_ms": 1661.94
+}

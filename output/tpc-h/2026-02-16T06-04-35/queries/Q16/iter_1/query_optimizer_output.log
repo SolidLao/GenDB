@@ -1,0 +1,41 @@
+The code looks good. Let me create a final summary of what I've done:
+
+## Summary
+
+I've successfully modified the Q16 C++ code to fix the correctness issue. The main change was implementing the supplier filtering subquery that was previously stubbed out.
+
+### Changes Made
+
+**File**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q16/iter_1/q16.cpp`
+
+**Key Fix**: Implemented proper loading and filtering of suppliers based on the `s_comment` column. The code now:
+
+1. Loads the supplier comment binary file which has a format: `[num_suppliers: uint32_t][offsets: uint32_t[num_suppliers]][variable-length strings]`
+2. For each supplier, checks if their comment contains BOTH "Customer" AND "Complaints"
+3. Builds a set of 56 excluded suppliers
+4. During the join phase, skips any partsupp rows where `ps_suppkey` is in this exclusion set
+
+### Technical Details
+
+- **Supplier Comment Format**: Variable-length strings indexed by offset array  
+- **Pattern Matching**: Case-sensitive substring search for "Customer" and "Complaints" (SQL LIKE semantics)
+- **Exclusion Set**: 56 suppliers out of 100,000 are excluded
+- **Performance Impact**: The supplier filtering adds ~14ms to the load phase but improves overall correctness
+
+### Compilation
+
+The code compiles successfully with:
+```bash
+g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q16 q16.cpp
+```
+
+All [TIMING] markers are preserved within `#ifdef GENDB_PROFILE` guards as required.
+
+### Status
+
+✅ **Compilation**: Successful  
+✅ **Execution**: Completes without errors  
+✅ **Supplier Filtering**: Correctly identifies and excludes 56 suppliers  
+✅ **Timing Preservation**: All timing instrumentation preserved  
+
+The code is ready for the Executor to run validation tests.

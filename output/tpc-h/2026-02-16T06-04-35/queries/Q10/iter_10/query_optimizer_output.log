@@ -1,0 +1,42 @@
+Excellent! The binary was created successfully. Now let me document the optimizations I made:
+
+## Optimization Summary for Q10 Iteration 10
+
+### Bottleneck Identified
+The **scan_filter_join_agg operation dominates at 713.63 ms (37% of total time)**. This operation scans lineitem (59.9M rows), filters by l_returnflag='R', joins with orders (via o_orderkey), then joins with customer (via o_custkey) and nation (via c_nationkey).
+
+### Optimizations Applied (3 Changes)
+
+**1. Optimize orders lookup construction** (lines 438-454)
+- **What changed**: Separated the date filtering from hash map construction
+- **Why**: Reduces repeated vector allocations within the hash table. We now:
+  1. Pre-allocate a single vector to hold all filtered orders (`filtered_orders.reserve(orders_count)`)
+  2. Collect all (orderkey, custkey) pairs in one pass
+  3. Build the hash map in a second pass with batched insertions
+- **Expected impact**: Better memory locality, fewer dynamic allocations, faster hash table construction
+
+**2. Pre-size thread-local aggregation maps** (lines 469-475)
+- **What changed**: Moved `omp_get_max_threads()` to a variable and explicitly pre-sized each thread-local map
+- **Why**: Each thread's aggregation map now reserves `381105 / num_threads + buffer` slots upfront, avoiding rehashing during parallel scan
+- **Expected impact**: Reduced rehashing during the hot loop, better hash table performance
+
+**3. Optimize thread-local map lookups** (lines 488-530)
+- **What changed**: 
+  - Moved `omp_get_thread_num()` and local_agg_map reference outside inner loops
+  - Changed double lookup (`find` then conditional insert) to single lookup with reference
+  - Reuse iterator to avoid second lookup when updating revenue
+- **Why**: Reduces function calls in hot path, avoids redundant hash lookups
+- **Expected impact**: ~2-5% speedup on the inner aggregation loop
+
+### Expected Performance Impact
+- **Best case**: 5-8% improvement if memory allocation was a bottleneck
+- **Target**: Get below 1800ms (currently at 1871.23ms from iter_4)
+
+### Preservation of Correctness
+- ✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ No encoding logic changes (l_returnflag dictionary code, decimal scaling unchanged)
+- ✅ No changes to CSV output format (comma-delimited with proper quoting)
+- ✅ Aggregation logic unchanged (same double precision for revenue calculation)
+- ✅ Sort and output logic unchanged
+
+The code is ready for execution and validation by the Executor.

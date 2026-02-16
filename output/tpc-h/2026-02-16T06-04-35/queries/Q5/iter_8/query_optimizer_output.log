@@ -1,0 +1,34 @@
+Perfect! The fix has been applied. Now let me write a summary of what was fixed:
+
+## Summary of Correctness Fix (Iteration 8)
+
+### Problem Identified
+The code had a **critical semantic correctness bug** - it was not enforcing the join constraint `c_nationkey = s_nationkey` from the Q5 SQL query. This caused the code to include lineitems where the supplier is in ASIA but the customer could be in any nation, resulting in vastly inflated revenue values.
+
+### What Was Fixed
+
+**Line 252-254 (Original)**: Had a TODO comment that skipped customer nation matching:
+```cpp
+// TODO: Verify customer nation matches supplier nation
+// (c_nationkey = s_nationkey)
+// For now, skip this check (iteration 0 correctness focus)
+```
+
+**Implemented Solution**:
+1. **Added PHASE 5**: New step that builds a `customer_to_nation` map by reading all customer records (1.5M rows) and indexing them by customer key
+2. **Updated PHASE 6 (scan_join_aggregate)**: Added verification logic:
+   - Lookup customer key from the order record
+   - Get customer's nation key from the `customer_to_nation` map
+   - **Enforce constraint**: Skip lineitem if `c_nk != nk` (customer nation ≠ supplier nation)
+
+### Expected Impact
+This fix changes the query from including all ASIA suppliers across all customers to correctly filtering only lineitems where both the supplier AND customer are in the same ASIA nation. This dramatically reduces the result and aligns with the TPC-H Q5 specification.
+
+- **Expected rows**: Still 5 nations (INDIA, CHINA, VIETNAM, JAPAN, INDONESIA)
+- **Expected revenue values**: Much smaller (e.g., INDIA: 536862587.9995 instead of 13463204022.22)
+
+### Code Quality
+- All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- Encoding logic unchanged
+- No performance optimization attempted until correctness is verified
+- Compilation successful with O3 + native optimizations

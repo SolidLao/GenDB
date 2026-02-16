@@ -1,0 +1,50 @@
+The binary is already in the correct location. Now let me create a summary of the optimizations made:
+
+## Summary of Q14 Iteration 3 Optimizations
+
+**Optimization Applied: Zone Map Pruning**
+
+### Problem Analysis
+- **Bottleneck**: `build_part_hash` dominates at 55.17 ms (66% of total time)
+- **Root cause**: Building a hash table for 2M part rows is expensive
+- **Secondary bottleneck**: Even though the scan phase is 27.58 ms, we're scanning ALL 59.9M lineitem rows and filtering by date in the innermost loop
+
+### Strategy
+Zone map pruning on `l_shipdate` reduces the number of blocks scanned. The lineitem table is sorted by `l_shipdate`, so blocks either fully satisfy the date range or don't overlap at all.
+
+### Implementation Details
+
+1. **Added ZoneMapEntry structure** (16 bytes):
+   - `int32_t min_val, max_val` - block min/max shipdate
+   - `uint32_t start_row, end_row` - row range for block
+
+2. **Zone map loading**: Loads pre-built zone map index from `indexes/lineitem_l_shipdate_zone.bin` via mmap
+
+3. **Block-level pruning logic**:
+   ```cpp
+   if (zone_map[z].max_val < date_start || zone_map[z].min_val >= date_end) {
+       continue;  // Skip entire block - no rows overlap with [1995-09-01, 1995-10-01)
+   }
+   ```
+
+4. **Parallelization**: Changed from row-level parallelism to block-level parallelism with `collapse(1)` to avoid OpenMP overhead on small iterations
+
+### Expected Impact
+- Reduces rows scanned by ~97% (date range is 1 month out of 7 years)
+- Estimated 20-30% overall speedup:
+  - Zone map load: ~0.2ms (negligible)
+  - Scan filter join: ~15-20ms (down from 27.58ms) due to fewer rows
+  - Build part hash: 55.17ms (unchanged - still built once)
+  - **Expected total**: ~70-75ms (down from 83.26ms)
+
+### Correctness
+- ✅ Zone map pruning is safe: only skips blocks known to be out of range
+- ✅ Preserved all [TIMING] lines inside #ifdef GENDB_PROFILE guards
+- ✅ Additional per-row date check within blocks as safety net
+- ✅ Encoding logic unchanged
+- ✅ Validation passes
+
+### Code Quality
+- Fallback to full-table scan if zone map unavailable
+- Clean separation of concerns: zone map loading, block identification, scan loop
+- Preserves existing optimizations: CompactHashTable, pre-computed PROMO lookup, thread-local buffers

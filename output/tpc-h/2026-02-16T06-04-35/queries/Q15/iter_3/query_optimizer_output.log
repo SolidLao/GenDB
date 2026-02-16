@@ -1,0 +1,35 @@
+Excellent! The code is properly modified. Let me create a summary of the optimization:
+
+## Summary of Iteration 3 Optimization
+
+**What was optimized:**
+
+1. **Zone Map Block Pruning** - Added efficient block-level skipping for the `l_shipdate` column:
+   - Loads the pre-built `lineitem_l_shipdate_zone.bin` index (if available)
+   - Each zone map entry contains (min_val, max_val, start_row, end_row)
+   - Skip logic: `if (zone.max_val < date_1996_01_01 || zone.min_val >= date_1996_04_01) continue`
+   - This avoids touching rows outside the date range [1996-01-01, 1996-04-01)
+   - Expected benefit: ~91 days out of ~9,861 days = ~99% of blocks can be skipped
+   - Impact: Eliminates I/O and cache misses for blocks entirely outside the date range
+
+2. **Graceful Fallback** - If zone map file is missing, the code falls back to full-scan processing (preserves baseline correctness)
+
+**Key Design Decisions:**
+- Pre-compute which blocks to process before parallel loop (avoids per-thread zone map checks)
+- Maintain existing parallel aggregation with thread-local hash tables + critical section merge (proven approach)
+- All [TIMING] lines preserved inside #ifdef GENDB_PROFILE guards
+- No changes to encoding logic or output format (comma-delimited CSV)
+
+**Why this differs from Iteration 2:**
+- Iteration 2 attempted the `io_bound` category and failed validation
+- Iteration 3 still targets `io_bound` but with a corrected, simpler approach focused purely on zone map pruning
+- The zone map skip logic is based directly on the storage guide layout: `(min_val, max_val, start_row, end_row)` with proper range comparisons
+
+**Expected Impact:**
+- Baseline (Iter 1): 524.68 ms (scan_filter: 519.20 ms)
+- Target: ~5-10 ms for scan_filter (massive speedup due to block skipping)
+- If zone map unavailable: Falls back to baseline performance
+
+**Compilation:** ✅ SUCCESS - No errors
+
+The binary is ready for execution at: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T06-04-35/queries/Q15/iter_3/q15`

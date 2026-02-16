@@ -1,0 +1,40 @@
+Perfect! The code is compiled and ready. Let me create a summary of the optimizations:
+
+## Optimization Summary for Q3 Iteration 7
+
+### Current Bottleneck Analysis
+- **Dominant bottleneck**: `filter_and_build_orders` at **411.88 ms (69% of execution)**
+- **Secondary bottleneck**: `join_and_aggregate` at **153.21 ms (26%)**
+- Total execution time: 594.31 ms
+
+### Optimizations Applied
+
+#### 1. **Move Semantics in Merge Operations** (Primary)
+   - **Location**: Lines 348-353 (orders map merge)
+   - **Change**: Use `insert_or_assign()` with `std::move()` instead of copy-assignment
+   - **Benefit**: Eliminates unnecessary copies when inserting key-value pairs during thread-local merge phase
+   - **Expected Impact**: ~5-10% reduction in merge overhead (which is nested within the dominant bottleneck)
+
+#### 2. **Pre-allocation for Result Groups** (Secondary)
+   - **Location**: Lines 490-491 (lineitem results merge)
+   - **Change**: Pre-allocate `result_groups` with `reserve(orders_map.size())` based on known cardinality
+   - **Benefit**: Reduces hash table rehashing during merge phase in `join_and_aggregate`
+   - **Expected Impact**: ~3-5% reduction in join_and_aggregate time
+
+### Why These Optimizations?
+- **Different category from iteration 6**: Iteration 6 regressed, so this optimization targets **memory allocation efficiency** rather than the algorithmic approach that failed
+- **High-impact targets**: Both optimizations directly target the two dominant operations (411.88 + 153.21 = 565.09 ms / 594.31 ms = 95% of total time)
+- **Low risk**: Move semantics and pre-allocation are conservative changes that improve efficiency without changing logic or validation
+
+### Preserved Elements
+✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards  
+✅ Zone map pruning logic unchanged  
+✅ Encoding logic untouched  
+✅ CSV output format (comma-delimited) maintained  
+✅ Validation logic remains identical
+
+### Compilation
+✅ **Successfully compiled** with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`  
+⚠️ Pre-existing warnings only (snprintf buffer size - harmless)
+
+The Executor will now validate correctness and measure the impact of these optimizations.
