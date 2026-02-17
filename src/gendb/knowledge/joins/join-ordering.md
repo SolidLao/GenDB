@@ -40,10 +40,10 @@ Generate a small C++ sampling program that:
 // sampling_join_order.cpp - Join order sampling
 // For each candidate join order, count intermediate result sizes
 
-// Example for TPC-H Q3 (customer ⋈ orders ⋈ lineitem):
-// Order A: customer → orders(filtered) → lineitem(filtered)
-// Order B: orders(date filter) → customer → lineitem(shipdate filter)
-// Order C: lineitem(shipdate filter) → orders(date filter) → customer
+// Example for a 3-table star schema (dim_filtered ⋈ bridge_table ⋈ fact_table):
+// Order A: dim_filtered → bridge_table(filtered) → fact_table(filtered)
+// Order B: bridge_table(date filter) → dim_filtered → fact_table(date filter)
+// Order C: fact_table(date filter) → bridge_table(date filter) → dim_filtered
 
 // For each order:
 //   1. Apply single-table filters to get filtered sizes
@@ -54,23 +54,23 @@ Generate a small C++ sampling program that:
 // Choose order with smallest total intermediate result size
 ```
 
-### Example: TPC-H Q3
+### Example: 3-Table Star Schema Join
 
 ```sql
-SELECT ... FROM customer, orders, lineitem
-WHERE c_mktsegment = 'BUILDING'
-  AND c_custkey = o_custkey
-  AND l_orderkey = o_orderkey
-  AND o_orderdate < '1995-03-15'
-  AND l_shipdate > '1995-03-15'
+SELECT ... FROM dim_table, bridge_table, fact_table
+WHERE dim_table.category = 'TARGET'
+  AND dim_table.key = bridge_table.dim_fk
+  AND fact_table.bridge_fk = bridge_table.key
+  AND bridge_table.date_col < DATE 'cutoff'
+  AND fact_table.date_col > DATE 'cutoff'
 ```
 
 Candidate orders to sample:
-- **A**: customer(segment='BUILDING') → orders(date<cutoff) → lineitem(shipdate>cutoff)
-- **B**: orders(date<cutoff) → customer(segment='BUILDING') → lineitem(shipdate>cutoff)
-- **C**: lineitem(shipdate>cutoff) → orders(date<cutoff) → customer(segment='BUILDING')
+- **A**: dim_table(category='TARGET') → bridge_table(date<cutoff) → fact_table(date>cutoff)
+- **B**: bridge_table(date<cutoff) → dim_table(category='TARGET') → fact_table(date>cutoff)
+- **C**: fact_table(date>cutoff) → bridge_table(date<cutoff) → dim_table(category='TARGET')
 
-Sampling reveals: Order B is typically best because the date filter on orders is very selective (~48% of rows), and joining the smaller filtered orders with customer (via FK) produces a small intermediate that probes efficiently into lineitem.
+Sampling reveals the best order by measuring actual intermediate sizes. The most selective filter often determines which table to start from, and FK relationships help predict intermediate sizes.
 
 ### Implementation Steps
 1. Compile and run the sampling program (takes <1 second on 100K row samples)

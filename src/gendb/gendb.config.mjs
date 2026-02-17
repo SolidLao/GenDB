@@ -13,7 +13,7 @@ export const defaults = {
   agentModels: {
     workload_analyzer: "haiku",
     storage_designer: "haiku",
-    code_generator: "haiku",
-    query_optimizer: "haiku",
+    code_generator: "sonnet",
+    query_optimizer: "sonnet",
   },
 };

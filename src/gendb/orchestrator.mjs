@@ -235,12 +235,6 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
 
         console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
 
-        // Log agent output to file for debugging (replaces agent-generated docs)
-        if (cwd) {
-          const logPath = resolve(cwd, `${name.replace(/[\s/]+/g, "_").toLowerCase()}_output.log`);
-          import("fs/promises").then(fs => fs.writeFile(logPath, resultText).catch(() => {}));
-        }
-
         resolveP({ result: resultText, durationMs, tokens, costUsd });
       }
     });
@@ -519,7 +513,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
   const workloadAnalysisPath = resolve(runDir, "workload_analysis.json");
 
   const analyzerUserPrompt = [
-    "Analyze the following TPC-H workload.",
+    "Analyze the following OLAP workload.",
     "",
     `## Optimization Target: ${args.optimizationTarget}`,
     "",
@@ -670,118 +664,6 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
 
   return { workloadAnalysisPath, storageDesignPath };
 }
-
-// ---------------------------------------------------------------------------
-// Storage Issue Detection & Re-ingestion
-// ---------------------------------------------------------------------------
-
-/**
- * Scan iteration 0 directories for storage_issue.json files.
- * Returns array of { queryId, issue, details } or empty array if no issues.
- */
-async function detectStorageIssues(parsedQueries, runDir) {
-  const issues = [];
-  for (const query of parsedQueries) {
-    const issueFile = resolve(runDir, "queries", query.id, "iter_0", "storage_issue.json");
-    const issue = await readJSON(issueFile);
-    if (issue) {
-      issues.push({ queryId: query.id, ...issue });
-    }
-  }
-  return issues;
-}
-
-/**
- * Re-invoke Storage/Index Designer with error context to fix ingestion bugs.
- */
-async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, detectedIssues, parsedQueries) {
-  console.log(`\n[Orchestrator] === RE-INGESTION: Fixing ${detectedIssues.length} storage issue(s) ===`);
-
-  // Read previous design for reference
-  const previousDesign = await readJSON(storageDesignPath);
-
-  // Clear corrupted storage
-  if (existsSync(args.gendbDir)) {
-    rmSync(args.gendbDir, { recursive: true, force: true });
-    console.log(`[Orchestrator] Cleared corrupted gendb storage at ${args.gendbDir}`);
-  }
-
-  const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
-  const generatedIngestDir = resolve(runDir, "generated_ingest");
-  const queryGuidesDir = resolve(runDir, "query_guides");
-
-  const issuesSummary = detectedIssues.map(i =>
-    `- ${i.queryId}: ${i.issue} — ${i.details}`
-  ).join("\n");
-
-  const designerUserPrompt = [
-    "Re-design and re-ingest: the previous ingestion produced CORRUPTED data. Fix the issues below.",
-    "",
-    "## DETECTED STORAGE ISSUES (MUST FIX ALL)",
-    issuesSummary,
-    "",
-    "## Previous Design (for reference — do NOT repeat the same bugs)",
-    "```json",
-    JSON.stringify(previousDesign, null, 2),
-    "```",
-    "",
-    `## Optimization Target: ${args.optimizationTarget}`,
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    `Read relevant knowledge files (especially storage/ and indexing/) to inform your design decisions.`,
-    "",
-    "## Workload Analysis",
-    `Read the workload analysis from: ${workloadAnalysisPath}`,
-    "",
-    "## Schema",
-    "```sql",
-    schema.trim(),
-    "```",
-    "",
-    `## Queries in Workload`,
-    `The following queries will be optimized in Phase 2. Generate a per-query storage guide for each.`,
-    ...(parsedQueries || []).map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``),
-    ``,
-    `## Query Guides Output Directory`,
-    `Write per-query storage guides to: ${queryGuidesDir}`,
-    `Each file: <QUERY_ID>_storage_guide.md`,
-    ``,
-    `## Data Directory (source .tbl files)`,
-    `${args.dataDir}`,
-    "",
-    `## GenDB Storage Directory (output)`,
-    `Write binary columnar data to: ${args.gendbDir}`,
-    "",
-    `## Output Directory for Generated Code`,
-    `Write ingest.cpp, build_indexes.cpp, and Makefile to: ${generatedIngestDir}`,
-    "",
-    `IMPORTANT: You MUST:`,
-    `1. Write your JSON design to EXACTLY this path: ${storageDesignPath}`,
-    `2. Generate ingest.cpp, build_indexes.cpp, and Makefile in: ${generatedIngestDir}`,
-    `3. Compile: cd ${generatedIngestDir} && make clean && make all`,
-    `4. Run ingestion: cd ${generatedIngestDir} && ./ingest ${args.dataDir} ${args.gendbDir}`,
-    `5. Run index building: cd ${generatedIngestDir} && ./build_indexes ${args.gendbDir}`,
-    `6. Generate per-query storage guides in: ${queryGuidesDir}`,
-    "",
-    `Pay special attention to the detected issues above. Verify that the fixes work by spot-checking the binary output.`,
-  ].join("\n");
-
-  const sdResult = await runAgent(storageDesignerConfig.name, {
-    systemPrompt: designerSystemPrompt,
-    userPrompt: designerUserPrompt,
-    allowedTools: storageDesignerConfig.allowedTools,
-    model: getAgentModel("storage_designer", args),
-    cwd: runDir,
-  });
-  recordAgentTelemetry("phase2", "storage_designer_reingest", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
-
-  const design = await readJSON(storageDesignPath);
-  if (!design) {
-    throw new Error("Re-ingestion failed — could not read/parse storage_design.json after re-ingest.");
-  }
-
-  console.log(`[Orchestrator] Re-ingestion completed. Tables: ${Object.keys(design.tables || {}).length}`);
-}
-
 
 // ---------------------------------------------------------------------------
 // Phase 2: Online Per-Query Parallel Optimization
@@ -1013,13 +895,6 @@ async function runQueryFullPipeline(
       `## Output`,
       `- Write .cpp file to: ${iterCppPath}`,
       ``,
-      `## Critical Reminders`,
-      `- [TIMING] instrumentation REQUIRED: wrap each major op in #ifdef GENDB_PROFILE guards (see system prompt pattern)`,
-      `- DATE columns = int32_t epoch days (values >3000). Compare as integers. YYYY-MM-DD only for CSV output.`,
-      `- DECIMAL columns = int64_t × scale_factor. Compute thresholds yourself. NEVER use double.`,
-      `- Dictionary strings: load _dict.txt at runtime to find codes. NEVER hardcode dictionary codes.`,
-      `- CSV: comma-delimited, include header row, 2 decimal places for monetary values.`,
-      ``,
       `## Validation Loop`,
       `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${queryId.toLowerCase()} ${cppName}`,
       `Run → Validate correctness (up to 2 fix attempts)`,
@@ -1203,15 +1078,25 @@ async function runQueryFullPipeline(
         "## Input Files",
         `- Execution results (timing + validation): ${bestExecResultsPath}`,
         `- Optimization history: ${historyPath}`,
+        // Pre-computed timing summary so optimizer doesn't have to parse JSON
+        (() => {
+          const ot = bestExecResults?.operation_timings || {};
+          const total = parseFloat(ot.total || bestExecResults?.timing_ms || 0);
+          if (total <= 0) return "";
+          const lines = ["", "## Current Performance Profile"];
+          let dominantOp = "", dominantPct = 0;
+          for (const [op, ms] of Object.entries(ot)) {
+            if (op === "total" || op === "output") continue;
+            const pct = ((parseFloat(ms) / total) * 100).toFixed(0);
+            lines.push(`- ${op}: ${Math.round(parseFloat(ms))}ms (${pct}%)`);
+            if (parseFloat(ms) > dominantPct) { dominantPct = parseFloat(ms); dominantOp = op; }
+          }
+          lines.push(`- total: ${Math.round(total)}ms`);
+          if (dominantOp) lines.push(`Dominant: ${dominantOp} (${((dominantPct / total) * 100).toFixed(0)}%)`);
+          return lines.join("\n");
+        })(),
         formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, bestExecResults?.timing_ms),
         "",
-        `## Critical Reminders`,
-        `- Read optimization_history.json before planning — do not repeat failed approaches`,
-        `- After regression, try a DIFFERENT optimization category than what failed`,
-        `- Preserve all [TIMING] lines inside #ifdef GENDB_PROFILE guards`,
-        `- Do NOT change encoding logic unless fixing a reported bug`,
-        `- Comma-delimited CSV output — do not change delimiter`,
-        ``,
         `## Hardware Configuration`,
         `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
         `- Disk type: ${hw.disk_type || 'unknown'}`,

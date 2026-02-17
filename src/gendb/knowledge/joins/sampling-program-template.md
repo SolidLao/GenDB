@@ -45,14 +45,14 @@ int main(int argc, char* argv[]) {
     const size_t SAMPLE_SIZE = 100000; // rows to sample per table
 
     // 1. Load columns (sample first SAMPLE_SIZE rows)
-    // Example for Q3: customer, orders, lineitem
-    // MappedColumn<int32_t> c_custkey(gendb_dir + "/customer.gendb/c_custkey.col", c_rows);
+    // Example for a 3-table join: table_A, table_B, table_C
+    // MappedColumn<int32_t> table_A_key(gendb_dir + "/table_A.gendb/key.col", table_A_rows);
     // ... load all join key columns and filter columns
 
     // 2. Apply single-table predicates to get filtered row indices
-    // std::vector<uint32_t> filtered_customers, filtered_orders, filtered_lineitem;
-    // for (size_t i = 0; i < std::min(SAMPLE_SIZE, c_rows); i++) {
-    //     if (c_mktsegment_code[i] == target_code) filtered_customers.push_back(i);
+    // std::vector<uint32_t> filtered_A, filtered_B, filtered_C;
+    // for (size_t i = 0; i < std::min(SAMPLE_SIZE, table_A_rows); i++) {
+    //     if (table_A_filter[i] == target_value) filtered_A.push_back(i);
     // }
 
     // 3. Test each join order
@@ -64,36 +64,36 @@ int main(int argc, char* argv[]) {
     };
     std::vector<JoinOrder> orders;
 
-    // Order A: customer -> orders -> lineitem
+    // Order A: table_A -> table_B -> table_C
     {
-        // Build hash on filtered customers (c_custkey)
-        std::unordered_set<int32_t> customer_keys;
-        for (auto idx : filtered_customers) customer_keys.insert(c_custkey.data[idx]);
+        // Build hash on filtered table_A keys
+        std::unordered_set<int32_t> A_keys;
+        for (auto idx : filtered_A) A_keys.insert(table_A_key.data[idx]);
 
-        // Probe with filtered orders
+        // Probe with filtered table_B
         std::vector<uint32_t> intermediate;
-        for (auto idx : filtered_orders) {
-            if (customer_keys.count(o_custkey.data[idx])) intermediate.push_back(idx);
+        for (auto idx : filtered_B) {
+            if (A_keys.count(table_B_fk.data[idx])) intermediate.push_back(idx);
         }
         size_t inter1 = intermediate.size();
 
-        // Build hash on intermediate order keys
-        std::unordered_set<int32_t> order_keys;
-        for (auto idx : intermediate) order_keys.insert(o_orderkey.data[idx]);
+        // Build hash on intermediate keys
+        std::unordered_set<int32_t> B_keys;
+        for (auto idx : intermediate) B_keys.insert(table_B_key.data[idx]);
 
-        // Probe with filtered lineitem
+        // Probe with filtered table_C
         size_t inter2 = 0;
-        for (auto idx : filtered_lineitem) {
-            if (order_keys.count(l_orderkey.data[idx])) inter2++;
+        for (auto idx : filtered_C) {
+            if (B_keys.count(table_C_fk.data[idx])) inter2++;
         }
 
-        orders.push_back({"customer->orders->lineitem", inter1, inter2, inter1 + inter2});
+        orders.push_back({"A->B->C", inter1, inter2, inter1 + inter2});
     }
 
-    // Order B: orders -> customer -> lineitem
+    // Order B: table_B -> table_A -> table_C
     // ... similar pattern
 
-    // Order C: lineitem -> orders -> customer
+    // Order C: table_C -> table_B -> table_A
     // ... similar pattern
 
     // 4. Find best order (smallest total intermediate)

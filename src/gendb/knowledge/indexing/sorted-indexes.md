@@ -7,7 +7,7 @@ Sorted indexes maintain keys in sorted order, enabling efficient range scans, bi
 
 B+ Trees are the best index for **range predicates** (date ranges, value ranges, ordered scans):
 - **Structure**: Internal nodes contain routing keys only; all data in leaf nodes; leaves linked for sequential scan
-- **Fan-out**: Typically 100-1000 keys per node (sized to cache line or page), giving O(log_F N) height — 60M rows with fanout 256 = 3 levels
+- **Fan-out**: Typically 100-1000 keys per node (sized to cache line or page), giving O(log_F N) height — N rows (from workload analysis) with fanout 256 = typically 3-4 levels
 - **Range scans**: Find start key in O(log N), then follow leaf links — ideal for `WHERE date BETWEEN X AND Y`
 - **Point lookups**: O(log N), comparable to hash indexes for practical sizes
 - **Ordered iteration**: Natural — just scan leaf level left-to-right
@@ -27,7 +27,7 @@ B+ Trees are the best index for **range predicates** (date ranges, value ranges,
 
 For GenDB's pre-built binary columns, B+ Tree construction is straightforward:
 
-1. **If data is already sorted by the index column** (e.g., lineitem sorted by l_shipdate): The column file IS the leaf level. Only build internal routing nodes.
+1. **If data is already sorted by the index column** (e.g., fact table sorted by date column): The column file IS the leaf level. Only build internal routing nodes.
 2. **If data is not sorted**: Create a sorted index (key, position) array, then build internal nodes on top.
 
 **Internal node format** (binary):

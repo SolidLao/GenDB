@@ -18,7 +18,7 @@ General engines pay overhead that generated code eliminates entirely:
 
 4. **Known cardinalities**: Pre-size all data structures (hash tables, arrays, buffers) to exact or estimated sizes. No dynamic resizing.
 
-5. **Known value domains**: When a column has a small known domain (e.g., nation keys 0-24, status flags), use direct array lookup instead of hash tables. `value[key]` is faster than any hash probe.
+5. **Known value domains**: When a column has a small known domain (e.g., small-domain dimension keys, status flags), use direct array lookup instead of hash tables. `value[key]` is faster than any hash probe.
 
 6. **Fused pipelines**: Combine scan + filter + join + aggregate into tight loops. No materialization of intermediate results between operators.
 
@@ -59,6 +59,17 @@ std::unordered_map<int32_t, std::string> nation_names;
 // GOOD: Direct array — O(1), zero hash overhead
 std::string nation_names[25];  // nationkey 0-24
 ```
+
+## The Hand-Written Code Advantage
+
+Hand-written C++ has fundamental advantages over ANY general-purpose engine:
+1. **Query-specific data structures**: flat array for 25 keys, compact hash for 10K, pre-sized for 1M
+2. **Compile-time constants**: the compiler eliminates all type dispatch and branch misprediction
+3. **Loop fusion**: scan + filter + join + aggregate in ONE pass, zero intermediate materialization
+4. **Hardware-specific compilation**: `-march=native` enables AVX2 auto-vectorization, `-flto` enables cross-function inlining
+5. **Zero runtime overhead**: no parser, no catalog, no buffer pool, no lock manager
+
+If your generated code is slower than a general-purpose engine, the PLAN is wrong.
 
 ## When Generated Code Loses to General Engines
 If your code is slower, check these root causes (in order of impact):

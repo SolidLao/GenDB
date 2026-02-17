@@ -1,5 +1,55 @@
--- TPC-H Focused Queries (13 queries: 8 CRITICAL + 5 TARGET)
--- Full 22-query set available in queries_all.sql
+-- TPC-H Standard Queries (Q1–Q22) with default parameter substitutions
+-- SQL is written for cross-system portability (PostgreSQL, DuckDB, ClickHouse, Umbra, MonetDB)
+
+-- Q1: Pricing Summary Report
+SELECT
+    l_returnflag,
+    l_linestatus,
+    SUM(l_quantity) AS sum_qty,
+    SUM(l_extendedprice) AS sum_base_price,
+    SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    AVG(l_quantity) AS avg_qty,
+    AVG(l_extendedprice) AS avg_price,
+    AVG(l_discount) AS avg_disc,
+    COUNT(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus;
+
+-- Q2: Minimum Cost Supplier
+SELECT
+    s_acctbal,
+    s_name,
+    n_name,
+    p_partkey,
+    p_mfgr,
+    s_address,
+    s_phone,
+    s_comment
+FROM
+    part, supplier, partsupp, nation, region
+WHERE
+    p_partkey = ps_partkey
+    AND s_suppkey = ps_suppkey
+    AND p_size = 15
+    AND p_type LIKE '%BRASS'
+    AND s_nationkey = n_nationkey
+    AND n_regionkey = r_regionkey
+    AND r_name = 'EUROPE'
+    AND ps_supplycost = (
+        SELECT MIN(ps_supplycost)
+        FROM partsupp, supplier, nation, region
+        WHERE
+            p_partkey = ps_partkey
+            AND s_suppkey = ps_suppkey
+            AND s_nationkey = n_nationkey
+            AND n_regionkey = r_regionkey
+            AND r_name = 'EUROPE'
+    )
+ORDER BY s_acctbal DESC, n_name, s_name, p_partkey
+LIMIT 100;
 
 -- Q3: Shipping Priority
 SELECT
@@ -17,6 +67,22 @@ WHERE
 GROUP BY l_orderkey, o_orderdate, o_shippriority
 ORDER BY revenue DESC, o_orderdate
 LIMIT 10;
+
+-- Q4: Order Priority Checking
+SELECT
+    o_orderpriority,
+    COUNT(*) AS order_count
+FROM orders
+WHERE
+    o_orderdate >= DATE '1993-07-01'
+    AND o_orderdate < DATE '1993-07-01' + INTERVAL '3' MONTH
+    AND EXISTS (
+        SELECT * FROM lineitem
+        WHERE l_orderkey = o_orderkey
+          AND l_commitdate < l_receiptdate
+    )
+GROUP BY o_orderpriority
+ORDER BY o_orderpriority;
 
 -- Q5: Local Supplier Volume
 SELECT
@@ -74,6 +140,31 @@ FROM (
 GROUP BY supp_nation, cust_nation, l_year
 ORDER BY supp_nation, cust_nation, l_year;
 
+-- Q8: National Market Share
+SELECT
+    o_year,
+    SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END) / SUM(volume) AS mkt_share
+FROM (
+    SELECT
+        EXTRACT(YEAR FROM o_orderdate) AS o_year,
+        l_extendedprice * (1 - l_discount) AS volume,
+        n2.n_name AS nation
+    FROM part, supplier, lineitem, orders, customer, nation n1, nation n2, region
+    WHERE
+        p_partkey = l_partkey
+        AND s_suppkey = l_suppkey
+        AND l_orderkey = o_orderkey
+        AND o_custkey = c_custkey
+        AND c_nationkey = n1.n_nationkey
+        AND n1.n_regionkey = r_regionkey
+        AND r_name = 'AMERICA'
+        AND s_nationkey = n2.n_nationkey
+        AND o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
+        AND p_type = 'ECONOMY ANODIZED STEEL'
+) AS all_nations
+GROUP BY o_year
+ORDER BY o_year;
+
 -- Q9: Product Type Profit Measure
 SELECT
     nation,
@@ -119,6 +210,26 @@ GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
 ORDER BY revenue DESC
 LIMIT 20;
 
+-- Q11: Important Stock Identification
+SELECT
+    ps_partkey,
+    SUM(ps_supplycost * ps_availqty) AS value
+FROM partsupp, supplier, nation
+WHERE
+    ps_suppkey = s_suppkey
+    AND s_nationkey = n_nationkey
+    AND n_name = 'GERMANY'
+GROUP BY ps_partkey
+HAVING SUM(ps_supplycost * ps_availqty) > (
+    SELECT SUM(ps_supplycost * ps_availqty) * 0.0001000000
+    FROM partsupp, supplier, nation
+    WHERE
+        ps_suppkey = s_suppkey
+        AND s_nationkey = n_nationkey
+        AND n_name = 'GERMANY'
+)
+ORDER BY value DESC;
+
 -- Q12: Shipping Modes and Order Priority
 SELECT
     l_shipmode,
@@ -157,6 +268,43 @@ FROM (
 GROUP BY c_count
 ORDER BY custdist DESC, c_count DESC;
 
+-- Q14: Promotion Effect
+SELECT
+    100.00 * SUM(CASE
+        WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount)
+        ELSE 0
+    END) / SUM(l_extendedprice * (1 - l_discount)) AS promo_revenue
+FROM lineitem, part
+WHERE
+    l_partkey = p_partkey
+    AND l_shipdate >= DATE '1995-09-01'
+    AND l_shipdate < DATE '1995-09-01' + INTERVAL '1' MONTH;
+
+-- Q15: Top Supplier
+WITH revenue0 AS (
+    SELECT
+        l_suppkey AS supplier_no,
+        SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+    FROM lineitem
+    WHERE
+        l_shipdate >= DATE '1996-01-01'
+        AND l_shipdate < DATE '1996-01-01' + INTERVAL '3' MONTH
+    GROUP BY l_suppkey
+)
+SELECT
+    s_suppkey,
+    s_name,
+    s_address,
+    s_phone,
+    total_revenue
+FROM supplier, revenue0
+WHERE
+    s_suppkey = supplier_no
+    AND total_revenue = (
+        SELECT MAX(total_revenue) FROM revenue0
+    )
+ORDER BY s_suppkey;
+
 -- Q16: Parts/Supplier Relationship
 SELECT
     p_brand,
@@ -175,6 +323,20 @@ WHERE
     )
 GROUP BY p_brand, p_type, p_size
 ORDER BY supplier_cnt DESC, p_brand, p_type, p_size;
+
+-- Q17: Small-Quantity-Order Revenue
+SELECT
+    SUM(l_extendedprice) / 7.0 AS avg_yearly
+FROM lineitem, part
+WHERE
+    p_partkey = l_partkey
+    AND p_brand = 'Brand#23'
+    AND p_container = 'MED BOX'
+    AND l_quantity < (
+        SELECT 0.2 * AVG(l_quantity)
+        FROM lineitem
+        WHERE l_partkey = p_partkey
+    );
 
 -- Q18: Large Volume Customer
 SELECT
@@ -196,6 +358,39 @@ WHERE
 GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
 ORDER BY o_totalprice DESC, o_orderdate
 LIMIT 100;
+
+-- Q19: Discounted Revenue
+SELECT
+    SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM lineitem, part
+WHERE
+    (
+        p_partkey = l_partkey
+        AND p_brand = 'Brand#12'
+        AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+        AND l_quantity >= 1 AND l_quantity <= 1 + 10
+        AND p_size BETWEEN 1 AND 5
+        AND l_shipmode IN ('AIR', 'AIR REG')
+        AND l_shipinstruct = 'DELIVER IN PERSON'
+    )
+    OR (
+        p_partkey = l_partkey
+        AND p_brand = 'Brand#23'
+        AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+        AND l_quantity >= 10 AND l_quantity <= 10 + 10
+        AND p_size BETWEEN 1 AND 10
+        AND l_shipmode IN ('AIR', 'AIR REG')
+        AND l_shipinstruct = 'DELIVER IN PERSON'
+    )
+    OR (
+        p_partkey = l_partkey
+        AND p_brand = 'Brand#34'
+        AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+        AND l_quantity >= 20 AND l_quantity <= 20 + 10
+        AND p_size BETWEEN 1 AND 15
+        AND l_shipmode IN ('AIR', 'AIR REG')
+        AND l_shipinstruct = 'DELIVER IN PERSON'
+    );
 
 -- Q20: Potential Part Promotion
 SELECT

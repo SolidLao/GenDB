@@ -60,7 +60,7 @@ Write JSON analysis to the exact file path specified in the user prompt.
     { "columns": ["c1 DESC"], "limit": 10, "query": "Q3" }
   ],
   "filter_selectivities": [
-    { "table": "lineitem", "predicate": "l_shipdate <= '1998-09-01'", "estimated_selectivity": 0.98 }
+    { "table": "<table>", "predicate": "<col> <op> '<value>'", "estimated_selectivity": 0.98 }
   ],
   "optimization_hints": [ "Q1: <one-line strategy>", "Q3: <one-line strategy>" ],
   "summary": "<2-3 sentences: dominant patterns, bottleneck query, key optimization levers>"

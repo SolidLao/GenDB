@@ -5,7 +5,7 @@ Using flat arrays indexed directly by key value instead of hash tables, when the
 
 ## When to Use
 - Join or lookup key has a small known domain (<256 distinct values)
-- Examples: nation keys (0-24), region keys (0-4), status flags, return flags, ship modes
+- Examples: dimension keys with small domains (<50 distinct values from workload analysis), status/flag columns, category codes
 - The key values must be contiguous or near-contiguous non-negative integers
 
 ## When NOT to Use
@@ -15,14 +15,14 @@ Using flat arrays indexed directly by key value instead of hash tables, when the
 
 ## Anti-Pattern: Hash Table for Small Domains
 ```cpp
-// BAD: Hash table for 25 nation keys — massive overhead
-std::unordered_map<int32_t, NationData> nation_map;
-nation_map.reserve(25);
-for (int i = 0; i < 25; i++) {
-    nation_map[nationkey[i]] = {name[i], regionkey[i]};
+// BAD: Hash table for small-domain keys — massive overhead
+std::unordered_map<int32_t, DimData> dim_map;
+dim_map.reserve(MAX_DOMAIN);
+for (int i = 0; i < num_dim_keys; i++) {
+    dim_map[dim_key[i]] = {attr_a[i], attr_b[i]};
 }
-// Probe: hash computation + bucket traversal for each of 60M rows
-auto it = nation_map.find(row_nationkey);
+// Probe: hash computation + bucket traversal for each of N rows
+auto it = dim_map.find(row_dim_key);
 ```
 
 ## Key Implementation Ideas
@@ -30,53 +30,54 @@ auto it = nation_map.find(row_nationkey);
 ### Direct Array Lookup
 ```cpp
 // GOOD: Flat array indexed by key — O(1), zero hash overhead
-struct NationData { int32_t regionkey; int32_t name_code; };
-NationData nation_data[25];  // indexed by nationkey 0-24
+// Size from workload analysis: MAX_DOMAIN = max distinct values in column
+struct DimData { int32_t attr_a; int32_t attr_b; };
+DimData dim_data[MAX_DOMAIN];  // indexed by dimension key 0..MAX_DOMAIN-1
 
 // Load once
-for (int i = 0; i < 25; i++) {
-    nation_data[i] = {regionkey_col[i], name_col[i]};
+for (int i = 0; i < num_dim_keys; i++) {
+    dim_data[i] = {attr_a_col[i], attr_b_col[i]};
 }
 
 // Probe: single array access per row — no hash, no comparison
-int32_t rk = nation_data[row_nationkey].regionkey;
+int32_t a = dim_data[row_dim_key].attr_a;
 ```
 
 ### Direct Array for Aggregation
 ```cpp
-// For GROUP BY with <256 groups (e.g., by nationkey)
-int64_t sum_by_nation[25] = {};
-int64_t count_by_nation[25] = {};
+// For GROUP BY with <256 groups
+int64_t sum_by_group[MAX_DOMAIN] = {};
+int64_t count_by_group[MAX_DOMAIN] = {};
 
 for (int64_t i = 0; i < num_rows; i++) {
-    int32_t nk = nationkey_col[i];
-    sum_by_nation[nk] += value_col[i];
-    count_by_nation[nk]++;
+    int32_t gk = group_key_col[i];
+    sum_by_group[gk] += value_col[i];
+    count_by_group[gk]++;
 }
 ```
 
 ### Boolean Filter Array
 ```cpp
-// For semi-join with small domain: "nations in region EUROPE"
-bool nation_in_europe[25] = {};
-for (int i = 0; i < 25; i++) {
-    if (regionkey_col[i] == europe_regionkey) {
-        nation_in_europe[i] = true;
+// For semi-join with small domain: "dimension keys matching a category filter"
+bool dim_matches[MAX_DOMAIN] = {};
+for (int i = 0; i < num_dim_keys; i++) {
+    if (category_col[i] == target_category) {
+        dim_matches[i] = true;
     }
 }
 
 // Probe: single boolean check per row
-if (nation_in_europe[supp_nationkey[i]]) { ... }
+if (dim_matches[row_dim_key]) { ... }
 ```
 
 ### Multi-Field Lookup Array
 ```cpp
 // Store multiple fields per key
-struct RegionInfo {
+struct CategoryInfo {
     int32_t name_code;
     bool is_target;
 };
-RegionInfo region_info[5];  // 5 regions
+CategoryInfo category_info[MAX_DOMAIN];
 ```
 
 ## Performance Impact

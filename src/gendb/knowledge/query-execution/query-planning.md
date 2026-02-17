@@ -97,3 +97,31 @@ Step 7 (Physical): Parallelism strategy per operation
 ```
 
 Write this plan as a comment block at the top of the .cpp file, then implement the code to follow the plan exactly.
+
+## Part 4: Advanced OLAP Optimization Principles
+
+### Principle 1: Star Schema Optimization
+Filter dimension tables first (small) → build hash on filtered dimensions → probe fact table (largest).
+Never build hash table on the fact table. The fact table is always the probe side.
+
+### Principle 2: Semi-Join Reduction
+Before expensive multi-table joins, use bloom filters from small filtered dimensions to
+pre-filter the fact table. Can eliminate 90%+ of fact table rows before the real join.
+
+### Principle 3: Subquery Decorrelation Priority
+Every correlated subquery MUST be decorrelated into pre-computation + lookup:
+- Correlated: O(outer × inner) per-row re-evaluation
+- Decorrelated: O(inner + outer) with one-time pre-computation
+For self-referencing subqueries (inner references same table as outer): single-pass pre-computation.
+Combined EXISTS + NOT EXISTS on same table: ONE pass, TWO output structures.
+
+### Principle 4: Hash Table Build Cost Awareness
+Building hash table on N rows costs ~N × (hash + insert + cache miss).
+For N = 60M: 500-2000ms build time alone.
+Alternatives: pre-built index via mmap (0ms build), filter first (reduce N), array for small domains.
+
+### Principle 5: Parallel Aggregation Without Merge Bottleneck
+Thread-local hash tables + sequential merge is slow for many groups.
+- <256 groups: shared flat array with atomic add (no merge needed)
+- 256–10K groups: pre-partition by key hash, each thread owns a partition
+- >10K groups: concurrent hash table with CAS, or partition-based approach

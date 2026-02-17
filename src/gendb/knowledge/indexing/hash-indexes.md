@@ -16,7 +16,7 @@ Hash indexes provide O(1) average-case lookups by mapping keys to buckets using 
 
 ## Multi-Value Hash Indexes for Join Columns
 
-Join columns often have **duplicate keys** (e.g., `l_orderkey` in lineitem — ~4 rows per order). A naive one-slot-per-row design wastes space and scatters related positions. Use a **two-array design**:
+Join columns often have **duplicate keys** (e.g., foreign key column in fact table — multiple rows per dimension key). A naive one-slot-per-row design wastes space and scatters related positions. Use a **two-array design**:
 
 1. **Positions array**: All row positions grouped by key (contiguous per key)
 2. **Hash table**: Maps key → `{offset_into_positions_array, count}`

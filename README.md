@@ -10,11 +10,12 @@ GenDB takes a different approach to query execution: instead of routing queries 
 
 - **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
 - **Multi-agent architecture** — 4 specialized agents collaborate to analyze, generate, and optimize
+- **Separation of concerns** — agent prompts contain only identity, workflow, and correctness rules; all technique knowledge lives in the knowledge base
 - **Per-query storage guides** — Storage/Index Designer generates concise, strict-format markdown guides (~30-50 lines) listing data file paths, types, encodings, and index binary layouts for each query
 - **True per-query pipelining** — each query flows independently through CodeGen→Execute→[Optimize→Execute]* with no batch boundaries; LLM calls gated by semaphore, execution serialized via ExecutionQueue
-- **Per-query benchmark targets** — optimizer receives focused comparison table (current GenDB vs all engines for that specific query) instead of full 1300-line JSON dump
+- **Per-query benchmark targets** — optimizer receives focused comparison table (current GenDB vs all engines for that specific query) and pre-computed performance profile with dominant bottleneck
 - **Stall detection** — after 3 consecutive non-improving iterations with >5x gap to best engine, triggers architectural restructure via optimizer
-- **Anti-pattern scanning** — optimizer checks for 6 common anti-patterns (unordered_map, loop-based dates, eager string loading, redundant scans, hash tables for small domains, per-row subquery evaluation) before any analysis
+- **Architecture-level failure detection** — optimizer checks for high-impact structural problems (wrong build side, undecorelated subqueries, unused pre-built indexes, sequential merge bottlenecks) before micro-optimization
 - **Knowledge-driven autonomy** — agents receive deep domain knowledge (40+ technique files across 9 domains) and reason about which techniques to apply
 - **Dual-mode timing** — `[TIMING]` instrumentation uses `#ifdef GENDB_PROFILE` guards; compiled in during optimization iterations, stripped from final build
 - **Logical→Physical→Code planning** — Code Generator produces a logical plan and physical plan before writing any C++ code
@@ -45,10 +46,10 @@ Final Assembly: collect best .cpp per query → main.cpp + Makefile
 
 | Agent | Phase | Role |
 |-------|-------|------|
-| **Workload Analyzer** | 1 | Parses SQL workload, detects hardware, samples actual data for statistics |
-| **Storage/Index Designer** | 1 | Designs storage layout, generates + runs ingest.cpp and build_indexes.cpp, generates per-query storage guides |
-| **Code Generator** | 2 | Iteration 0: produces logical+physical query plan, then generates correct code with per-query benchmark targets |
-| **Query Optimizer** | 2 | Iterations 1+: three-level bottleneck analysis (anti-pattern scan → plan-level → operator-level), stall detection triggers architectural restructure |
+| **Workload Analyzer** | 1 | Parses SQL workload, detects hardware, samples actual data for statistics (70 lines) |
+| **Storage/Index Designer** | 1 | Designs storage layout, generates + runs ingest.cpp and build_indexes.cpp, generates per-query storage guides (112 lines) |
+| **Code Generator** | 2 | Iteration 0: produces logical+physical query plan, then generates correct code with per-query benchmark targets (82 lines) |
+| **Query Optimizer** | 2 | Iterations 1+: architecture-level failure detection, bottleneck-targeted optimization, stall detection triggers restructure (40 lines) |
 | **Executor** | 2 | Non-LLM function: compile → run → validate → parse `[TIMING]` output |
 
 ## Knowledge Base
@@ -61,7 +62,7 @@ Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 
 | **parallelism** | Thread parallelism (morsel-driven), SIMD (AVX2/SSE), data partitioning |
 | **storage** | Columnar vs row, compression, memory layout, string optimization, persistent binary storage, encoding handling |
 | **indexing** | Hash indexes (multi-value), B+ Trees & sorted indexes, zone maps, bloom filters |
-| **query-execution** | Query planning (logical→physical→code pipeline), vectorized execution, operator fusion, compiled queries, pipeline breakers, scan/filter optimization, sort/Top-K, subquery optimization |
+| **query-execution** | Query planning (logical→physical→code pipeline + OLAP optimization principles), vectorized execution, operator fusion, compiled queries, pipeline breakers, scan/filter optimization, sort/Top-K, subquery optimization |
 | **joins** | Hash join variants, sort-merge join, join ordering, sampling-based order determination |
 | **aggregation** | Hash aggregation, sorted aggregation, partial aggregation |
 | **data-structures** | Compact hash tables, arena allocation, flat structures |
@@ -74,4 +75,4 @@ Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 
 | DuckDB | 2,231ms | 1.0x |
 | GenDB | 37,817ms | 17x |
 
-GenDB beats DuckDB on Q6 (25ms vs 19ms) and Q14 (14ms vs 67ms). Primary optimization targets: Q21 (46x gap), Q18 (25x), Q10 (17x), Q3 (16x) — all complex multi-table joins where generated code uses suboptimal data structures and execution plans. All 22 queries produce correct results validated against DuckDB ground truth.
+GenDB beats DuckDB on Q6 (25ms vs 19ms) and Q14 (14ms vs 67ms). Primary optimization targets: Q21 (93x gap), Q20 (20x), Q7 (14x), Q12 (12x), Q9 (11x), Q13 (11x), Q18 (9x), Q10 (7x). All 22 queries produce correct results validated against DuckDB ground truth.

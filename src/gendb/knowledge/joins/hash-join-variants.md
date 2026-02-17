@@ -1,30 +1,50 @@
 # Hash Join Variants
 
-## What It Is
-Hash join builds a hash table on the smaller relation (build side) and probes it with tuples from the larger relation (probe side). Variants optimize for different data sizes, cardinalities, and memory constraints through partitioning, table design, and execution strategies.
+**When to use**: Default join method for equi-joins. Build hash table on smaller side, probe with larger side.
+**Impact**: Correct build-side selection alone can yield 10-100x improvement over building on the wrong side.
 
-## Key Implementation Ideas
-- **Build side selection**: Always choose the smaller relation as the build side based on cardinality estimates
-- **Linear probing hash table**: Open addressing with linear probing is cache-friendly; store the hash value in each entry to avoid key recomputation
-- **Load factor sizing**: Pre-size the hash table to ~75% load factor (size = cardinality / 0.75, rounded to power of two) to avoid expensive rehashing
-- **Chained vs open addressing**: Linear probing is 10-20% faster at low collision rates; chaining degrades more gracefully under high load
-- **Radix partitioning**: Partition both relations by hash bits so each partition pair fits in L3 cache, improving locality
-- **Partition count tuning**: Choose partition count so each partition fits in cache (typically 64-512 partitions); over-partitioning increases coordination overhead
-- **Multi-pass partitioning**: For very large data, apply radix partitioning in multiple passes with different bit ranges
-- **Pre-filtering probe side**: Apply local filters on probe tuples before hashing to reduce unnecessary probe work
-- **Bloom filter on build keys**: Build a bloom filter during the build phase to skip 80-90% of non-matching probes cheaply
-- **Null key handling**: Hash nulls to a separate bucket; nulls never match in standard SQL join semantics
-- **SIMD-optimized probing**: Vectorize hash computation and key comparison for throughput on modern CPUs
-- **Adaptive hash join**: Monitor build-side size during execution and switch from simple to partitioned strategy if memory is exceeded
-- **Perfect hashing for low-cardinality keys**: When key domain is small and known, use direct-mapped arrays instead of hash tables
+## Principle
+- Always choose the smaller (filtered) relation as the build side
+- Open-addressing hash tables are 2-5x faster than `std::unordered_map` (no pointer chasing)
+- Pre-size hash table to ~75% load factor (power-of-2 sizing)
+- For 1:N joins, use multi-value design: positions array + hash table mapping key → (offset, count)
+- Apply Bloom filter on build keys to skip 80-90% of non-matching probes cheaply
+- Parallelize the probe phase with OpenMP; build phase is typically sequential
 
-## Compact Hash Tables for Joins
+## Pattern
+```cpp
+// Build phase: hash table on smaller (filtered) side
+struct BuildEntry { int32_t key; int32_t payload; };
+CompactHashTable<int32_t, BuildEntry> ht(filtered_build_size);
+for (int64_t i = 0; i < build_rows; i++) {
+    if (build_predicate(i)) {
+        ht.insert(build_key[i], {build_key[i], build_payload[i]});
+    }
+}
 
-**IMPORTANT**: Never use `std::unordered_map` for join hash tables in performance-critical code. Open-addressing hash tables are 2-5x faster due to:
-- Cache-friendly linear probing (no pointer chasing)
-- Lower memory overhead (~16 bytes/entry vs ~80 bytes for unordered_map)
-- Better prefetching behavior
+// Probe phase: scan larger side, look up in hash table
+#pragma omp parallel for
+for (int64_t i = 0; i < probe_rows; i++) {
+    if (probe_predicate(i)) {
+        auto* match = ht.find(probe_key[i]);
+        if (match) {
+            // Process join result
+            emit(match->payload, probe_payload[i]);
+        }
+    }
+}
 
-See `patterns/parallel-hash-join.md` for a complete open-addressing template.
+// 1:N join with multi-value lookup
+struct MultiValueHT {
+    std::vector<uint32_t> positions;  // all positions, grouped by key
+    CompactHashTable<int32_t, std::pair<uint32_t, uint32_t>> index; // key → (offset, count)
+};
+// Lookup: auto [offset, count] = index.find(key); iterate positions[offset..offset+count]
+```
 
-For 1:N joins where multiple build rows match a single probe key, use `std::unordered_map<K, std::vector<uint32_t>>` with `.reserve()` pre-sizing, or a custom multi-map with open addressing.
+## Pitfalls
+- Building hash table on the larger side is the #1 cause of slow joins
+- `std::unordered_map` for joins with >10K entries wastes 2-5x performance
+- Forgetting to apply single-table predicates before join → building on unfiltered data
+- Pre-built hash indexes (from Storage Guide) can eliminate build time entirely — check before building from scratch
+- See `patterns/parallel-hash-join.md` for a complete open-addressing implementation template

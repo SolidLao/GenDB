@@ -1,14 +1,60 @@
 # Compact Hash Tables
 
-## What It Is
-Cache-friendly hash tables using open addressing (all data in a single array) instead of chaining (linked lists). Modern variants like Robin Hood hashing and Swiss Tables minimize memory overhead and maximize cache locality.
+**When to use**: Joins or GROUP BY with >256 groups where `std::unordered_map` is too slow (2-5x overhead from pointer chasing).
+**Impact**: 2-5x speedup over `std::unordered_map` for joins and aggregation.
 
-## Key Implementation Ideas
-- **Robin Hood hashing**: Track "distance from ideal bucket" (DIB) per entry; steal from rich (high DIB) to give to poor (low DIB), equalizing probe lengths
-- **Swiss Tables (SIMD probing)**: Store 16 control bytes per group; use SIMD to compare all 16 in parallel for near-constant-time lookups
-- **Open addressing with linear probing**: Store all entries in a single contiguous array for cache locality; probe sequentially on collision
-- **Tombstone-free deletion (backward shift)**: On delete, shift subsequent entries backward to fill the gap, avoiding tombstone accumulation
-- **Power-of-2 table sizing**: Use bitwise AND (`hash & (capacity - 1)`) instead of expensive modulo for index computation
-- **Prefetching for batch lookups**: Prefetch the target bucket N steps ahead in a batch loop to hide memory latency
-- **Load factor management**: Resize at 75-87.5% full to keep probe chains short while maintaining space efficiency
-- **High-quality hash functions**: Use XXH3, Murmur3, or similar to minimize clustering and collision chains
+## Principle
+- Open addressing stores all entries in a single contiguous array (cache-friendly, no pointer chasing)
+- Robin Hood hashing equalizes probe lengths by displacing entries with shorter probe distances
+- Power-of-2 sizing enables fast index computation via `hash & (capacity - 1)` instead of modulo
+- Pre-size to 75% load factor: `capacity = next_power_of_2(expected_entries * 4 / 3)`
+
+## Pattern
+```cpp
+template<typename K, typename V>
+struct CompactHashTable {
+    struct Entry { K key; V value; uint8_t dist; bool occupied; };
+    std::vector<Entry> table;
+    size_t mask;
+
+    CompactHashTable(size_t expected) {
+        size_t cap = 1;
+        while (cap < expected * 4 / 3) cap <<= 1;
+        table.resize(cap);
+        mask = cap - 1;
+    }
+
+    size_t hash_key(K key) const {
+        return (uint64_t)key * 0x9E3779B97F4A7C15ULL >> 32;
+    }
+
+    void insert(K key, V value) {
+        size_t pos = hash_key(key) & mask;
+        Entry entry{key, value, 0, true};
+        while (table[pos].occupied) {
+            if (table[pos].key == key) { table[pos].value = value; return; }
+            if (entry.dist > table[pos].dist) std::swap(entry, table[pos]);
+            pos = (pos + 1) & mask;
+            entry.dist++;
+        }
+        table[pos] = entry;
+    }
+
+    V* find(K key) {
+        size_t pos = hash_key(key) & mask;
+        uint8_t dist = 0;
+        while (table[pos].occupied) {
+            if (table[pos].key == key) return &table[pos].value;
+            if (dist > table[pos].dist) return nullptr;
+            pos = (pos + 1) & mask;
+            dist++;
+        }
+        return nullptr;
+    }
+};
+```
+
+## Pitfalls
+- Never use `std::hash<int32_t>` — it is often the identity function, causing severe clustering
+- Forgetting to pre-size leads to excessive resizing and rehashing
+- Load factor >90% causes exponential probe chain growth

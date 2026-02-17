@@ -17,15 +17,15 @@ Defer loading of columns not needed in the current pipeline step. Load integer/f
 ## Anti-Pattern: Eager Full Materialization
 ```cpp
 // BAD: Load ALL columns including strings before any filtering
-auto names = load_string_column("customer_name");      // 1.5M strings
-auto addresses = load_string_column("customer_address"); // 1.5M strings
-auto comments = load_string_column("customer_comment");  // 1.5M strings
-auto acctbal = load_int_column("customer_acctbal");      // 1.5M ints
+auto names = load_string_column("table_a_name.col");      // N strings
+auto addresses = load_string_column("table_a_addr.col");   // N strings
+auto comments = load_string_column("table_a_comment.col"); // N strings
+auto filter_col = load_int_column("table_a_filter.col");   // N ints
 
 // Then filter — 99% of loaded strings are wasted
 for (int i = 0; i < rows; i++) {
-    if (acctbal[i] > threshold) {
-        emit(names[i], addresses[i], comments[i], acctbal[i]);
+    if (filter_col[i] > threshold) {
+        emit(names[i], addresses[i], comments[i], filter_col[i]);
     }
 }
 ```
@@ -35,28 +35,28 @@ for (int i = 0; i < rows; i++) {
 ### Two-Phase Scan
 ```cpp
 // GOOD: Phase 1 — Load only filter columns, identify qualifying row positions
-auto acctbal = (int64_t*)mmap_column("customer_acctbal.col");
-auto nationkey = (int32_t*)mmap_column("customer_nationkey.col");
+auto filter_col = (int64_t*)mmap_column("table_a_filter.col");
+auto fk_col = (int32_t*)mmap_column("table_a_fk.col");
 
 std::vector<int64_t> qualifying_positions;
 qualifying_positions.reserve(estimated_qualifying);
 
 for (int64_t i = 0; i < num_rows; i++) {
-    if (acctbal[i] > threshold && nationkey[i] == target_nation) {
+    if (filter_col[i] > threshold && fk_col[i] == target_key) {
         qualifying_positions.push_back(i);
     }
 }
 
 // Phase 2 — Load string columns only for qualifying rows
 // With mmap, just access the positions directly
-auto name_codes = (int32_t*)mmap_column("customer_name.col");
-auto addr_codes = (int32_t*)mmap_column("customer_address.col");
+auto name_codes = (int32_t*)mmap_column("table_a_name.col");
+auto addr_codes = (int32_t*)mmap_column("table_a_addr.col");
 
 for (int64_t pos : qualifying_positions) {
     int32_t name_code = name_codes[pos];
     int32_t addr_code = addr_codes[pos];
     // decode strings only for these rows
-    emit(decode(name_code), decode(addr_code), acctbal[pos]);
+    emit(decode(name_code), decode(addr_code), filter_col[pos]);
 }
 ```
 
