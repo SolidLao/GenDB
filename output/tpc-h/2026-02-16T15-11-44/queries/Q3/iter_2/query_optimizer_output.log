@@ -1,0 +1,60 @@
+Excellent! All timing markers are preserved. Now let me create a summary document of the optimizations:
+
+## Optimization Summary - Q3 Iteration 2
+
+### Problem Statement
+**Baseline (Iter 1):** 45.64 seconds  
+**Target:** ~290 ms (157× improvement needed)  
+**Dominant Bottleneck:** `filter_lineitem` at 73.9% of execution time (33,772 ms)
+
+### Root Causes Identified
+1. **Excessive Synchronization**: Using `#pragma omp critical` in hot parallel filtering loops serializes the most expensive operations
+2. **Sequential Memory Accumulation**: Every filtered row acquisition goes through global vector with lock, killing parallelism efficiency
+3. **Separate Join Phase**: Filter and join happen in two passes instead of combined, doubling I/O cost for orders table
+4. **Non-Parallel Aggregation**: Single-threaded aggregation loses parallelism on 64-core system
+
+### Optimizations Implemented
+
+**1. Thread-Local Accumulation Pattern (CRITICAL)**
+- **Where:** Customer filtering, orders filtering, lineitem filtering, aggregation, join2
+- **Impact:** Eliminates `#pragma omp critical` sections in hot loops
+- **Expected Gain:** 3-5× speedup on filtering phases by eliminating serialization
+- **Implementation:** Each thread accumulates into its own vector, merge happens once after parallel phase
+
+**2. Fused Filter+Join for Orders**
+- **What:** Combined `filter_orders` + `join1` into single loop
+- **Why:** Applies both `o_orderdate < THRESHOLD` and `customer_set` membership check simultaneously
+- **Impact:** Reduces redundant scans and improves cache locality
+- **Expected Gain:** 15-20% reduction in combined filter_orders + join1 time
+
+**3. Parallel Join2 with Thread-Local Results**
+- **What:** Moved lineitem→orders join probe into parallel phase with thread-local result vectors
+- **Why:** Previously sequential, now uses all 64 cores
+- **Expected Gain:** 20-30× speedup from full parallelization of join2
+
+**4. Parallel Aggregation with Thread-Local Buffers**
+- **What:** Each thread maintains its own hash table, merge after parallel phase
+- **Why:** Eliminates hash table contention in aggregation loop
+- **Expected Gain:** 10-30× speedup depending on hash table contention
+
+**5. Hash Table Pre-Sizing**
+- Added explicit `reserve()` calls to all hash tables based on estimated cardinalities
+- Expected Gain:** Eliminates rehashing overhead
+
+### Code Quality Improvements
+- ✅ All `[TIMING]` markers preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Zone map pruning logic preserved
+- ✅ Compilation successful with `-O3 -march=native`
+- ✅ No semantic changes to query logic
+
+### Expected Performance Improvements
+- **Conservative:** 5-10× speedup (focus on parallelization wins)
+- **Optimistic:** 20-50× speedup (thread-local accumulation removes major bottleneck)
+- **Target:** Reduce 45.64s → sub-5 second execution
+
+### Remaining Optimization Opportunities (Future)
+1. Replace `std::unordered_map` with open-addressing hash table (2-5× speedup)
+2. Use SIMD filtering for lineitem date predicate
+3. Implement partial aggregation + merge pattern for better load distribution
+4. Vectorized output formatting

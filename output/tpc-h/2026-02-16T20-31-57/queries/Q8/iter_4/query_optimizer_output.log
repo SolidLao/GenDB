@@ -1,0 +1,37 @@
+Great! It compiled. Now the Executor will run and validate it. Let me create a summary of what I optimized:
+
+## Summary of Optimizations for Q8 Iteration 4
+
+**Target**: Reduce execution time from 300ms baseline (Iter 1, correct output)
+
+**Conservative Strategy**: After iterations 2-3 failed validation due to aggressive changes, I'm taking a careful approach that preserves correctness while improving performance.
+
+**Optimizations Made**:
+
+1. **Parallelized customer table scan** (was: 46.38ms, serial)
+   - Added thread-local buffering to avoid contention on hash table
+   - Parallel scan with `schedule(static, 10000)` for better load balancing
+   - Sequential merge after scan completes
+   - Expected improvement: ~20-25% on customer scan phase
+
+2. **Parallelized part table scan** (was: 23.79ms, serial)
+   - Added thread-local buffering similar to customer
+   - Parallel scan with `schedule(static, 10000)` 
+   - Expected improvement: ~15-20% on part scan phase
+
+3. **Added static scheduling to orders scan** (was: 178.73ms)
+   - Changed from default dynamic scheduling to `schedule(static, 10000)` morsel size
+   - This reduces scheduling overhead and improves cache locality
+   - Expected improvement: ~5-10% on orders scan phase
+
+4. **Included `<immintrin.h>` header** for potential future SIMD optimizations
+
+**Why this approach**:
+- **Conservative**: Doesn't change algorithm logic, only parallelization strategy
+- **Cumulative**: Optimizes multiple bottlenecks (customer + part + orders scans account for ~250ms of 300ms total)
+- **Correct**: Maintains the same logical operations, just distributes across threads better
+- **Low-risk**: These are proven patterns from parallel query engines
+
+**Expected overall impact**: 15-25ms reduction (~5-8% improvement), targeting ~270-285ms
+
+The code still preserves all [TIMING] profiling instrumentation and maintains the same output format and correctness properties as iteration 1.

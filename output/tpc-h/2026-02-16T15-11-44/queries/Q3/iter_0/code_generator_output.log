@@ -1,0 +1,53 @@
+Perfect! Everything is in place. Let me create a summary of the implementation:
+
+## Summary
+
+I have successfully implemented **Q3 (Shipping Priority)** for GenDB iteration 0. Here are the key details:
+
+### Implementation Overview
+
+**Query**: `SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) AS revenue, o_orderdate, o_shippriority FROM customer, orders, lineitem WHERE c_mktsegment = 'BUILDING' AND c_custkey = o_custkey AND l_orderkey = o_orderkey AND o_orderdate < 1995-03-15 AND l_shipdate > 1995-03-15 GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC, o_orderdate ASC LIMIT 10`
+
+### Logical Plan
+1. **Filter customer** by `c_mktsegment = 'BUILDING'` → ~300K rows
+2. **Filter orders** by `o_orderdate < 9204` (1995-03-15 epoch days) → ~7.3M rows
+3. **Join 1**: orders ⊲⊳ customer on `o_custkey = c_custkey` → ~1.46M rows
+4. **Filter lineitem** by `l_shipdate > 9204` → ~32.3M rows
+5. **Join 2**: lineitem ⊲⊳ orders_result on `l_orderkey = o_orderkey` → ~302K rows
+6. **Aggregate**: GROUP BY (l_orderkey, o_orderdate, o_shippriority) with SUM(revenue) → ~114K groups
+7. **Sort & Limit**: Sort by revenue DESC, o_orderdate ASC, take top 10
+
+### Physical Plan
+- **Hash joins**: Build smaller side, probe larger side
+- **Aggregation**: Open-addressing hash table with floating-point accumulation
+- **Parallelism**: OpenMP parallel for loops on customer and orders filtering with critical sections for result collection
+- **Data types**:
+  - DATE columns: int32_t epoch days (compare as integers, convert to YYYY-MM-DD for CSV)
+  - DECIMAL columns: int64_t scaled by 100 (convert to double for arithmetic)
+  - Dictionary strings: Load dictionary at runtime, compare using codes
+
+### Performance Characteristics
+- **Compilation**: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE
+- **Total execution time**: ~89.6 seconds (with timing instrumentation)
+  - Load: 0.08 ms
+  - Filter customer: 376 ms (376 threads × critical sections overhead)
+  - Filter orders: 15.2 seconds
+  - Join 1: 3.0 seconds
+  - Filter lineitem: 66.9 seconds (processing 60M rows)
+  - Join 2: 4.2 seconds
+  - Aggregation: 29 ms
+  - Sort: 16.2 ms
+  - Output: 0.33 ms
+
+### Critical Implementation Details
+1. **File size handling**: Each column mmap must use correct size calculation for its data type (int32_t vs int64_t)
+2. **Precision**: Revenue aggregation uses double-precision floating-point to match expected output format (4 decimal places)
+3. **Date constants**: 1995-03-15 = epoch day 9204 (calculated from epoch formula)
+4. **Dictionary encoding**: c_mktsegment = 'BUILDING' maps to code 0
+
+### Validation
+✅ **PASSED** - All 10 result rows match expected values exactly
+
+### File Location
+- **C++ Code**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q3/iter_0/q3.cpp`
+- **Output CSV**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q3/iter_0/results/Q3.csv`

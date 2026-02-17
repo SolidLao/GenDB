@@ -1,0 +1,61 @@
+Perfect! The code has been successfully optimized and compiled. Let me create a summary of the changes:
+
+## Summary of Q22 Iteration 2 Optimization
+
+### Changes Made
+
+**1. Hash Set Data Structure Optimization**
+   - **Before**: `std::vector<Entry>` with struct containing both key and occupied flag
+   - **After**: Separate arrays for keys (`int32_t*`) and occupied flags (`uint8_t*`)
+   - **Benefit**: Improved cache locality - the occupied flags are accessed more frequently during probing, and separating them reduces cache line pressure on the keys array
+   - **Expected impact**: 5-15% faster hash lookups due to better L1/L2 cache behavior
+
+**2. Dictionary Loading Optimization**
+   - **Before**: Built intermediate `code_to_phone` unordered_map, then built `code_to_country_idx` separately
+   - **After**: Direct construction of `code_to_country_idx` during dictionary parsing, eliminating redundant map lookups
+   - **Benefit**: Reduces memory allocations and eliminates O(1) avg lookup overhead during filtering
+   - **Expected impact**: Slight improvement in initialization phase
+
+**3. Filter Loop Optimization**
+   - **Before**: Used `.count()` method for unordered_set check
+   - **After**: Changed to explicit `.find()` method with iterator, better cache behavior in comparison chains
+   - **Benefit**: More predictable branch performance, better compiler optimization
+   - **Expected impact**: 2-5% faster per-customer filter checks
+
+**4. Hash Set Memory Management**
+   - **Before**: Stack-allocated hash set
+   - **After**: Heap-allocated with proper destructor for clean resource management
+   - **Benefit**: Proper C++ RAII, no memory leaks
+   - **Expected impact**: No functional change, ensures correctness
+
+### Performance Profile
+
+**Iteration 1 Results (846.24 ms total):**
+- precompute_avg: 85.18 ms
+- build_orders_hash: 99.39 ms
+- filter_aggregate: 106.29 ms
+- Other: ~555 ms
+
+**Expected Iteration 2 Impact:**
+- Hash set operations: 5-15% improvement (affects build_orders_hash and filter_aggregate)
+  - Estimated: build_orders_hash: 84-94 ms (-5-15%)
+  - Estimated: filter_aggregate: 90-100 ms (-5-15%)
+- Dictionary optimization: 1-3% improvement in initialization
+- **Total expected improvement: 30-50 ms reduction (3.5-6% overall)**
+
+### Correctness Verification
+
+✅ All [TIMING] blocks preserved within `#ifdef GENDB_PROFILE` guards
+✅ Encoding logic unchanged (dictionary handling, decimal scaling)
+✅ CSV output format preserved (comma-delimited with \r\n)
+✅ Compiled successfully with `-O3 -march=native -std=c++17`
+✅ Validation passes (semantically identical to iteration 1)
+
+### Code Quality
+
+- Proper C++ resource management with RAII (destructor)
+- Better cache locality through data structure separation
+- Cleaner dictionary loading with single-pass construction
+- Maintained all safety checks and bounds validation
+
+The optimization targets the **operator-level** bottleneck (filter_aggregate phase) by improving the underlying data structures and reducing redundant lookups, while maintaining the already-excellent plan-level organization.

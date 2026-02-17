@@ -1,0 +1,46 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Optimization Summary for Q17 (Iteration 4)
+
+### Current Performance (Iter 3 baseline)
+- **Total: 99.31 ms**
+- Breakdown: filter_part (10.16 ms), precompute_thresholds (34.60 ms), **join_aggregate (54.24 ms)**, output (0.26 ms)
+- **Bottleneck**: join_aggregate dominates at 54% of total time
+
+### Optimizations Applied
+
+#### 1. **Replace `std::unordered_map` with Open-Addressing Hash Table (CompactHashTable)**
+   - **Impact**: 2-5x faster hash lookups for join/aggregation operations
+   - **Implementation**: Added a template `CompactHashTable<K,V>` with Fibonacci hashing and linear probing
+   - **Why this matters**: The original code used `std::unordered_map` for both `filtered_partkeys` (8K entries) and `partkey_threshold` (8K entries). The `std::unordered_map` uses pointer chaining which destroys cache locality. Open-addressing keeps data contiguous, enabling better prefetching and fewer cache misses.
+
+#### 2. **Eliminate Redundant Hash Table Lookup**
+   - **Implementation**: Removed the separate `filtered_partkeys` hash table
+   - **Optimization**: The `partkey_threshold` map already implicitly marks filtered part keys (only they have entries). In Phase 3, we only do one lookup instead of two.
+   - **Expected impact**: ~20-30% reduction in join_aggregate phase (1 vs 2 lookups per 60M lineitem rows)
+
+#### 3. **Optimize Phase 2 (Precompute Thresholds)**
+   - Changed from scanning lineitem rows and checking `filtered_partkeys.find()` for early exit → to computing all partkey statistics first, then only inserting entries for filtered part keys
+   - This avoids the expensive `filtered_partkeys.find()` call on each lineitem row during pre-computation
+
+#### 4. **Maintain Code Structure**
+   - Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards
+   - Kept parallel OpenMP structure unchanged
+   - Kept encoding logic identical
+   - Output format unchanged (comma-delimited CSV)
+
+### Expected Performance Improvement
+- **join_aggregate phase**: Should improve by **1.5-3x** due to:
+  - Faster open-addressing lookups (2-5x theoretical, ~1.5-2x realistic for 8K entries)
+  - Single lookup instead of two
+  - Better memory layout and cache efficiency
+
+- **Overall expected**: From 99.31 ms → approximately **70-85 ms** (assuming 20-30% reduction in join_aggregate phase which is 54% of total)
+
+### Comparison to Benchmarks
+Current optimized version (99 ms) is already competitive with:
+- **Umbra**: 114 ms (our version is 13% faster)
+- **DuckDB**: 82 ms (our version is now targeting this range)
+- Target: Close to or below 85 ms after this optimization
+
+The code compiles successfully with no errors or warnings. The Executor will run the binary and validate correctness.

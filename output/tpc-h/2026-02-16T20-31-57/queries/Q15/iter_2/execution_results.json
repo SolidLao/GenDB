@@ -1,0 +1,102 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_2/q15.cpp: In function ‘std::string epoch_to_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_2/q15.cpp:151:29: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 0 and 6 [-Wformat-truncation=]\n  151 |     snprintf(buf, 11, \"%04d-%02d-%02d\", year, month, day);\n      |                             ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_2/q15.cpp:151:23: note: directive argument in the range [1, 12]\n  151 |     snprintf(buf, 11, \"%04d-%02d-%02d\", year, month, day);\n      |                       ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_2/q15.cpp:151:23: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_2/q15.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 11\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.07 ms\n[TIMING] scan_filter_aggregate: 72.97 ms\n[TIMING] find_max: 0.95 ms\n[TIMING] load_supplier: 25.94 ms\n[TIMING] join: 0.13 ms\n[TIMING] output: 0.14 ms\n[TIMING] total: 100.33 ms\n",
+    "stderr": "",
+    "duration_ms": 114
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q15\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": false,\n      \"error\": \"1 row(s) differ across 5 column(s)\",\n      \"column_failures\": {\n        \"s_suppkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"69998\",\n              \"actual\": \"82870\",\n              \"abs_diff\": 12872.0,\n              \"rel_diff_pct\": 18.3891,\n              \"row\": 0\n            }\n          ]\n        },\n        \"s_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"Supplier#000069998\",\n              \"actual\": \"Supplier#000082870\",\n              \"row\": 0\n            }\n          ]\n        },\n        \"s_address\": {\n          \"category\": \"exact\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \",ZT4VX2ygq9dLsG298SbYYSVUqeH,jhLSRVxNxGv\",\n              \"actual\": \"iyYMDmQPmoNfxcidNOJlVp1xSEUSS0v\",\n              \"row\": 0\n            }\n          ]\n        },\n        \"s_phone\": {\n          \"category\": \"exact\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"16-386-278-9829\",\n              \"actual\": \"19-190-794-5676\",\n              \"row\": 0\n            }\n          ]\n        },\n        \"total_revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"2194132.8166\",\n              \"actual\": \"474951.5843\",\n              \"abs_diff\": 1719181.23,\n              \"rel_diff_pct\": 78.3536,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q15": {
+          "rows_expected": 1,
+          "rows_actual": 1,
+          "match": false,
+          "error": "1 row(s) differ across 5 column(s)",
+          "column_failures": {
+            "s_suppkey": {
+              "category": "exact",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "69998",
+                  "actual": "82870",
+                  "abs_diff": 12872,
+                  "rel_diff_pct": 18.3891,
+                  "row": 0
+                }
+              ]
+            },
+            "s_name": {
+              "category": "exact",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "Supplier#000069998",
+                  "actual": "Supplier#000082870",
+                  "row": 0
+                }
+              ]
+            },
+            "s_address": {
+              "category": "exact",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": ",ZT4VX2ygq9dLsG298SbYYSVUqeH,jhLSRVxNxGv",
+                  "actual": "iyYMDmQPmoNfxcidNOJlVp1xSEUSS0v",
+                  "row": 0
+                }
+              ]
+            },
+            "s_phone": {
+              "category": "exact",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "16-386-278-9829",
+                  "actual": "19-190-794-5676",
+                  "row": 0
+                }
+              ]
+            },
+            "total_revenue": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "2194132.8166",
+                  "actual": "474951.5843",
+                  "abs_diff": 1719181.23,
+                  "rel_diff_pct": 78.3536,
+                  "tolerance": "$100",
+                  "row": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load": 0.07,
+    "scan_filter_aggregate": 72.97,
+    "find_max": 0.95,
+    "load_supplier": 25.94,
+    "join": 0.13,
+    "output": 0.14,
+    "total": 100.33
+  },
+  "timing_ms": 100.19
+}

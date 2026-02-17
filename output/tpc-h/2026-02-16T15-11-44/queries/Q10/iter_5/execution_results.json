@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_5/q10.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_5/q10.cpp:246:34: warning: ‘%02d’ directive output may be truncated writing between 2 and 11 bytes into a region of size between 2 and 8 [-Wformat-truncation=]\n  246 |     snprintf(buf, 16, \"%04d-%02d-%02d\", year, month + 1, day + 1);\n      |                                  ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_5/q10.cpp:246:23: note: directive argument in the range [-2147483647, 2147483647]\n  246 |     snprintf(buf, 16, \"%04d-%02d-%02d\", year, month + 1, day + 1);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_5/q10.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 16\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.14 ms\n[TIMING] filter_lineitem: 759.25 ms (14808183 rows)\n[TIMING] filter_orders: 151.53 ms (573157 rows)\n[TIMING] build_lineitem_ht: 544.36 ms\n[TIMING] build_customer_ht: 560.81 ms\n[TIMING] build_nation_ht: 0.01 ms\n[TIMING] join_aggregate: 821.77 ms (381105 groups)\n[TIMING] convert_sort: 2890.24 ms (20 rows)\n[TIMING] output: 229.92 ms\n[TIMING] total: 10883.89 ms\nQ10 completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_5/results/Q10.csv\n",
+    "stderr": "",
+    "duration_ms": 13105
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q10\": {\n      \"rows_expected\": 20,\n      \"rows_actual\": 20,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.14,
+    "filter_lineitem": 759.25,
+    "filter_orders": 151.53,
+    "build_lineitem_ht": 544.36,
+    "build_customer_ht": 560.81,
+    "build_nation_ht": 0.01,
+    "join_aggregate": 821.77,
+    "convert_sort": 2890.24,
+    "output": 229.92,
+    "total": 10883.89
+  },
+  "timing_ms": 10653.97
+}

@@ -1,0 +1,40 @@
+Perfect! The code compiled successfully. Now let me review the optimizations I've made:
+
+## Optimization Summary for Q21 Iteration 4
+
+### Changes Made:
+
+1. **Added OpenMP header** (`#include <omp.h>`) to support parallelization
+
+2. **Parallelized the `precompute_exists_not_exists` phase** (was 13.5s bottleneck):
+   - Switched from single-threaded to multi-threaded construction using OpenMP
+   - Each thread builds local `suppkeys_per_order` and `late_suppliers_per_order` maps
+   - Final merge using `#pragma omp critical` to combine thread-local results
+   - **Expected impact**: 30-50% speedup (parallel I/O friendliness on 64 cores)
+
+3. **Parallelized the main join/aggregate loop** (was 3.1s):
+   - Used `#pragma omp parallel for` with chunk size 100,000 for morsel-driven parallelism
+   - Each thread maintains its own aggregation map to avoid lock contention
+   - Final merge step combines all thread-local aggregations
+   - **Expected impact**: 40-50% speedup on 64 cores
+
+### Rationale:
+
+The previous iteration (iter 3, REGRESSED to 18.6s) suggests the last optimization attempt was misguided. My approach differs by:
+- **Not** replacing data structures with more complex ones (avoiding new bugs)
+- **Focusing on parallelism** instead - the 64-core machine was underutilized
+- **Keeping all timing instrumentation** in place for validation
+- **Thread-local-then-merge pattern** to avoid synchronization bottlenecks
+
+### Expected Performance:
+
+- **Previous best (iter 2)**: 15,489 ms
+- **Current baseline (iter 3, rollback)**: 18,610 ms  
+- **Target (iter 4)**: ~9,000-11,000 ms (parallel speedup factor of 1.7-2.0x on most operations)
+
+The parallelization should be especially effective because:
+1. The precompute phase scans 60M lineitem rows - perfect for parallel I/O
+2. The join phase is filter-heavy with low selectivity - good parallelization
+3. Thread-local aggregation eliminates synchronization overhead in the hot loop
+
+Code is ready for execution. The Executor will now compile, run, and validate the optimized query.

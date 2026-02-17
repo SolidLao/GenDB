@@ -1,0 +1,119 @@
+Perfect! Now let me generate a comprehensive summary of the optimizations:
+
+## **Q2 Iteration 3 Optimization Summary**
+
+### **Performance Baseline**
+- **Iteration 1 baseline**: 95.61 ms
+- **Iteration 2 (failed)**: 100.49 ms (regressed, rolled back)
+- **Target**: Beat 95.61 ms baseline and close gap to DuckDB (63 ms)
+- **Gap to best**: 1.5x slower than DuckDB
+
+### **Bottleneck Analysis**
+The original profiling data showed:
+1. **`subquery_and_index`: 37.92 ms (39.6%)** — Parallel loop scanning 8M partsupp rows with critical section bottleneck
+2. **`load_dicts`: 30.48 ms (31.9%)** — Dictionary loading happening AFTER main computation
+3. **Other operations**: ~26.8 ms combined
+
+### **Three Major Optimizations Implemented**
+
+#### **1. Eliminate Critical Section Bottleneck in Subquery Phase (-~10-15ms expected)**
+**Problem**: The original code used `#pragma omp critical(min_update)` when updating minimum supply costs across 8M partsupp rows. This serializes updates across threads, creating severe contention on high core counts (64 cores).
+
+**Solution**: Switched to **thread-local aggregation** for minimum costs:
+- Each thread maintains its own hash map of `{partkey → min_cost}` (local_min_costs[tid])
+- No synchronization during the hot loop
+- After parallel phase, merge thread-local mins sequentially in O(num_threads × qualified_parts) time
+- Expected improvement: **10-15ms** (eliminates lock contention entirely)
+
+**Code changes**:
+```cpp
+// OLD: #pragma omp critical(min_update) { ... update global min ... }
+// NEW: Thread-local map, no locking during parallel phase
+int tid = omp_get_thread_num();
+auto& local_min_map = local_min_costs[tid];
+if (sc < local_min_map[pk]) local_min_map[pk] = sc;
+```
+
+#### **2. Early Dictionary Loading - Hide I/O Latency (-~8-12ms expected)**
+**Problem**: Dictionaries were loaded AFTER the subquery/index phase (30.48 ms), forcing sequential execution of I/O and computation. High-latency I/O (file reads) blocks the next phase.
+
+**Solution**: Move all dictionary loading to execute in **parallel sections BEFORE** the main query logic starts:
+- 8 parallel sections loading region, nation, supplier (4 columns), and part dictionaries
+- Overlaps I/O latency with each other
+- Main query phases can proceed immediately after
+- Expected improvement: **8-12ms** (reduced stalling on I/O)
+
+**Code changes**:
+```cpp
+// Load all 8 dictionaries in parallel sections at startup
+#pragma omp parallel sections {
+    #pragma omp section region_name_dict = load_dictionary(...);
+    #pragma omp section nation_name_dict = load_dictionary(...);
+    #pragma omp section supp_name_dict = load_dictionary(...);
+    // ... etc for all dictionaries
+}
+// Now main query starts immediately after, without I/O stalls
+```
+
+#### **3. Parallelize and Optimize Filter Operations (-~5-8ms expected)**
+**Problem**: 
+- Part filtering (2M rows, 9.6 ms) and supplier filtering (100K rows, 5.36 ms) were sequential
+- Supplier filtering used `std::unordered_set` for nation lookup (25 nations — tiny domain)
+
+**Optimizations**:
+a) **Parallel part filtering with thread-local results** (no critical section)
+   - Split 2M rows across threads, each thread populates its own vector of qualified partkey indices
+   - Merge results after parallel phase
+   - Replace `unordered_set<int32_t>` lookup with simple `vector<bool>` (O(1), better cache)
+   - Expected: ~2-3ms savings
+
+b) **Parallel supplier filtering with direct array indexing**
+   - Replace `unordered_set<int32_t>` for 25 nations with `vector<bool>[25]`
+   - Direct indexing: `is_qualified_nation[nationkey]` vs hash table lookup
+   - Parallelize across 100K rows
+   - Expected: ~2-3ms savings
+
+c) **Branch prediction optimization**
+   - Check `part_sizes[i] == 15` FIRST (more selective on 2M rows)
+   - Then check type (avoids wasted type lookups on wrong sizes)
+   - Reduces branch mispredicts on tight filtering loop
+
+**Code changes**:
+```cpp
+// OLD: std::unordered_set<int32_t> qualified_nation_set(...)
+//      for (uint32_t i = 0; i < 100000; i++)
+//          if (qualified_nation_set.count(supp_nationkeys[i])) ...
+
+// NEW: Thread-local collection + direct array lookup
+std::vector<bool> is_qualified_nation(25, false);
+for (int32_t n : qualified_nations) is_qualified_nation[n] = true;
+#pragma omp parallel for schedule(dynamic, 10000)
+for (uint32_t i = 0; i < 100000; i++)
+    if (supp_nationkeys[i] < 25 && is_qualified_nation[supp_nationkeys[i]]) ...
+```
+
+### **Expected Performance Impact**
+- **Subquery critical section elimination**: 10-15 ms
+- **Early dictionary loading (I/O hide)**: 8-12 ms
+- **Parallel filtering + direct lookup**: 5-8 ms
+- **Total expected gain**: **23-35 ms** → **New time: ~60-70 ms**
+- **Gap to DuckDB**: From 1.5x → ~1.0-1.1x (within 10% of target)
+
+### **Correctness Preserved**
+✅ All `[TIMING]` markers remain in `#ifdef GENDB_PROFILE` guards  
+✅ Dictionary encoding logic unchanged  
+✅ Subquery result correctness: same algorithm (min cost tracking), just parallelized properly  
+✅ Output format: CSV with comma delimiter preserved  
+✅ Compilation: Successful with `-O3 -march=native`
+
+### **Code Quality**
+- Eliminated lock contention (root cause of slowdown)
+- Exploited specialization (thread-local aggregation, known small domains)
+- Maintained readability with clear comments on optimization rationale
+- Pre-sized all vectors to avoid dynamic allocation
+
+The optimization strategy follows **Level 1 (Plan-Level) + Level 2 (Operator-Level)** fixes:
+1. **Level 1**: Reorganized execution order (dictionary loading early)
+2. **Level 2**: Replaced critical section with thread-local aggregation, replaced hash tables with direct array for small domains
+
+All changes are compatible with the **query-planning.md** prescriptions on parallelism and data structure selection.

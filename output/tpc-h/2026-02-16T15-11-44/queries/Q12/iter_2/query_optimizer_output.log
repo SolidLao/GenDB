@@ -1,0 +1,47 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations for Q12 Iteration 2
+
+**Baseline (Iteration 1):**
+- Total execution time: **1152.9 ms**
+- Bottleneck: join_probe = 579.51 ms (50% of total)
+- Scan_filter = 504.59 ms (44% of total)
+
+**Optimizations Applied:**
+
+### 1. **Parallel Scan-Filter (lineitem_rows scan)**
+   - Changed from single-threaded sequential loop to OpenMP `#pragma omp parallel for`
+   - Each thread maintains thread-local `filtered_lineitem` vector
+   - Results merged after barrier
+   - Expected speedup: ~4-16x on 64-core hardware
+   - Impact on scan_filter phase: ~504.59 ms → ~30-125 ms
+
+### 2. **Zone Map Block Skipping** 
+   - Added zone skip mask computation before scan
+   - Prevents scanning entire zones outside the date range [1994-01-01, 1995-01-01)
+   - Zones with max_val < 1994-01-01 or min_val >= 1995-01-01 are skipped entirely
+   - Expected reduction: ~30-40% of lineitem rows skipped (based on zone map structure)
+   - Additional impact on scan_filter phase
+
+### 3. **Parallel Join Probe with Thread-Local Aggregation**
+   - Changed from single-threaded sequential probe to OpenMP `#pragma omp parallel for`
+   - Each thread maintains thread-local aggregation buffers (7 shipmodes × 2 counters)
+   - Eliminates lock contention on shared aggregation state
+   - Threads merge results after barrier
+   - Expected speedup: ~4-16x on 64-core hardware
+   - Impact on join_probe phase: ~579.51 ms → ~36-145 ms
+
+**Expected Total Impact:**
+- Scan-filter: ~504.59 ms → ~30-100 ms (5-17x improvement)
+- Join-probe: ~579.51 ms → ~36-145 ms (4-16x improvement)
+- **Projected execution time: ~100-300 ms (4-11x overall speedup)**
+
+**Compilation:** ✓ Successful (62K binary)
+
+The code maintains:
+- ✓ All [TIMING] lines within `#ifdef GENDB_PROFILE` guards
+- ✓ Encoding logic unchanged
+- ✓ Correctness preserved (thread-safe aggregation via thread-local buffers)
+- ✓ Comma-delimited CSV output format
+
+The Executor will now validate that results remain correct and measure the actual speedup on the 64-core hardware.

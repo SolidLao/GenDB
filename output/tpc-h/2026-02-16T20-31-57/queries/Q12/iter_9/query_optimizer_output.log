@@ -1,0 +1,38 @@
+Excellent! The code is clean and correct. Now let me provide the summary of this optimization:
+
+## Optimization Summary for Q12 (Iteration 9)
+
+### Problem Identified
+The previous iteration (iter_6, 648ms total) had a **critical bottleneck**: it was spending **580ms (89% of total time) rebuilding a hash table** for the orders table, even though the data structure didn't require it.
+
+### Root Cause
+- The orders table is **sorted by o_orderkey** (values 1 to 15,000,000)
+- Since orderkeys are sequential integers, direct array indexing is possible: `o_orderpriority[orderkey - 1]` gives O(1) lookup
+- Previous code tried to use pre-built indexes but fell back to building a CompactHashTable anyway, wasting 580ms
+
+### Solution: Direct Array Indexing
+Replaced the expensive hash table construction with **direct array lookup** using the natural ordering:
+
+1. **Removed**: Hash table build (580ms)
+2. **Added**: `OrdersPriorityDirect` struct with O(1) direct array access
+3. **Probe**: Changed from `ht.data.find()` to `priority_lookup.find_priority()`
+
+### Code Changes
+- **Removed** `OrdersPriorityMap` struct and hash table building
+- **Replaced** `PreBuiltOrdersIndexDirect` with `OrdersPriorityDirect` 
+- **Simplified** hash table build phase from 580ms to ~0.1ms (just pointer assignment)
+
+### Expected Impact
+- **Previous:** 648ms (580ms hash build + 24ms scan/filter/join)
+- **Expected:** ~25ms (eliminated 580ms overhead, ~1% improvement)
+- **Umbra baseline:** 52ms (still 2.1x faster than current target)
+
+### Correctness Maintained
+- ✅ All [TIMING] lines preserved
+- ✅ Encoding logic unchanged  
+- ✅ CSV output format preserved
+- ✅ Dictionary code mappings unchanged
+- ✅ Parallel execution with thread-local aggregation intact
+
+The optimization is now ready for execution. The compiled binary is at:
+`/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q12/iter_9/q12`

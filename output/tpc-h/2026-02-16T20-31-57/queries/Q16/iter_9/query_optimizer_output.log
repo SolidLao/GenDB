@@ -1,0 +1,49 @@
+Excellent! All timing markers are preserved. Now let me create a summary of what was optimized:
+
+## Optimization Summary for Q16 Iteration 9
+
+### Changes Made
+
+**1. Replaced `std::unordered_map` with `CompactHashTable` for thread-local aggregation** (2-5x expected speedup)
+   - Implemented templated open-addressing hash table with composite key support
+   - Changed from chaining-based unordered_map (poor cache locality, pointer chasing) to open-addressing (contiguous memory, better cache utilization)
+   - Added `num_entries` tracking for correct group count reporting
+
+**2. Updated aggregation hot loop** 
+   - Changed from `thread_agg_maps[tid][key]` (auto-insert via operator[]) to explicit `find()` → conditional `insert()` 
+   - Eliminates unnecessary hash lookups on duplicates
+
+**3. Updated merge phase**
+   - Adapted to iterate through CompactHashTable entries directly via table vector
+   - Preserves bitset-based dedup logic (O(n) not O(n log n))
+
+**4. Updated output building**
+   - Iterates through occupied entries in CompactHashTable
+   - Maintains all dictionary lookups and output formatting
+
+### Expected Performance Impact
+
+**Dominant bottleneck:** scan_filter_aggregate = 172.64ms (74% of total)
+
+**Root cause:** unordered_map hot-path operations have poor cache locality and pointer chasing overhead
+
+**Expected improvements:**
+- CompactHashTable: **2-3x speedup** on aggregation hash table access (cache-friendly open addressing)
+- Eliminates unnecessary heap allocations per vector<int32_t> in map entries
+- Better CPU branch prediction with contiguous table layout
+
+**Expected result:** 225.77ms → **~130-150ms** (~42% improvement from baseline)
+- Subquery: 38.42ms (unchanged)
+- Scan/Filter/Aggregate: 172.64ms → ~60-80ms (3-5% CPU overhead increase acceptable)
+- Sort: 9.34ms (unchanged)
+- Output: 7.19ms (unchanged)
+- **Total: ~225ms → ~115-135ms**
+
+### Code Preservation
+✅ All [TIMING] lines inside #ifdef GENDB_PROFILE preserved  
+✅ Encoding logic unchanged  
+✅ Bitset-based dedup intact (O(n) vs O(n log n))  
+✅ Parallel scan with thread-local aggregation pattern preserved  
+✅ CSV output format unchanged  
+
+The Executor will now compile, run, and validate the optimized code. The CompactHashTable provides a modern, high-performance aggregation backend while maintaining algorithm correctness.

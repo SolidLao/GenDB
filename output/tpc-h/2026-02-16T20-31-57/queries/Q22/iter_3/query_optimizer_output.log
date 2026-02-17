@@ -1,0 +1,50 @@
+Excellent! Now let me create a detailed summary of the optimizations:
+
+## Summary of Optimizations for Q22 (Iteration 3)
+
+### Problem Analysis
+- **Baseline (Iter 1)**: 1386ms total, PASSED validation
+- **Iter 2**: FAILED validation (result counts off by 9000x) - rolled back
+- **Key bottlenecks (from Iter 1 timing breakdown)**:
+  - `build_antijoin`: 913ms (66% of total) - Sequential hash set construction from 15M orders
+  - `filter_aggregate`: 229ms (16% of total) - Hash map operations for low-cardinality aggregation
+  - `dict_load`: 221ms (16% of total) - Dictionary loading
+  - Total gap to Umbra: 41.5x (33ms vs 1386ms)
+
+### Optimizations Implemented
+
+#### 1. **Parallelized Anti-Join Hash Set Construction** (Target: -600ms from 913ms)
+   - **Before**: Sequential loop over 15M orders to insert into hash set
+   - **After**: Two-phase parallel approach:
+     - Phase 1: OpenMP parallel scan with 64 thread-local accumulation sets
+     - Phase 2: Merge thread-local sets into final set
+   - **Impact**: Expected 5-10x speedup on 64-core system (parallelization efficiency ~70-80%)
+   - **Correctness**: Identical logic, just parallelized
+
+#### 2. **Optimized Aggregation with Direct Array Indexing** (Target: -150ms from 229ms)
+   - **Before**: Hash map operations for country code aggregation
+     - `unordered_map<string, pair<int64_t, int64_t>>` for aggregates
+     - Thread-local unordered_maps with dynamic inserts
+     - High overhead from string hashing and hash table operations
+   - **After**: Direct array-based aggregation
+     - Pre-compute phone_code → country string mapping (only target codes, ~100 entries)
+     - Use flat array indexed by country code (7 total countries)
+     - Thread-local arrays with direct index access (no hash operations)
+     - Better cache locality (arrays vs pointer chasing)
+   - **Impact**: Expected 2-3x speedup from elimination of hash operations and improved cache behavior
+   - **Correctness**: Same aggregation logic, just using arrays instead of maps
+
+### Expected Performance Impact
+- **Build anti-join**: 913ms → ~130-180ms (6-7x improvement)
+- **Filter aggregate**: 229ms → ~75-115ms (2-3x improvement)
+- **Total estimated**: 1386ms → ~400-550ms (2.5-3.5x improvement overall)
+- **Gap to Umbra**: 41.5x → ~12-16x
+
+### Code Quality
+- All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- Encoding logic unchanged
+- CSV output format preserved (comma-delimited)
+- Thread-safe parallel execution with OpenMP
+- Validation correctness maintained (using same filtering logic as iter_1)
+
+The optimizations focus on the two largest bottlenecks identified in the timing breakdown, using standard parallelization and data structure optimization techniques from the knowledge base.

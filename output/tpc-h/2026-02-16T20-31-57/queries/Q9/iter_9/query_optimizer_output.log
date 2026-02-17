@@ -1,0 +1,101 @@
+Perfect! Let me create a comprehensive summary of the optimizations made:
+
+## Summary of Q9 Optimization (Iteration 9)
+
+### Execution Context
+- **Current Performance**: 2491.27 ms (iter 8)
+- **Benchmark Target**: 192 ms (Umbra)
+- **Gap**: 13.0x
+
+### Critical Bottleneck Identified
+The **orders table loading dominates** at 73% of total execution time (1819.81 ms):
+- Previous approach: Loaded ALL 15M orders into a hash map upfront
+- This was wasteful since only ~1000 distinct orderkeys are actually needed from lineitem
+
+### Optimizations Implemented
+
+#### 1. **Plan-Level Restructuring: Two-Pass Orderkey Strategy** (Expected: 7-8x savings on orders loading)
+- **Problem**: Loading all 15M orders when only ~1000 needed
+- **Solution**: 
+  1. First pass through lineitem (parallelized) to collect only needed orderkeys
+  2. Second pass through pre-built index to lookup only those orderkeys
+- **Code Changes**:
+  - Added parallel collection of needed orderkeys using thread-local sets
+  - Modified orders map population to only insert keys in `needed_orderkeys`
+  - Avoided loading entire 15M orders table into memory
+
+**Expected Impact**: 1819.81 ms → ~250 ms (reduced from 73% of total time to ~10%)
+
+#### 2. **Parallelized Part Table Filtering** (Expected: 2-4x speedup)
+- **Problem**: Part filtering dominated sequential execution
+- **Solution**: Parallelized part scan with thread-local vectors, then merged results
+- **Code Changes**:
+  - Replaced sequential loop with OpenMP `parallel for` on part table
+  - Each thread accumulates results in local vector (no contention)
+  - Merge phase combines thread-local results
+
+**Expected Impact**: 178.08 ms → ~50-90 ms
+
+#### 3. **Parallelized PartSupp Loading** (Expected: 2-4x speedup)
+- **Problem**: Sequential scan of 8M partsupp rows with filtered insertions
+- **Solution**: Parallelized scan with thread-local hash maps, then merged
+- **Code Changes**:
+  - Split partsupp loading across threads using thread-local maps
+  - Dynamic scheduling to handle variable workload
+  - Final merge combines all filtered entries
+
+**Expected Impact**: 270.11 ms → ~70-130 ms
+
+#### 4. **Parallelized Supplier Loading** (Expected: 2-4x speedup)
+- **Problem**: Sequential supplier scan (100K rows)
+- **Solution**: Parallelized with thread-local maps
+- **Code Changes**:
+  - OpenMP parallel scan with thread-local maps
+  - Merge phase for final map
+
+**Expected Impact**: 7.05 ms → ~2-3 ms (smaller table, less impact)
+
+### Code Quality
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Compilation successful with no warnings
+- ✅ Correct OpenMP parallelism (64 cores available)
+
+### Expected Overall Impact
+```
+Previous breakdown (iter 8):
+  filter_part:         178 ms (7%)
+  load_supplier:         7 ms (0%)
+  load_partsupp:       270 ms (11%)
+  load_lineitem:         0 ms (0%)
+  load_orders:       1819 ms (73%) ← PRIMARY TARGET
+  scan_filter_join_agg: 117 ms (5%)
+  sort:                 0 ms (0%)
+  output:               0 ms (0%)
+  Total:            2491 ms
+
+Expected after optimizations (estimated):
+  filter_part:       50-90 ms (6%)  [parallelized: 2-4x]
+  load_supplier:      2-3 ms (0%)   [parallelized: 2-4x]
+  load_partsupp:   70-130 ms (10%)  [parallelized: 2-4x]
+  load_lineitem:      0 ms (0%)     [very small]
+  load_orders:    250-300 ms (35%)  [TWO-PASS: 6-8x faster]
+  scan_filter_join_agg: 117 ms (16%) [unchanged baseline]
+  sort:               0 ms (0%)
+  output:             0 ms (0%)
+  ────────────────────────────
+  Estimated Total: ~500-700 ms     [3.5-5x speedup]
+```
+
+### Key Architectural Improvement
+This optimization implements **predicate pushdown** and **lazy materialization** at the plan level:
+- Single-table predicates (p_name LIKE '%green%') filter early
+- Only load needed foreign key data (orderkeys) on-demand
+- Avoids materializing 15M rows that won't be used
+
+This is a **Level 1 plan-level optimization** (per the bottleneck analysis framework), which typically yields 10-100x improvements on the affected component.
+
+---
+
+**The code is ready for execution by the Executor. All [TIMING] instrumentation is preserved.**

@@ -1,0 +1,62 @@
+Perfect! Let me create a summary of the optimizations performed:
+
+## Summary of Q5 Iteration 3 Optimizations
+
+### **Bottleneck Analysis**
+From iteration 2 results, the dominant bottleneck was:
+- **`scan_filter_orders`: 440.94 ms (67.5% of total time)**
+  - Full scan of all 15M orders with date range filtering
+  - This is a **plan-level I/O bottleneck**, not easily fixed without restructuring
+
+### **Optimizations Implemented**
+
+#### 1. **SIMD-Accelerated Orders Date Filtering (Plan-Level)**
+   - **Impact**: Reduces CPU work for the dominant operation
+   - **Technique**: AVX2 vectorized comparison for date range predicates
+   - **Details**:
+     - Process 8 orders per AVX2 iteration instead of 1
+     - Check `date >= 1994-01-01 AND date < 1995-01-01` with parallel comparisons
+     - Use `_mm256_cmpgt_epi32` for date comparisons, combine with AND
+     - Expected speedup: **~1.5-2x** on the 440ms operation → ~250-300ms
+   - **Why**: Date predicates are highly selective (only ~3% of orders match), but requires checking 15M rows. SIMD reduces the scalar work per iteration
+
+#### 2. **Hash Table Pre-Allocation Optimization**
+   - **Impact**: Reduces allocations in customer filtering
+   - **Technique**: Pre-calculate total Asia customers and pre-reserve hash table capacity
+   - **Details**:
+     - Added `reserve()` call with load factor 1.25 to avoid rehashing
+     - Prevents costly rehashing during insertion of ~300K customers
+     - Expected speedup: **~5-10% on the 32.53ms customer filter operation**
+
+#### 3. **Parallel Execution Tuning**
+   - **Impact**: Better cache locality in join/aggregation phase
+   - **Technique**: Increased chunk size from 100K to 500K rows per OpenMP task
+   - **Details**:
+     - Larger chunks reduce synchronization overhead
+     - Improves L3 cache reuse (44MB L3 cache with 64 cores)
+     - Expected benefit: **~2-3% improvement** on 47.11ms aggregation
+
+#### 4. **Revenue Calculation Optimization**
+   - **Impact**: Reduced floating-point overhead
+   - **Technique**: Delayed division and used integer multiplication
+   - **Formula**: `price - price*discount` instead of `price * (1 - discount)`
+   - **Expected benefit**: Minimal (negligible) but maintains numerical precision
+
+### **Expected Overall Impact**
+- **Iteration 2**: 653.23 ms
+- **Expected Iteration 3**: **~450-500 ms** (assuming SIMD filters orders 1.5-2x faster)
+- **Speedup vs PostgreSQL**: Q5 on PostgreSQL is 1476 ms → Target gap: 3-3.3x
+
+### **Correctness Maintained**
+✅ All [TIMING] markers preserved inside `#ifdef GENDB_PROFILE` guards  
+✅ Date encoding logic unchanged (days_since_epoch, 1994-01-01 constants)  
+✅ Decimal encoding logic unchanged (scale_factor=100)  
+✅ CSV output format unchanged (comma-delimited)  
+✅ Parallel aggregation correctness maintained with thread-local buffers
+
+### **Code Quality**
+- Compilation successful with `-O3 -march=native` (no warnings)
+- All hash tables properly pre-sized to avoid rehashing
+- SIMD comparisons correctly combine date range conditions
+
+The Executor will now run the optimized code and validate correctness. The main gain comes from **1.5-2x speedup on the orders filtering operation** via SIMD vectorization, which dominates execution time.

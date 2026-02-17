@@ -1,0 +1,35 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] scan_region_filter: 0.13 ms\n[TIMING] scan_nation_filter: 0.08 ms (found 5 nations)\n[TIMING] scan_supplier_filter: 5.83 ms (found 20037 suppliers)\n[TIMING] scan_customer_filter: 32.99 ms (found 300270 customers)\n[TIMING] scan_filter_orders: 546.06 ms (found 456771 orders)\n[TIMING] load_lineitem: 0.03 ms (59986052 rows)\n[TIMING] build_supplier_ht: 41.39 ms\n[TIMING] build_orderkey_ht: 115.64 ms\n[TIMING] build_nation_ht: 0.00 ms\n[TIMING] join_and_aggregation: 50.42 ms\n[TIMING] sort: 0.02 ms\n[TIMING] output: 0.21 ms\n[TIMING] total: 792.89 ms\n",
+    "stderr": "",
+    "duration_ms": 961
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "scan_region_filter": 0.13,
+    "scan_nation_filter": 0.08,
+    "scan_supplier_filter": 5.83,
+    "scan_customer_filter": 32.99,
+    "scan_filter_orders": 546.06,
+    "load_lineitem": 0.03,
+    "build_supplier_ht": 41.39,
+    "build_orderkey_ht": 115.64,
+    "build_nation_ht": 0,
+    "join_and_aggregation": 50.42,
+    "sort": 0.02,
+    "output": 0.21,
+    "total": 792.89
+  },
+  "timing_ms": 792.68
+}

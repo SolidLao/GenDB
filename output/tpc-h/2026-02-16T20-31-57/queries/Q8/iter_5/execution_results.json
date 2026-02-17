@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] region_scan: 0.14 ms\n[TIMING] nation_scan: 0.06 ms\n[TIMING] customer_scan: 48.77 ms\n[TIMING] orders_scan_filter: 168.55 ms (filtered: 911049)\n[TIMING] part_scan_filter: 29.43 ms (filtered: 13309)\n[TIMING] supplier_scan: 2.63 ms\n[TIMING] lineitem_load: 0.04 ms\n[TIMING] aggregation: 47.04 ms (processed: 22176)\n[TIMING] output: 0.19 ms\n[TIMING] total: 296.92 ms\nQ8 query completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q8/iter_5/results/Q8.csv\n",
+    "stderr": "",
+    "duration_ms": 392
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q8\": {\n      \"rows_expected\": 2,\n      \"rows_actual\": 2,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "region_scan": 0.14,
+    "nation_scan": 0.06,
+    "customer_scan": 48.77,
+    "orders_scan_filter": 168.55,
+    "part_scan_filter": 29.43,
+    "supplier_scan": 2.63,
+    "lineitem_load": 0.04,
+    "aggregation": 47.04,
+    "output": 0.19,
+    "total": 296.92
+  },
+  "timing_ms": 296.73
+}

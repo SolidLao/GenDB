@@ -1,0 +1,63 @@
+Good. Now let me create a summary of the optimizations made and their expected impact:
+
+## Summary of Optimizations Applied (Iteration 1)
+
+### Problem Analysis
+- **Current time**: 300ms
+- **Target (Umbra)**: 30ms  
+- **Dominant bottlenecks**: 
+  - `pass1_total_sum`: 135ms (44%)
+  - `aggregation`: 153ms (50%)
+  - These are two separate full scans of 8M rows
+
+### Optimization Strategy (Three Levels)
+
+#### Level 0 Anti-Patterns (Fixed ✓):
+1. **Two full scans → Single fused scan** (saved ~150ms)
+   - Pass 1 and Pass 2 merged into one parallel loop
+   - Compute total_sum and per-partkey aggregation simultaneously
+   
+2. **std::unordered_map → open-addressing hash table** (2-5x faster)
+   - Replaced std::unordered_map with custom CompactHashTable
+   - Linear probing with power-of-2 sizing for better cache locality
+   - Expected 2-5x speedup on aggregation workload
+
+#### Level 1 Plan-Level Issues (Fixed ✓):
+1. **Single-pass fusion**
+   - Restructured code to fuse Pass 1 (total_sum) and Pass 2 (aggregation)
+   - Eliminates redundant traversal of 8M partsupp rows
+   
+2. **Thread-local aggregation with merge**
+   - Each thread accumulates to its own CompactHashTable
+   - Merged after parallel phase to avoid contention
+   - Enables near-linear speedup with 64 cores
+
+#### Level 2 Operator-Level (Applied):
+1. **Parallelism**
+   - Added OpenMP `#pragma omp parallel for` on partsupp scan (64 cores available)
+   - Expected 8-16x speedup (48-64 cores with hyper-threading)
+   
+2. **Thread-safe aggregation**
+   - Thread-local aggregation buffers avoid locks/atomics
+   - Merge step is sequential (small overhead)
+
+### Expected Impact
+- **Scan fusion**: ~150ms saved (two scans → one) = 50% reduction
+- **Open-addressing hash table**: 2-5x speedup on aggregation
+- **Parallelism**: 8-16x speedup on scan (64 cores, limited by memory bandwidth)
+- **Overall**: Conservative estimate 8-15x speedup on aggregation/scan portions
+  - Pass 1+Pass 2 combined: 289ms → 20-40ms
+  - Total expected: 300ms → **60-100ms** (closer to DuckDB/ClickHouse range)
+
+### Code Changes
+1. ✓ Added CompactHashTable struct (open-addressing with linear probing)
+2. ✓ Merged Pass 1 and Pass 2 into single #pragma omp parallel for loop
+3. ✓ Added thread-local aggregation buffers (vector of CompactHashTable)
+4. ✓ Implemented thread-local sum aggregation
+5. ✓ Maintained all [TIMING] lines within #ifdef GENDB_PROFILE guards
+6. ✓ Preserved CSV output format (comma-delimited)
+7. ✓ Preserved all correctness logic (scaling, threshold calculation)
+
+**Compilation Status**: ✓ Success (no warnings or errors)
+
+The code is ready for Executor validation. The optimizations target the dominant bottlenecks (scan + aggregation) using proven techniques (single-pass fusion, open-addressing, parallelism).

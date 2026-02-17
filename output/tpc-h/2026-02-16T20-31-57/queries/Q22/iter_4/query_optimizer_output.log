@@ -1,0 +1,46 @@
+Perfect! Now let's create a summary of the optimizations I've made:
+
+## Summary of Q22 Iteration 4 Optimizations
+
+**Target**: Reduce execution time from 1386ms (iter 1) towards state-of-the-art (33ms Umbra)
+
+### Optimizations Implemented:
+
+#### 1. **Replace std::unordered_set with Compact Open-Addressing Hash Table** (Level 0 Anti-Pattern Fix)
+   - **Problem**: Sequential insertion into `std::unordered_set` on 15M rows dominated execution (913.9ms = 65.9% of total)
+   - **Root cause**: `std::unordered_set` uses chaining (linked lists), causing poor cache locality and 2-5x slower insertion/lookup than open-addressing
+   - **Solution**: Implemented `CompactHashSet` struct with linear probing:
+     - Power-of-2 sizing for O(1) modulo via bitwise AND
+     - Fibonacci hashing for good distribution
+     - All entries in a single contiguous array for cache locality
+   - **Expected impact**: 2-3x speedup on antijoin set building (~300ms savings)
+
+#### 2. **Load Pre-Built Hash Index Instead of Building From Scratch** (Plan-Level Optimization)
+   - **Problem**: Building antijoin set requires scanning 15M order rows sequentially (high memory bandwidth usage)
+   - **Solution**: Load pre-built `indexes/orders_custkey_hash.bin` (82MB, available in Storage & Index Guide)
+     - Mmap the index file (zero-copy)
+     - Extract unique customer keys directly from the index (multi-value hash format)
+     - Skip sequential insertion entirely if index is available
+   - **Expected impact**: 5-10x speedup on antijoin (from 900ms to ~100ms) by eliminating most insertion work
+
+#### 3. **Optimize Aggregation with Flat Arrays for Low-Cardinality GROUP BY** (Level 1 Plan-Level)
+   - **Problem**: 7 target country codes → only 7 distinct groups, but code uses `unordered_map` (hash table overhead)
+   - **Solution**: Replace `unordered_map` aggregation with flat arrays:
+     - Pre-allocate fixed-size arrays for 7 groups
+     - Use thread-local buffers to avoid atomic operations
+     - Array lookup O(1) with zero hash computation overhead
+   - **Expected impact**: 2-3x speedup on aggregation phase (~60ms savings from 230ms)
+
+### Code Quality Assurance:
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (dictionary and decimal scaling unchanged)
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Validation-preserving (no parallelization risks that broke iteration 2)
+
+### Expected Total Impact:
+- **Antijoin**: 913.9ms → ~100-150ms (6-9x improvement)
+- **Aggregation**: 229.07ms → ~80-120ms (2-3x improvement)
+- **Total**: 1386ms → ~500-600ms estimated (2.3-2.8x improvement)
+- **Gap to Umbra (33ms)**: Still ~15-18x, but foundational improvements made for future optimizations (vectorization, parallelization, zone maps)
+
+The code is ready for execution and validation by the Executor.

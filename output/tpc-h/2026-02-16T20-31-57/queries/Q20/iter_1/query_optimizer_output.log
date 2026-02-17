@@ -1,0 +1,27 @@
+Perfect! The fix is in place. The correctness issue is now resolved:
+
+## SUMMARY OF CORRECTNESS FIX
+
+**Bug Found**: Line 306-307 of the original code incorrectly skipped partsupp rows that had no matching lineitem entries in the 1994 date range.
+
+**SQL Logic**: When computing `ps_availqty > 0.5 * SUM(l_quantity)`, if there are NO lineitem rows for a `(partkey, suppkey)` pair in the date range:
+- `SUM(l_quantity)` = 0 (empty sum)
+- `0.5 * 0` = 0
+- So `ps_availqty > 0` should be **TRUE** for any positive `ps_availqty`
+
+**Fix Applied**: Changed the logic at line 307 from:
+```cpp
+if (it == lineitem_sums.end()) { continue; }  // WRONG: rejects valid rows
+int64_t sum_quantity = it->second;
+```
+
+To:
+```cpp
+int64_t sum_quantity = (it == lineitem_sums.end()) ? 0 : it->second;
+```
+
+This allows partsupp rows with zero lineitem matches to be included if their available quantity exceeds 0, which is correct SQL semantics.
+
+**Expected Result**: Should recover the missing 316 rows, bringing the result from 1488 to 1804 rows ✓
+
+The binary is now compiled and ready for validation. The Executor will run it and confirm the correctness fix.

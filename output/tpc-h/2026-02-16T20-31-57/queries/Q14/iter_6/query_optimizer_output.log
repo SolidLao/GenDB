@@ -1,0 +1,53 @@
+Perfect! No errors. Now let me create a summary of the optimization:
+
+## Optimization Summary for Q14 - Iteration 6
+
+### Problem Analysis
+**Bottleneck from Iteration 5 (113.47 ms total):**
+- `build_hash_table: 72.29 ms (63.7% of total time)` ← **PRIMARY BOTTLENECK**
+- `join_filter_aggregate: 40.80 ms (35.9%)`
+
+The code was building a full hash table from all 2M part rows, then filtering down to PROMO types during the join probe. This caused:
+1. **Hash table construction overhead**: Unnecessarily building indices for 2M rows when only ~333K are PROMO
+2. **Wasted lookups**: Every lineitem probe had to check the full hash table
+
+### Optimization Applied (Plan-Level Fix)
+Restructured the logical plan to **push down the p_type PROMO filter BEFORE hash table construction**:
+
+**Before (Iteration 5):**
+1. Load all 2M part rows (p_partkey, p_type)
+2. Build hash table from ALL 2M rows → **72.29 ms**
+3. For each filtered lineitem row:
+   - Probe hash table for p_partkey
+   - Check if part.p_type is PROMO
+   - Compute revenue
+
+**After (Iteration 6):**
+1. Load all 2M part rows (p_partkey, p_type)
+2. **Pre-filter to only PROMO part rows** → ~333K rows (downselected from 2M)
+3. Build hash table from **only PROMO rows** → **Estimated ~12 ms (6x reduction)**
+4. For each filtered lineitem row:
+   - Probe hash table for p_partkey (now much smaller and with better cache locality)
+   - If found: it's guaranteed to be PROMO (already filtered)
+   - Compute revenue
+
+### Key Changes
+1. **Changed data structure**: Replaced `std::unordered_map<int32_t, bool> promo_codes` with `std::vector<bool> is_promo_type` for O(1) direct indexed lookup instead of hash map overhead
+2. **Pre-filter part table**: Scan part rows to identify PROMO types and collect their indices before hash table construction
+3. **Build smaller hash table**: `CompactHashTable` now contains ~333K entries instead of 2M
+4. **Simplified probe logic**: No need to check part type during probe (already guaranteed PROMO), but still track total revenue for ALL matching lineitem rows
+
+### Expected Performance Impact
+- **Hash table build**: 72.29 ms → ~12 ms (6x reduction, primary gain)
+- **Join probe**: ~40.80 ms → ~35 ms (fewer collisions, better cache locality due to smaller table)
+- **Total**: 113.47 ms → **~48-52 ms (2.2-2.4x improvement)**
+
+### Correctness Preserved
+- ✅ All [TIMING] lines remain inside `#ifdef GENDB_PROFILE` guards
+- ✅ No encoding logic changed
+- ✅ Parallel execution maintained with thread-local aggregation
+- ✅ Zone map pruning preserved
+- ✅ Comma-delimited CSV output format unchanged
+- ✅ Aggregation logic correct: sum ALL matching lineitem rows, but only count PROMO revenues
+
+The code is ready for execution and validation.

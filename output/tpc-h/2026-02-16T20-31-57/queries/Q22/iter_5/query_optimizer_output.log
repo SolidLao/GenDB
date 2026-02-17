@@ -1,0 +1,94 @@
+Perfect! The code compiles successfully. Now let me create a summary of the optimizations made:
+
+## Summary of Optimization for Q22 Iteration 5
+
+### Problem Statement
+**41.5x gap to best engine (1386ms vs 33ms)** - 3 consecutive iterations failed to improve. Optimization stall detected, requiring fundamental algorithm rewrite.
+
+### Root Cause Analysis
+**TIMING BREAKDOWN (Iteration 1):**
+- dict_load: 221ms (16%)
+- **build_antijoin: 913ms (66%) ← MASSIVE BOTTLENECK**
+- compute_avg: 21ms (1.5%)
+- filter_aggregate: 229ms (16.5%)
+- output: 7ms
+
+The anti-join step consumed 913ms = 66% of total execution time.
+
+### The Problem: Why Was It So Slow?
+
+The old code iterated through **all 15 million order rows** and inserted each customer key into `std::unordered_map`:
+
+```cpp
+for (int32_t i = 0; i < orders_count; i++) {  // 15M iterations!
+    orders_keys_set.insert(o_custkey[i]);       // unordered_map insertion
+}
+```
+
+**Why this was catastrophic:**
+1. **Pointer chasing**: `std::unordered_map` uses chaining (linked lists), destroying cache locality
+2. **~80 bytes per entry**: Huge memory overhead
+3. **Poor distribution**: Default hash function on int32_t is often identity, causing clustering
+4. **15M scalar operations**: Even optimized, insertion is expensive at scale
+
+### The Solution: Optimized Data Structure
+
+Replaced `std::unordered_map` with **`FastHashSet`** - an **open-addressing hash table**:
+
+**Key improvements:**
+1. **Open addressing**: No pointer chasing, sequential memory access → better cache locality
+2. **50% load factor**: Sized at 2x expected entries to minimize probe chains
+3. **Better hash function**: Uses FNV-like mixing to reduce clustering
+4. **Vectorization-friendly**: Dense array layout allows compiler optimizations
+
+**Expected speedup: 2-5x** (from 913ms → 180-450ms)
+
+### Implementation Details
+
+```cpp
+struct FastHashSet {
+    // Entry array: no pointers, cache-friendly
+    struct Entry { int32_t key; bool occupied; };
+    std::vector<Entry> table;
+    
+    // Open addressing with linear probing
+    void insert(int32_t key) {
+        size_t idx = hash_fn(key);
+        while (table[idx].occupied) {
+            if (table[idx].key == key) return;
+            idx = (idx + 1) & mask;  // Linear probing
+        }
+        table[idx] = {key, true};
+    }
+    
+    // Better hash function than std::hash
+    inline size_t hash_fn(int32_t key) const {
+        uint64_t h = key;
+        h ^= h >> 16;
+        h *= 0x7feb352d;  // FNV-like mixing
+        h ^= h >> 15;
+        return h & mask;
+    }
+};
+```
+
+### Why This Matters
+
+This is a **Level 0 anti-pattern fix** (from the optimizer system prompt):
+- `std::unordered_map` for joins/aggregation with >256 expected groups → replace with open-addressing hash table
+
+### Correctness Preservation
+
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (dictionary codes, decimal scaling)
+- ✅ CSV output format preserved (comma-delimited, 2 decimal places)
+- ✅ Validation logic unchanged
+- ✅ Logical query plan unchanged (only physical structure optimized)
+
+### Expected Impact
+
+**Conservative estimate: 900ms → 200-400ms** (2-5x improvement)
+
+This should bring performance from **1386ms closer to the target of 33ms**, though additional fundamental restructuring (using pre-built indexes or query plan changes) may be needed for further improvements.
+
+The binary compiles successfully and is ready for the Executor to run and validate.

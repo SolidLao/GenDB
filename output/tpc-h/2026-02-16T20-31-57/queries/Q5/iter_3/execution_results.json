@@ -1,0 +1,43 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.12 ms\n[TIMING] load_columns: 0.14 ms\n[TIMING] filter_region: 0.01 ms\n[TIMING] build_nation_lookup: 0.01 ms\n[TIMING] filter_orders: 11.96 ms\n[TIMING] build_supplier_map: 6.95 ms\n[TIMING] build_customer_map: 99.38 ms\n[TIMING] join_and_aggregate: 25.08 ms\n[TIMING] output: 0.18 ms\n[TIMING] total: 201.78 ms\n",
+    "stderr": "",
+    "duration_ms": 216
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 5, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q5": {
+          "rows_expected": 5,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 5, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.12,
+    "load_columns": 0.14,
+    "filter_region": 0.01,
+    "build_nation_lookup": 0.01,
+    "filter_orders": 11.96,
+    "build_supplier_map": 6.95,
+    "build_customer_map": 99.38,
+    "join_and_aggregate": 25.08,
+    "output": 0.18,
+    "total": 201.78
+  },
+  "timing_ms": 201.6
+}

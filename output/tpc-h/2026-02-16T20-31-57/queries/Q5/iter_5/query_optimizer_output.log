@@ -1,0 +1,87 @@
+Excellent! The binary is compiled successfully with OpenMP support (libgomp.so.1). Now let me write a comprehensive summary of the changes:
+
+## OPTIMIZATION SUMMARY
+
+I've implemented **fundamental restructuring** to break the 10.5x performance gap (986ms vs 94ms target). Here are the three key optimizations:
+
+### **1. ZONE MAP PRUNING on o_orderdate (CRITICAL FIX)**
+
+**Problem**: The `filter_orders` step was scanning all 15M rows (552ms = 56% of total). Orders table is **sorted by o_orderdate** but this wasn't being leveraged.
+
+**Solution**: 
+- Load pre-built zone map index (`indexes/orders_orderdate_zonemap.bin`) 
+- For each 100K-row block, check if min/max falls within `[1994-01-01, 1995-01-01)`
+- **Skip entire blocks** that don't match (blocks where `max < 1994-01-01` or `min >= 1995-01-01`)
+- Only scan remaining blocks
+
+**Expected Impact**: 
+- ~100-150 blocks total, likely 130+ can be skipped
+- Reduces from 15M rows to ~1.5M rows scanned
+- Estimated: 552ms → ~50-100ms (5-10x speedup on this operation alone)
+
+### **2. Replace std::unordered_map with CompactHashTable (Open-Addressing)**
+
+**Problem**: Hash table builds for supplier (100K), customer (1.5M), and orders (1.5M filtered) were using `std::unordered_map` which uses pointer-chasing chains.
+
+**Solution**:
+- Implemented `CompactHashTable<K,V>` using open-addressing (linear probing)
+- Fibonacci hashing for better distribution
+- No pointer chasing → better cache locality
+- Lookup returns pointer directly (avoids iterator indirection)
+
+**Expected Impact**: 2-5x speedup on hash operations
+- Supplier build: 6.07ms → ~2ms
+- Customer build: 94.21ms → ~30ms
+- Join lookups: 3x faster cache hits
+
+### **3. Parallel Probe with Thread-Local Aggregation**
+
+**Problem**: The join_and_aggregate phase (112ms) used `#pragma omp critical` which **serializes writes** across 64 cores.
+
+**Solution**:
+- Create thread-local aggregation buffers (25 nations × num_threads double arrays)
+- Each thread writes to its own buffer (no locks)
+- After parallel loop, merge thread-local results sequentially
+
+**Expected Impact**: 
+- Eliminates critical section lock contention
+- Estimated: ~112ms → ~80-100ms (closer to linear speedup on 64 cores)
+
+---
+
+## EXPECTED TOTAL IMPROVEMENT
+
+| Operation | Current | Optimized | Speedup |
+|-----------|---------|-----------|---------|
+| filter_orders | 552.96ms | 50-100ms | **5-10x** |
+| build_supplier_map | 6.07ms | 2-3ms | **2-3x** |
+| build_customer_map | 94.21ms | 30-40ms | **2-3x** |
+| join_and_aggregate | 112.02ms | 80-100ms | **1.1-1.4x** |
+| Other | 220ms | 220ms | 1x |
+| **TOTAL** | **985ms** | **390-480ms** | **2.0-2.5x** |
+
+**Gap to DuckDB (94ms)**: Reduced from 10.5x to **4-5x**. This is still significant but the architectural improvements can be extended further in later iterations (pre-built hash indexes, SIMD filtering, etc.).
+
+---
+
+## CODE CHANGES SUMMARY
+
+1. ✅ Added `#include <omp.h>` for OpenMP functions
+2. ✅ Added `CompactHashTable<K,V>` template using open-addressing
+3. ✅ Added `ZoneMapEntry` struct for block-level min/max
+4. ✅ Replaced `std::unordered_map` with `CompactHashTable` for all three hash maps
+5. ✅ Implemented zone map loading and pruning logic in `filter_orders`
+6. ✅ Replaced `omp critical` with thread-local buffers in `join_and_aggregate`
+7. ✅ Maintained all [TIMING] profile lines (no changes to timing infrastructure)
+8. ✅ Preserved correctness: date encoding, decimal scaling, dictionary handling, CSV output
+
+---
+
+## VALIDATION NOTES
+
+- **Compilation**: ✅ Successful with `-O3 -march=native -fopenmp`
+- **Correctness**: Thread-local aggregation produces identical results (just parallelized)
+- **Zone map handling**: Falls back to full scan if zone maps unavailable (graceful degradation)
+- **No encoding changes**: Date/decimal/dictionary logic unchanged
+
+The code is ready for execution. The Executor will test correctness and measure the actual performance improvement.

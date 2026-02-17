@@ -1,0 +1,30 @@
+Excellent! The fix is in place. Now let me create a summary of what was fixed:
+
+## Summary of Changes
+
+### CORRECTNESS FIX (Critical)
+
+**Issue:** Query returned 2111 rows instead of 1804 (307-row overflow, ~18% error).
+
+**Root Cause:** Incorrect comparison in the correlated subquery filter. The `l_quantity` column is stored with `scale_factor=2`, meaning:
+- Stored value `X` represents actual value `X/2`
+- When aggregating: `sum_quantity` = sum of stored values (not scaled back)
+- Comparison: `ps_availqty > 0.5 * SUM(actual_l_quantity)`
+
+**The Bug:**
+- Code had: `ps_availqty * 2 > sum_quantity` 
+- This became: `ps_availqty > 0.5 * (sum_quantity / 2)` = `ps_availqty > sum_quantity / 4` ✗
+
+**The Fix:**
+- Changed to: `ps_availqty * 4 > sum_quantity`
+- This correctly becomes: `ps_availqty > 0.5 * (sum_quantity / 2)` ✓
+
+**Location:** Line 316 in q20.cpp (partsupp filter step)
+
+### Expected Results
+- Rows returned: 1804 (corrected from 2111)
+- All [TIMING] lines preserved in #ifdef guards
+- No encoding logic changes
+- Compilation: SUCCESS ✓
+
+The Executor will now validate the corrected results and measure performance impact. The fix targets the semantic/correctness category and should bring row count to expected value.

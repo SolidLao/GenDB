@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] filter_part: 176.80 ms\n[TIMING] load_supplier: 7.94 ms\n[TIMING] load_partsupp: 252.09 ms\n[TIMING] load_nation: 0.07 ms\n[TIMING] load_lineitem: 0.03 ms\n[TIMING] load_orders: 6938.88 ms\n[TIMING] scan_filter_join_agg: 125.22 ms\n[TIMING] sort: 0.05 ms\n[TIMING] output: 1.08 ms\n[TIMING] total: 7600.78 ms\n",
+    "stderr": "",
+    "duration_ms": 8849
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "filter_part": 176.8,
+    "load_supplier": 7.94,
+    "load_partsupp": 252.09,
+    "load_nation": 0.07,
+    "load_lineitem": 0.03,
+    "load_orders": 6938.88,
+    "scan_filter_join_agg": 125.22,
+    "sort": 0.05,
+    "output": 1.08,
+    "total": 7600.78
+  },
+  "timing_ms": 7599.7
+}

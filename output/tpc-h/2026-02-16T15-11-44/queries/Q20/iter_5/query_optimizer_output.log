@@ -1,0 +1,66 @@
+Excellent! Now let me create a summary of the optimization strategy and what was changed:
+
+## Summary of Optimization for Q20 (Iteration 5)
+
+### Bottleneck Analysis
+From execution results (Iteration 4):
+- **lineitem_aggregation: 2175.36 ms** (70% of 3094 ms total) — **DOMINANT BOTTLENECK**
+- part_filter: 632.12 ms (20%)
+- partsupp_filter: 218.03 ms (7%)
+- Others: < 70 ms
+
+### Root Cause
+The lineitem aggregation scans 60M rows filtering by a date range [1994-01-01, 1995-01-01). Even though only ~33% match, full table scan with per-row filtering is expensive. The current implementation does:
+1. Full 60M-row scan
+2. Per-row date comparison
+3. Per-row hash table insertion
+
+### Optimization Strategy: **Zone Map Pruning**
+
+#### Technique Applied
+Added **zone map pruning on l_shipdate** to skip entire data blocks (rows 100K each) that fall completely outside the date range.
+
+#### Implementation Details
+
+1. **Loaded pre-built zone map** (`idx_lineitem_shipdate_zmap.bin`):
+   - 450 zones covering 60M rows (100K rows/zone)
+   - Binary format: `int32_t min, int32_t max, uint32_t start_row, uint32_t end_row` (16 bytes/entry)
+   - Loaded via mmap during query execution
+
+2. **Added block-level pruning logic**:
+   - For each zone, check if `zone.max_val < DATE_1994_01_01` or `zone.min_val >= DATE_1995_01_01`
+   - If yes: **skip entire zone** (100K-row I/O + processing eliminated)
+   - If no but partial overlap: still check per-row
+   - If yes and complete overlap: skip per-row filter check
+
+3. **Maintained parallel execution**:
+   - Changed from `schedule(static)` to `schedule(dynamic, 1)` for better work distribution
+   - Zones can be heavily skipped, so dynamic scheduling avoids stragglers
+   - Thread-local aggregation tables still merge at end
+
+#### Expected Impact
+- **Block skipping saves I/O**: With zone maps, estimated 20-30% of blocks can be entirely skipped (those before 1994 or after 1995)
+- **Reduced branching**: Fully-within-zone blocks skip per-row date comparison, improving CPU pipeline efficiency
+- **No memory overhead**: Zone map is 7KB, negligible vs. 60M-row scan
+
+#### Code Changes
+- Added `#include <sys/stat.h>` for `fstat()`
+- Added `ZoneMapEntry` struct (16 bytes)
+- Added zone map loading logic with mmap (lines 330-355)
+- Restructured lineitem aggregation loop to use dynamic zone processing (lines 364-408)
+- Preserved all `[TIMING]` lines and encoding logic
+
+#### Correctness
+- ✅ All timing guards (`#ifdef GENDB_PROFILE`) preserved
+- ✅ Encoding logic unchanged
+- ✅ Zone map skip logic verified: for `col >= X`: skip if `zone.max < X`, for `col < Y`: skip if `zone.min >= Y`
+- ✅ Fallback to full scan if zone map unavailable
+
+### Expected Performance Improvement
+- **Lineitem aggregation**: 2175 ms → ~1600-1700 ms (25-35% improvement)
+- **Total query time**: 3094 ms → ~2500-2600 ms (20-25% improvement)
+- **Compared to best-in-class** (DuckDB ~98 ms): Still ~25x slower due to implementation maturity, but closer
+
+---
+
+The code compiles successfully with `-O3 -march=native` and is ready for execution validation.

@@ -1,0 +1,34 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q7/iter_4/q7.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q7/iter_4/q7.cpp:199:34: warning: ‘%02d’ directive output may be truncated writing between 2 and 11 bytes into a region of size between 6 and 12 [-Wformat-truncation=]\n  199 |     snprintf(buf, 20, \"%04d-%02d-%02d\", year, month, day);\n      |                                  ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q7/iter_4/q7.cpp:199:23: note: directive argument in the range [-2147483647, 2147483647]\n  199 |     snprintf(buf, 20, \"%04d-%02d-%02d\", year, month, day);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q7/iter_4/q7.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 20\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.10 ms\n[TIMING] supp_filter: 0.50 ms\n[METADATA] Filtered supplier: 8010 rows\n[TIMING] cust_filter: 21.74 ms\n[METADATA] Filtered customer: 120469 rows\n[TIMING] scan_filter: 1004.89 ms\n[METADATA] Filtered lineitem: 18230325 rows\n[TIMING] join_supplier: 400.66 ms\n[METADATA] After join with supplier: 1460257 rows\n[TIMING] join_lineitem_orders: 1416.47 ms\n[METADATA] After join with orders: 1460257 rows\n[TIMING] join_customer: 43.29 ms\n[METADATA] After join with customer: 117014 rows\n[TIMING] nation_filter: 3.39 ms\n[METADATA] After nation filter: 58365 rows\n[TIMING] aggregation: 1.06 ms\n[METADATA] Aggregated groups: 4\n[TIMING] sort: 0.00 ms\n[TIMING] output: 0.99 ms\n[TIMING] total: 2893.21 ms\n",
+    "stderr": "",
+    "duration_ms": 3499
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q7\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.1,
+    "supp_filter": 0.5,
+    "cust_filter": 21.74,
+    "scan_filter": 1004.89,
+    "join_supplier": 400.66,
+    "join_lineitem_orders": 1416.47,
+    "join_customer": 43.29,
+    "nation_filter": 3.39,
+    "aggregation": 1.06,
+    "sort": 0,
+    "output": 0.99,
+    "total": 2893.21
+  },
+  "timing_ms": 2892.2200000000003
+}

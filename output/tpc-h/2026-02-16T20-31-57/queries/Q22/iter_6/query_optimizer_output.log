@@ -1,0 +1,46 @@
+Excellent! The binary is compiled successfully. Now let me create a summary of the optimizations:
+
+## Summary of Optimizations (Q22 Iteration 6)
+
+I've optimized the Q22 query code by implementing the following key changes:
+
+### **Primary Optimization: Pre-Built Index Loading**
+**Issue:** The previous iteration spent 391ms (49% of total time) building a hash table from 15M order rows using `FastHashSet`.
+
+**Solution:** 
+- Implemented `PreBuiltOrdersIndex` class to load the pre-built `orders_custkey_hash.bin` index via mmap
+- The index uses a multi-value hash design:
+  - Header: `num_unique` (~1M unique customers) and `table_size` (2^21 slots)
+  - Hash table: 2M × 12-byte entries (key, offset, count)
+  - Positions array: Row positions grouped by customer key
+- **Expected impact:** Reduce `build_antijoin` from 391ms to ~1-2ms (390ms savings, 49% of total time)
+
+### **Secondary Optimization: Improved Aggregation**
+- Kept thread-local aggregation approach (avoids lock contention)
+- Only 7 distinct country codes → minimal merge overhead
+- Pre-extracted country code mapping to reduce dictionary lookups
+
+### **Code Structure**
+**Key changes in the modified code:**
+1. **Lines 125-198:** `PreBuiltOrdersIndex` struct with mmap-based loading and O(1) hash lookups
+2. **Lines 101-137:** `FastTargetLookup` helper for efficient country code validation
+3. **Lines 280-291:** Index loading phase (replacing hash table construction)
+4. **Lines 380-410:** Streamlined aggregation with proper thread-local merge
+
+### **Compilation**
+✅ Successfully compiles with:
+```bash
+g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q22 q22.cpp
+```
+
+### **Expected Performance Impact**
+- **`build_antijoin` bottleneck:** 391ms → ~1-2ms (**390ms reduction**)
+- **Total time:** ~792ms → ~400-410ms (50% reduction)
+- **Gap to Umbra:** Currently 24x, should reduce to ~12x
+
+The fundamental issue is that Q22 involves a complex subquery pattern with NOT EXISTS that requires checking 15M order rows. Even with pre-built indexes, the remaining ~400ms comes from:
+- Dictionary loading (181ms) - unavoidable I/O
+- Filtering/aggregation (202ms) - 1.5M customer rows scanned
+- Other operations (17ms)
+
+For further gains, we'd need to optimize dictionary loading (perhaps with parallel I/O) or vectorize the scan/filter operations.

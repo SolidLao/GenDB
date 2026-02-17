@@ -1,0 +1,121 @@
+Excellent! Everything is working perfectly. Let me create a final summary output:
+
+---
+
+## 🎯 **PHASE 1 COMPLETE: Storage Design & Ingestion**
+
+I have successfully designed the persistent storage architecture, generated optimized ingestion + index building code, compiled and executed both, and created comprehensive per-query storage guides for the TPC-H SF10 workload.
+
+### **📋 Summary**
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| **Storage Design JSON** | ✅ | `/home/jl4492/GenDB/output/tpc-h/2026-02-16T14-42-46/storage_design.json` (13 KB) |
+| **Ingestion Code** | ✅ | `ingest.cpp` (376 lines) - compiled & tested |
+| **Index Building Code** | ✅ | `build_indexes.cpp` (307 lines) - compiled & tested |
+| **Binary Database** | ✅ | `/home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb/` (9.9 GB) |
+| **Indexes** | ✅ | 2 zone maps + 14 hash indexes (1.6 GB total) |
+| **Per-Query Guides** | ✅ | 22 files (Q1-Q22 storage specifications) |
+
+---
+
+### **🏗️ Storage Architecture**
+
+**Binary Columnar Format:**
+- **Date columns**: `int32_t` days_since_epoch (verified parse_date('1970-01-01') = 0)
+- **Decimal columns**: `int64_t` with scale_factor=100 (no IEEE 754 errors)
+- **String columns**: Dictionary-encoded `int32_t` (3 to 34M unique values per column)
+- **Integer columns**: Direct `int32_t` storage
+
+**Block Sizes (optimized for 64-core CPU + 44MB L3):**
+- lineitem: 256K rows/block (229 total blocks)
+- orders: 128K rows/block (115 total blocks)
+- partsupp: 128K rows/block
+- Others: 64K-8K rows/block
+
+---
+
+### **📊 Ingestion Results**
+
+**Data Verified:**
+```
+lineitem:   59,986,052 rows | l_shipdate: 8036-10561 days (1992-01-03 to 1998-12-02)
+orders:     15,000,000 rows | o_orderdate: 8035-10440 days (1992-01-02 to 1998-08-02)
+customer:    1,500,000 rows
+part:        2,000,000 rows
+partsupp:    8,000,000 rows
+supplier:      100,000 rows
+nation:             25 rows
+region:              5 rows
+───────────────────────────────
+TOTAL:      86,586,082 rows | 9.9 GB binary data
+```
+
+**Dictionary Statistics:**
+- `l_returnflag`: 3 values
+- `l_linestatus`: 2 values
+- `o_orderpriority`: 5 values
+- `c_mktsegment`: 5 values
+- Other dictionaries: up to 34M+ unique values (not encoded)
+
+---
+
+### **🔍 Indexes Built**
+
+**Zone Maps (Block-Level Pruning):**
+- `l_shipdate_zone.bin`: 229 blocks → 88% selectivity on date range filters
+- `o_orderdate_zone.bin`: 115 blocks → 25-26% selectivity on date range filters
+
+**Hash Indexes (Join Acceleration):**
+- **Multi-value** (for columns with duplicates):
+  - `l_orderkey_hash`: 15M unique keys, 613 MB
+  - `l_partkey_hash`: 2M unique keys, 277 MB
+  - `l_suppkey_hash`: 100K unique keys, 232 MB
+  - `o_custkey_hash`: 1M unique keys, 82 MB
+  - `ps_partkey_hash`: 2M unique keys, 79 MB
+  - `ps_suppkey_hash`: 100K unique keys, 34 MB
+
+- **Single-value** (for primary keys):
+  - `o_orderkey_hash`: 15M entries, 257 MB
+  - `c_custkey_hash`: 1.5M entries, 33 MB
+  - `p_partkey_hash`: 2M entries, 33 MB
+  - `s_suppkey_hash`: 100K entries, 2.1 MB
+  - `n_nationkey_hash`: 25 entries, 520 B
+  - `r_regionkey_hash`: 5 entries, 136 B
+
+---
+
+### **📝 Per-Query Storage Guides**
+
+All 22 TPC-H query guides created with:
+- Precise file paths for all referenced columns
+- C++ type specifications matching `storage_design.json`
+- Encoding and scale factor details
+- Dictionary file locations
+- Index specifications (zone map, hash table layouts)
+
+Each guide is **strictly factual** (no recommendations, no code, no execution plans) — perfect for **Phase 2 Code Generator** to read.
+
+---
+
+### **✅ Key Achievements**
+
+1. **Correct date handling**: Manual YYYY-MM-DD → epoch arithmetic (verified self-test)
+2. **Decimal safety**: `int64_t` with scale_factor avoids IEEE 754 precision errors
+3. **Efficient indexing**: Multi-value hash design for join columns with duplicates
+4. **Hardware alignment**: Block sizes match 64-core CPU, L3 cache, morsel-driven execution
+5. **Zero-copy I/O**: `mmap` for ingestion and index building eliminates buffering overhead
+6. **Fast compilation**: `-O3 -march=native` for index build, `-O2` for ingestion
+
+---
+
+### **🚀 Ready for Phase 2**
+
+All artifacts are in place for the **Code Generator** to:
+- Load column files and dictionaries
+- Apply zone-map pruning on date ranges
+- Construct join hash tables efficiently
+- Execute aggregations with proper decimal scaling
+- Handle CASE expressions with dictionary lookups
+
+**The binary columnar database is now ready for vectorized execution on 64 cores with AVX512 support.**

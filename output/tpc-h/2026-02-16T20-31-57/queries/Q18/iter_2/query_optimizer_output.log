@@ -1,0 +1,42 @@
+Perfect! The compilation succeeded. Now let me create a summary of the optimizations I made:
+
+## Summary of Q18 Iteration 2 Optimizations
+
+### Changes Made:
+
+**1. Replaced unordered_set with sorted vector for qualifying orderkeys lookup (Level 0 Anti-pattern)**
+   - **Issue:** `qualifying_orderkeys.count()` was O(1) average but called 59M times (lineitem scan) → high cache misses and poor hash distribution
+   - **Fix:** Convert to sorted `std::vector` and use `std::binary_search()` → O(log N) but much better cache locality and zero hash collisions
+   - **Expected Impact:** ~5-10% improvement on lineitem scan (filter phase)
+   - **Location:** Lines 427-454
+
+**2. Optimized orders_hash and customer_hash initialization**
+   - Pre-sized hash tables based on actual cardinality (qualifying_count for orders)
+   - Reduced allocation overhead in the build phase
+   - **Expected Impact:** Marginal (1-2%) but cleaner code
+
+**3. Optimized final aggregation sizing**
+   - Changed `final_agg` pre-sizing from fixed 1M to `qualifying_count + 10000`
+   - Matches expected cardinality (one group per qualifying orderkey)
+   - **Expected Impact:** Better memory efficiency, fewer hash collisions (~2-3%)
+
+**4. Replaced full sort with partial_sort for LIMIT 100**
+   - Changed from `std::sort()` to `std::partial_sort()` 
+   - Only sorts top 100 instead of all groups
+   - **Expected Impact:** ~1-2% improvement (sort was already small at 9.69ms)
+
+### Performance Expectations:
+
+- **Current (Iter 1):** 2195.65 ms
+- **Expected (Iter 2):** ~1950-2050 ms (10-12% improvement)
+  - Binary search on qualifying set: -50-100ms
+  - Hash table efficiency: -20-50ms
+  - Partial sort: -10-20ms
+
+### Bottleneck Status:
+The subquery remains the dominant operation. Future iterations could:
+- Use pre-built lineitem indexes (if available for zone-map pruning)
+- Implement SIMD vectorization on hash aggregation
+- Use memory-mapped pre-built hash tables instead of building from scratch
+
+The code is ready for validation by the Executor. All [TIMING] markers preserved, encoding logic unchanged, validation should pass.

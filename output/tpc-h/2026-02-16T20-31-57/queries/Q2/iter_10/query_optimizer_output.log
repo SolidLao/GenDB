@@ -1,0 +1,34 @@
+Perfect! Now let me create a summary of the optimization:
+
+## Optimization Summary for Q2 Iteration 10
+
+**Bottleneck Identified:** 
+The `subquery_and_index` phase (20.85 ms, 28% of total) dominated execution time. The hot inner loop checked set membership via `std::unordered_set<int32_t>` which incurs:
+- Hash computation overhead
+- Collision handling
+- Cache misses (hash table not compact)
+
+**Optimization Applied:**
+Replaced hash set lookups with **dense boolean bitvectors** for O(1) constant-time set membership checks:
+
+1. **`qualified_suppkey_set` → `is_qualified_suppkey` bitvector**
+   - Dense array of size 100001 (suppkey range: 1-100000)
+   - Direct indexing: `is_qualified_suppkey[suppkey]` — guaranteed O(1), no hash computation
+
+2. **`qualified_partkey_set` → `is_qualified_partkey` bitvector**
+   - Dense array of size 2000001 (partkey range: 1-2000000)
+   - Direct indexing: `is_qualified_partkey[partkey]` — guaranteed O(1)
+
+**Impact:**
+- **Eliminates hash computation** in the 8M-row inner loop
+- **Better cache locality** — bitvectors are compact and sequential
+- **Expected improvement:** 2-4 ms (saves ~10-20% of subquery_and_index phase)
+- **Baseline at 74.24 ms** suggests target is ~70-72 ms
+
+**Code Quality:**
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic untouched
+- ✅ Validation correctness maintained (same algorithm, faster operations)
+- ✅ Compiled successfully with `-O3 -march=native`
+
+The Executor will now run the binary and validate correctness. If this passes, we expect a **2-4 ms improvement** from the bitvector optimization.

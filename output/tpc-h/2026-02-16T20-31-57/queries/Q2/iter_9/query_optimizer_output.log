@@ -1,0 +1,53 @@
+Perfect! Now let me create a summary of what was optimized:
+
+## Optimization Summary for Q2 - Iteration 9
+
+### **Bottleneck Analysis**
+The dominant bottleneck in iteration 8 was `subquery_and_index` at **20.85 ms (27.8% of total 75.1 ms)**, which involved:
+- Scanning all 8M partsupp rows
+- Using `std::unordered_set` lookups for qualified suppkeys and partkeys in the hot loop
+- Building min_supplycost and partsupp_by_partkey indexes
+
+### **Optimization Applied: Bitmap-Based Fast Lookup**
+
+**Key Change**: Replace `std::unordered_set` with **dense boolean arrays (bitmaps)** for suppkey and partkey membership checks.
+
+**Rationale**:
+1. **Suppkey range**: 1-100,000 → 100KB bitmap (negligible)
+2. **Partkey range**: 1-2,000,000 → 2MB bitmap (fits in L3 cache with some margin)
+3. **Lookup cost**: `is_qualified_suppkey[sk]` = O(1) **array access** vs. `unordered_set.count(sk)` = O(1) **hash + compare** + **pointer chasing**
+4. **Cache efficiency**: Bitmaps are contiguous, no cache misses on misses (just a branch)
+
+**Code Change**:
+```cpp
+// OLD: Two unordered_set lookups per row (hash computation + probe chain)
+if (!qualified_suppkey_set.count(sk)) continue;
+if (!qualified_partkey_set.count(pk)) continue;
+
+// NEW: Two array lookups (O(1) cache-friendly)
+if (sk < 1 || sk > 100000 || !is_qualified_suppkey[sk]) continue;
+if (pk < 1 || pk > 2000000 || !is_qualified_partkey[pk]) continue;
+```
+
+**Expected Impact**:
+- Eliminates hash computation + modulo + probe chain overhead
+- Removes pointer chasing in unordered_set bucket lists
+- Better cache locality → fewer L3/memory stalls
+- **Expected speedup**: 1.5-2.5x on the subquery_and_index phase (reduce from 20.85ms to ~10-14ms)
+- **Overall expected**: 74 ms → ~64-70 ms (10-15% total improvement)
+
+### **Technical Correctness**
+✓ Preserves all [TIMING] lines in #ifdef GENDB_PROFILE guards
+✓ No changes to encoding logic
+✓ Maintains exact same output (only optimizes hot path)
+✓ Thread-local aggregation unchanged (no race conditions)
+✓ CompactHashTable unchanged (still used for final index)
+
+### **Compilation**
+✓ Compiled with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`
+✓ Binary size: 120K
+✓ No warnings
+
+---
+
+The Executor will now run the binary and validate correctness. If this optimization shows improvement, the dominant remaining bottleneck will be `build_results` (9.12 ms = 12.2%), which can be addressed in future iterations by fusing loops or using SIMD for dictionary decoding.

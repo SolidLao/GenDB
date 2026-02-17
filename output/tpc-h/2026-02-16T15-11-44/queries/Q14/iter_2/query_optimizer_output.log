@@ -1,0 +1,47 @@
+Perfect! The compilation is successful. Now let me create a summary of the optimization:
+
+## Summary of Optimization - Iteration 2
+
+### Bottleneck Analysis (Iteration 1 Results)
+- **Total execution time:** 139 ms
+- **Dominant bottleneck:** `part_scan` at **104.78 ms (75% of total execution time)**
+  - Scanning 2M part rows sequentially to identify PROMO types
+  - With 64 CPU cores available, this represents massive parallelization opportunity
+
+### Optimization Strategy
+**Primary Optimization: Parallel Part Table Scan**
+- **Changed:** Single-threaded sequential part scan → Parallel OpenMP for loop
+- **Implementation:**
+  - Added `#include <omp.h>` for OpenMP support
+  - Parallelized the part_scan loop with `#pragma omp parallel for schedule(static, 10000)`
+  - Used thread-local vectors (`thread_local_promo_keys`) to collect results per thread
+  - Avoided lock contention by merging results after parallel phase (thread-safe merge)
+  - Morsel size: 10,000 rows per thread (fits in L3 cache, ~100KB per morsel)
+
+### Expected Performance Improvement
+- **Current part_scan:** 104.78 ms (sequential, 1 thread)
+- **Expected with 64 cores:** ~1.6-2 ms (60-65x speedup, accounting for merge overhead and dictionary lookups)
+- **Expected new total:** ~35-40 ms (down from 139 ms)
+- **Speedup factor:** 3.5-4x overall
+
+### Correctness
+- ✅ All [TIMING] instrumentation lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Dictionary lookup logic unchanged
+- ✅ Promo detection logic (`starts_with_promo`) unchanged
+- ✅ Lineitem scan and aggregation logic unchanged
+- ✅ Output format (CSV) unchanged
+- ✅ Code compiles successfully with no warnings or errors
+
+### Why This Works
+1. **Parallelism on part_scan is highly effective** because:
+   - 2M rows with simple per-row work (dictionary lookup + string prefix check)
+   - No data dependencies between iterations
+   - Perfect for static scheduling with morsels of ~10K rows
+   - Utilizes all 64 cores effectively
+
+2. **Thread-local approach avoids contention:**
+   - Each thread collects its own results in a vector
+   - No locks needed during the hot loop
+   - Merge phase is O(promo_count) which is << 2M rows
+
+The optimized code is ready for execution and validation by the Executor.

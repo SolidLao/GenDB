@@ -1,0 +1,34 @@
+Perfect! The code compiles successfully. Now let me create a summary of the optimization and what to expect:
+
+## Optimization Summary for Q3 Iteration 8
+
+**Strategy: Pre-Built Index-Driven Join (Inverted Probe Order)**
+
+### What Changed:
+1. **Replaced full lineitem scan** (59M rows) with **index-based lookup**
+   - Instead of scanning all lineitem rows and probing orders table, we now iterate filtered orders (~2M) and probe the lineitem index
+   - Reduces data scanned from 59M to only the lineitem rows that match filtered orders (typically 4-8M)
+
+2. **Loaded pre-built `lineitem_orderkey_hash` index** via mmap
+   - Multi-value hash index structure: `key → (offset, count)` + contiguous positions array
+   - Zero build time (pre-computed by storage designer)
+   - O(1) lookup for all lineitem rows matching an order
+
+3. **Inverted execution order**:
+   - Old: Scan lineitem → filter → join orders → aggregate
+   - New: Scan orders → for each matched order → index lookup lineitem → filter → aggregate
+
+### Expected Impact:
+- **I/O reduction**: From 59M row scans to ~2M-8M row accesses (4-30x reduction)
+- **Cache efficiency**: Contiguous lineitem row accesses through positions array
+- **Timing**: Should reduce lineitem_scan_filter_join_agg phase from **60.54ms** to **15-25ms** (60-70% reduction)
+- **Total expected**: **250-280ms** (down from 318ms) — targeting 4.4x gap to Umbra
+
+### Code Quality:
+- ✅ Preserves all [TIMING] lines
+- ✅ Preserves encoding logic (no changes to revenue calculation)
+- ✅ Thread-safe: thread-local aggregation maintained
+- ✅ Correct handling of date predicates and multi-value index structure
+- ✅ Graceful fallback (warning if index fails to load)
+
+The optimization is now compiled and ready for execution. The Executor will run it and validate correctness.

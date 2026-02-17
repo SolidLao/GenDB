@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 23.53 ms\n[TIMING] supplier_filter: 0.70 ms\n[TIMING] orders_filter: 4444.55 ms\n[TIMING] subquery_preprocessing: 52300.25 ms\n[TIMING] scan_filter_aggregate: 148.49 ms\n[TIMING] output: 17.14 ms\n[TIMING] total: 56934.82 ms\nQ21 result written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q21/iter_2/results/Q21.csv\n",
+    "stderr": "",
+    "duration_ms": 68359
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q21\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_data": 23.53,
+    "supplier_filter": 0.7,
+    "orders_filter": 4444.55,
+    "subquery_preprocessing": 52300.25,
+    "scan_filter_aggregate": 148.49,
+    "output": 17.14,
+    "total": 56934.82
+  },
+  "timing_ms": 56917.68
+}

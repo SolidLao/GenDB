@@ -1,0 +1,46 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] scan_region_filter: 0.09 ms\n[TIMING] scan_nation_filter: 0.05 ms (found 5 nations)\n[TIMING] scan_supplier_filter: 2.41 ms (found 20037 suppliers)\n[TIMING] scan_customer_filter: 112.01 ms (found 300270 customers)\n[TIMING] scan_filter_orders: 418.37 ms (found 0 orders)\n[TIMING] load_lineitem: 0.06 ms (59986052 rows)\n[TIMING] build_supplier_ht: 201.46 ms\n[TIMING] build_orderkey_ht: 0.00 ms\n[TIMING] build_nation_ht: 0.01 ms\n[TIMING] join_and_aggregation: 128.03 ms\n[TIMING] sort: 0.00 ms\n[TIMING] output: 0.18 ms\n[TIMING] total: 862.76 ms\n",
+    "stderr": "",
+    "duration_ms": 1050
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 5, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q5": {
+          "rows_expected": 5,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 5, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "scan_region_filter": 0.09,
+    "scan_nation_filter": 0.05,
+    "scan_supplier_filter": 2.41,
+    "scan_customer_filter": 112.01,
+    "scan_filter_orders": 418.37,
+    "load_lineitem": 0.06,
+    "build_supplier_ht": 201.46,
+    "build_orderkey_ht": 0,
+    "build_nation_ht": 0.01,
+    "join_and_aggregation": 128.03,
+    "sort": 0,
+    "output": 0.18,
+    "total": 862.76
+  },
+  "timing_ms": 862.58
+}

@@ -1,0 +1,41 @@
+Perfect! The code has been updated with the optimizations. Let me create a summary of what was changed:
+
+## Summary of Q5 Optimization Changes (Iteration 1)
+
+### Three High-Impact Optimizations Implemented:
+
+**1. Replaced `std::unordered_map` with Open-Addressing `CompactHashTable` (2-5x improvement)**
+   - **Changes:**
+     - Added `CompactHashTable<K, V>` template using open-addressing with Fibonacci hashing
+     - Replaced orders, customer, and supplier hash maps from `std::unordered_map` to `CompactHashTable`
+     - Proper sizing: Load factor ~75%, power-of-2 sizing for fast modulo via bitmask
+   - **Why:** Open-addressing eliminates pointer chasing (cache misses) and reduces per-entry overhead from ~80 bytes to ~16 bytes. Fibonacci hashing ensures good distribution on integer keys.
+   - **Expected Impact:** Orders hash operations (map build during filter): 553ms → ~200-250ms
+
+**2. Implemented Thread-Local Aggregation Buffers (5-8x improvement on parallel aggregation)**
+   - **Changes:**
+     - Added `thread_revenues[num_threads][25]` and `thread_counts[num_threads][25]` 
+     - Each thread updates its own local buffer during the parallel loop (no synchronization)
+     - Single serial merge phase after loop completes
+   - **Why:** Previous code used `omp critical` on every match, serializing all aggregation and eliminating parallelism. Thread-local approach enables true parallel aggregation.
+   - **Expected Impact:** Join/aggregate loop: 112ms → ~20-25ms (if lineitem matches are >100K)
+
+**3. Updated Code for Pointer-Based Lookups**
+   - Changed from `.find()` iterator pattern to direct pointer lookup (`orders_map.find()` returns `V*`)
+   - Enabled by `CompactHashTable::find()` returning `V*` instead of iterator
+   - Slightly cleaner pointer checks
+
+### Expected Total Impact:
+- **Orders filter + hash build:** 553ms → ~200-250ms (2.2-2.8x)
+- **Join/aggregate:** 112ms → ~20-25ms (4.5-5.6x)
+- **Total:** 986ms → ~400-500ms (2-2.5x overall improvement)
+- **Target:** 94ms (DuckDB) — still 4-5x slower, but eliminates anti-pattern bottlenecks
+
+### Correctness Preserved:
+✅ All [TIMING] markers remain inside `#ifdef GENDB_PROFILE` guards
+✅ Encoding logic unchanged (decimal scale factor, date computation)
+✅ CSV output format unchanged (comma-delimited)
+✅ All join predicates and aggregation logic preserved
+✅ Thread safety with OpenMP guarantees
+
+The code compiles successfully with `-O3 -march=native -fopenmp` flags. Executor will run validation to confirm correctness.

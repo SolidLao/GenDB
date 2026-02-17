@@ -2,6 +2,27 @@
 
 Read this index first. Only read individual files if you need specific implementation details for a technique you plan to use.
 
+## Query Planning (READ FIRST — before writing or optimizing any query code)
+
+Wrong operation ordering causes 10-100x slowdowns even with perfect operators. Plan first, code second.
+
+| File | Technique | When to Use |
+|------|-----------|-------------|
+| `query-execution/query-planning.md` | **Logical → Physical → Code Pipeline** | **ALWAYS. Covers filter pushdown, join ordering, subquery decorrelation, physical operator selection, data structure choice.** |
+
+## Performance Techniques
+
+Concrete implementation patterns for key optimization techniques. Read `beating-general-purpose-engines.md` first for the philosophical foundation.
+
+| File | Technique | When to Use |
+|------|-----------|-------------|
+| `techniques/beating-general-purpose-engines.md` | **Specialization Philosophy (READ FIRST)** | **Always. Generated code must exploit specialization to outperform general engines.** |
+| `techniques/date-operations.md` | O(1) Date Extraction | Any query extracting year/month/day from epoch-day integers. Replaces loop-based extraction. |
+| `techniques/semi-join-patterns.md` | Hash Semi-Join / Anti-Join | EXISTS, NOT EXISTS, IN (SELECT ...) subqueries. Pre-compute inner result into hash set. |
+| `techniques/direct-array-lookup.md` | Direct Array Lookup | Join/lookup key with <256 distinct values (nation keys, region keys, flags). |
+| `techniques/bloom-filter-join.md` | Bloom Filter for Joins | Hash joins where build side is much smaller than probe side and many probes have no match. |
+| `techniques/late-materialization.md` | Late Materialization | Queries filtering on integers but outputting strings. Load strings only for qualifying rows. |
+
 ## Parallelism (CRITICAL - Check First)
 
 Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources and is the #1 performance bottleneck.

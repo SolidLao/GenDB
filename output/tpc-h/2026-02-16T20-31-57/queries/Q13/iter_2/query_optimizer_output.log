@@ -1,0 +1,61 @@
+Perfect! The binary was successfully compiled. Now let me review the changes and document the optimization strategy:
+
+## Summary of Optimizations for Q13 Iteration 2
+
+I've implemented **three critical optimizations** targeting the dominant bottleneck:
+
+### Bottleneck Analysis
+- **Previous iteration (iter_0):** 4985.73 ms total
+  - `dictionary_filter`: 1296.11 ms (26%)
+  - `first_aggregation`: 3671.09 ms (74%) ← **DOMINANT BOTTLENECK**
+  - Other phases: <20 ms
+
+### Optimizations Applied
+
+#### 1. **Parallel Dictionary Filtering** (1296 ms → target: ~800-900 ms)
+- **Issue**: Dictionary scan was sequential despite 64 cores available
+- **Solution**: 
+  - Parallel loop with `#pragma omp parallel for` to scan dictionary lines in parallel
+  - Each thread checks the "special%requests" pattern independently
+  - Critical section to append matching codes to vector
+  - Convert to hash set for fast lookups
+- **Expected impact**: 30-40% reduction (8-16x speedup from parallelism, minus merge overhead)
+
+#### 2. **Parallel Orders Aggregation with Thread-Local Buffers** (3671 ms → target: ~400-600 ms)
+- **Issue**: Sequential scan of 15M orders with hash table insertions is inherently sequential
+- **Solution**: 
+  - Thread-local hash maps: Each of 64 threads maintains its own aggregation buffer
+  - Parallel scan: `#pragma omp parallel for` on 15M orders, each thread updates only its local map (zero contention)
+  - Merge phase: Sequentially merge all thread-local results into global map
+- **Expected impact**: 5-8x speedup from 64 cores (80-90% of scaling efficiency)
+
+#### 3. **Optimize Second Aggregation with Flat Array** (18 ms → ~5-10 ms)
+- **Issue**: Using `std::unordered_map` for low-cardinality aggregation (~25-50 distinct groups)
+- **Solution**: 
+  - Compute max order count from first aggregation
+  - Use flat array `vector<int32_t>` indexed by order count
+  - Direct array increment (O(1) with no hashing overhead)
+  - Array indexing is 5-10x faster than hash map operations for low cardinality
+- **Expected impact**: 2-3x reduction in second aggregation time
+
+### Expected Overall Performance
+
+**Baseline (iter_0):** 4985.73 ms
+
+**Estimated breakdown:**
+- Dictionary filter: 1296 ms × 0.35 = **454 ms** (35% of original with 8-16x speedup from parallelism)
+- First aggregation: 3671 ms × 0.15 = **551 ms** (15% of original with 6-7x speedup from parallelism + thread-local buffers)
+- Second aggregation: 18 ms × 0.30 = **5 ms** (30% of original with flat array)
+- Other phases: ~20 ms (unchanged)
+
+**Projected total: ~1030 ms** (4.8x speedup vs iteration 0)
+
+This brings GenDB from 4985 ms to approximately **1000-1200 ms**, closing the gap to Umbra (136 ms) from 36.6x to 7-9x. Further optimization would require architectural changes (vectorization, adaptive joins with pre-built indexes).
+
+### Correctness Preservation
+✅ All [TIMING] macros preserved with correct labels
+✅ Encoding logic unchanged
+✅ LEFT OUTER JOIN semantics preserved (all customers initialized with count)
+✅ CSV output format unchanged (comma-delimited)
+
+The Executor will now run the optimized code and validate correctness. This optimization strategy follows the Level 0 anti-pattern scan (parallelism) and Level 1 plan-level analysis (no plan changes needed, just parallel execution).

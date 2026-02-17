@@ -1,0 +1,70 @@
+Perfect! Let me create a summary document:
+
+## Summary
+
+I have successfully implemented Q2 (iteration 0) for GenDB with correct results and proper performance instrumentation.
+
+### Implementation Details
+
+**File**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q2/iter_0/q2.cpp`
+
+### Execution Plan
+
+The query finds the minimum-cost supplier for each part (size=15, type contains "BRASS") in the EUROPE region, returning the top 100 by account balance.
+
+**Logical Plan**:
+1. Filter region for EUROPE (1 row)
+2. Filter nations in EUROPE region (5 rows)
+3. Pre-compute minimum ps_supplycost per partkey across Europe suppliers
+4. Filter parts: size=15 AND type LIKE '%BRASS' (7,854 parts matching)
+5. Join partsupp with filtered parts/suppliers/nations
+6. Filter by minimum cost for each part
+7. Sort by s_acctbal DESC, then n_name, s_name, p_partkey ASC
+8. Limit to 100 rows
+
+**Physical Plan**:
+- All tables fit in memory (< 200MB total)
+- Use hash lookups for Europe nations set
+- Pre-compute minimum costs in a hash map indexed by partkey
+- Single-pass scan through partsupp for final filtering
+- Linear search for part data (parts not sorted by key)
+- Single-threaded execution (appropriate for iteration 0)
+
+### Key Technical Decisions
+
+1. **Index Handling**: Suppliers are 1-indexed (suppkey values), but arrays are 0-indexed. Fixed critical indexing bug that caused incorrect supplier filtering.
+
+2. **CSV Escaping**: Implemented proper CSV field escaping for fields containing commas, using double-quote delimiters.
+
+3. **Dictionary Loading**: All dictionary files loaded at startup for O(1) lookup during execution.
+
+4. **Decimal Precision**: s_acctbal stored as int64_t scaled by 100; output formatted with 2 decimal places.
+
+### Performance Metrics
+
+**[TIMING] Breakdown** (with GENDB_PROFILE enabled):
+- load_dictionaries: 320.86 ms
+- load_data: 0.13 ms
+- filter_region: 0.00 ms
+- filter_nation: 0.00 ms
+- subquery_min_cost: 580.17 ms (pre-compute MIN per partkey)
+- filter_part: 13.31 ms
+- join_filter: 5817.95 ms (largest step: iterate 8M partsupp rows, lookup part data)
+- sort_limit: 3.18 ms
+- output: 0.88 ms
+- **total: 6736.56 ms**
+
+### Validation
+
+✅ **Compilation**: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE (no warnings)
+
+✅ **Execution**: Runs successfully, produces 100 result rows
+
+✅ **Correctness**: Perfect match with ground truth (100/100 rows match exactly)
+
+### Output Format
+
+- CSV with header row: `s_acctbal,s_name,n_name,p_partkey,p_mfgr,s_address,s_phone,s_comment`
+- Proper quoting for fields containing commas
+- Decimal values with 2 decimal places
+- Window line endings preserved for compatibility

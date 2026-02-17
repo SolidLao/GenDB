@@ -1,0 +1,22 @@
+The plan is ready for your review. I've designed a comprehensive storage architecture for TPC-H SF10:
+
+## Key Design Highlights:
+
+**Storage Strategy:**
+- Binary columnar format with 100K row blocks
+- Sorted by filter columns (lineitem→l_shipdate, orders→o_orderdate)
+- Dictionary encoding for low-cardinality strings
+- DECIMAL as int64_t (scale=100), DATE as int32_t epoch days
+
+**Index Strategy:**
+- Zone maps on all filtered columns (l_shipdate, o_orderdate, l_discount, etc.)
+- Multi-value hash indexes on join columns (l_orderkey, o_custkey, etc.)
+- Leverages 64 cores with OpenMP parallelism
+
+**Implementation:**
+- Parallel ingestion with arithmetic date parsing (self-tested)
+- Fast index building via mmap + OpenMP
+- Post-ingestion validation for dates and decimals
+- 22 per-query storage guides (concise, fact-only format)
+
+The plan follows all requirements from the knowledge base and is optimized for the 64-core, 376GB, AVX512 hardware with HDD storage.

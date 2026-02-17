@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_customer_data: 0.02 ms\n[TIMING] load_orders_data: 0.01 ms\n[TIMING] load_dictionary: 2098.14 ms\n[TIMING] build_customer_hash: 90.34 ms\n[TIMING] scan_filter_join_probe: 955.81 ms\n[TIMING] merge_aggregation: 4448.78 ms\n[TIMING] second_aggregation: 43.33 ms\n[TIMING] sort: 0.01 ms\n[TIMING] output: 0.16 ms\n[TIMING] total: 7636.65 ms\n",
+    "stderr": "",
+    "duration_ms": 8610
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q13\": {\n      \"rows_expected\": 46,\n      \"rows_actual\": 46,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_customer_data": 0.02,
+    "load_orders_data": 0.01,
+    "load_dictionary": 2098.14,
+    "build_customer_hash": 90.34,
+    "scan_filter_join_probe": 955.81,
+    "merge_aggregation": 4448.78,
+    "second_aggregation": 43.33,
+    "sort": 0.01,
+    "output": 0.16,
+    "total": 7636.65
+  },
+  "timing_ms": 7636.49
+}

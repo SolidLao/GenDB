@@ -9,7 +9,7 @@ export const defaults = {
   targetBenchmark: "tpc-h",
   model: "haiku",
   optimizationTarget: "execution_time",
-  maxConcurrentQueries: 5,
+  maxConcurrentQueries: 22,
   agentModels: {
     workload_analyzer: "haiku",
     storage_designer: "haiku",

@@ -1,0 +1,47 @@
+Perfect! I'm already in the correct directory and the binary is compiled. Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations (Iteration 4)
+
+I've implemented **critical plan-level and operator-level optimizations** targeting the 73% of time spent in joins:
+
+### Key Changes:
+
+1. **Replaced `std::unordered_map` with `CompactHashTable` (open-addressing)**
+   - Replaces pointer-chasing hash table with linear probing
+   - Expected speedup: 2-5x for join operations
+   - Implemented in:
+     - Supplier join (8K rows)
+     - Customer join (120K rows)
+
+2. **Optimized lineitem-orders join (979ms → target: 300-400ms)**
+   - **OLD:** Scanned all 15M orders sequentially, lookup per row = O(n) with poor cache
+   - **NEW:** Parallel probe (64 cores) with CompactHashTable using multi-value indexing
+   - Multi-value hash table structure:
+     - Count occurrences per orderkey
+     - Build compact index: `orderkey → {offset, count}`
+     - Pack positions into contiguous array (better cache locality)
+     - Parallel probe with thread-local aggregation
+   - Expected speedup: 3-5x (parallelism + better data structures)
+
+3. **Better data locality**
+   - Multi-value hash avoids `std::vector<>` pointers
+   - Parallel probe reduces memory access skew
+   - Positions array is packed and cache-friendly
+
+### Expected Performance Impact:
+
+| Operation | Old (ms) | Target (ms) | Speedup |
+|-----------|----------|-----------|---------|
+| join_supplier | 576 | ~200 | 2.8x (CompactHashTable) |
+| join_lineitem_orders | 979 | ~300 | 3.3x (parallelism + compact) |
+| join_customer | 72 | ~50 | 1.4x (CompactHashTable) |
+| **Total** | **2135** | **~1300** | **1.6-1.7x** |
+
+### Correctness Preserved:
+- All [TIMING] lines within #ifdef GENDB_PROFILE guards
+- Nation filtering logic unchanged
+- Encoding logic unchanged (still using int64_t scale_factor=100 for decimals)
+- CSV output format unchanged
+- Validation expected to pass (same query semantics)
+
+The compilation succeeded with zero errors. The Executor will now validate the results.

@@ -1,0 +1,48 @@
+Perfect! The Q15 implementation is complete and fully validated. Here's the final summary:
+
+## ✅ Q15 Implementation Complete
+
+**File Location:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q15/iter_0/q15.cpp`
+
+### Validation Status
+✅ **PASSED** - Output matches ground truth exactly with 1 row returned
+
+### Performance Metrics
+- **Compilation:** Clean, no warnings
+- **Execution Time:** 427 ms (with profiling enabled)
+- **Breakdown:**
+  - Scan & Filter: 0.16 ms
+  - Aggregation: 327.76 ms (parallel hash aggregation)
+  - Max Selection: 1.72 ms
+  - Join: 58.17 ms
+  - Decode: 0.00 ms
+  - Output: 0.18 ms
+
+### Key Implementation Details
+
+1. **Logical Plan:**
+   - Single-table filter on lineitem (date range 1996-01-01 to 1996-04-01)
+   - GROUP BY aggregation on l_suppkey: SUM(l_extendedprice * (1 - l_discount))
+   - Find MAX(total_revenue) supplier
+   - Join with supplier table for attributes
+   - Single-row output
+
+2. **Physical Optimizations:**
+   - Zone map index for lineitem.l_shipdate (block-level pruning)
+   - Open-addressing hash table for aggregation (100K pre-sized)
+   - Thread-local aggregation buffers with merge phase
+   - Parallel scan+filter with OpenMP (100K-row chunks)
+
+3. **Critical Correctness Details:**
+   - **Decimal arithmetic:** `revenue = price_scaled * (100 - discount_scaled) / 10000` (avoiding floating-point errors)
+   - **Dictionary decoding:** Parse `code=value` format, lookup by code not line index
+   - **CSV quoting:** Proper handling of comma-containing address field
+   - **[TIMING] instrumentation:** All major operations timed with `#ifdef GENDB_PROFILE` guards
+
+### Output Format
+```csv
+s_suppkey,s_name,s_address,s_phone,total_revenue
+69998,Supplier#000069998,",ZT4VX2ygq9dLsG298SbYYSVUqeH,jhLSRVxNxGv",16-386-278-9829,2194132.8166
+```
+
+The implementation is ready for production and correctly handles all TPC-H Q15 requirements.

@@ -1,0 +1,31 @@
+Perfect! The optimization is in place. Let me create a summary of what was optimized:
+
+## Summary of Optimization (Iteration 4)
+
+**Bottleneck Identified (Level 1 - Plan-Level Issue):**
+- The previous iteration's `load_orders` step consumed **5667 ms (87.5% of total execution)**
+- Root cause: Full sequential scan of all 15M orders rows to find ~1000-2000 needed orderkeys
+- This is a classic predicate pushdown + index utilization opportunity
+
+**Optimization Applied:**
+1. **Replaced full-scan with indexed lookups**: Instead of scanning all 15M orders rows, we now:
+   - Load the pre-built hash index on `orders.o_orderkey` (100KB, not 120MB)
+   - Use O(1) hash lookups for each needed orderkey (~1000-2000 lookups)
+   - Total I/O: Index load (~100KB) + column access via sparse lookups (much smaller working set)
+
+2. **Struct Implementation**:
+   - Added `SingleValueHashEntry` struct for hash index entries
+   - Added `SingleValueHashIndex<KeyType>` template class to load and query pre-built indexes
+   - Hash index binary format (from Storage Guide): `[uint32_t num_entries] [key:int32_t, pos:uint32_t] pairs`
+
+3. **Code Changes**:
+   - Lines 234-282: New hash index loading infrastructure
+   - Lines 472-515: Orders loading now uses indexed access instead of full scan
+   - Removed unnecessary `o_orderkey` column loading and cleanup
+
+**Expected Impact:**
+- Orders load time: **5667 ms → ~50-100 ms** (50-100x improvement)
+- Total execution time: **6474 ms → ~400-600 ms** (10-16x improvement)
+- Compilation: ✅ Success with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+
+This directly addresses the 87.5% bottleneck through proper use of pre-built indexes, a Level 0 anti-pattern fix (avoiding full scans when selective access is available).

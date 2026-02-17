@@ -1,0 +1,39 @@
+Perfect! The binary compiled successfully. Now let me create a summary of the changes:
+
+## Summary of Optimizations for Q8 (Iteration 10)
+
+### Changes Made:
+
+**1. Zone Map Pruning for Orders Table (orders_orderdate_zonemap.bin)**
+   - Added `ZoneMapEntry` struct and `load_zonemap()` function
+   - Modified orders scan loop to use zone map blocks instead of full sequential scan
+   - Skip entire blocks where `max_val < 1995-01-01` or `min_val > 1996-12-31`
+   - Fallback to full scan if zone maps unavailable
+
+**2. Zone Map Pruning for Lineitem Table (lineitem_shipdate_zonemap.bin)**
+   - Load zone maps during lineitem initialization
+   - Modified main aggregation loop to iterate over zone blocks
+   - Skip blocks where `max_val < 1995-01-01` or `min_val > 1996-12-31`
+   - Fallback to full scan if zone maps unavailable
+
+### Expected Impact:
+
+- **orders_scan_filter**: 40.28 ms → estimate **18-22 ms** (zone-based block skipping, ~50% reduction)
+- **aggregation**: 25.93 ms → estimate **19-23 ms** (fewer rows processed, ~20% reduction)
+- **Total**: 106.82 ms → estimate **95-100 ms** (~10-12% improvement)
+
+### Rationale:
+
+The orders and lineitem tables are **sorted by date** (o_orderdate and l_shipdate respectively), making zone maps highly effective:
+- Many blocks fall entirely outside the [1995-01-01, 1996-12-31] range
+- Block skipping costs almost zero CPU (just pointer arithmetic)
+- Reduces memory bandwidth used for scanning non-matching rows
+
+### Implementation Notes:
+
+- Preserved all `[TIMING]` labels inside `#ifdef GENDB_PROFILE` guards
+- Did not modify encoding logic (decimal, date, dictionary encoding unchanged)
+- Maintained parallel execution strategy (zone blocks iterated in parallel)
+- Added graceful fallback to full scan if zone map files unavailable
+
+**Code is ready for execution testing.**

@@ -1,0 +1,44 @@
+Perfect! Compilation succeeded. Now let me create a summary of the optimizations made:
+
+## Summary of Q7 Iteration 2 Optimizations
+
+### Optimizations Implemented
+
+**1. Replaced std::unordered_map with Open-Addressing Hash Table (ALL JOINS)**
+- Implemented `CompactHashTableMulti<K, V>` template using linear probing + Fibonacci hashing
+- Reduces memory overhead and improves cache locality vs. chaining-based unordered_map
+- **Expected impact**: 2-3x speedup on hash table operations (supplier join, customer join)
+
+**2. Improved Orders Join Strategy**
+- Changed from full 15M orders scan to selective hash table lookup
+- Pre-builds grouping of lineitem results by orderkey using `unordered_map`
+- Probes with open-addressing hash table for faster lookup
+- **Expected impact**: Reduced hash table probe cost by using faster open-addressing instead of std::unordered_map chains
+
+**3. Maintained All Correctness Invariants**
+- Preserved all [TIMING] lines within #ifdef GENDB_PROFILE guards
+- No encoding logic changes
+- Aggregation logic unchanged
+- Output format unchanged (comma-delimited CSV)
+
+### Bottleneck Analysis
+
+From Iteration 1 timing breakdown:
+- **join_lineitem_orders**: 979.54 ms (45.9% of total) ← PRIMARY TARGET
+- **join_supplier**: 576.05 ms (27.0%)
+- **scan_filter**: 493.37 ms (23.1%)
+
+The main issue was **suboptimal join data structure** (std::unordered_map with expensive pointer chasing). The open-addressing hash table provides:
+- Better cache locality (contiguous entries)
+- No pointer dereferencing overhead
+- ~2-3x speedup on multi-point lookups
+
+### Expected Performance Improvement
+
+- Supplier join (8K rows): ~50-150 ms improvement (10-15% speedup)
+- Orders join (1.4M rows): ~150-400 ms improvement (15-40% speedup via better hash table)
+- Customer join (120K rows): ~20-50 ms improvement (25-30% speedup)
+
+**Conservative estimate**: 200-500 ms total reduction (10-25% overall speedup), targeting ~1700-1900 ms execution time.
+
+The code is now compiled and ready for execution validation.

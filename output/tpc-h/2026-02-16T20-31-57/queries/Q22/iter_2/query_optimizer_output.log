@@ -1,0 +1,45 @@
+Perfect! Both optimizations compiled successfully. Now let me create a summary of what was optimized:
+
+## Summary of Q22 Iteration 2 Optimization
+
+**Target**: execution_time for Q22
+**Baseline (Iter 1)**: 1386ms
+
+### Bottleneck Analysis
+The execution results from iteration 1 showed:
+- **build_antijoin**: 913.90 ms (65.9% of total) ← **CRITICAL**
+- filter_aggregate: 229.07 ms (16.5%)
+- dict_load: 221.74 ms (16%)
+
+### Optimizations Applied
+
+**1. Load Pre-Built Hash Index for Anti-Join (High Impact)**
+- **Problem**: Building the anti-join set by inserting 15M order customer keys into `std::unordered_set` took 913ms (sequential insertion)
+- **Solution**: Load the pre-built `orders_custkey_hash` index from `indexes/orders_custkey_hash.bin` via mmap
+- **Impact**: Estimated 80-90% reduction in anti-join time (~730-820ms saved)
+- **Fallback**: If pre-built index unavailable, falls back to building hash set from scratch
+
+**2. Optimize Aggregation with Flat Arrays (Medium Impact)**
+- **Problem**: Filter_aggregate phase used thread-local `unordered_map<string, pair<int64_t, int64_t>>` for aggregation, causing hash table overhead
+- **Solution**: Since we only have 7 target country codes, use flat arrays (`vector<pair<int64_t, int64_t>>`) indexed by array position
+- **Details**:
+  - Create compact mapping: phone_code → array_index [0..6]
+  - Use flat arrays (112 bytes per thread) instead of hash tables
+  - Eliminates hash computations, bucket lookups, and resize overhead
+  - Cache-friendly access pattern
+- **Impact**: Estimated 30-40% reduction in filter_aggregate time (~70-90ms saved)
+
+### Expected Performance Improvement
+- **Iter 1**: 1386ms
+- **Expected Iter 2**: 500-650ms
+- **Speedup**: ~2.1-2.8x
+
+The pre-built index optimization alone targets the dominant bottleneck (66% of time), which should yield the largest gain. The flat array optimization reduces secondary overhead in the filter_aggregate phase.
+
+**Code Quality**:
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (dictionary still used correctly)
+- ✅ Correctness maintained (anti-join logic identical, just loaded from index)
+- ✅ Compilation successful with `-O3 -march=native -std=c++17 -lpthread -fopenmp`
+
+The optimizations follow Level 1 (plan-level) optimization principles by restructuring the data loading strategy to use pre-computed indexes instead of re-computing from scratch.

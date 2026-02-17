@@ -1,0 +1,69 @@
+Perfect! The code compiles successfully. Let me create a summary of the optimization changes:
+
+## Optimization Summary - Q4 Iteration 9
+
+**Current Performance (Iteration 3):** 102.15 ms  
+**Target (Umbra):** 66 ms  
+**Gap:** 1.5x
+
+### Optimizations Implemented
+
+#### 1. **SIMD-Accelerated Commitdate Comparison (Target: -30% on semi_join_build)**
+   - **Problem:** The lineitem scan at 57.91 ms (56.7% of total time) had a branch per-row for `l_commitdate < l_receiptdate`
+   - **Solution:** Vectorized using AVX2 instructions to process 8 int32 comparisons per instruction
+   - **Implementation:**
+     - Load 8 consecutive commitdate and receiptdate values into 256-bit registers
+     - Use `_mm256_cmpgt_epi32(receipt, commit)` to vectorize the comparison
+     - Extract results and perform selective hash set lookups
+     - Handle remainder rows (< 8) in scalar code
+   - **Expected Gain:** 1.3-1.5x speedup on the 59M row lineitem scan
+   - **Code Changes:**
+     - Added `#include <immintrin.h>` for AVX2 support
+     - Refactored lineitem processing into single parallel region with SIMD chunk loop + scalar tail
+
+#### 2. **Zone Map Pruning on Orders Date Filter (Target: -25% on orders_filter)**
+   - **Problem:** Orders filter didn't exploit the available zone map index
+   - **Solution:** Load `orders_orderdate_zonemap.bin` to skip blocks outside the date range
+   - **Implementation:**
+     - Enhanced ZoneMap struct with `get_qualifying_blocks()` method
+     - Load zone map metadata (150 blocks × 12 bytes)
+     - Identify blocks where `max_val < 8582` or `min_val >= 8674` and skip them
+     - Expected: ~75% of blocks skipped based on date selectivity (~92 days out of 2555 total days)
+   - **Code Changes:**
+     - Refactored ZoneMap constructor to use persistent MmapFile
+     - Added block qualification logic
+     - Integrated zone map loading into orders filter phase
+
+#### 3. **CompactHashSet Data Structure (Pre-existing optimization)**
+   - Already using open-addressing hash table instead of std::unordered_map
+   - Fibonnaci hashing for good key distribution
+   - ~75% load factor for performance/space tradeoff
+
+### Correctness Preservation
+- ✅ All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Dictionary encoding logic unchanged
+- ✅ Aggregation logic (flat array [0..4]) unchanged
+- ✅ All semi-join logic semantically identical (just vectorized comparison)
+
+### Code Quality
+- ✅ Compiles without errors or warnings with `-O3 -march=native -std=c++17`
+- ✅ Parallel regions properly structured (single `#pragma omp parallel` with nested `#pragma omp for`)
+- ✅ Thread safety preserved with thread-local aggregation vectors
+- ✅ Comments updated to reflect new optimizations
+
+### Performance Expectations
+| Phase | Current (Iter 3) | Expected (Iter 9) | Speedup |
+|-------|-----------------|------------------|---------|
+| orders_load_columns | 0.06 ms | 0.06 ms | 1.0x |
+| orders_filter | 34.75 ms | 26 ms | 1.3x |
+| lineitem_load_columns | 0.04 ms | 0.04 ms | 1.0x |
+| semi_join_build | 57.91 ms | 40 ms | 1.45x |
+| orders_scan_filter_join | 9.31 ms | 9.31 ms | 1.0x |
+| output | 0.17 ms | 0.17 ms | 1.0x |
+| **Total** | **102.15 ms** | **76 ms** | **1.35x** |
+
+**Expected Result:** 76 ms (vs. Umbra's 66 ms) = 1.15x gap, significantly improved from 1.5x.
+
+The optimization is **complete and ready for execution**. The binary is compiled and located at:
+`/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q4/iter_9/q4`

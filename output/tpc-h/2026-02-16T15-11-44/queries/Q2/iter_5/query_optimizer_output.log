@@ -1,0 +1,36 @@
+Perfect! Code compiled successfully. Now let me create a summary of the optimization and what to expect:
+
+## Summary of Optimization for Q2 Iteration 5
+
+### Key Bottleneck Identified
+From execution_results.json (iteration 2):
+- **subquery_min_cost: 302.22ms (50.7% of total)** — The dominant bottleneck
+- **join_filter: 182.18ms (30.6%)**
+
+### Root Cause Analysis (Plan-Level)
+The original code computed MIN(ps_supplycost) for **ALL 2M partkeys** by scanning all 8M partsupp rows, even though only ~1-2K partkeys actually match the filters (p_size=15 AND p_type LIKE '%BRASS'). This is a **missing predicate pushdown** issue.
+
+### Optimization Applied
+**Predicate Pushdown Reordering**:
+1. **Step 5 (NEW)**: Filter part table FIRST to identify valid partkeys (1-2K matches)
+2. **Step 6**: Compute MIN(ps_supplycost) only for those valid partkeys
+   - Early filter in partsupp loop: `if (valid_partkeys.find(partkey) == valid_partkeys.end()) continue;`
+   - This prevents processing 8M rows when most won't match the part predicates
+
+### Code Changes
+1. Moved part filtering before subquery MIN computation (reordered Steps 5 & 6)
+2. Added early exit in parallel MIN computation loop to skip non-matching partkeys
+3. Changed `valid_partkeys` from `unordered_map<int32_t, int32_t>` to `unordered_set<int32_t>` for cleaner semantics
+4. Added `#include <unordered_set>`
+
+### Expected Impact
+- **Scans reduced from ~8M rows to ~1-2K partkeys** in the MIN computation phase
+- Should reduce subquery_min_cost from 302ms to ~10-30ms (10-30x speedup)
+- **Total execution time target**: ~300-350ms (from current 594ms)
+- Still behind DuckDB (61ms) but closer to MonetDB (147ms)
+
+### Data Structure Efficiency
+- Using unordered_set instead of unordered_map saves memory and has slightly faster lookup
+- Parallel thread-local aggregation pattern maintained for scalability
+
+The optimization is now compiled and ready for execution validation by the Executor.

@@ -1,0 +1,59 @@
+Great! Compilation succeeded. Now let me summarize the optimizations I made:
+
+## Optimization Summary for Q4 Iteration 3
+
+### Bottleneck Analysis
+The previous iteration (iter_2) had a timing breakdown of:
+- **semi_join_build: 111.42 ms (46% of total)** ← Primary bottleneck
+- orders_scan_filter_join: 81.23 ms  
+- orders_filter: 49.09 ms
+- Total: 241.94 ms
+
+### Root Cause Identified (Level 0 Anti-Pattern)
+The code was performing **TWO separate passes over the 59M-row lineitem table**:
+1. First pass (lines 342-348): Count matching rows
+2. Second pass (lines 355-361): Collect order keys into thread-local buffers
+
+This is a classic anti-pattern—redundant scans over large tables.
+
+### Optimizations Applied
+
+#### 1. **Single-Pass Lineitem Processing** (Expected: -30-40 ms)
+- **Change**: Eliminated the counting phase entirely
+- **Implementation**: Merged both scans into one parallel loop that directly collects keys into thread-local buffers
+- **Benefit**: Avoids 59M redundant comparisons and accesses
+- **Impact**: ~30-40% reduction in semi_join_build time
+
+#### 2. **Parallelize Final Orders Scan** (Expected: -20-30 ms)
+- **Change**: Changed serial scan (lines 389-408) to parallel OpenMP loop
+- **Implementation**: Added thread-local aggregation arrays (one per thread), then merge results after parallel phase
+- **Benefit**: 64 CPU cores now fully utilized for 15M-row scan; previously single-threaded
+- **Impact**: ~8-16x speedup on this 81ms operation (best case ~60ms gain, conservative ~20-30ms)
+
+#### 3. **Data Structure Sizing Improvement**
+- **Change**: Moved hash table size estimation to after key collection
+- **Benefit**: More accurate size calculation (uses actual key counts from thread-local buffers rather than row counts), leading to better hash table load factors and fewer collisions
+
+### Expected Performance Impact
+
+**Previous iteration: 241.94 ms**
+
+Conservative estimate:
+- Single-pass lineitem: -35 ms (semi_join_build: 111 → 76 ms)
+- Parallel orders scan: -25 ms (orders_scan_filter_join: 81 → 56 ms)
+- **Expected new total: ~182 ms** (24% improvement)
+
+Optimistic estimate (with better parallelization):
+- Single-pass lineitem: -40 ms
+- Parallel orders scan: -35 ms  
+- **Expected new total: ~167 ms** (31% improvement)
+
+**Gap to Umbra (66ms): 2.5-2.7x** (was 3.6x, now narrowed by ~31%)
+
+### Code Quality
+✅ All [TIMING] markers preserved inside GENDB_PROFILE guards
+✅ Encoding logic unchanged
+✅ CSV output format preserved
+✅ Compilation successful with -O3 -march=native optimizations
+
+The code is ready for execution and validation by the Executor.

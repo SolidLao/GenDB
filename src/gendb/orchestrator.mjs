@@ -1,20 +1,19 @@
 /**
- * GenDB Orchestrator v16
+ * GenDB Orchestrator v20
  *
- * Two-phase agentic system with notification-based execution queue:
+ * Two-phase agentic system with true per-query pipeline parallelism:
  *   Phase 1 (Offline Data Storage Optimization):
  *     Workload Analyzer → Storage/Index Designer (design + ingest + build_indexes + per-query guides)
  *   Phase 2 (Online Per-Query Pipeline-Parallel Optimization):
- *     Iteration 0: Code Generators (parallel) → Executor (serial via ExecutionQueue)
- *     Iteration 1+: Per query (parallel):
- *       shouldContinue() [programmatic] → Query Optimizer [LLM] → Executor → checkImprovement()
- *     → Final Assembly
+ *     Each query runs independently: CodeGen → Execute → [Optimize → Execute]* → done
+ *     LLM calls gated by Semaphore, execution serialized via ExecutionQueue.
  *
- * v16 changes: Per-query storage guides from S/I Designer (exact binary format docs passed to
- * CG/QO agents), dual-mode timing with #ifdef GENDB_PROFILE (stripped from final build),
- * hardware_config in filtered query context.
+ * v20 changes: True per-query pipelining (no batch boundaries), per-query benchmark context
+ * (replaces full JSON dump), stall detection with restructure override, knowledge base
+ * technique files, anti-pattern scan in optimizer, getBestBaselineTime fix, maxIterations=10.
  *
- * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue
+ * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue,
+ * Mutex on run.json, PipelineProgressTracker, Iter0Barrier for storage checkpoint.
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
  *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>]
@@ -299,18 +298,41 @@ function extractQueryContext(query, storageDesign, workloadAnalysis) {
   return { filteredStorage, filteredWorkload };
 }
 
-/** Format benchmark comparison results as a prompt section. */
-function formatBenchmarkContext(benchmarkResults) {
+/** Format benchmark comparison for a single query — extracts only relevant data. */
+function formatPerQueryBenchmarkContext(benchmarkResults, queryId, currentTimeMs) {
   if (!benchmarkResults) return "";
-  return [
+  const rows = [];
+  let bestTime = Infinity;
+  let bestSystem = "";
+  for (const [system, data] of Object.entries(benchmarkResults)) {
+    const qData = data?.[queryId] || data?.queries?.[queryId];
+    const time = qData?.min_ms || qData?.average_ms || qData?.time_ms;
+    if (time != null) {
+      rows.push({ system, time });
+      if (time < bestTime) { bestTime = time; bestSystem = system; }
+    }
+  }
+  if (rows.length === 0) return "";
+  rows.sort((a, b) => a.time - b.time);
+  const lines = [
     "",
-    "## Benchmark Comparison (reference targets)",
-    "Performance of other database systems on the same workload and scale factor.",
-    "Use these as optimization targets — the goal is to close the gap with the fastest system.",
-    "```json",
-    JSON.stringify(benchmarkResults, null, 2),
-    "```",
-  ].join("\n");
+    `## Performance Comparison for ${queryId}`,
+    "| System | Time (ms) |",
+    "|--------|-----------|",
+    ...rows.map(r => `| ${r.system} | ${Math.round(r.time)} |`),
+  ];
+  if (currentTimeMs != null) {
+    lines.push(`| Current GenDB | ${Math.round(currentTimeMs)} |`);
+    const gap = (currentTimeMs / bestTime).toFixed(1);
+    if (currentTimeMs > bestTime * 5) {
+      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). Gap: ${gap}x. Fundamental restructuring needed.`);
+    } else if (currentTimeMs > bestTime * 1.2) {
+      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). Gap: ${gap}x. Further optimization needed.`);
+    } else {
+      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). GenDB is competitive.`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Parse queries.sql into individual queries with IDs. */
@@ -415,7 +437,7 @@ function getBestBaselineTime(benchmarkResults, queryId) {
   let best = Infinity;
   for (const [system, data] of Object.entries(benchmarkResults)) {
     const qData = data?.queries?.[queryId] || data?.[queryId];
-    const time = qData?.time_ms || qData?.median_ms;
+    const time = qData?.min_ms || qData?.average_ms || qData?.time_ms || qData?.median_ms;
     if (time && time < best) best = time;
   }
   return best === Infinity ? null : best;
@@ -765,6 +787,62 @@ async function reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalys
 // Phase 2: Online Per-Query Parallel Optimization
 // ---------------------------------------------------------------------------
 
+/** Mutex for updateRunMeta — prevents race conditions with concurrent pipeline writes. */
+class Mutex {
+  constructor() { this._queue = []; this._locked = false; }
+  async acquire() {
+    if (!this._locked) { this._locked = true; return; }
+    await new Promise(resolve => this._queue.push(resolve));
+  }
+  release() {
+    if (this._queue.length > 0) { this._queue.shift()(); }
+    else { this._locked = false; }
+  }
+}
+
+const runMetaMutex = new Mutex();
+
+/** Thread-safe updateRunMeta wrapper. */
+async function updateRunMetaSafe(runDir, updater) {
+  await runMetaMutex.acquire();
+  try {
+    return await updateRunMeta(runDir, updater);
+  } finally {
+    runMetaMutex.release();
+  }
+}
+
+/** Countdown latch for Iter0 barrier — coordinates storage checkpoint after all iter-0 complete. */
+class Iter0Barrier {
+  constructor(count) {
+    this._remaining = count;
+    this._resolve = null;
+    this._promise = new Promise(resolve => { this._resolve = resolve; });
+    this._results = [];
+  }
+  report(ctx) {
+    this._results.push(ctx);
+    this._remaining--;
+    if (this._remaining <= 0) this._resolve(this._results);
+  }
+  async wait() { return this._promise; }
+}
+
+/** Pipeline progress tracker — prints real-time per-query stage updates. */
+class PipelineProgressTracker {
+  constructor(queryIds) {
+    this._stages = {};
+    for (const qid of queryIds) this._stages[qid] = "pending";
+  }
+  update(queryId, stage) {
+    this._stages[queryId] = stage;
+    const summary = Object.entries(this._stages)
+      .map(([qid, s]) => `${qid}:${s}`)
+      .join("  ");
+    console.log(`[Pipeline] ${summary}`);
+  }
+}
+
 async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath) {
   const queriesText = await readFile(args.queries, "utf-8");
   const schema = await readFile(args.schema, "utf-8");
@@ -779,7 +857,7 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
   console.log(`[Orchestrator] Found ${parsedQueries.length} queries: ${parsedQueries.map(q => q.id).join(", ")}`);
   console.log(`[Orchestrator] Max concurrent: ${args.maxConcurrent}, Max iterations per query: ${args.maxIterations}\n`);
 
-  await updateRunMeta(runDir, (meta) => {
+  await updateRunMetaSafe(runDir, (meta) => {
     meta.phase2 = {
       status: "running",
       queries: parsedQueries.map(q => q.id),
@@ -792,110 +870,34 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
   const groundTruthDir = resolve(BENCHMARKS_DIR, defaults.targetBenchmark, "query_results");
   const hasGroundTruth = existsSync(groundTruthDir);
 
-  // ExecutionQueue: ensures only one Executor runs at a time (notification-based, zero polling)
+  // Shared resources
   const executionQueue = new ExecutionQueue();
-
-  // Concurrency limiter for parallel LLM calls
   const semaphore = new Semaphore(args.maxConcurrent);
-
-  // --- Iteration 0: Parallel Code Generators → Executor via ExecutionQueue → Storage Checkpoint ---
-  console.log(`\n[Orchestrator] === Iteration 0: Parallel Code Generation for all queries ===`);
   const cgSystemPrompt = await readFile(codeGeneratorConfig.promptPath, "utf-8");
+  const qoSystemPrompt = await readFile(queryOptimizerConfig.promptPath, "utf-8");
+  const iter0Barrier = new Iter0Barrier(parsedQueries.length);
+  const progressTracker = new PipelineProgressTracker(parsedQueries.map(q => q.id));
 
-  // Prepare iter_0 directories and run code generators
-  const iter0Contexts = await Promise.all(
-    parsedQueries.map(async (query) => {
-      await semaphore.acquire();
-      try {
-        return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt);
-      } catch (err) {
-        console.error(`[Orchestrator] Code Generator for ${query.id} failed: ${err.message}`);
-        return { query, queryDir: null, iterDir: null, iterCppPath: null, error: err.message };
-      } finally {
-        semaphore.release();
-      }
-    })
-  );
-
-  // --- STORAGE CHECKPOINT — detect storage issues ---
-  const storageIssues = await detectStorageIssues(parsedQueries, runDir);
-  let retriesLeft = 1;
-
-  if (storageIssues.length > 0 && retriesLeft > 0) {
-    console.log(`\n[Orchestrator] STORAGE CHECKPOINT: ${storageIssues.length} query(s) detected storage issues:`);
-    for (const issue of storageIssues) {
-      console.log(`  - ${issue.queryId}: ${issue.issue}`);
-    }
-
-    // Re-ingest with fixes
-    await reIngestWithFixes(args, runDir, storageDesignPath, workloadAnalysisPath, schema, storageIssues, parsedQueries);
-    retriesLeft--;
-
-    // Clear iter_0 directories and re-run code generation
-    console.log(`\n[Orchestrator] === Re-running iteration 0 Code Generation after re-ingestion ===`);
-    for (const ctx of iter0Contexts) {
-      if (ctx.iterDir && existsSync(ctx.iterDir)) {
-        rmSync(ctx.iterDir, { recursive: true, force: true });
-      }
-    }
-
-    // Re-run code generators
-    const retryContexts = await Promise.all(
-      parsedQueries.map(async (query) => {
-        await semaphore.acquire();
-        try {
-          return await runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt);
-        } catch (err) {
-          console.error(`[Orchestrator] Code Generator retry for ${query.id} failed: ${err.message}`);
-          return { query, queryDir: null, iterDir: null, iterCppPath: null, error: err.message };
-        } finally {
-          semaphore.release();
-        }
-      })
-    );
-
-    // Check for storage issues again
-    const retryIssues = await detectStorageIssues(parsedQueries, runDir);
-    if (retryIssues.length > 0) {
-      console.error(`[Orchestrator] Storage issues persist after re-ingestion. Continuing with best effort.`);
-    }
-
-    // Use retried contexts
-    iter0Contexts.splice(0, iter0Contexts.length, ...retryContexts);
-  }
-
-  // --- Iteration 0: Execute all queries via ExecutionQueue ---
-  console.log(`\n[Orchestrator] === Iteration 0: Execute all queries ===`);
-  for (const ctx of iter0Contexts) {
-    if (!ctx.iterCppPath || !existsSync(ctx.iterCppPath)) {
-      console.log(`[Orchestrator] Skipping Executor for ${ctx.query.id}: no code produced.`);
-      continue;
-    }
-    // Execute via queue (notification-based, serial)
-    await executionQueue.requestExecution(ctx.query.id, async () => {
-      console.log(`[Orchestrator] [${ctx.query.id}] Iteration 0: Executor (compile + run + validate)`);
-      const iterResultsDir = resolve(ctx.iterDir, "results");
-      return await executeQuery(ctx.query, ctx.iterDir, ctx.iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
-    });
-  }
-
-  // --- Iterations 1+: Pipeline-parallel per query ---
+  // Launch all query pipelines in parallel
   const results = await Promise.all(
-    iter0Contexts.map(async (ctx) => {
-      if (!ctx.iterCppPath || !existsSync(ctx.iterCppPath)) {
-        return { queryId: ctx.query.id, status: "failed", error: ctx.error || "no code produced", bestCppPath: null, iterations: 0 };
-      }
+    parsedQueries.map(async (query) => {
       try {
-        return await runQueryIterationsRemaining(ctx.query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionQueue, ctx);
+        return await runQueryFullPipeline(
+          query, args, runDir, workloadAnalysisPath, storageDesignPath,
+          schema, groundTruthDir, hasGroundTruth,
+          executionQueue, semaphore, cgSystemPrompt, qoSystemPrompt,
+          iter0Barrier, progressTracker
+        );
       } catch (err) {
-        console.error(`[Orchestrator] Query pipeline ${ctx.query.id} failed: ${err.message}`);
-        return { queryId: ctx.query.id, status: "failed", error: err.message, bestCppPath: ctx.iterCppPath };
+        console.error(`[Orchestrator] Query pipeline ${query.id} failed: ${err.message}`);
+        iter0Barrier.report({ query, error: err.message });
+        return { queryId: query.id, status: "failed", error: err.message, bestCppPath: null, iterations: 0 };
       }
     })
   );
 
   // Update run meta with pipeline results
-  await updateRunMeta(runDir, (meta) => {
+  await updateRunMetaSafe(runDir, (meta) => {
     for (const r of results) {
       meta.phase2.pipelines[r.queryId] = {
         status: r.status,
@@ -912,20 +914,30 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
 }
 
 // ---------------------------------------------------------------------------
-// Per-Query Pipeline (Code Gen iter 0, Iterations 1+)
+// Per-Query Full Pipeline (Code Gen → Execute → [Optimize → Execute]*)
 // ---------------------------------------------------------------------------
 
 /**
- * Iteration 0 Code Generator only (runs in parallel across queries).
- * Returns context object for subsequent steps.
+ * Full lifecycle pipeline for a single query.
+ * Code generation (LLM, gated by Semaphore)
+ * → ExecutionQueue (serial, enters immediately after code gen)
+ * → [shouldContinue → Query Optimizer (LLM) → ExecutionQueue]*
+ * → done
+ *
+ * Each query progresses independently. No waiting for other queries between stages.
  */
-async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storageDesignPath, groundTruthDir, hasGroundTruth, cgSystemPrompt) {
+async function runQueryFullPipeline(
+  query, args, runDir, workloadAnalysisPath, storageDesignPath,
+  schema, groundTruthDir, hasGroundTruth,
+  executionQueue, semaphore, cgSystemPrompt, qoSystemPrompt,
+  iter0Barrier, progressTracker
+) {
   const queryId = query.id;
   const queryDir = await createQueryDir(runDir, queryId);
   const queryPhase = `query_${queryId}`;
   const cppName = `${queryId.toLowerCase()}.cpp`;
 
-  console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Code Generator`);
+  progressTracker.update(queryId, "codegen");
 
   // Optimization history for this query
   const historyPath = resolve(queryDir, "optimization_history.json");
@@ -940,7 +952,7 @@ async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storag
   const iterResultsDir = resolve(iterDir, "results");
   await mkdir(iterResultsDir, { recursive: true });
 
-  // Read hardware info and filtered context from storage design / workload analysis
+  // Read hardware info and filtered context
   const storageDesign = await readJSON(storageDesignPath);
   const workloadAnalysis = await readJSON(workloadAnalysisPath);
   const hw = storageDesign?.hardware_config || {};
@@ -953,139 +965,164 @@ async function runQueryCodeGen(query, args, runDir, workloadAnalysisPath, storag
   let storageGuide = "";
   try { storageGuide = await readFile(guidePath, "utf-8"); } catch {}
 
-  // Run Code Generator
-  const cgUserPrompt = [
-    `Generate a correct, self-contained C++ implementation for ${queryId} (iteration 0).`,
-    ``,
-    `## Optimization Target: ${args.optimizationTarget}`,
-    `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-    ``,
-    `## Hardware Configuration`,
-    `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
-    `- Disk type: ${hw.disk_type || 'unknown'}`,
-    `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
-    `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
-    ``,
-    storageGuide ? [
-      `## Storage & Index Guide (from Storage/Index Designer)`,
-      `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
-      `Use this to load data correctly and leverage pre-built indexes for performance.`,
+  // === ITERATION 0: CODE GENERATION (gated by semaphore) ===
+  await semaphore.acquire();
+  try {
+    console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Code Generator`);
+
+    const cgUserPrompt = [
+      `Generate a correct, self-contained C++ implementation for ${queryId} (iteration 0).`,
       ``,
-      storageGuide,
-    ].join("\n") : "",
-    "",
-    `## Workload Analysis (${queryId})`,
-    "```json",
-    JSON.stringify(filteredWorkload, null, 2),
-    "```",
-    "",
-    `- Schema: ${args.schema}`,
-    ``,
-    `## Query to implement`,
-    "```sql",
-    query.sql,
-    "```",
-    ``,
-    `## GenDB Storage Directory`,
-    `Binary columnar data: ${args.gendbDir}`,
-    ``,
-    `## Ground Truth (for validation)`,
-    hasGroundTruth ? `${groundTruthDir}` : `No ground truth available`,
-    ``,
-    `## Output`,
-    `- Write .cpp file to: ${iterCppPath}`,
-    ``,
-    `## Critical Reminders`,
-    `- [TIMING] instrumentation REQUIRED: wrap each major op in #ifdef GENDB_PROFILE guards (see system prompt pattern)`,
-    `- DATE columns = int32_t epoch days (values >3000). Compare as integers. YYYY-MM-DD only for CSV output.`,
-    `- DECIMAL columns = int64_t × scale_factor. Compute thresholds yourself. NEVER use double.`,
-    `- Dictionary strings: load _dict.txt at runtime to find codes. NEVER hardcode dictionary codes.`,
-    `- CSV: comma-delimited, include header row, 2 decimal places for monetary values.`,
-    ``,
-    `## Validation Loop`,
-    `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${queryId.toLowerCase()} ${cppName}`,
-    `Run → Validate correctness (up to 2 fix attempts)`,
-    hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
-  ].join("\n");
+      `## Optimization Target: ${args.optimizationTarget}`,
+      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+      ``,
+      `## Hardware Configuration`,
+      `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
+      `- Disk type: ${hw.disk_type || 'unknown'}`,
+      `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
+      `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
+      ``,
+      storageGuide ? [
+        `## Storage & Index Guide (from Storage/Index Designer)`,
+        `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
+        `Use this to load data correctly and leverage pre-built indexes for performance.`,
+        ``,
+        storageGuide,
+      ].join("\n") : "",
+      "",
+      `## Workload Analysis (${queryId})`,
+      "```json",
+      JSON.stringify(filteredWorkload, null, 2),
+      "```",
+      "",
+      `- Schema: ${args.schema}`,
+      ``,
+      formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, null),
+      ``,
+      `## Query to implement`,
+      "```sql",
+      query.sql,
+      "```",
+      ``,
+      `## GenDB Storage Directory`,
+      `Binary columnar data: ${args.gendbDir}`,
+      ``,
+      `## Ground Truth (for validation)`,
+      hasGroundTruth ? `${groundTruthDir}` : `No ground truth available`,
+      ``,
+      `## Output`,
+      `- Write .cpp file to: ${iterCppPath}`,
+      ``,
+      `## Critical Reminders`,
+      `- [TIMING] instrumentation REQUIRED: wrap each major op in #ifdef GENDB_PROFILE guards (see system prompt pattern)`,
+      `- DATE columns = int32_t epoch days (values >3000). Compare as integers. YYYY-MM-DD only for CSV output.`,
+      `- DECIMAL columns = int64_t × scale_factor. Compute thresholds yourself. NEVER use double.`,
+      `- Dictionary strings: load _dict.txt at runtime to find codes. NEVER hardcode dictionary codes.`,
+      `- CSV: comma-delimited, include header row, 2 decimal places for monetary values.`,
+      ``,
+      `## Validation Loop`,
+      `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${queryId.toLowerCase()} ${cppName}`,
+      `Run → Validate correctness (up to 2 fix attempts)`,
+      hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
+    ].join("\n");
 
-  const cgResult = await runAgent(codeGeneratorConfig.name, {
-    systemPrompt: cgSystemPrompt,
-    userPrompt: cgUserPrompt,
-    allowedTools: codeGeneratorConfig.allowedTools,
-    model: getAgentModel("code_generator", args),
-    cwd: iterDir,
-  });
-  recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
+    // Retry loop: up to 2 attempts
+    const maxCgAttempts = 2;
+    for (let cgAttempt = 1; cgAttempt <= maxCgAttempts; cgAttempt++) {
+      const attemptPrompt = cgAttempt === 1
+        ? cgUserPrompt
+        : `RETRY: Previous attempt failed to produce a .cpp file. You MUST write C++ code to ${iterCppPath} using the Write tool. Do NOT output analysis or planning text only.\n\n${cgUserPrompt}`;
 
-  if (!existsSync(iterCppPath)) {
-    throw new Error(`Code Generator failed to produce ${iterCppPath}`);
+      const cgResult = await runAgent(codeGeneratorConfig.name, {
+        systemPrompt: cgSystemPrompt,
+        userPrompt: attemptPrompt,
+        allowedTools: codeGeneratorConfig.allowedTools,
+        model: getAgentModel("code_generator", args),
+        cwd: iterDir,
+      });
+      recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
+
+      if (existsSync(iterCppPath)) break;
+
+      if (cgAttempt < maxCgAttempts) {
+        console.log(`[Orchestrator] Code Generator attempt ${cgAttempt} failed to produce ${iterCppPath}, retrying...`);
+      } else {
+        throw new Error(`Code Generator failed to produce ${iterCppPath} after ${maxCgAttempts} attempts`);
+      }
+    }
+  } finally {
+    semaphore.release();
   }
 
-  return { query, queryDir, iterDir, iterCppPath, cppName };
-}
+  // === ITERATION 0: EXECUTE (enters ExecutionQueue immediately) ===
+  progressTracker.update(queryId, "exec-0");
+  console.log(`[Orchestrator] [${queryId}] Iteration 0: Executor (compile + run + validate)`);
+  await executionQueue.requestExecution(queryId, async () => {
+    return await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
+  });
 
-/**
- * Iterations 1+ for a single query.
- * Uses programmatic shouldContinue() instead of Orchestrator Agent LLM.
- * Uses Query Optimizer (which now absorbs Learner analysis) instead of OA→QO→Learner chain.
- */
-async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysisPath, storageDesignPath, schema, groundTruthDir, hasGroundTruth, executionQueue, iter0Ctx) {
-  const queryId = query.id;
-  const queryDir = iter0Ctx.queryDir;
-  const queryPhase = `query_${queryId}`;
-  const cppName = iter0Ctx.cppName;
+  // Report to Iter0 barrier (for storage checkpoint coordination)
+  iter0Barrier.report({ query, queryDir, iterDir, iterCppPath, cppName });
 
-  const historyPath = resolve(queryDir, "optimization_history.json");
-  const optimizationHistory = await readJSON(historyPath) || { query_id: queryId, iterations: [] };
+  // === ITERATIONS 1+: OPTIMIZE → EXECUTE loop ===
+  let bestIterDir = iterDir;
+  let bestCppPath = iterCppPath;
+  let bestExecResultsPath = resolve(iterDir, "execution_results.json");
 
-  const qoSystemPrompt = await readFile(queryOptimizerConfig.promptPath, "utf-8");
-
-  // Read hardware info and filtered context from storage design / workload analysis
-  const storageDesign = await readJSON(storageDesignPath);
-  const workloadAnalysis = await readJSON(workloadAnalysisPath);
-  const hw = storageDesign?.hardware_config || {};
   const { filteredWorkload: qoFilteredWorkload } = (storageDesign && workloadAnalysis)
     ? extractQueryContext(query, storageDesign, workloadAnalysis)
     : { filteredWorkload: null };
-
-  // Iteration 0 results are the baseline
-  let bestIterDir = iter0Ctx.iterDir;
-  let bestCppPath = iter0Ctx.iterCppPath;
-  let bestExecResultsPath = resolve(iter0Ctx.iterDir, "execution_results.json");
 
   const maxIter = args.maxIterations;
   let previousIterationOutcome = null;
 
   for (let iteration = 1; iteration <= maxIter; iteration++) {
-    // --- Programmatic shouldContinue() check (replaces Orchestrator Agent LLM) ---
+    // --- Programmatic shouldContinue() check ---
     const bestExecResults = await readJSON(bestExecResultsPath);
     const continueDecision = shouldContinue(queryId, optimizationHistory, args.benchmarkResults, bestExecResults, iteration, maxIter);
 
+    progressTracker.update(queryId, `iter-${iteration}`);
     console.log(`\n[Orchestrator] [${queryId}] --- Iteration ${iteration}/${maxIter} --- shouldContinue: ${continueDecision.action} (${continueDecision.reason})`);
 
     if (continueDecision.action === 'stop') {
       console.log(`[Orchestrator] [${queryId}] Stopping: ${continueDecision.reason}`);
+      progressTracker.update(queryId, "done");
       break;
     }
 
     // Create iteration directory
-    const iterDir = resolve(queryDir, `iter_${iteration}`);
-    await mkdir(iterDir, { recursive: true });
+    const optIterDir = resolve(queryDir, `iter_${iteration}`);
+    await mkdir(optIterDir, { recursive: true });
 
-    const iterCppPath = resolve(iterDir, cppName);
-    const iterResultsDir = resolve(iterDir, "results");
-    await mkdir(iterResultsDir, { recursive: true });
-    const iterExecResultsPath = resolve(iterDir, "execution_results.json");
+    const optIterCppPath = resolve(optIterDir, cppName);
+    const optIterResultsDir = resolve(optIterDir, "results");
+    await mkdir(optIterResultsDir, { recursive: true });
+    const optIterExecResultsPath = resolve(optIterDir, "execution_results.json");
 
-    // Copy best code from previous best iteration as starting point
+    // Copy best code as starting point
     if (bestCppPath && existsSync(bestCppPath)) {
-      await writeFile(iterCppPath, await readFile(bestCppPath, "utf-8"));
+      await writeFile(optIterCppPath, await readFile(bestCppPath, "utf-8"));
     }
 
-    // --- Query Optimizer (absorbs Learner analysis — reads execution_results.json directly) ---
-    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer`);
+    // --- Stall detection ---
+    let stallSection = "";
+    const recentHistory = optimizationHistory.iterations.slice(-3);
+    if (recentHistory.length >= 3 && recentHistory.every(it => !it.improved)) {
+      const bestBaseline = getBestBaselineTime(args.benchmarkResults, queryId);
+      const currentBest = bestExecResults?.timing_ms;
+      if (bestBaseline && currentBest && currentBest > bestBaseline * 5) {
+        stallSection = [
+          "",
+          "## OPTIMIZATION STALL DETECTED",
+          `${recentHistory.length} consecutive iterations failed to improve. Current: ${Math.round(currentBest)}ms, best engine: ${Math.round(bestBaseline)}ms (${(currentBest / bestBaseline).toFixed(1)}x gap).`,
+          "The current code architecture is fundamentally limited. See optimizer system prompt for stall recovery guidance.",
+          "",
+        ].join("\n");
+        console.log(`[Orchestrator] [${queryId}] STALL DETECTED: ${recentHistory.length} non-improving iterations, ${(currentBest / bestBaseline).toFixed(1)}x gap`);
+      }
+    }
 
-    // Check for mandatory join ordering sampling
+    // --- Join sampling mandate ---
     let joinSamplingMandate = "";
     const opTimings = bestExecResults?.operation_timings || {};
     const totalTime = parseFloat(opTimings.total || bestExecResults?.timing_ms || 0);
@@ -1093,7 +1130,6 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       .filter(([key]) => key.toLowerCase().includes('join'))
       .reduce((sum, [, val]) => sum + parseFloat(val || 0), 0);
     const joinDominant = totalTime > 0 && (joinTime / totalTime) > 0.4;
-    // Count joins: explicit JOIN keywords + implicit comma-separated tables in FROM
     const explicitJoins = (query.sql.match(/\bJOIN\b/gi) || []).length;
     const fromMatch = query.sql.match(/\bFROM\s+([^WHERE;]+)/i);
     const implicitJoins = fromMatch ? (fromMatch[1].split(",").length - 1) : 0;
@@ -1115,7 +1151,7 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       ].join("\n");
     }
 
-    // Build correctness failure section if validation failed
+    // Build correctness failure section
     let correctnessSection = "";
     if (bestExecResults?.validation?.status === 'fail') {
       const details = bestExecResults.validation.details
@@ -1134,89 +1170,97 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
       ].join("\n");
     }
 
-    // Read per-query storage guide if available
+    // Read storage guide
     const qoGuidePath = resolve(runDir, "query_guides", `${queryId}_storage_guide.md`);
     let qoStorageGuide = "";
     try { qoStorageGuide = await readFile(qoGuidePath, "utf-8"); } catch {}
 
-    const qoUserPrompt = [
-      `Optimize the existing C++ code for ${queryId}. This is iteration ${iteration}.`,
-      correctnessSection,
-      `## Optimization Target: ${args.optimizationTarget}`,
-      ``,
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-      "",
-      qoStorageGuide ? [
-        `## Storage & Index Guide (from Storage/Index Designer)`,
-        `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
-        `Use this to leverage pre-built indexes for performance.`,
+    // --- Query Optimizer (gated by semaphore) ---
+    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer`);
+    await semaphore.acquire();
+    try {
+      const qoUserPrompt = [
+        `Optimize the existing C++ code for ${queryId}. This is iteration ${iteration}.`,
+        stallSection,
+        correctnessSection,
+        `## Optimization Target: ${args.optimizationTarget}`,
         ``,
-        qoStorageGuide,
-      ].join("\n") : "",
-      "",
-      `## Workload Analysis (${queryId})`,
-      "```json",
-      JSON.stringify(qoFilteredWorkload, null, 2),
-      "```",
-      "",
-      "## Input Files",
-      `- Execution results (timing + validation): ${bestExecResultsPath}`,
-      `- Optimization history: ${historyPath}`,
-      formatBenchmarkContext(args.benchmarkResults),
-      "",
-      `## Critical Reminders`,
-      `- Read optimization_history.json before planning — do not repeat failed approaches`,
-      `- After regression, try a DIFFERENT optimization category than what failed`,
-      `- Preserve all [TIMING] lines inside #ifdef GENDB_PROFILE guards`,
-      `- Do NOT change encoding logic unless fixing a reported bug`,
-      `- Comma-delimited CSV output — do not change delimiter`,
-      ``,
-      `## Hardware Configuration`,
-      `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
-      `- Disk type: ${hw.disk_type || 'unknown'}`,
-      `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
-      `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
-      joinSamplingMandate,
-      "",
-      previousIterationOutcome ? `## Previous Iteration Outcome\n${previousIterationOutcome}\n` : "",
-      `## GenDB Storage Directory`,
-      `${args.gendbDir}`,
-      "",
-      `## Query Code`,
-      `Read and modify: ${iterCppPath}`,
-      "",
-      `## Original SQL`,
-      "```sql",
-      query.sql,
-      "```",
-      "",
-      `## Compilation`,
-      `Compile (do NOT run — Executor handles validation):`,
-      `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${resolve(iterDir, queryId.toLowerCase())} ${iterCppPath}`,
-      `Ensure the code compiles successfully (up to 3 fix attempts).`,
-    ].join("\n");
+        `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+        "",
+        qoStorageGuide ? [
+          `## Storage & Index Guide (from Storage/Index Designer)`,
+          `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
+          `Use this to leverage pre-built indexes for performance.`,
+          ``,
+          qoStorageGuide,
+        ].join("\n") : "",
+        "",
+        `## Workload Analysis (${queryId})`,
+        "```json",
+        JSON.stringify(qoFilteredWorkload, null, 2),
+        "```",
+        "",
+        "## Input Files",
+        `- Execution results (timing + validation): ${bestExecResultsPath}`,
+        `- Optimization history: ${historyPath}`,
+        formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, bestExecResults?.timing_ms),
+        "",
+        `## Critical Reminders`,
+        `- Read optimization_history.json before planning — do not repeat failed approaches`,
+        `- After regression, try a DIFFERENT optimization category than what failed`,
+        `- Preserve all [TIMING] lines inside #ifdef GENDB_PROFILE guards`,
+        `- Do NOT change encoding logic unless fixing a reported bug`,
+        `- Comma-delimited CSV output — do not change delimiter`,
+        ``,
+        `## Hardware Configuration`,
+        `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
+        `- Disk type: ${hw.disk_type || 'unknown'}`,
+        `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
+        `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
+        joinSamplingMandate,
+        "",
+        previousIterationOutcome ? `## Previous Iteration Outcome\n${previousIterationOutcome}\n` : "",
+        `## GenDB Storage Directory`,
+        `${args.gendbDir}`,
+        "",
+        `## Query Code`,
+        `Read and modify: ${optIterCppPath}`,
+        "",
+        `## Original SQL`,
+        "```sql",
+        query.sql,
+        "```",
+        "",
+        `## Compilation`,
+        `Compile (do NOT run — Executor handles validation):`,
+        `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${resolve(optIterDir, queryId.toLowerCase())} ${optIterCppPath}`,
+        `Ensure the code compiles successfully (up to 3 fix attempts).`,
+      ].join("\n");
 
-    const qoResult = await runAgent(queryOptimizerConfig.name, {
-      systemPrompt: qoSystemPrompt,
-      userPrompt: qoUserPrompt,
-      allowedTools: queryOptimizerConfig.allowedTools,
-      model: getAgentModel("query_optimizer", args),
-      cwd: iterDir,
-    });
-    recordAgentTelemetry(queryPhase, "query_optimizer", qoResult.durationMs, qoResult.tokens, qoResult.costUsd);
+      const qoResult = await runAgent(queryOptimizerConfig.name, {
+        systemPrompt: qoSystemPrompt,
+        userPrompt: qoUserPrompt,
+        allowedTools: queryOptimizerConfig.allowedTools,
+        model: getAgentModel("query_optimizer", args),
+        cwd: optIterDir,
+      });
+      recordAgentTelemetry(queryPhase, "query_optimizer", qoResult.durationMs, qoResult.tokens, qoResult.costUsd);
+    } finally {
+      semaphore.release();
+    }
 
-    // --- Executor via ExecutionQueue (serial, notification-based) ---
+    // --- Execute via ExecutionQueue (enters immediately after QO) ---
+    progressTracker.update(queryId, `exec-${iteration}`);
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Executor (compile + run + validate)`);
     await executionQueue.requestExecution(queryId, async () => {
-      return await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
+      return await executeQuery(query, optIterDir, optIterCppPath, args.gendbDir, groundTruthDir, optIterResultsDir);
     });
 
-    // --- Improvement check (keep or rollback) using execution_results.json ---
+    // --- Improvement check ---
     const prevExecResults = await readJSON(bestExecResultsPath);
-    const newExecResults = await readJSON(iterExecResultsPath);
+    const newExecResults = await readJSON(optIterExecResultsPath);
     const improved = checkExecutionImprovement(prevExecResults, newExecResults);
 
-    // Track categories (derive from timing analysis)
     const categories = [];
     if (joinSamplingMandate) categories.push("join_sampling");
     if (opTimings.join && (joinTime / totalTime) > 0.3) categories.push("join");
@@ -1233,15 +1277,17 @@ async function runQueryIterationsRemaining(query, args, runDir, workloadAnalysis
 
     if (improved) {
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration} improved. Keeping changes.`);
-      bestIterDir = iterDir;
-      bestCppPath = iterCppPath;
-      bestExecResultsPath = iterExecResultsPath;
+      bestIterDir = optIterDir;
+      bestCppPath = optIterCppPath;
+      bestExecResultsPath = optIterExecResultsPath;
       previousIterationOutcome = `Iteration ${iteration} IMPROVED. Changes kept.`;
     } else {
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration} did not improve. Rolling back.`);
       previousIterationOutcome = `Iteration ${iteration} REGRESSED — rolled back. Avoid repeating the same approach.`;
     }
   }
+
+  progressTracker.update(queryId, "done");
 
   return {
     queryId,
@@ -1699,7 +1745,7 @@ async function main() {
     console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline v16");
+  console.log("[Orchestrator] GenDB Pipeline v20");
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);

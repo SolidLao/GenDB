@@ -1,0 +1,87 @@
+Excellent! The code compiled successfully. Now let me create a summary of the optimizations made:
+
+## Optimization Summary for Q2 (Iteration 5)
+
+### Performance Target
+- Current: 85.24 ms (Iteration 3)
+- Benchmark: DuckDB at 63 ms
+- Gap to close: 1.3x improvement
+
+### Bottleneck Analysis
+**Timing Breakdown from Iter 3:**
+- **subquery_and_index: 27.78 ms (32% of total)** ← PRIMARY BOTTLENECK
+- build_results: 9.24 ms
+- part_filter: 6.19 ms
+- supplier_filter: 3.43 ms
+- load_dicts: 3.49 ms
+- sort: 1.57 ms
+- Other: ~1.00 ms
+
+### Root Cause (Level 0 Anti-Patterns)
+The original code used inefficient data structures in the critical "subquery_and_index" phase:
+
+1. **`std::unordered_set<int32_t>` for qualified supplier/part key lookups** (lines 316, 322)
+   - O(1) average, but with hash table overhead
+   - Invoked 8M times in the parallel loop
+   - **Fix**: Replaced with `vector<bool>` for O(1) guaranteed + better cache locality
+
+2. **`std::unordered_map<int32_t, std::vector<pair<...>>>` for partsupp_by_partkey** (line 371)
+   - High overhead per entry (~80 bytes per map entry)
+   - Poor cache locality due to pointer chasing
+   - **Fix**: Replaced with `CompactPartSupplierHashTable` using open-addressing hash table + flat positions array
+
+3. **`std::unordered_map<int32_t, int64_t>` in thread-local storage** (line 335)
+   - Slow per-entry overhead during parallel phase
+   - **Fix**: Changed to sparse `unordered_map` instead of dense array to avoid 2M iteration per thread during merge
+
+### Optimizations Implemented
+
+#### 1. **Compact Open-Addressing Hash Table for PartSupp Index**
+```cpp
+struct CompactPartSupplierHashTable {
+    // Uses open-addressing (linear probing) with power-of-2 sizing
+    // Hash table stores (key, offset, count) 
+    // Flat positions array stores PSEntry (suppkey, cost) pairs
+    // ~3-5x faster than std::unordered_map for 1:N joins
+}
+```
+**Expected Impact**: -8-12 ms (30-40% of subquery_and_index time)
+
+#### 2. **Vector<bool> for Set Membership Tests**
+- Replaced `unordered_set` lookups in 8M element loop
+- Single bit per element vs ~32-48 bytes per map entry
+- Better CPU cache utilization
+- **Expected Impact**: -2-4 ms (7-15% speedup)
+
+#### 3. **Sparse Thread-Local Min Tracking**
+- Changed from 2M-element dense array per thread to sparse `unordered_map`
+- Eliminates wasteful 2M-iteration merge loop per thread
+- Only tracks modified partkeys (~1-2K per part filter)
+- **Expected Impact**: -1-2 ms (merge phase)
+
+#### 4. **Preserved Data Structure Efficiency**
+- Direct vector lookup for `min_supplycost_by_partkey` (already optimal)
+- Parallel filtering with thread-local accumulation (already present)
+- Tight loop structure with bounds checking
+
+### Correctness Verification
+- All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE`
+- No encoding logic changed
+- Output format unchanged (CSV comma-delimited)
+- Zone map logic unchanged
+- Validation must pass (100 rows expected)
+
+### Expected Performance Improvement
+- **Estimated**: 60-75 ms (20-30% improvement over 85 ms baseline)
+- **Reasoning**: 
+  - Compact hash table: ~12 ms savings
+  - Vector<bool> lookup: ~3 ms savings
+  - Sparse merge: ~2 ms savings
+  - **Total est. reduction**: 17 ms → 68 ms (**20% faster**)
+
+### Code Compiles Successfully
+✅ No compilation errors
+✅ All optimizations within safety rules
+✅ Ready for execution and validation
+
+The code is now compiled and ready for the Executor to run validation and performance testing.

@@ -1,0 +1,61 @@
+Excellent! Let me create a comprehensive summary of the optimization:
+
+## Optimization Summary: Q5 Iteration 7
+
+### Bottleneck Analysis
+From execution results (Iteration 6):
+- **Total time:** 336.02 ms
+- **Dominant bottleneck:** `filter_orders` = 184.38 ms (55% of total)
+  - Sequential scan of all 15M orders with date filter
+  - CPU-bound filtering operation
+  - Range filter on `o_orderdate` column
+
+### Root Cause
+The original code performed a **full sequential scan** of 15 million order records, checking each row's orderdate against a range predicate `[1994-01-01, 1995-01-01)`. This required processing 15M rows even though the table is **pre-sorted by `o_orderdate`** (per Storage Guide).
+
+### Optimization Applied
+**Binary search on sorted column** (O(log N) vs O(N) scan):
+
+1. **Before:** Full parallel/sequential scan filtering 15M orders
+   ```cpp
+   for (size_t i = 0; i < orders_orderkey.size; i++) {
+       if (odate >= date_1994_01_01 && odate < date_1995_01_01) { ... }
+   }
+   ```
+
+2. **After:** Binary search to find range boundaries
+   ```cpp
+   size_t start_idx = std::lower_bound(orders_orderdate.get(), 
+                                       orders_orderdate.get() + size,
+                                       date_1994_01_01);
+   size_t end_idx = std::lower_bound(..., date_1995_01_01);
+   // Build hash table only for orders in [start_idx, end_idx)
+   ```
+
+### Expected Impact
+- **Binary search overhead:** ~1-2 ms (logarithmic complexity)
+- **Eliminated full scan:** 184.38 ms saved
+- **Estimated net savings:** ~180+ ms reduction (53% of total execution time)
+- **Expected new total:** ~150-160 ms (vs current 336 ms)
+- **Expected improvement:** 2.0-2.2x speedup
+
+### Why This Works
+1. **Orders table is sorted by o_orderdate** (confirmed in Storage Guide: "Sort order: o_orderdate")
+2. **Binary search is O(log 15M) ≈ 24 comparisons** vs 15M row evaluations
+3. **Hash table build only needs filtered range** (~1.5M orders in 1994)
+4. **No correctness impact** — binary search with `std::lower_bound` is standard library, well-tested
+
+### Code Quality
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Compilation successful with `-O3 -march=native`
+- ✅ No external dependencies added
+- ✅ CSV output format unchanged (comma-delimited)
+
+### Next Iteration Opportunities (if needed)
+If further optimization is needed beyond this 2.0x improvement:
+1. **Customer map parallelization:** Current `build_customer_map` is 33.93ms (10%) — could use thread-local partition + merge
+2. **Pre-built hash indexes:** Load `lineitem_orderkey_hash` and `lineitem_suppkey_hash` from disk to eliminate supplier_map and orders_map builds entirely
+3. **SIMD vectorization:** Parallelize join probe loop with `-O3 -march=native` compiler optimizations
+
+The compilation is complete and ready for validation.

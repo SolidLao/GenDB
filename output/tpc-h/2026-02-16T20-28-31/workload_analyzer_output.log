@@ -1,0 +1,29 @@
+## Summary
+
+✅ **TPC-H Workload Analysis Complete**
+
+**File Written:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-28-31/workload_analysis.json`
+
+### Key Findings:
+
+**Hardware:** 64-core CPU (Xeon, 2 sockets × 16 cores), L3 cache 44MB, **AVX-512 SIMD support**, HDD storage, 376GB RAM
+
+**Workload Profile:**
+- **Fact tables:** lineitem (60M rows) and orders (15M rows) dominate access (30/22 queries each)
+- **Dimensions:** customer (1.5M), part (2M), supplier (100K) with high selectivity filters
+- **Join topology:** 8-table star schema; most queries traverse 4–7 tables
+- **Cardinality:** Aggressive grouping (Q1: 6 groups; Q13: 30 groups) mixed with large aggregations (Q11: 200K groups)
+
+**Bottleneck Queries:**
+- **Q1, Q6, Q7, Q12:** Large fact-table scans with selective filters → vectorize date/flag comparisons
+- **Q3, Q5, Q10, Q18:** Complex multi-table joins with low-selectivity subqueries → bloom filters, semi-join decorrelation
+- **Q2, Q16, Q20, Q21:** Correlated subqueries → hash semi-join conversion critical
+
+**Optimization Priorities:**
+1. **Parallelization:** Thread-level (64 cores) + SIMD (AVX-512) for scans/aggregations
+2. **Filter pushdown:** Date ranges (25–98% selectivity) and LIKE predicates move early
+3. **Direct array lookups:** region (5 rows) and nation (25 rows) avoid hash tables
+4. **Bloom filters:** Reduce join probe volume for high-selectivity dimension filters
+5. **Subquery decorrelation:** IN/EXISTS → hash semi-joins, avoid repeated correlated execution
+
+**Next Steps:** Storage/Index Designer should prioritize zone maps on `l_shipdate`, `o_orderdate`, and high-selectivity STRING columns; hash indexes on join keys (lineitem.l_orderkey, orders.o_custkey, part.p_partkey).

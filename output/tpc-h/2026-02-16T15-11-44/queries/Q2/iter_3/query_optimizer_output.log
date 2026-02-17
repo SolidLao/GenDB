@@ -1,0 +1,54 @@
+Excellent! Now let me create a summary of the optimization I just made:
+
+## Summary of Q2 Iteration 3 Optimization
+
+### Bottleneck Analysis
+From iteration 2 execution results:
+- **Total time: 595.56 ms**
+- **Subquery computation: 302.22 ms (50.7%)** ← DOMINANT BOTTLENECK
+- **Join/filter: 182.18 ms (30.6%)** ← Secondary bottleneck
+- Together they account for **81.3%** of total execution time
+
+### Root Cause
+The subquery computation was inefficient:
+1. It scanned all 8M partsupp rows with a parallel for loop
+2. For **each** partsupp row, it checked supplier membership by:
+   - Validating suppkey range bounds (1-100000)
+   - Looking up `supplier_s_nationkey[suppkey-1]` array access
+   - Checking `europe_nations.find(nationkey)` hash table lookup (repeated for same suppkey)
+
+This caused excessive hash table operations and redundant lookups.
+
+### Optimization Strategy: Predicate Pushdown
+**Key insight:** Build a prefiltered set of Europe suppliers FIRST, then use it for fast O(1) membership checks.
+
+**Changes made:**
+1. **Load `supplier_s_suppkey` in step 2** - Added loading of the suppkey column from supplier table
+2. **Build a prefiltered set (step 5a)** - Create a `std::unordered_set<int32_t>` containing all suppkeys of suppliers in Europe nations
+   - Single pass through 100K suppliers
+   - Build the set once, reuse for all 8M partsupp checks
+3. **Simplify the inner loop (step 5b)** - Replace complex checks with simple set lookup:
+   - Old: bounds check + array access + hash lookup per row
+   - New: single `europe_suppliers.find(suppkey)` per row
+
+### Expected Impact
+- **Set lookup is O(1) average case vs. multiple operations before**
+- **Eliminates redundant lookups** - Each suppkey is checked once against the set, not repeatedly
+- **Better memory access pattern** - Small set fits in cache
+- **Estimated improvement:** 15-25% reduction in subquery_min_cost time (45-75 ms saved)
+- **Total estimated:** ~550-570 ms (from 595 ms), approximately **5-7% overall improvement**
+
+### Code Changes Summary
+- Added `#include <unordered_set>`
+- Added loading of `supplier_s_suppkey` during data load phase
+- Restructured subquery step to build Europe suppliers set first
+- Simplified the partsupp loop filter condition from complex multi-step checks to simple set membership
+
+### Correctness
+- ✅ All [TIMING] guards preserved
+- ✅ No encoding logic changes
+- ✅ Output format unchanged (CSV with comma delimiter)
+- ✅ Compilation successful
+- ✅ Same logical result (just more efficient execution)
+
+The optimization applies **plan-level restructuring** (predicate pushdown) which is more impactful than micro-optimizations, following the knowledge base guidance that plan-level issues cause 10-100x slowdowns.

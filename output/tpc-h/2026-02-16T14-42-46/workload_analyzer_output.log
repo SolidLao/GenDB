@@ -1,0 +1,31 @@
+Perfect! I've completed the TPC-H workload analysis. Here's a summary:
+
+## Workload Analysis Summary
+
+**Output file:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T14-42-46/workload_analysis.json`
+
+### Key Findings:
+
+**Hardware:** 64 CPU cores, 376 GB RAM, HDD storage, AVX-512 SIMD support
+
+**Data Scale (SF10):**
+- **lineitem:** 60M rows (fact table) — hot columns: dates, flags, prices, discount
+- **orders:** 15M rows (fact table) — hot columns: order date, customer key, priority
+- **dimension tables:** customer (1.5M), part (2M), supplier (100K), nation (25), region (5)
+
+**Access Patterns:**
+- 22 queries heavily use lineitem (dominant)
+- Multi-table joins (2–6 way) on FK relationships
+- Complex aggregations with GROUP BY on multiple columns
+- Date range filters with very high selectivity (88% pass for Q1, 14% for Q6, 2.5% for Q4)
+
+**Critical Optimizations:**
+1. **Parallelism:** Use all 64 cores with morsel-driven execution (10K–100K rows/thread)
+2. **Zone-Maps:** Build on date columns (l_shipdate, o_orderdate) for 85%+ block skips
+3. **Filter Selectivity:** Aggressive pushdown of highly selective predicates (0.004–0.17)
+4. **Join Strategy:** Hash joins dominate; partial aggregation reduces intermediates
+5. **Subquery Decorrelation:** Convert correlated subqueries in Q9, Q17, Q20, Q22 to CTEs/semi-joins
+
+**Bottleneck Queries:** Q3 (shipping priority), Q5 (supplier volume), Q7 (volume shipping), Q9 (profit), Q18 (large volume customer) — all involve 3–6 table joins + aggregation.
+
+The analysis includes exact row counts from profiling, 22 optimization hints (one per query), and actionable guidance for the Storage/Index Designer and Code Generator downstream agents.

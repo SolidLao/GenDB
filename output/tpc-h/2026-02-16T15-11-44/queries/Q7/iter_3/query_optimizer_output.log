@@ -1,0 +1,82 @@
+Perfect! Both the binary and source code are in place. Let me create a final summary document:
+
+## Optimization Summary - Q7 Iteration 3
+
+### Baseline Performance (Iteration 1)
+- **Total Execution Time**: 2,135 ms
+- **Bottleneck**: `join_lineitem_orders` at **979.54 ms (45.8% of total)**
+
+### Root Cause Analysis (Plan-Level Issue)
+
+The original execution had a **reversed join order** problem:
+
+```
+ORIGINAL (Iteration 1):
+1. Build hash table: supplier_lineitem result (1.46M rows) keyed by orderkey
+2. Probe: ALL 15M ORDERS scanned sequentially
+   - Only ~1.46M rows match (~9.7% selectivity)
+   - Remaining 13.54M rows are wasted cache lines
+   - Hash table lookups with poor cache locality = 980ms
+```
+
+This is a **10-100x performance anti-pattern**:
+- Scanning a large table with poor selectivity
+- Multiple cache misses per lookup
+- Hash table underutilization
+
+### Optimization Applied (Iteration 3)
+
+**Join Order Reversal - Reverse the build/probe directions:**
+
+```
+OPTIMIZED (Iteration 3):
+1. Build hash table: ALL 15M ORDERS keyed by o_orderkey
+   - Build cost: ~100-200ms (one-time, amortized)
+   
+2. Probe: Only 1.46M supplier_lineitem rows scanned
+   - Probe cost: ~10-50ms (100% selectivity, all rows match)
+   - 10x fewer cache misses per probe
+```
+
+**Why this works:**
+- Hash table on orders can be built in ~100-200ms (large but sequential)
+- Probing 1.46M rows with 100% selectivity is much faster than probing 15M rows with 10% selectivity
+- The build cost is a one-time expense, quickly amortized by the probe speedup
+- Expected net improvement: **800-900ms reduction** on this operation alone
+
+### Code Changes
+
+**File**: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q7/iter_3/q7.cpp`
+
+**Lines 371-418**: Rewrote STEP 5 (join with orders)
+- Changed from: Build on supplier-lineitem (1.46M), probe orders (15M)
+- Changed to: Build on orders (15M), probe supplier-lineitem (1.46M)
+- Data structure: Simple `unordered_map<int32_t, int32_t>` (orderkey → custkey)
+
+### Compilation
+
+✅ **Status**: SUCCESS
+- Compiled with: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`
+- No errors, only format warnings (pre-existing)
+- Binary size: 80KB
+- All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+
+### Expected Impact
+
+| Metric | Baseline | Expected | Improvement |
+|--------|----------|----------|-------------|
+| join_lineitem_orders | 980 ms | 100-150 ms | **6.5-9.8x** |
+| Total execution | 2,135 ms | ~1,300-1,400 ms | **35-39% faster** |
+| vs DuckDB (82.7ms) | 25.8x slower | 15.7-16.9x slower | Closer to target |
+| vs Umbra (78.8ms) | 27.1x slower | 16.5-17.8x slower | Closer to target |
+
+### Risk Assessment
+
+**Low Risk - This is a safe plan-level optimization:**
+- ✅ Correctness: All rows still joined correctly (just different order)
+- ✅ Data structure: Simple hash table, no complex logic
+- ✅ Encoding: No changes to encoding/decoding
+- ✅ Output format: CSV format unchanged
+- ⚠️ Only caveat: Build time on large table might be higher, but probe speedup dominates
+
+The Executor will validate correctness via the validation step. If any regression occurs, the system has automatic rollback.

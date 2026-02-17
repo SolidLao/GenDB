@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[Q17] Starting execution...\n[Q17] brand_code=13 container_code=38\n[TIMING] dict_load: 0.12 ms\n[Q17] lineitem rows: 59986052\n[Q17] subquery: 2000000 distinct partkeys\n[TIMING] subquery: 2969.60 ms\n[Q17] part rows: 2000000\n[Q17] qualifying parts: 2044\n[TIMING] part_filter: 7.74 ms\n[TIMING] join_filter_aggregate: 8.18 ms\n[Q17] Result: 3287771.46\n[Q17] Output written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q17/iter_2/results/Q17.csv\n[TIMING] output: 1.50 ms\n[TIMING] total: 2987.22 ms\n",
+    "stderr": "",
+    "duration_ms": 3200
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q17\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dict_load": 0.12,
+    "subquery": 2969.6,
+    "part_filter": 7.74,
+    "join_filter_aggregate": 8.18,
+    "output": 1.5,
+    "total": 2987.22
+  },
+  "timing_ms": 2985.72
+}

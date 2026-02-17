@@ -1,0 +1,43 @@
+Perfect! The code looks good. All timing guards are preserved. Let me create a summary of the optimizations made:
+
+## Summary of Optimization Changes (Iteration 5)
+
+### Key Optimizations:
+
+1. **Early-Exit Orders Scan** (Primary optimization)
+   - Since the orders table is **sorted by `o_orderdate`**, we can break as soon as we encounter a row where `o_orderdate >= date_boundary`
+   - This reduces processing from full table scan to only the prefix of matching rows (estimated ~2M out of 15M rows ≈ 13% of table)
+   - **Expected impact**: 40-50ms saved (from 147ms → ~80-100ms)
+
+2. **Zone Map Max Boundary Optimization**
+   - Compute `last_matching_block` from zone map: the last block where `max_val < date_boundary`
+   - Only process blocks up to this point; skip all blocks after
+   - This ensures parallel threads stop scanning unnecessary blocks
+   - **Expected impact**: Amplifies early-exit by preventing thread idle on trailing blocks
+
+3. **Simplified Scan Loop**
+   - Replaced vectorized 8-element batch processing with cleaner scalar loop
+   - The early-exit pattern is simpler and more cache-friendly than vectorization here
+   - Single comparison per row is better than SIMD overhead
+   - **Expected impact**: ~5-10ms reduction from cleaner code and better branch prediction
+
+4. **Code Structure for Pre-built Indexes**
+   - Added index loading infrastructure (will be leveraged in future iterations if needed)
+   - Currently commented out but ready for multi-value hash index usage
+   - **Expected impact**: Minimal now; enables future optimizations
+
+### Expected Performance Impact:
+- **Current iter 4 (regressed)**: 697ms
+- **Baseline iter 3**: 318ms
+- **Target iter 5**: ~200-220ms (45-50ms improvement from early-exit + zone map optimization)
+- **Relative to Umbra 72ms**: Still ~3x gap, but solid progress
+
+### Correctness:
+- ✅ All `[TIMING]` lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ No encoding logic changes
+- ✅ Date predicate logic verified: `o_orderdate < 9204` (STRICT <)
+- ✅ Customer filter preserved
+- ✅ Decimal computation unchanged
+- ✅ Compilation successful with `-O3 -march=native`
+
+The code is ready for validation by the Executor.

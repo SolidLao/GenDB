@@ -1,0 +1,52 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Optimization Summary for Q22 Iteration 8
+
+### **Bottleneck Analysis**
+From iteration 7 execution results (602.51ms total):
+- **build_antijoin: 271.75 ms (45%)** ← CRITICAL BOTTLENECK
+- **dict_load: 172.52 ms (29%)**
+- **filter_aggregate: 144.86 ms (24%)**
+- **compute_avg: 1.33 ms**
+- **output: 11.98 ms**
+
+### **Key Optimization: Pre-Built Index Loading**
+The main insight is that instead of **building the anti-join hash set from scratch** (which dominated at 45% of execution time), we now **load the pre-built `orders_custkey_hash.bin` index** via mmap.
+
+**Changes Made:**
+1. **Replaced FastHashSet build phase with PrebuiltHashIndex loader**
+   - Old approach: Partition orders data, build hash set in parallel (271.75 ms)
+   - New approach: mmap the pre-built binary index (estimated ~50 ms)
+   - **Expected gain: ~220 ms (36% reduction)**
+
+2. **New PrebuiltHashIndex struct**
+   - Loads binary format: `[uint32_t num_unique][uint32_t table_size][entries][positions]`
+   - Each entry: `[int32_t key][uint32_t offset][uint32_t count]`
+   - Implements O(1) lookup with linear probing through the hash table
+   - Memory-mapped for zero-copy access
+
+3. **Simplified hash lookup**
+   - Replaced complex radix-partitioned build with simple mmap load
+   - `contains()` function still uses linear probing but operates on pre-built data
+   - No contention, no atomic operations needed
+
+### **Expected Performance Improvement**
+- **Iteration 7: 602.51 ms**
+- **Iteration 8: ~370-400 ms (target)**
+- **Improvement: ~35-40% reduction**
+- **Contribution breakdown:**
+  - Index loading: ~50 ms (vs. 271.75 ms build)
+  - Rest of pipeline: ~320-350 ms (similar to iteration 7)
+
+### **Code Correctness**
+- ✅ All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Dictionary loading retained for country code extraction
+- ✅ Predicate pushdown maintained (c_acctbal > avg, country in target set, anti-join check)
+- ✅ Aggregation and output logic unchanged
+- ✅ Compiled successfully with `-O3 -march=native`
+
+### **Why This Works**
+The pre-built index is generated once during data preparation and stored in binary format. Loading it via mmap is orders of magnitude faster than building it from 15M rows in parallel. This is a **plan-level optimization** (Rule 2 from query-planning.md: use pre-built indexes when available).
+
+The code is now ready for execution and validation.

@@ -1,0 +1,70 @@
+Perfect! The binary and source are ready. Now let me create a summary of the optimizations:
+
+## Optimization Summary for Q11 Iteration 8
+
+### Current Performance Baseline
+- **Iteration 6 (previous best)**: 78.30 ms
+- **Performance gap to Umbra**: 2.7x (Umbra: 30ms)
+- **Timing breakdown** (dominant bottlenecks):
+  - `pass1_total_sum` (parallel scan + aggregation): 46.45 ms (54%)
+  - `aggregation` (merge thread results): 22.18 ms (26%)
+  - `output`: 7.49 ms (9%)
+  - Others: <3ms each
+
+### Optimization Strategy (Iteration 8)
+
+**Key Insight**: The scan loop over 8M partsupp rows dominates (46.45ms). Each iteration does a supplier lookup, which was previously done via hash table probing. Hash table lookups on 8M iterations incur collision overhead.
+
+**Optimizations Applied**:
+
+1. **Direct Array Lookup for Supplier Nationkey** (High Impact: ~3-5ms expected)
+   - **Before**: Hash table lookup (MurmurHash + probing) per partsupp row
+   - **After**: Direct array indexed by `suppkey`: `supplier_nationkey_by_suppkey[suppkey]`
+   - **Rationale**: 
+     - Supplier keys are 1-100,000 (bounded range)
+     - Direct array is only 100K entries (fits in L2 cache easily)
+     - Avoids hash collision overhead on 8M iterations
+     - Single cache-line fetch vs hash table multiple probes
+
+2. **Inlined Hash Table Lookups in Merge** (Micro-optimization: ~1-2ms)
+   - **Before**: Merging thread-local aggregations via `insert()` function calls
+   - **After**: Inlined hash table insertion logic in merge loop
+   - **Rationale**: Reduces function call overhead in the merge phase
+
+3. **Optimized Thread Aggregation Merge**
+   - **Before**: Collected all pairs then rebuilt hash table (expensive)
+   - **After**: Direct insertion into final table, only iterating occupied slots
+   - **Rationale**: Better cache locality, fewer iterations
+
+### Expected Impact
+
+- **Direct array lookup**: 3-5ms savings (5-7% improvement)
+- **Inlined merge logic**: 1-2ms savings (1-2% improvement)
+- **Total expected improvement**: 4-7ms → **Target: 71-74ms** (vs 78.3ms baseline)
+
+### Code Changes Summary
+
+| Component | Change | Benefit |
+|-----------|--------|---------|
+| Supplier lookup | Hash table → Direct array[suppkey] | O(1) cache-friendly, no collision overhead |
+| Scan loop | Function calls → Inlined array access | Reduce function call overhead |
+| Merge phase | Function calls → Inlined insertion | Better cache locality |
+
+### Correctness Verification
+
+✓ Compilation: Successful (no warnings)
+✓ All timing points preserved in `#ifdef GENDB_PROFILE` guards
+✓ Encoding logic unchanged (decimals still scaled by 100, threshold still /100000)
+✓ CSV output format preserved (comma-delimited)
+✓ [TIMING] labels preserved exactly
+
+### Next Steps for Executor
+
+The code is compiled and ready. The Executor will:
+1. Run the binary
+2. Validate output (8685 rows expected, no new columns)
+3. Measure execution time
+4. If **improved** → accept, update baseline
+5. If **regressed** → automatic rollback to iteration 6
+
+The optimization targets the dominant bottleneck (parallel scan) with a low-risk, high-confidence change that eliminates hash table collision overhead through direct array indexing.

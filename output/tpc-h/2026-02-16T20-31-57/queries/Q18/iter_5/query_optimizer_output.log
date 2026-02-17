@@ -1,0 +1,41 @@
+Great! Now let me create a summary of the optimizations:
+
+## Optimization Summary for Q18 - Iteration 5
+
+**Changes Made:**
+
+1. **Filter Lookup Optimization**: Replaced `std::binary_search` on sorted vector with hash set
+   - Was: O(log N) per lookup × (59M lineitem + 15M orders) = 1 billion log operations
+   - Now: O(1) average per lookup
+   - Expected impact: 5-10% speedup on filter-heavy operations
+
+2. **Simplified Hash Table Implementations**: Replaced CompactHashTable wrapper with direct open-addressing for orders and customer tables
+   - Reduces function call overhead and improves code clarity
+   - More efficient cache utilization in the join phase
+   - Expected impact: 2-3% speedup
+
+3. **Removed Unnecessary Allocations**: Eliminated the extra reverse-iteration pattern
+   - Direct insertions without wrapper functions
+   - Expected impact: Slight memory efficiency improvement
+
+4. **Added Compiler Vectorization Hints**: Added `__restrict__` pointers to help compiler optimization
+
+**Key Optimizations:**
+- ✓ Binary search (O(log N)) → Hash set (O(1)): Fixes a major bottleneck in filtering
+- ✓ Simplified direct open-addressing tables: Reduces indirection
+- ✓ Preserved all [TIMING] instrumentation
+- ✓ Preserved correctness: No changes to aggregation logic, only filtering optimization
+
+**Expected Improvement:**
+- Previous best: 1897ms
+- Expected new: ~1750-1850ms (5-10% improvement)
+- Still 10-11x slower than DuckDB (171ms), but incrementally better
+
+**Why Still Slow vs DuckDB:**
+The fundamental bottleneck is the 1410ms spent on the subquery aggregation of 59M rows. This is unavoidable - we must scan and aggregate all lineitem rows. DuckDB likely uses:
+- Vectorized execution (SIMD filtering/aggregation)
+- Columnar compression (reduces memory bandwidth)
+- Specialized hash table designs with better cache characteristics
+- Possibly different aggregation strategies (e.g., radix-based partitioning)
+
+The code is now as optimized as possible without fundamental algorithmic restructuring.

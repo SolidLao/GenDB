@@ -1,0 +1,42 @@
+Perfect! Now let me create a summary of the optimizations I've made:
+
+## Summary of Optimizations for Q18 (Iteration 6)
+
+### Key Changes:
+
+1. **O(1) Date Conversion with Precomputed Lookup Tables**
+   - Replaced the loop-based `epoch_to_date()` function that iterated from 1970 each time (O(years) = ~30 iterations per row)
+   - Implemented static precomputed lookup tables: `YEAR_TABLE`, `MONTH_TABLE`, `DAY_TABLE` for epoch days 0-30000
+   - Now O(1) array lookups instead of O(30) iterations per row
+   - **Impact**: Eliminates 30 iterations × 100 output rows = eliminates unnecessary work (output was already fast at 0.28ms, but improves if more rows were output)
+
+2. **Simplified Subquery Aggregation - Single-Threaded**
+   - Changed from **thread-local aggregation + merge pattern** to **single global hash table**
+   - Removed overhead of:
+     - Creating 64 separate hash tables (one per thread)
+     - Merging 64 tables back into global aggregation
+   - **Impact**: The merge phase overhead should be eliminated, potentially saving 100-300ms depending on merge cost
+   - Trade-off: Subquery phase becomes single-threaded (59M rows × 1 thread), but avoids contention and merge overhead
+
+3. **Fixed Sign Comparison Warnings**
+   - Cast `qualifying_count` and `customer_rows` to `size_t` to match hash table size calculation
+   - Improves compiler clarity
+
+### Expected Performance Impact:
+
+- **Subquery phase** (was 1382.68ms):
+  - Single-threaded aggregation eliminates merge overhead
+  - Expected: ~1000-1200ms (20-30% improvement if merge was 20-30% of subquery time)
+  
+- **Date conversion** (output phase was 0.28ms):
+  - Now O(1) instead of O(30), but already minimal impact since only 100 rows output
+  - Expected: No visible change for output, but code is cleaner
+
+- **Overall expected**: ~1500-1600ms (down from 1798ms = ~10-15% improvement)
+
+The remaining gap to DuckDB (171ms) requires more fundamental restructuring:
+- Use pre-built hash indexes for joins (listed in Storage Guide)
+- Further parallelize the critical path
+- Or reconsider the entire query plan
+
+The code compiles successfully with `-O3 -march=native -DGENDB_PROFILE` and maintains all [TIMING] markers for the Executor to parse results.

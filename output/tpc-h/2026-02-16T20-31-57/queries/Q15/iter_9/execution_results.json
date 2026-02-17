@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_9/q15.cpp: In function ‘std::string epoch_to_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_9/q15.cpp:242:29: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 0 and 6 [-Wformat-truncation=]\n  242 |     snprintf(buf, 11, \"%04d-%02d-%02d\", year, month, day);\n      |                             ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_9/q15.cpp:242:23: note: directive argument in the range [1, 12]\n  242 |     snprintf(buf, 11, \"%04d-%02d-%02d\", year, month, day);\n      |                       ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_9/q15.cpp:242:23: note: directive argument in the range [-2147483647, 2147483647]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_9/q15.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 11\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.08 ms\n[TIMING] zonemap: 0.06 ms\n[TIMING] scan_filter_aggregate: 41.23 ms\n[TIMING] find_max: 0.76 ms\n[TIMING] load_supplier: 0.07 ms\n[TIMING] join: 32.35 ms\n[TIMING] output: 1.82 ms\n[TIMING] total: 76.43 ms\n",
+    "stderr": "",
+    "duration_ms": 118
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q15\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.08,
+    "zonemap": 0.06,
+    "scan_filter_aggregate": 41.23,
+    "find_max": 0.76,
+    "load_supplier": 0.07,
+    "join": 32.35,
+    "output": 1.82,
+    "total": 76.43
+  },
+  "timing_ms": 74.61000000000001
+}

@@ -1,0 +1,49 @@
+Excellent! The binary compiled successfully. Now let me create a summary of the optimizations made:
+
+## Optimization Summary for Q15 Iteration 9
+
+### Key Optimizations Implemented:
+
+1. **Zone Map Pruning on l_shipdate** (Iteration 9)
+   - **What**: Load pre-built zone map index for l_shipdate column, identify blocks overlapping date range [9496, 9587)
+   - **Why**: Prevents scanning all 59M lineitem rows; most blocks are outside the date range
+   - **Expected Impact**: 10-30% reduction in scan work (depends on data clustering; l_shipdate is already sort-ordered)
+   - **Code Changes**:
+     - Added `load_zone_map_blocks()` function to parse zone map binary format
+     - Modified scan loop to iterate over qualifying blocks only instead of full table
+     - Kept per-row filter check for correctness
+
+2. **Pre-Built Hash Index for Supplier Join** (Iteration 9)
+   - **What**: Load pre-built supplier_suppkey_hash index instead of linear O(N) scan
+   - **Why**: Replaces O(100K) linear scan with O(1) average-case lookup
+   - **Expected Impact**: 10-100x speedup on join operation (36ms → <1ms ideally)
+   - **Code Changes**:
+     - Added `SupplierHashIndex` structure and `load_supplier_hash_index()` function
+     - Implemented `supplier_hash_lookup()` for index queries
+     - Changed join from linear scan to hash index lookup
+
+3. **Preserved Existing Optimizations**
+   - Fine-grained per-bucket locking for parallel aggregation
+   - OpenMP parallelism on zone map blocks
+   - Lazy dictionary loading only after finding supplier
+
+### Expected Performance Impact:
+
+**Baseline (Iter 5)**: 84.76 ms
+- scan_filter_aggregate: 44.78 ms (53%)
+- join: 36.05 ms (42%)
+
+**Expected (Iter 9)**:
+- Zone map pruning: 44.78 → ~35 ms (20% reduction, conservative)
+- Hash index join: 36.05 → ~2-3 ms (12x+ speedup)
+- **Total estimate: ~40-45 ms** (2.0x faster than baseline)
+
+This targets the 40ms Umbra benchmark gap.
+
+### Correctness Preservation:
+- All [TIMING] lines preserved in #ifdef GENDB_PROFILE guards
+- Encoding logic unchanged
+- Zone map skip logic correct (max_val >= date_min && min_val < date_max)
+- Hash index lookup validates supplier_pos bounds before access
+
+The code is ready for execution and validation by the Executor.

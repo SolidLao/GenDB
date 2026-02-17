@@ -1,0 +1,32 @@
+Great! Compilation successful. Now let me create a summary of the optimization made:
+
+## Optimization Summary - Q14 Iteration 4
+
+**Problem Identified:**
+The code was spending **213.31ms (82% of total time)** loading a pre-built hash index for `part_partkey` using `std::unordered_map`. This is a **Level 0 Anti-Pattern** - using `std::unordered_map` for hash join workloads when a faster data structure is available.
+
+**Root Cause:**
+- Each `std::unordered_map` entry costs 80+ bytes overhead plus pointer chasing
+- Loading 2M entries one-by-one into the map involves repeated hashing and insertion logic
+- The map is only used for lookups during the join phase (45.86ms), but construction dominates
+
+**Solution Applied:**
+Replaced `std::unordered_map` with a **CompactHashTable** - a custom open-addressing hash table with:
+- **Single contiguous array** (cache-friendly, ~20 bytes per entry vs 80+ for unordered_map)
+- **Fibonacci hashing** for uniform distribution
+- **Linear probing** with bitwise AND modulo for fast lookups
+- **Expected speedup**: 2-5x for hash table operations
+
+**Changes Made:**
+1. Added `CompactHashTable<K,V>` template with open-addressing design
+2. Replaced `load_hash_index()` to populate CompactHashTable instead of std::unordered_map
+3. Updated join probe code to use `find()` API (returns pointer instead of iterator)
+
+**Expected Impact:**
+- Load/build hash table time: **213ms → ~50-80ms** (2.7-4.3x improvement)
+- **Total time**: **259ms → ~120-150ms** (1.7-2.2x overall improvement)
+- **Gap to best**: Still 8-10x slower than 14ms target, but closer
+
+**Compilation:** ✅ Successful with `-O3 -march=native`
+
+The code is ready for validation. The Executor will run it and measure the actual improvement.

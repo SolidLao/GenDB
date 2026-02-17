@@ -1,0 +1,33 @@
+Great! The code compiled successfully. Now let me provide a summary of the optimization:
+
+## Optimization Summary for Q2 — Iteration 1
+
+### **Problem Identified**
+Execution analysis revealed a critical **plan-level bottleneck**:
+- **join_filter operation: 1409.03 ms (80.4% of total execution time)**
+
+**Root cause:** In the main join loop (Step 7), the code scanned all 8M partsupp rows. For EACH matched row, it performed a **linear search through all 2M part rows** (nested loop with O(n·m) complexity) to find the part index. This created an unnecessary O(2M) operation per matched row.
+
+### **Solution Applied**
+Restructured the code to use **hash-based lookup** instead of linear search:
+
+1. **Pre-compute a hash map** (partkey → part_idx) before the main loop — O(2M)
+2. **Replace nested loop with O(1) hash lookup** in the main join loop
+
+**Changes made to q2.cpp:**
+- Added Step 7: Build `partkey_to_idx` hash map from part table (lines 379-382)
+- Modified Step 8 (formerly Step 7): Replace linear search (lines 406-410) with `partkey_to_idx.find(ps_partkey)` (lines 413-416)
+- Updated step numbering in comments accordingly
+
+### **Expected Impact**
+- **join_filter operation**: 1409 ms → **~20-50 ms** (28-70x faster)
+  - Changed from O(matched_rows × 2M) to O(matched_rows × 1)
+- **Total execution time**: 1753 ms → **~300-400 ms** (4-6x faster overall)
+
+### **Code Quality**
+✅ Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards  
+✅ Maintained encoding logic (no changes to dictionary decoding)  
+✅ CSV output format unchanged (comma-delimited)  
+✅ Correctness validation preserved (hash lookup is semantically identical to linear search)
+
+The optimization is a **pure plan-level restructuring** that eliminates a nested loop inefficiency without changing the algorithmic correctness.

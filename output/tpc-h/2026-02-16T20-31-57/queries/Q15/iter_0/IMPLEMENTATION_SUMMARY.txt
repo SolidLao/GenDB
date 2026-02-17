@@ -1,0 +1,167 @@
+================================================================================
+Q15 QUERY IMPLEMENTATION - GenDB Iteration 0
+================================================================================
+
+QUERY ANALYSIS
+==============
+Q15 finds the supplier with the maximum total revenue during a 3-month period
+(1996-01-01 to 1996-03-31 in the TPC-H dataset).
+
+SQL Query:
+- Filters lineitem by shipdate in [1996-01-01, 1996-04-01)
+- Aggregates revenue = SUM(l_extendedprice * (1 - l_discount)) by supplier
+- Joins with supplier table to output supplier details
+- Single-row result: the supplier with maximum revenue
+
+CRITICAL DATA INSIGHTS
+======================
+1. DATE COLUMNS: Stored as int32_t days since epoch (1970-01-01)
+   - 1996-01-01 = day 9496
+   - 1996-04-01 = day 9587
+   
+2. DECIMAL COLUMNS: Stored as int64_t with scale_factor = 2
+   - Value stored as (actual_value * 100)
+   - Example: $76,475.30 stored as 7,647,530
+   - Discount 0.05 (5%) stored as 5
+   
+3. REVENUE CALCULATION:
+   - Formula: extendedprice * (1 - discount)
+   - Stored: price_int * (100 - discount_int) / 10,000
+   - Accumulates as int64_t to avoid precision loss
+   - Divides by 10,000 only for final CSV output
+
+4. DICTIONARY ENCODING:
+   - s_name, s_address, s_phone stored as int32_t codes
+   - Dictionary files loaded at runtime:
+     * supplier/s_name_dict.txt
+     * supplier/s_address_dict.txt
+     * supplier/s_phone_dict.txt
+   - Reverse lookup: code → string via dictionary vectors
+
+EXECUTION PLAN
+==============
+
+LOGICAL PLAN:
+1. Filter lineitem: shipdate in [9496, 9587) → ~2.2M rows
+2. Aggregate: GROUP BY l_suppkey, SUM(revenue) → ~100K groups
+3. Find maximum revenue value
+4. Join with supplier table (equi-join on suppkey)
+5. Output single row with supplier details and max revenue
+
+PHYSICAL PLAN:
+- Scan lineitem: Full mmap scan with inline filtering (no zone map optimization in iter 0)
+- Aggregation: Open-addressing hash table (200K slots for 100K groups)
+- Max Finding: Linear scan of hash table
+- Join: Linear scan of supplier table (100K rows, small enough for sequential)
+- Output: CSV with proper quoting for address field (contains commas)
+
+PARALLELISM:
+- OpenMP parallel scan of lineitem with work-stealing
+- Morsel size: 10K rows per thread
+- Thread-local aggregation buffers (one per thread)
+- Sequential merge of local buffers into global hash table
+- Hardware: 64 cores available, using OpenMP runtime scheduling
+
+PERFORMANCE CHARACTERISTICS
+============================
+Execution Time Breakdown (measured with -DGENDB_PROFILE):
+- Load columns:         ~0.08 ms (mmap)
+- Scan/Filter/Agg:      ~185 ms (main work)
+- Find max:             ~0.74 ms
+- Load supplier:        ~33 ms (dictionary I/O)
+- Join:                 ~0.14 ms (linear scan)
+- Output (CSV):         ~0.21 ms
+- TOTAL:                ~219 ms
+
+Comparison:
+- Umbra:                 40 ms
+- DuckDB:                50 ms
+- ClickHouse:           168 ms
+- GenDB (this impl):    219 ms
+
+STATUS: Performance acceptable for iteration 0. Opportunities for improvement:
+- Zone map pruning on lineitem_shipdate (6-10% filtering potential)
+- Pre-built hash index lookup for supplier join (eliminates linear scan)
+- SIMD vectorization of scan/filter loop
+- Two-pass aggregation with partial aggregation in parallel phase
+
+VALIDATION
+==========
+Correctness: PASS
+- Row count: 1 (expected 1) ✓
+- Supplier: 69998 ✓
+- Revenue: 2194132.8166 ✓
+- CSV format: Properly quoted fields ✓
+- Line endings: \r\n ✓
+
+File Generated: /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_0/q15.cpp
+Output: /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q15/iter_0/results/Q15.csv
+
+COMPILATION
+===========
+Command: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o q15 q15.cpp
+Result: Success (executable 47K)
+
+With profiling:  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE
+Without profiling: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp
+
+KEY IMPLEMENTATION DETAILS
+===========================
+
+1. Date Predicate Handling:
+   - Pre-computed epoch day values (9496, 9587)
+   - Integer comparison: shipdate >= 9496 AND shipdate < 9587
+   - No branch-free optimization (not needed for 3% selectivity)
+
+2. Revenue Aggregation:
+   - Accumulate as: price * (100 - discount)
+   - No early division (maintains precision across 2.2M rows)
+   - Final scaling: divide by 10,000 for output only
+
+3. Hash Aggregation:
+   - Open-addressing with linear probing
+   - Hash function: ((uint64_t)key * 2654435761UL) % capacity
+   - Capacity: 200K entries (double load factor for sparse groups)
+   - Update-in-place: critical for cache locality
+
+4. Dictionary Decoding:
+   - Load reverse dictionary (code → string) at startup
+   - Bounds-checked array access: code < dict.size()
+   - Single lookup per supplier (output phase only)
+
+5. CSV Output:
+   - Header: "s_suppkey,s_name,s_address,s_phone,total_revenue\r\n"
+   - Address field quoted: "...,\"<address>\",..."
+   - Revenue: fixed 4 decimal places (%.4f)
+   - Line endings: \r\n (Windows CRLF, matching expected output)
+
+MEMORY USAGE
+============
+- Lineitem columns (mmap): ~2.3 GB
+- Hash table (200K entries): ~4.8 MB
+- Supplier columns (mmap): ~3.1 MB
+- Dictionary buffers: ~10 MB
+- Total working set: <100 MB (outside mmap)
+
+NEXT ITERATION OPPORTUNITIES (Iter 1+)
+======================================
+1. Zone Map Pruning:
+   - lineitem_shipdate_zonemap.bin: 600 blocks, skip 94% of data
+   - ~2x speedup potential
+
+2. Pre-built Indexes:
+   - supplier_suppkey_hash.bin: Direct O(1) lookup
+   - Eliminates linear scan of 100K rows
+
+3. Vectorized Filtering:
+   - SIMD comparison on dates
+   - AVX2: 4 dates per instruction
+
+4. Partial Aggregation:
+   - Two-phase: local + merge
+   - Distribute work across cores with atomic-free buffers
+
+5. Sort-based Aggregation:
+   - If data is pre-sorted by suppkey
+   - O(n) with zero hash table overhead
+

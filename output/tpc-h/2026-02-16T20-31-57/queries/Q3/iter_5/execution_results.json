@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] customer_scan_filter: 17.16 ms\n[TIMING] orders_scan_filter_join: 89.89 ms\n[TIMING] join_customer_orders: 0.00 ms (included in orders_scan)\n[TIMING] lineitem_scan_filter_join_agg: 36.21 ms\n[TIMING] sort_topk: 0.00 ms\n[TIMING] output: 0.16 ms\n[TIMING] total: 158.57 ms\n",
+    "stderr": "",
+    "duration_ms": 173
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 10, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 10,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 10, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "customer_scan_filter": 17.16,
+    "orders_scan_filter_join": 89.89,
+    "join_customer_orders": 0,
+    "lineitem_scan_filter_join_agg": 36.21,
+    "sort_topk": 0,
+    "output": 0.16,
+    "total": 158.57
+  },
+  "timing_ms": 158.41
+}

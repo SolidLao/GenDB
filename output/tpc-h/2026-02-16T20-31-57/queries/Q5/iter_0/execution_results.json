@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.04 ms\n[TIMING] load_columns: 0.06 ms\n[TIMING] filter_region: 0.00 ms\n[TIMING] build_nation_lookup: 0.00 ms\n[TIMING] filter_orders: 552.96 ms\n[TIMING] build_supplier_map: 6.07 ms\n[TIMING] build_customer_map: 94.21 ms\n[TIMING] join_and_aggregate: 112.02 ms\n[TIMING] output: 0.24 ms\n[TIMING] total: 985.91 ms\n",
+    "stderr": "",
+    "duration_ms": 1003
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.04,
+    "load_columns": 0.06,
+    "filter_region": 0,
+    "build_nation_lookup": 0,
+    "filter_orders": 552.96,
+    "build_supplier_map": 6.07,
+    "build_customer_map": 94.21,
+    "join_and_aggregate": 112.02,
+    "output": 0.24,
+    "total": 985.91
+  },
+  "timing_ms": 985.67
+}

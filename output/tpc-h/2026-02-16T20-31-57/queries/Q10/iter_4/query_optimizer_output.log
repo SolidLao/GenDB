@@ -1,0 +1,36 @@
+Perfect! Compilation is clean (0 errors). Now let me create a summary of the optimization:
+
+## Summary of Q10 Iteration 4 Optimization
+
+### Problem Analysis
+**Previous State (Iter 2 Baseline):** 3788.59 ms
+- Dominant bottleneck: **lineitem_build_hash: 1626.30 ms (43% of total)**
+- This operation builds a multi-value hash table from 14.8M filtered lineitem rows using `std::unordered_map`
+- The lineitem_filter step takes 421.30 ms before building the hash
+
+**Gap to Best (Umbra):** 27.6x
+
+### Root Cause (Level 0 Anti-Pattern)
+Building a large hash table from scratch using `std::unordered_map` is slow due to:
+1. Poor cache locality (chaining/pointer chasing)
+2. High memory overhead per entry (~80 bytes)
+3. Multiple heap allocations for `std::vector<size_t>` buckets
+
+### Solution: Load Pre-Built Hash Index
+Instead of building the hash table at runtime, load the **pre-built `lineitem_orderkey_hash` multi-value index** from disk via mmap (zero copy). This eliminates 1626 ms of CPU time.
+
+**Key Changes:**
+1. **Removed lineitem filtering and building** — Instead of counting, allocating vectors, and building a hash table, now load the pre-built index directly from `/indexes/lineitem_orderkey_hash.bin`
+2. **Modified join probe** — Probe the pre-built index using the same linear-probing hash function, then apply the `l_returnflag = 'R'` filter inline during the join
+3. **Direct column access** — Positions from the hash index point directly into the mmap'd lineitem column arrays (`l_extendedprice`, `l_discount`, `l_returnflag`)
+
+### Expected Impact
+- **lineitem_build_hash**: ~0 ms (was 1626 ms) → **-1626 ms saved**
+- **lineitem_filter**: ~0 ms (merged into join, with inline filtering) → **-421 ms saved** (approximately)
+- **join_orders_lineitem**: Slightly slower due to inline filtering, but still much faster overall → **+50-100 ms**
+- **Net savings: ~1600-2000 ms (42-53% reduction)**
+- **Expected result: ~1900-2000 ms total** (vs 3788 ms, or 50% faster)
+
+This brings GenDB significantly closer to the Umbra benchmark (135 ms target).
+
+The code compiles successfully with no errors.

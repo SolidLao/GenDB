@@ -1,0 +1,70 @@
+Perfect! Now let me create a summary document of the optimization:
+
+## Summary of Q1 Optimization (Iteration 1)
+
+### Bottleneck Analysis
+**Execution Results (iter_0):**
+- Total time: 501.14 ms
+- Dominant operation: `scan_filter` at 428.44 ms (85.5% of total)
+- Rows processed: 59,986,052 (lineitem table)
+- Filter selectivity: 98.6% (almost no rows filtered out)
+
+**Bottleneck Classification:** `CPU_BOUND` - single-threaded scan + aggregation on 60M rows
+
+### Root Cause
+The baseline implementation uses single-threaded execution on a **64-core machine**. For a large-scan query processing 60M rows with high filter selectivity, this wastes 98% of available CPU cores.
+
+### Optimization Strategy
+**Parallelization via OpenMP Thread-Parallel Scan:**
+1. Divide the scan loop across multiple threads using `#pragma omp parallel for`
+2. Each thread maintains its own local aggregation buffer (6 groups max) to avoid contention
+3. Threads process rows in dynamic chunks (100K rows/chunk) for load balancing
+4. Merge thread-local results after parallel phase completes
+
+### Key Changes Made
+
+**File Modified:** `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q1/iter_1/q1.cpp`
+
+1. **Added OpenMP headers:**
+   ```cpp
+   #include <omp.h>
+   #include <atomic>
+   ```
+
+2. **Parallel scan loop** (lines 217-272):
+   - `#pragma omp parallel for schedule(dynamic, 100000)` distributes iterations across threads
+   - Each thread accesses `thread_agg[tid]` for its local aggregation buffer
+   - Uses `std::atomic<uint64_t>` for thread-safe filtered row count with relaxed memory ordering
+
+3. **Merge phase** (lines 274-285):
+   - Sequentially merges all thread-local results into final aggregation array
+   - No locks needed since merge happens after parallel phase
+
+4. **Preserved all correctness elements:**
+   - Date filter logic unchanged
+   - Scaled arithmetic (100, 10000, 1000000 scales) unchanged
+   - Dictionary encoding handling unchanged
+   - All [TIMING] markers preserved within `#ifdef GENDB_PROFILE` guards
+   - CSV output format unchanged (comma-delimited)
+
+### Expected Performance Impact
+
+**Theoretical speedup:** 30-50x (with 64 cores, minus coordination overhead)
+- Baseline: ~428 ms (scan_filter only)
+- Expected after optimization: **8-15 ms** (scan_filter component)
+- Total estimated time: **~40-60 ms** (down from ~501 ms)
+
+**Rationale:**
+- Load balancing with dynamic scheduling ensures all 64 cores remain busy
+- Thread-local aggregation eliminates lock contention (bottleneck on >8 cores)
+- Memory bandwidth scales near-linearly for sequential scan workloads
+- Merge phase is negligible (only 6 aggregates × 64 threads = 384 operations)
+
+### Correctness Verification
+✅ **Compilation successful** with `-O3 -march=native -fopenmp -DGENDB_PROFILE`
+✅ **All [TIMING] guards preserved** - Executor can parse timing data
+✅ **No encoding logic changes** - dictionary/scaled arithmetic identical
+✅ **Aggregation semantics unchanged** - same group indexing, same calculations
+✅ **Output format unchanged** - CSV comma-delimited per spec
+
+The Executor will now validate correctness (result matching) and measure execution time.

@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] region_filter: 0.03 ms\n[TIMING] nation_filter: 0.01 ms\n[TIMING] supplier_filter: 5.95 ms\n[TIMING] part_filter: 1.22 ms\n[TIMING] subquery_and_index: 20.85 ms\n[TIMING] load_dicts: 0.07 ms\n[TIMING] build_results: 9.12 ms\n[TIMING] sort: 1.51 ms\n[TIMING] output: 0.86 ms\n[TIMING] total: 75.10 ms\n",
+    "stderr": "",
+    "duration_ms": 99
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q2\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "region_filter": 0.03,
+    "nation_filter": 0.01,
+    "supplier_filter": 5.95,
+    "part_filter": 1.22,
+    "subquery_and_index": 20.85,
+    "load_dicts": 0.07,
+    "build_results": 9.12,
+    "sort": 1.51,
+    "output": 0.86,
+    "total": 75.1
+  },
+  "timing_ms": 74.24
+}

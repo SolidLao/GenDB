@@ -1,0 +1,35 @@
+Great! The code compiled successfully. Let me summarize the optimizations made:
+
+## Optimization Summary for Q9 Iteration 1
+
+### Bottleneck Analysis
+The execution results showed a critical **Level 1 Plan-Level Issue**:
+- **load_partsupp**: 4264.47 ms (63.8% of total time) - Building a hash map for ALL 8M rows
+- **load_orders**: 1953.56 ms (29.2% of total time) - Loading ALL 15M order rows
+
+### Root Cause
+The original code built hash tables for the **entire** partsupp and orders tables upfront, even though only ~1000 filtered parts would be needed. This is wasteful.
+
+### Optimizations Implemented
+
+**1. Filtered PartSupp Loading (saves ~4.2 seconds)**
+   - Changed from building a hash map for all 8M partsupp rows to only building entries for partkeys that exist in the filtered part set (~1000 parts)
+   - This avoids 90%+ of the unnecessary hash table insertions and memory allocation
+   - Pre-reserve reduced from 8M to 2000 entries
+
+**2. Filtered Orders Loading (saves ~1.9 seconds)**
+   - Reordered loading to read lineitem first to identify which orderkeys are actually needed
+   - Only include orders that match orderkeys from lineitem items with filtered parts
+   - Pre-filters the 15M order rows down to ~1000-2000 needed entries
+
+**3. Code Structure**
+   - Preserved all [TIMING] macros and labels for accurate profiling
+   - Maintained correctness by keeping predicate logic unchanged
+   - Added comments explaining the optimization strategy
+
+### Expected Impact
+- **Estimated time reduction**: 6682 ms → ~1400-1500 ms (78-80% improvement)
+- **Bottleneck shift**: From loading (93% of time) to actual query execution (scan_filter_join_agg), which is much more efficient
+- These are plan-level optimizations that eliminate redundant work, not micro-optimizations
+
+The code compiled successfully with `-O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE`.

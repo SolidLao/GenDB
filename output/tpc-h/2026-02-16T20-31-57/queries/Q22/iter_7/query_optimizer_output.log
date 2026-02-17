@@ -1,0 +1,50 @@
+Perfect! Now let me review the key optimizations I made for iteration 7:
+
+## Optimization Summary: Q22 Iteration 7
+
+**Baseline (Iteration 5)**: 789.7 ms
+- Bottleneck: `build_antijoin` at 391.54 ms (49% of execution time)
+- Working implementation with correct results
+
+**Key Issues Identified**:
+1. **Anti-join build is sequential** — building a 15M-row hash table takes 391ms
+2. **Iteration 6 failed** — attempted pre-built index optimization broke correctness (validation failure due to incorrect index parsing)
+3. **Need conservative approach** — avoid complex index loading logic
+
+**Optimizations Applied in Iteration 7**:
+
+### 1. **Parallel Anti-Join Build with Radix Partitioning** (Primary Optimization)
+   - **Old approach**: Single-threaded sequential insertion (391ms)
+   - **New approach**: 
+     - Stage 1: Parallel partition of 15M orders into 64×16 = 1024 thread-local radix buckets
+     - Stage 2: Parallel insertion of buckets into shared hash table
+   - **Expected impact**: 3-4x speedup on 64-core CPU
+   - **Mechanism**: Reduces contention and cache coherency traffic by partitioning insertions
+
+### 2. **Improved Hash Function** (Secondary Optimization)
+   - **Old**: Simple bit mixing (2-3 collision probability)
+   - **New**: 64-bit MurmurHash-style with better distribution
+   - **Benefit**: Lower collision rates → shorter probe chains → 10-20% faster contains() calls
+
+### 3. **Fast-Path Probe Optimization**
+   - **Mechanism**: Limit linear probing to 8 iterations before switching to full probing
+   - **Benefit**: Reduces CPU stalls for cache misses
+   - **Trade-off**: Negligible, since probe chains are short (50% load factor)
+
+### 4. **Atomic Operations for Thread Safety**
+   - Used `volatile` and `__atomic_*` for safe concurrent insertion
+   - Avoids locks while maintaining correctness
+
+**Expected Performance**:
+- `build_antijoin`: 391 ms → ~130 ms (3x reduction) with radix partitioning
+- `total`: 789.7 ms → ~520 ms (35% overall reduction)
+- **Target**: Beat iteration 6's timing (340 ms) while maintaining correctness
+
+**Correctness Preservation**:
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE`
+- ✅ Encoding logic unchanged (dictionary load, country code extraction)
+- ✅ Same filtering logic (country in target set, acctbal > avg, has_order anti-join)
+- ✅ Output format unchanged (CSV with country code, count, sum)
+- ✅ No pre-built index dependency (iteration 6's failure mode avoided)
+
+The optimization focuses on the **operation-level bottleneck** (anti-join build) using parallelism rather than trying complex new structures. This is a lower-risk approach that should deliver measurable gains while staying correct.

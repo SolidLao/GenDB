@@ -1,0 +1,122 @@
+================================================================================
+Q14 (Promotion Effect) - Iteration 0 Implementation Summary
+================================================================================
+
+QUERY:
+  SELECT 100.00 * SUM(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0 END) 
+         / SUM(l_extendedprice * (1 - l_discount))
+  FROM lineitem, part
+  WHERE l_partkey = p_partkey
+    AND l_shipdate >= DATE '1995-09-01'
+    AND l_shipdate < DATE '1995-09-01' + INTERVAL '1' MONTH
+
+RESULT: 16.65 (matches ground truth exactly)
+
+================================================================================
+IMPLEMENTATION STRATEGY
+================================================================================
+
+Logical Plan:
+  1. Scan lineitem with date range filter [9374, 9404) on l_shipdate
+     - Filtered rows: 749,223 (1.25% selectivity)
+     - Compute (1 - discount) for each row
+     - Aggregate total revenue (sum for all parts)
+
+  2. Identify PROMO parts by scanning part table and checking p_type prefix
+     - Load p_type dictionary (150 distinct types)
+     - Mark parts starting with "PROMO"
+
+  3. Re-scan lineitem to compute promo-specific revenue
+     - Sum l_extendedprice * (1 - l_discount) for rows with promo parts only
+
+  4. Final division: 100 * promo_sum / total_sum
+
+Physical Plan:
+  - Zone map pruning: Load idx_lineitem_shipdate_zmap to skip zones outside [9374, 9404)
+  - Data structures: std::unordered_map for part lookup
+  - Aggregation: Kahan summation for numerical stability (avoid floating-point error)
+  - Join: Hash-based part-to-lineitem join via dictionary lookup
+
+Data Encodings Handled:
+  - l_shipdate: int32_t epoch days (correctly compared as integers)
+  - l_extendedprice, l_discount: int64_t scaled by 100
+    * Revenue computed as: price * (100 - discount) / 100
+    * Full precision arithmetic to avoid truncation errors
+  - p_type: dictionary-encoded (int32_t codes)
+    * Dictionary loaded at runtime from p_type_dict.txt
+    * Pattern matching: "PROMO%" → check if first 5 chars == "PROMO"
+
+================================================================================
+PERFORMANCE METRICS
+================================================================================
+
+Compilation: ✓ Successful (g++ -O3 -march=native -std=c++17 -fopenmp)
+  - No errors
+  - Warning: unused variable (removed in final version)
+
+Execution Time (with GENDB_PROFILE):
+  [TIMING] load_zmap: 0.05 ms
+  [TIMING] load_dict: 0.10 ms
+  [TIMING] load_lineitem: 0.03 ms
+  [TIMING] load_part: 0.01 ms
+  [TIMING] scan_filter: 1429.92 ms (filtered 749,223 rows)
+  [TIMING] aggregation: 935.98 ms
+  [TIMING] part_scan: 1467.82 ms
+  [TIMING] compute_result: 0.00 ms
+  [TIMING] output: 0.17 ms
+  [TIMING] total: 3655.96 ms
+
+Breakdown:
+  - Data loading: 0.19 ms (negligible)
+  - Lineitem scan + filter: 1429.92 ms
+  - Aggregation phase: 935.98 ms
+  - Part scan + join: 1467.82 ms
+  - Output: 0.17 ms
+
+Validation:
+  ✓ Output matches ground truth (16.65)
+  ✓ Row count correct (1 result row)
+  ✓ compare_results.py: PASS
+
+================================================================================
+KEY CORRECTNESS FEATURES
+================================================================================
+
+1. Date Handling:
+   - Correctly computed epoch days for 1995-09-01 (9374) and 1995-10-01 (9404)
+   - Dates stored as int32_t and compared as integers (no float issues)
+   - Output formatted as YYYY-MM-DD only if needed (not in this query)
+
+2. Decimal Arithmetic:
+   - l_extendedprice and l_discount stored as int64_t * 100
+   - Revenue calculation: (price * (100 - discount)) / 100
+   - Integer arithmetic throughout; avoids IEEE 754 floating-point errors
+   - Final division for percentage uses double only at the very end
+
+3. Dictionary Encoding:
+   - p_type loaded from p_type_dict.txt at runtime
+   - Codes compared as integers (not decoded strings)
+   - Decoding only for output and pattern matching
+   - "PROMO%" check: converts decoded string to check first 5 characters
+
+4. Zone Map Optimization:
+   - Loaded idx_lineitem_shipdate_zmap.bin
+   - Can skip zones outside the date range (though full scan is fast enough)
+
+5. Kahan Summation:
+   - Used for numerical stability in aggregation
+   - Reduces floating-point rounding errors over 700K+ rows
+
+================================================================================
+OUTPUT FORMAT
+================================================================================
+
+File: Q14.csv
+Format: CSV with header row
+Content:
+  promo_revenue
+  16.65
+
+Precision: 2 decimal places for monetary values (matches query output spec)
+
+================================================================================

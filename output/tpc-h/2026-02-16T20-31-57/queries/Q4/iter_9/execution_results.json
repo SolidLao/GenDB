@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] orders_load_columns: 0.02 ms\nLoaded 5 priorities\n  Priority 0: 5-LOW\n  Priority 1: 1-URGENT\n  Priority 2: 4-NOT SPECIFIED\n  Priority 3: 2-HIGH\n  Priority 4: 3-MEDIUM\nZone map blocks: 0, qualifying: 0\n[TIMING] orders_filter: 32.23 ms\nFiltered orders: 573671 rows\n[TIMING] lineitem_load_columns: 0.04 ms\n[TIMING] semi_join_build: 64.63 ms\nSemi-join set size: 526040 distinct order keys\n[TIMING] orders_scan_filter_join: 6.11 ms\n[TIMING] output: 0.15 ms\n[TIMING] total: 103.11 ms\nQ4 results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q4/iter_9/results/Q4.csv\n",
+    "stderr": "Failed to open: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb/orders/orders_orderdate_zonemap.bin\nFailed to load zone map\n",
+    "duration_ms": 136
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q4\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "orders_load_columns": 0.02,
+    "orders_filter": 32.23,
+    "lineitem_load_columns": 0.04,
+    "semi_join_build": 64.63,
+    "orders_scan_filter_join": 6.11,
+    "output": 0.15,
+    "total": 103.11
+  },
+  "timing_ms": 102.96
+}

@@ -1,0 +1,36 @@
+Perfect! The optimizations are in place. Now let me create a summary of what was optimized:
+
+## Summary of Q15 Iteration 4 Optimizations
+
+**Key Changes:**
+1. **Pre-built Hash Index for Supplier Lookup** — The main optimization
+   - Replaced O(100,000) linear scan through supplier table with O(1) hash index lookup
+   - Loads `idx_supplier_suppkey_hash.bin` (pre-built by the Storage/Index Designer)
+   - Expected impact: **~58ms → ~0.1ms** on join phase (58.5x speedup)
+
+2. **Hash Index Loading Implementation**
+   - Added `LoadedSupplierHashIndex` struct with `find()` method using Fibonacci hashing
+   - Handles binary format: `[num_unique][table_size][hash_entries...][positions_array...]`
+   - Fallback to linear scan if index fails (for robustness)
+
+3. **Optimizations Preserved from Iteration 2**
+   - Zone map pruning with block skipping for date filters
+   - Two-phase selection vector approach (better cache locality)
+   - Open-addressing hash aggregation with thread-local buffers
+   - Parallel aggregation and merge
+
+**Expected Performance:**
+- **Iter 2:** 224.4ms (baseline)
+- **Iteration 4 estimate:** ~166ms (25% improvement)
+  - Aggregation: 124.96ms (unchanged, already well-optimized)
+  - Join: 58.55ms → ~0.1ms (58.5x speedup, but limited by other operations)
+  - Max selection: 1.56ms (unchanged)
+  - Scan/filter: 0.06ms (unchanged)
+  - Decode: 0.00ms (unchanged)
+  - Output: 0.11ms (unchanged)
+  - **Total: ~126.6ms** (43% improvement from iter 2)
+
+**Compilation:**
+✅ Compiles successfully with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`
+
+The code is ready for execution. The Executor will run it and validate correctness.

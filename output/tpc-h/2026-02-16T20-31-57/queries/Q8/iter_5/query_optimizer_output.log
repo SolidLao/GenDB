@@ -1,0 +1,69 @@
+The volume calculation looks fine. Let me now create a comprehensive summary of what has been optimized:
+
+## Summary of Optimizations for Q8 Iteration 5
+
+I've optimized the Q8 code with **targeted improvements focused on the dominant bottlenecks**. Here are the key changes:
+
+### **Optimizations Applied:**
+
+#### 1. **Parallelization Tuning (Orders Scan - 160ms bottleneck)**
+   - **Reduced morsel size from 10,000 to 5,000 rows** in customer, orders, and part scans
+   - This improves work distribution across 64 cores and increases cache locality
+   - Each thread processes smaller chunks → better L3 cache hit rates
+   - Expected impact: **5-10% reduction** in orders/customer/part scan times
+
+#### 2. **Predicate Ordering (Orders Scan)**
+   - **Moved date range check before customer hash lookup**
+   - Date comparisons are cheaper than hash table probes
+   - Eliminates unnecessary hash lookups early
+   - Expected impact: **2-3% reduction** in orders filtering
+
+#### 3. **Cache Optimization (Aggregation Loop)**
+   - **Cached variable lookups** to reduce memory indirections
+   - Changed `l_shipdate[i]` to local variable `shipdate`
+   - Same for price, discount, orderkey, partkey, suppkey
+   - Reduces L1 cache misses by reusing values multiple times
+   - Expected impact: **3-5% reduction** in aggregation time
+
+#### 4. **Compiler Hints via `restrict` Pointers (Aggregation Loop)**
+   - Added `__restrict__` pointers to lineitem column arrays
+   - Helps compiler optimize memory access patterns and enable SIMD
+   - Compiler can now assume no aliasing between pointers
+   - Expected impact: **2-4% speedup** from better auto-vectorization
+
+#### 5. **Register-Level Variable Optimization**
+   - Pre-cached nation lookups (`nation_n2_name[s_nation]`)
+   - Stored price/discount/suppkey in registers before use
+   - Reduces memory bandwidth requirements in hot loop
+
+### **Performance Expectations:**
+
+- **Previous iteration 4:** 274.37 ms
+- **Expected improvement:** 10-20% reduction
+- **Target range:** 220-245 ms
+- **This closes the gap with DuckDB (116ms) to ~1.9-2.1x**
+
+### **Code Quality Safeguards:**
+
+✅ All **[TIMING]** lines preserved in `#ifdef GENDB_PROFILE` guards  
+✅ No encoding logic modified  
+✅ Hash table implementations unchanged (already optimized with open addressing)  
+✅ Thread-local aggregation pattern maintained  
+✅ Compilation successful with `-O3 -march=native`  
+
+### **Key Observations:**
+
+The Q8 query has fundamentally expensive operations:
+- **Lineitem table (59M rows)** is probed against 4 hash tables sequentially
+- Even with perfect implementation, this requires millions of hash table lookups
+- DuckDB achieves 116ms with similar algorithms but potentially:
+  - Zone map pruning on orders (avoiding blocks outside date range)
+  - Better SIMD vectorization
+  - Advanced join ordering strategies
+
+The optimizations applied focus on what's implementable without changing the overall algorithm architecture. Further significant gains would require:
+1. Zone map pruning on orders.o_orderdate
+2. SIMD-vectorized hash table probes
+3. Pre-built indexes (if available in storage guide)
+
+**Code is ready for execution and validation.**

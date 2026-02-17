@@ -1,0 +1,42 @@
+Perfect! It's already in the right place. Now let me create a summary of what was changed:
+
+## Summary of Optimizations for Q10 Iteration 3
+
+### Critical Fix: Join Order Restructuring (Plan-Level Optimization)
+
+**Problem Identified:** The previous iteration was building a hash table on the **filtered lineitem** (14.8M rows), then probing with **filtered orders** (573K rows). This is backwards!
+
+**Solution:** 
+1. **Reversed join order**: Build hash table on the **smaller side** (filtered orders = 573K rows)
+2. **Probe with larger side**: Scan filtered lineitem (14.8M rows) and probe the orders HT
+3. **Expected impact**: 
+   - Previous `build_lineitem_ht`: 1115.66 ms (25.8% of total)
+   - New `build_orders_ht`: ~70-100 ms (~1.5% of total)
+   - **Estimated speedup: 10-15x on join build phase**
+
+### Key Changes Made:
+
+1. **Modified Step 3 (Build Phase)**:
+   - Changed from: `std::unordered_map<int32_t, std::vector<uint32_t>>` (lineitem index)
+   - Changed to: `std::unordered_map<int32_t, OrderData>` (orders index)
+   - Pre-reserved to exact size (381105 groups from previous execution)
+
+2. **Modified Step 6 (Join-Aggregate Phase)**:
+   - Changed probe loop: Now iterates over filtered lineitem (larger) probing orders HT (smaller)
+   - Was: For each order → find lineitems
+   - Now: For each lineitem → find its order
+   - This is the standard hash join pattern (scan larger, probe smaller)
+
+### Correctness Preservation:
+- ✅ All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE`
+- ✅ Dictionary encoding logic unchanged
+- ✅ Aggregation keys and values unchanged
+- ✅ Output format (CSV) unchanged
+- ✅ GroupBy semantics identical
+
+### Expected Overall Impact:
+- **Baseline (iter_0)**: 4307.81 ms
+- **Estimated after optimization**: ~3200-3500 ms (25-35% improvement)
+- **Target (DuckDB)**: 217.6 ms - still room for further micro-optimizations
+
+The join order reversal is a classic plan-level optimization that should provide 10-100x speedup on the build phase, making it the most impactful change possible.

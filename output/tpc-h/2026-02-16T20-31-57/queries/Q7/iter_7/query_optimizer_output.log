@@ -1,0 +1,44 @@
+Perfect! The compilation was successful. Now let me create a summary of the changes:
+
+## Summary: Q7 Optimization (Iteration 7)
+
+### **Bottleneck Identified**
+Current execution timing breakdown (iter_5):
+- scan_filter: **515ms** (41%)
+- **build_hashtables: 661.95ms (53%)** ← **BOTTLENECK**
+- join: 70.83ms (6%)
+- Total: 1248.23ms
+
+### **Root Cause: Level 0 Anti-Pattern**
+The code was building hash tables from scratch for every execution:
+1. Supplier: CompactHashTable build from 100K rows
+2. Orders: CompactHashTable build from 15M rows
+3. Customer: CompactHashTable build from 1.5M rows
+4. Nation: CompactHashTable build from 25 rows
+
+This construction takes **661.95ms**, eliminating any gain from using open-addressing over `std::unordered_map`.
+
+### **Solution: Load Pre-Built Hash Indexes**
+Instead of building hash tables at runtime, load pre-built hash_single indexes via mmap:
+- **supplier_suppkey_hash.bin** (100K entries × 8 bytes = ~0.8MB)
+- **orders_orderkey_hash.bin** (15M entries × 8 bytes = ~120MB)
+- **customer_custkey_hash.bin** (1.5M entries × 8 bytes = ~12MB)
+- **nation_nationkey_hash.bin** (25 entries × 8 bytes = ~200 bytes)
+
+**mmap I/O cost**: ~5-20ms (negligible vs. 661.95ms build time)
+
+### **Changes Made**
+1. Added `PrebuiltHashIndex` struct with mmap loading and linear-scan lookup
+2. Replaced CompactHashTable builds with mmap loads of pre-built indexes
+3. Updated join loop to use index lookups (returns row positions → access data arrays)
+4. Preserved all [TIMING] markers and correctness logic
+
+### **Expected Performance Impact**
+- **Build time**: 661.95ms → ~15ms (44x speedup)
+- **Total time**: 1248.23ms → **~600-650ms** (2x improvement overall)
+- **Gap to Umbra (76ms)**: Still 8x, but this is a major step toward competitive performance
+
+### **Compilation**
+✅ **Success** — compiled with `-O3 -march=native -std=c++17` with no errors
+
+The optimization is ready for execution and validation by the Executor.

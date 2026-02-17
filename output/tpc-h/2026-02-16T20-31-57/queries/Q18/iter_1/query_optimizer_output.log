@@ -1,0 +1,33 @@
+The binary is already in the right place. Now let me review the optimizations I made:
+
+## Summary of Optimizations for Q18 Iteration 1
+
+I've implemented **three major optimizations** targeting the bottleneck identified in the execution results:
+
+### 1. **Replaced `std::unordered_map` with Open-Addressing Hash Tables**
+   - **What changed**: Replaced all three hash aggregations (subquery, orders, customer, final) with custom `CompactHashTable` and `CompactHashTableComposite` using open-addressing
+   - **Why**: `std::unordered_map` uses pointer-chasing linked lists → poor cache locality → 2-5x slower than open-addressing
+   - **Expected gain**: 2-5x speedup on hash table operations (~400-500ms saved)
+
+### 2. **Parallelized Subquery Aggregation (59M rows → 15M groups)**
+   - **What changed**: Split lineitem scan into parallel phase with thread-local aggregation buffers (one per thread), then merge all buffers
+   - **Why**: Subquery aggregation was **1785ms (54.6% of total time)**. Single-threaded on 64-core CPU = massive waste. OpenMP parallelization with thread-local buffers avoids lock contention
+   - **Expected gain**: 30-50x speedup on 64 cores (if linear scaling) = ~1500-1700ms saved
+
+### 3. **Parallelized Join+Aggregation Phase (59M lineitem rows)**
+   - **What changed**: Parallel lineitem scan with thread-local `final_agg` buffers, merged at the end
+   - **Why**: join_agg was **961ms (29.4% of total)**, also single-threaded. Same pattern as subquery
+   - **Expected gain**: 30-50x speedup on 64 cores = ~900-950ms saved
+
+### Expected Total Impact
+- **Current**: 3268 ms
+- **After optimizations**: ~200-400 ms (rough estimate)
+- **Gap to DuckDB (171ms)**: Should be much closer (within 2-3x)
+
+### Technical Details
+- **Timing preservation**: All `[TIMING]` lines inside `#ifdef GENDB_PROFILE` guards preserved
+- **Correctness**: No changes to encoding logic, HAVING threshold (30000), or output formatting
+- **Parallelism**: Uses OpenMP with `schedule(static, 100000)` for good load balancing
+- **Memory efficiency**: `CompactHashTable` with 75% load factor pre-sizing
+
+The code should now compile and run significantly faster. The Executor will validate correctness and measure the actual performance improvement.

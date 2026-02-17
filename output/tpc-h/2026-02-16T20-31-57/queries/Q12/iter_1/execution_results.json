@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[Q12] Starting query execution\n[Q12] Phase 1: Load orders table\n[Q12] Loaded 15000000 orders\n[TIMING] load_orders: 0.07 ms\n[Q12] Built hash table with 15000000 entries\n[TIMING] build_orders_ht: 1758.53 ms\n[Q12] Phase 2: Scan lineitem with filters\n[Q12] Loaded 59986052 lineitem rows\n[TIMING] load_lineitem: 0.14 ms\n[TIMING] scan_filter_join_aggregate: 133.81 ms\n[Q12] Phase 4: Write results\n[Q12] Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q12/iter_1/results/Q12.csv\n[TIMING] output: 0.19 ms\n[TIMING] total: 2061.55 ms\n[Q12] Query execution complete\n",
+    "stderr": "",
+    "duration_ms": 2174
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q12\": {\n      \"rows_expected\": 2,\n      \"rows_actual\": 2,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_orders": 0.07,
+    "build_orders_ht": 1758.53,
+    "load_lineitem": 0.14,
+    "scan_filter_join_aggregate": 133.81,
+    "output": 0.19,
+    "total": 2061.55
+  },
+  "timing_ms": 2061.36
+}

@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dict_load: 181.52 ms\n[TIMING] load_customer: 0.03 ms\n[TIMING] load_orders: 0.00 ms\n[TIMING] build_antijoin: 1332.47 ms\n[TIMING] compute_avg: 14.39 ms\n[DEBUG] avg_acctbal (scaled): 499815, count: 381776\n[TIMING] filter_aggregate: 18.02 ms\n[TIMING] output: 2.04 ms\n[TIMING] total: 1548.54 ms\n",
+    "stderr": "",
+    "duration_ms": 1589
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q22\": {\n      \"rows_expected\": 7,\n      \"rows_actual\": 7,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dict_load": 181.52,
+    "load_customer": 0.03,
+    "load_orders": 0,
+    "build_antijoin": 1332.47,
+    "compute_avg": 14.39,
+    "filter_aggregate": 18.02,
+    "output": 2.04,
+    "total": 1548.54
+  },
+  "timing_ms": 1546.5
+}

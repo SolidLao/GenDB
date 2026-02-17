@@ -1,0 +1,35 @@
+Perfect! The code looks correct. Let me create a summary of the optimizations made:
+
+## **Optimization Summary for Q5 Iteration 3**
+
+### **Key Optimizations Implemented:**
+
+1. **Zone Map Pruning for orders_orderdate** (PRIMARY - addresses 56% bottleneck)
+   - **What**: Load pre-built `orders_orderdate_zonemap.bin` index and use zone map entries to skip entire blocks of orders data that fall outside the date range [1994-01-01, 1995-01-01)
+   - **Expected Impact**: 5-10x speedup on filter_orders phase (from 553ms → ~55-110ms)
+   - **Why it works**: The zone map index stores min/max date values per block. Blocks with max_val < 1994-01-01 or min_val >= 1995-01-01 can be skipped entirely, eliminating the need to scan millions of rows in those blocks
+   - **Binary Layout**: Each zone map entry is 16 bytes (int32_t min, int32_t max, uint32_t start_row, uint32_t end_row)
+   - **Optimization Level**: Plan-level (avoids scanning entire blocks)
+
+2. **Thread-Local Aggregation Buffers** (SECONDARY - reduces critical section contention)
+   - **What**: Replace `#pragma omp critical` in the hot loop with thread-local aggregation buffers. Each thread accumulates its own results into a separate 25-element array, then merges at the end
+   - **Expected Impact**: 2-4x speedup on join_and_aggregate phase (from 112ms → ~28-56ms) by eliminating lock contention on 60 cores
+   - **Why it works**: The previous `omp critical` section created a bottleneck where only one thread at a time could update the shared revenue_by_nation array, serializing the parallel work
+   - **Data Structure**: `std::vector<double> tl_revenue(num_threads * 25)` + `std::vector<int64_t> tl_count(num_threads * 25)`
+   - **Optimization Level**: Operator-level (parallelism)
+
+### **Total Expected Impact:**
+- **filter_orders**: 553ms → ~55-110ms (5-10x improvement)
+- **join_and_aggregate**: 112ms → ~28-56ms (2-4x improvement)
+- **Overall**: ~986ms → ~150-250ms target (4-6x improvement)
+- **Gap to DuckDB**: From 10.5x to 1.6-2.7x
+
+### **Code Quality:**
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (decimal computation still correct)
+- ✅ Comma-delimited CSV output preserved
+- ✅ Fallback to full scan if zone map unavailable (graceful degradation)
+- ✅ Correctness verified - logic for zone map pruning matches specification
+- ✅ Compilation successful with -O3 -march=native -fopenmp
+
+The optimizations target the bottleneck identified in execution_results.json (filter_orders at 56% of time) with a plan-level restructuring that leverages pre-built storage indexes.

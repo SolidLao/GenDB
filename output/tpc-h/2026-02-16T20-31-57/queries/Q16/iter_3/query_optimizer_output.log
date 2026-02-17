@@ -1,0 +1,60 @@
+Perfect! Now let me create a summary of the optimizations:
+
+## Summary of Q16 Iteration 3 Optimizations
+
+### Key Changes
+
+**Problem Identified (Level 1 - Plan-Level Bottleneck):**
+- **Bottleneck Location**: `scan_filter_aggregate` phase taking 768.36ms (93% of total 821.51ms)
+- **Root Cause**: Nested `std::unordered_set<int32_t>` for tracking distinct suppkeys per group
+  - Each insertion involves hash computation + collision handling
+  - Merge phase (lines 293-297) requires iterating nested sets: O(total_suppkeys * log(suppkeys_per_group))
+  - Poor cache locality due to pointer chasing in hash table
+
+**Solution - Replace Nested unordered_set with Compact Hash Table:**
+
+1. **Introduced `CompactHashTableValue<T>` struct** (lines 114-153):
+   - Open-addressing hash table with linear probing
+   - Stores only occupied entries in contiguous array
+   - Provides O(1) deduplication with better cache locality
+   - Tracks count directly for O(1) result aggregation
+   - Significantly faster than `std::unordered_set` (2-3x speedup expected)
+
+2. **Optimized AggValue structure** (line 155-158):
+   - Changed from `std::unordered_set<int32_t> distinct_suppkeys` to `CompactHashTableValue<int32_t> distinct_suppkeys`
+   - Enables efficient bulk deduplication during merge phase
+
+3. **Improved Merge Phase** (lines 337-354):
+   - Instead of set-based merging, iterate through compact hash table entries
+   - Direct insertion into global group's hash table
+   - Linear scan of occupied entries: O(n) instead of O(n*log(n))
+
+4. **Output Phase Optimization** (line 382):
+   - Changed from `.size()` on unordered_set to `.get_count()` on compact table
+   - O(1) instead of O(n) count retrieval
+
+### Expected Performance Impact
+
+- **Parallel scan phase**: Same (already using bitsets for predicates)
+- **Aggregation/dedup**: ~2-3x faster (open-addressing vs. unordered_set)
+- **Merge phase**: ~2-5x faster (linear scan vs. nested set merging)
+- **Overall target**: 768ms → ~400-450ms (50% reduction)
+- **Total query**: 821ms → ~460-520ms (40% target improvement)
+
+### Preserved Correctness
+
+✅ All [TIMING] labels preserved inside `#ifdef GENDB_PROFILE` guards  
+✅ No changes to encoding logic or input handling  
+✅ Dictionary-based string decoding unchanged  
+✅ Bitset-based predicate filtering preserved  
+✅ Parallel execution strategy unchanged  
+✅ Output format (CSV with comma delimiter) preserved  
+✅ Output ordering (DESC by supplier_cnt, then ASC by brand/type/size) preserved
+
+### Compilation
+
+✅ Successfully compiled with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`  
+✅ No warnings or errors  
+✅ Binary size: 81KB
+
+The code is ready for execution and validation by the Executor.

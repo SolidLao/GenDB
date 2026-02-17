@@ -1,0 +1,56 @@
+Perfect! Now let me create a summary document of the optimization:
+
+## Summary of Iteration 4 Optimization
+
+### Problem Analysis
+The previous 3 iterations were failing to improve because they didn't address the **fundamental bottleneck**: the scan/filter/aggregate phase dominated at **180.6ms (84% of total time)**.
+
+**Stall Cause**: The architecture was limited by:
+1. **Missing zone map pruning** - scanning all 600 blocks even though the date range filters to ~50 blocks
+2. **Thread-local aggregation overhead** - critical sections limited parallelism benefits
+3. **Late supplier loading** - inefficient memory access pattern
+
+### Optimization Strategy: PLAN-LEVEL RESTRUCTURING
+
+This iteration implements a **fundamentally different physical plan**:
+
+#### Key Changes:
+
+1. **Zone Map Pruning (NEW)**
+   - Load `lineitem_shipdate_zonemap.bin` at startup (7.2 KB - negligible overhead)
+   - Pre-filter blocks where zone [min, max] doesn't overlap [9496, 9587)
+   - **Expected pruning**: ~550 blocks skipped, only ~50 blocks scanned
+   - This alone should yield **3-5x improvement** on the dominant phase
+
+2. **Simplified Parallelism**
+   - Changed from thread-local aggregation + sequential merge to **direct parallel block iteration**
+   - Each thread processes one block independently with thread-local aggregation
+   - Merge only at the critical section (smaller critical sections)
+   - Schedule: `dynamic, 4` to better load balance given variable block contents
+
+3. **Preserved Correctness**
+   - All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+   - Same aggregation formula: `extendedprice * (100 - discount)`
+   - Same output format and CSV quoting
+   - Fallback to full scan if zone map unavailable
+
+### Expected Impact
+
+Given the timing breakdown:
+- **scan_filter_aggregate: 180.6ms → ~40-60ms** (3-4x from zone map pruning)
+- **load_supplier: 32.73ms** (unchanged, already optimized)
+- **find_max: 0.75ms** (unchanged)
+- Other operations: ~1ms
+
+**Projected total: 75-95ms** (roughly **2.2-2.8x improvement**)
+
+This moves us closer to the 40ms target (currently 5.4x gap).
+
+### Code Quality
+- ✅ Compilation successful with no errors
+- ✅ All [TIMING] labels preserved
+- ✅ No encoding logic changes
+- ✅ Correct zone map skip logic
+- ✅ Thread-safe critical section for merge
+
+The implementation is ready for execution testing.

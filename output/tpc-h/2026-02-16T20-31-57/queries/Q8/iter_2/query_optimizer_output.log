@@ -1,0 +1,56 @@
+Excellent! The zone map loading code is in place. Let me create a summary of what was optimized:
+
+## Optimization Summary for Q8 Iteration 2
+
+### **Bottleneck Analysis**
+
+From execution results for iteration 1:
+- **orders_scan_filter: 178.73 ms (59.5% of total time)** ← CRITICAL BOTTLENECK
+- aggregation: 48.53 ms (16.2%)
+- customer_scan: 46.38 ms (15.4%)
+- part_scan_filter: 23.79 ms (7.9%)
+- Others: <1%
+
+**Root cause:** Scanning all 15M orders rows to find only 911K matches (~6% selectivity) on date range filter [1995-01-01, 1996-12-31].
+
+### **Optimization Applied: Zone Map Pruning**
+
+**Technique:** Added zone map block-level pruning on sorted columns to skip entire blocks of data where no rows can match the predicate.
+
+**Implementation:**
+1. **Loaded zone map indexes:**
+   - `orders_orderdate_zonemap.bin` → ~75 blocks with min/max date per block
+   - `lineitem_shipdate_zonemap.bin` → ~300 blocks with min/max shipdate per block
+
+2. **Modified orders scan:**
+   - Before: `for (int64_t i = 0; i < 15M; i++) { if (date_ok && cust_ok) ... }`
+   - After: Iterate over zones; skip entire blocks if `zone.max_val < date_low || zone.min_val > date_high`
+   - Only scan rows within non-pruned zones
+
+3. **Modified lineitem aggregation:**
+   - Before: Scan all 60M lineitem rows with per-row date filtering
+   - After: Skip entire zones outside [1995-01-01, 1996-12-31] date range
+
+**Expected Performance Gain:**
+- Orders are sorted by `o_orderdate` (as stated in storage guide: "Sort order: o_orderdate")
+- Date range [1995-01-01, 1996-12-31] is 2 years out of ~25 years of data (1970-1998)
+- Estimated zone skip rate: **40-60%** of blocks → 50-100 ms saved from orders scan
+- Secondary benefit on lineitem: additional 10-20 ms savings
+- **Total expected improvement: 60-120 ms (20-40% improvement, target: 200-240 ms)**
+
+### **Code Changes**
+
+✅ **Preserved correctness:**
+- All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- Zone map skip logic: `if (zone.max_val < low || zone.min_val > high) continue;` ✓ correct
+- Fallback to full scan if zone maps not available
+- All encoding logic unchanged
+
+✅ **Compilation:** Successful with `-O3 -march=native -std=c++17`
+
+### **Data Structures**
+- Added `ZoneMapEntry` struct (24 bytes: min_val, max_val, start_row, end_row)
+- Added `ZoneMapIndex` struct with mmap loading and RAII cleanup
+- No additional heap allocations in hot path
+
+The optimization is a **plan-level improvement** (restructuring loop to use block-level skipping) rather than micro-optimization, which typically yields 10-100x gains. Zone map pruning on sorted columns is one of the most effective techniques for range-filter-heavy queries.

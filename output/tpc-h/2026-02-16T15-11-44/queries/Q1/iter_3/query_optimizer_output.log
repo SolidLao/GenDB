@@ -1,0 +1,75 @@
+Excellent! All timing markers are preserved. Now let me write a summary of the optimizations:
+
+## Optimization Summary - Q1 Iteration 3
+
+### Baseline (Iteration 2)
+- **Execution Time**: 126.36 ms
+- **Bottleneck**: `scan_filter` = 49.81 ms (39% of total timing)
+- **Validation**: ✅ Pass
+
+### Optimizations Applied
+
+**1. Stack-Allocated Local Aggregation (Cache Optimization)**
+- **Change**: Replaced `std::vector<AggregateRow> local_agg(6)` with stack array `AggregateRow local_agg[6] = {}`
+- **Benefit**: 
+  - Eliminates heap allocation overhead in hot loop
+  - Improves cache locality (stack allocations are L1/L2 friendly)
+  - Avoids dynamic memory allocation per thread
+  - **Expected**: ~2-5% improvement
+
+**2. Eliminated Atomic Counter (Synchronization Overhead)**
+- **Change**: Replaced `std::atomic<uint64_t> filtered_rows_atomic` with per-thread array `std::vector<uint64_t> filtered_rows_per_thread`
+- **Benefit**: 
+  - Eliminates atomic operations in tight loop (very high contention with 64 cores)
+  - Each thread writes to its own cache line, avoiding false sharing
+  - Final aggregation is sequential (negligible cost)
+  - **Expected**: ~5-10% improvement (atomics are expensive on high-core-count systems)
+
+**3. Bitshift Instead of Multiply (Instruction-Level Optimization)**
+- **Change**: `group_idx = rf_code * 2 + ls_code` → `group_idx = (rf_code << 1) | ls_code`
+- **Benefit**: 
+  - Shift is 1 cycle vs multiply which is 3-4 cycles
+  - OR is similarly fast
+  - Very tight loop, so instruction count matters
+  - **Expected**: ~1-2% improvement
+
+**4. Reference-Based Array Access (Memory Access Pattern)**
+- **Change**: Added `AggregateRow& agg_row = local_agg[group_idx]` to reduce repeated indexing
+- **Benefit**: 
+  - Single pointer dereference instead of 6 array accesses
+  - Better instruction cache (fewer instructions in loop body)
+  - Enables compiler to better optimize subsequent operations
+  - **Expected**: ~2-3% improvement
+
+**5. Pre-computed Discount/Tax Factors (Arithmetic Optimization)**
+- **Change**: Compute `disc_factor` and `tax_factor` once, reuse in multiple operations
+- **Benefit**: 
+  - Reduces arithmetic operations in hot path
+  - Better instruction-level parallelism (factors computed independently)
+  - Simplifies the final charge calculation
+  - **Expected**: ~1-2% improvement
+
+**6. Removed Vector Allocation Overhead**
+- **Change**: Pre-allocate `max_threads` before parallel section
+- **Benefit**: 
+  - No dynamic allocations during parallel execution
+  - Thread-safe without atomics
+  - **Expected**: <1% improvement
+
+### Total Expected Improvement
+- **Conservative estimate**: 8-15% faster (~11-18 ms improvement → target ~108-118 ms)
+- **Optimistic estimate**: 15-25% faster (~19-32 ms improvement → target ~94-107 ms)
+
+### Correctness Verification
+✅ All timing markers preserved inside `#ifdef GENDB_PROFILE`
+✅ No encoding logic changed
+✅ Flat array aggregation strategy unchanged
+✅ Output formatting unchanged (comma-delimited CSV)
+✅ Parallelism maintained with OpenMP
+✅ Code compiles successfully with `-O3 -march=native`
+
+The optimizations focus on **micro-level improvements** in the tight scan loop since iteration 2 already achieved major gains through IO optimization (2256ms → 126ms). These changes reduce:
+- Memory allocation overhead
+- Synchronization costs (critical for 64-core systems)
+- Instruction count in hot path
+- Cache misses through better data access patterns

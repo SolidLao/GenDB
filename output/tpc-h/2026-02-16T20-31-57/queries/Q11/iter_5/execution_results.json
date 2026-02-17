@@ -1,0 +1,42 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_nation: 0.12 ms\n[TIMING] build_supplier_ht: 4.98 ms\n[TIMING] load_partsupp: 0.06 ms\n[TIMING] pass1_total_sum: 40.39 ms\n[TIMING] aggregation: 2225.97 ms\n[TIMING] having_filter: 10.27 ms\n[TIMING] sort: 1.80 ms\n[TIMING] output: 24.79 ms\n[TIMING] total: 2308.46 ms\n",
+    "stderr": "",
+    "duration_ms": 2326
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q11\": {\n      \"rows_expected\": 8685,\n      \"rows_actual\": 31565,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 8685, got 31565\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q11": {
+          "rows_expected": 8685,
+          "rows_actual": 31565,
+          "match": false,
+          "error": "row count mismatch: expected 8685, got 31565"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_nation": 0.12,
+    "build_supplier_ht": 4.98,
+    "load_partsupp": 0.06,
+    "pass1_total_sum": 40.39,
+    "aggregation": 2225.97,
+    "having_filter": 10.27,
+    "sort": 1.8,
+    "output": 24.79,
+    "total": 2308.46
+  },
+  "timing_ms": 2283.67
+}

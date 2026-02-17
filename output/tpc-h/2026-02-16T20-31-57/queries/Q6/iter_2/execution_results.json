@@ -1,0 +1,54 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp: In function ‘void run_Q6(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp:151:25: warning: variable ‘zones’ set but not used [-Wunused-but-set-variable]\n  151 |     const ZoneMapEntry* zones = nullptr;\n      |                         ^~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp:294:37: warning: ‘l_extendedprice_size’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  294 |     if (l_extendedprice_data) munmap(l_extendedprice_data, l_extendedprice_size);\n      |                               ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp:293:32: warning: ‘l_quantity_size’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  293 |     if (l_quantity_data) munmap(l_quantity_data, l_quantity_size);\n      |                          ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp:292:32: warning: ‘l_discount_size’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  292 |     if (l_discount_data) munmap(l_discount_data, l_discount_size);\n      |                          ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q6/iter_2/q6.cpp:291:32: warning: ‘l_shipdate_size’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  291 |     if (l_shipdate_data) munmap(l_shipdate_data, l_shipdate_size);\n      |                          ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] zonemap_load: 0.01 ms\n[TIMING] zone_map_analysis: 0.10 ms (rows_to_scan: 58190)\n[TIMING] scan_filter_aggregate: 19.00 ms\n[TIMING] output: 0.12 ms\n[TIMING] total: 19.35 ms\n",
+    "stderr": "",
+    "duration_ms": 26
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": false,\n      \"error\": \"1 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"1230113636.0101\",\n              \"actual\": \"7894114.4109\",\n              \"abs_diff\": 1222219521.6,\n              \"rel_diff_pct\": 99.3583,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q6": {
+          "rows_expected": 1,
+          "rows_actual": 1,
+          "match": false,
+          "error": "1 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "1230113636.0101",
+                  "actual": "7894114.4109",
+                  "abs_diff": 1222219521.6,
+                  "rel_diff_pct": 99.3583,
+                  "tolerance": "$100",
+                  "row": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "zonemap_load": 0.01,
+    "zone_map_analysis": 0.1,
+    "scan_filter_aggregate": 19,
+    "output": 0.12,
+    "total": 19.35
+  },
+  "timing_ms": 19.23
+}

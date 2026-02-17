@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 29.62 ms\n[TIMING] supplier_scan_and_filter: 16.54 ms (excluded: 56)\n[TIMING] part_scan_and_filter: 65.25 ms (filtered: 296824)\n[TIMING] partsupp_join_and_aggregate: 625.69 ms (matched: 1186602)\n[TIMING] sort: 13.64 ms\n[TIMING] output: 6.36 ms\n[TIMING] total: 757.15 ms\nQ16 completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q16/iter_4/results/Q16.csv\n",
+    "stderr": "",
+    "duration_ms": 851
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q16\": {\n      \"rows_expected\": 27840,\n      \"rows_actual\": 27840,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dictionaries": 29.62,
+    "supplier_scan_and_filter": 16.54,
+    "part_scan_and_filter": 65.25,
+    "partsupp_join_and_aggregate": 625.69,
+    "sort": 13.64,
+    "output": 6.36,
+    "total": 757.15
+  },
+  "timing_ms": 750.79
+}

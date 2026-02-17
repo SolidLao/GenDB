@@ -1,0 +1,40 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Summary of Q7 Optimization (Iteration 1)
+
+### **Key Optimizations Implemented:**
+
+#### **1. Fixed Parallelism Bottleneck (scan_filter: 23.3s → expected ~8-10s)**
+   - **Problem**: Original code used `#pragma omp critical` inside the parallel lineitem filter loop, which serialized all push_back operations
+   - **Solution**: Replaced with thread-local vector buffers. Each thread fills its own buffer without synchronization, then merge post-loop
+   - **Impact**: True parallelization on 64 cores with no contention
+
+#### **2. Predicate Pushdown on Nation Codes (new, significant speedup)**
+   - **Problem**: Nation pair filtering `(FRANCE, GERMANY)` or `(GERMANY, FRANCE)` was applied AFTER all joins, filtering final result from 18M to just 58K rows (99.7% reduction)
+   - **Solution**: Filter supplier and customer tables by nation EARLY (before joins)
+     - Supplier: 100K → ~8K rows (2/25 nations = 8%)
+     - Customer: 1.5M → ~120K rows (2/25 nations = 8%)
+   - **Impact**: Joins now operate on dramatically smaller intermediate results
+
+#### **3. Improved Join Ordering**
+   - **Old order**: lineitem (18M) → orders (15M) → customer (1.5M) → supplier (100K)
+   - **New order**: supplier (8K) → lineitem (18M) → orders (15M) → customer (120K)
+   - **Impact**: Build hash tables on smallest sides, reducing memory and hash table build time
+
+### **Timing Impact (Expected):**
+- **Old baseline**: 44.3s (scan_filter 23.3s + join_orders 18.9s dominated)
+- **Expected new**: ~10-12s
+  - scan_filter: ~8-10s (parallelism + no critical sections)
+  - join_supplier: ~0.5s (8K rows)
+  - join_orders: ~1.5s (reduced intermediate cardinality from 18M to ~5M)
+  - join_customer: ~0.5s (120K rows in hash table)
+  - Other ops: ~0.5s
+  - **Expected speedup: 3.7-4.4x**
+
+### **Code Structure:**
+- All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- Encoding logic unchanged
+- Comma-delimited CSV output preserved
+- Correctness: Nation pair filtering still applied (though now as final filter on smaller dataset)
+
+The binary is ready for execution. The Executor will validate correctness and measure performance.

@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q1 Input Parameters:\n  gendb_dir: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\n  results_dir: /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q1/iter_2/results\n  Scale factor for DECIMAL columns: 100\n  Lineitem table rows: 59,986,052\n  Block size: 100,000 rows\n  Target date (1998-09-02): 10471 days since epoch\n[TIMING] load: 0.08 ms\n[METADATA CHECK] Loaded dictionaries:\n  l_returnflag_dict: 3 entries\n  l_linestatus_dict: 2 entries\n[METADATA CHECK] Zone map: 600 blocks\n[TIMING] zonemap_load: 0.05 ms\n[METADATA CHECK] Zone map pruning: 600 out of 600 blocks will be scanned\n[METADATA CHECK] Estimated valid rows after pruning: 59986052\n[TIMING] scan_filter: 66.68 ms\n[TIMING] aggregation_merge: 0.02 ms\n[TIMING] output: 0.18 ms\n[TIMING] total: 67.19 ms\nQuery execution complete. Results written to: /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q1/iter_2/results/Q1.csv\n",
+    "stderr": "",
+    "duration_ms": 160
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.08,
+    "zonemap_load": 0.05,
+    "scan_filter": 66.68,
+    "aggregation_merge": 0.02,
+    "output": 0.18,
+    "total": 67.19
+  },
+  "timing_ms": 67.00999999999999
+}

@@ -1,0 +1,43 @@
+Perfect! The code compiles successfully. Now let me create a summary of the optimization made:
+
+## Summary of Optimization (Iteration 2)
+
+### Bottleneck Identified
+The `semi_join_build` operation dominated at **632.68ms (98% of total time)** in iteration 1.
+
+### Root Cause
+The original code was sequentially:
+1. Scanning all 59.986M lineitem rows
+2. Filtering on `l_commitdate < l_receiptdate`
+3. Inserting matching order keys into a hash set
+
+This sequential approach left the CPU under-utilized despite having 64 cores available.
+
+### Optimization Strategy: Parallel Filtering with Thread-Local Aggregation
+
+**Changes made:**
+1. **Phase 1 - Parallel Filtering**: Use OpenMP `parallel for` to distribute the lineitem scan across threads, with each thread collecting filtered keys in a local vector (`thread_keys[tid]`)
+   - Eliminates hash table contention by avoiding concurrent insertions
+   - Better cache locality as each thread works on its own data
+   - Compiler can auto-vectorize the filter condition
+
+2. **Phase 2 - Merge**: Single-threaded merge of all thread-local key vectors into the final hash set
+   - No contention, no synchronization overhead
+   - Sequential insertion with good cache locality
+
+**Expected improvement:**
+- The filter phase should now parallelize across 64 cores
+- Estimated speedup: **2-4x** (depending on memory bandwidth and branch prediction)
+- Expected new timing: **150-300ms** (from 632.68ms)
+- New total query time: ~165-315ms (from 645.26ms)
+
+**Correctness:**
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Semi-join logic preserved (all matching keys collected)
+- ✅ CSV output format unchanged
+
+**Compilation:**
+- ✅ Compiles successfully with `-O3 -march=native -std=c++17 -fopenmp -DGENDB_PROFILE`
+
+The Executor will now run and validate this optimization. The improved parallelization should yield significant performance gains while maintaining correctness.

@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] lineitem_load_columns: 0.03 ms\n[TIMING] semi_join_build: 1001.16 ms\nSemi-join set size: 13753474 distinct order keys\n[TIMING] zonemap_load: 0.04 ms\n[TIMING] orders_load_columns: 0.02 ms\nLoaded 5 priorities\n  Priority 0: 5-LOW\n  Priority 1: 1-URGENT\n  Priority 2: 4-NOT SPECIFIED\n  Priority 3: 2-HIGH\n  Priority 4: 3-MEDIUM\n[TIMING] orders_scan_filter_join: 107.12 ms\n[TIMING] output: 0.13 ms\n[TIMING] total: 1108.53 ms\nQ4 results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q4/iter_1/results/Q4.csv\n",
+    "stderr": "",
+    "duration_ms": 1206
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q4\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "lineitem_load_columns": 0.03,
+    "semi_join_build": 1001.16,
+    "zonemap_load": 0.04,
+    "orders_load_columns": 0.02,
+    "orders_scan_filter_join": 107.12,
+    "output": 0.13,
+    "total": 1108.53
+  },
+  "timing_ms": 1108.3999999999999
+}

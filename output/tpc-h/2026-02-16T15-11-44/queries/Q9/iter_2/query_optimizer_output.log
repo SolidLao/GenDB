@@ -1,0 +1,28 @@
+Perfect! The code compiles successfully. Now let me summarize what I've optimized:
+
+## Summary of Optimization Changes (Iteration 2)
+
+### What Was Optimized:
+1. **Replaced `std::unordered_map` with `CompactHashTable` (open-addressing)** for critical hash tables:
+   - **orders hash table** (15M rows, 46% of total execution time) — This was the dominant bottleneck
+   - **supplier hash table** (100K rows)
+   - **part hash table** (filtered to ~108K rows)
+
+### Why This Optimization:
+- `std::unordered_map` uses **chaining** (pointer chasing through linked lists), causing poor cache locality
+- `CompactHashTable` uses **open-addressing** with a single contiguous array, providing:
+  - **2-5x better performance** due to cache locality
+  - **Faster memory access** patterns (linear probing vs. pointer indirection)
+  - **Lower memory overhead** (no per-entry heap allocation)
+
+### Expected Impact:
+- **orders_hash operation (1026.04 ms)**: Expected reduction of 50-70% → savings of ~500-700ms
+- **Overall execution time**: From ~2229ms down to ~1600-1700ms (target: **~27% improvement**)
+
+### Code Quality:
+✓ All [TIMING] lines preserved inside #ifdef GENDB_PROFILE guards  
+✓ Encoding logic unchanged  
+✓ Validation expected to pass (CompactHashTable semantically equivalent to unordered_map)  
+✓ Compiled successfully with -O3 -march=native  
+
+The optimization focused on the **dominant bottleneck (orders_hash at 46% of total time)** by replacing the slow map structure with a high-performance open-addressing hash table. This is a **plan-level improvement** (data structure choice) rather than micro-optimization, which yields the highest returns.

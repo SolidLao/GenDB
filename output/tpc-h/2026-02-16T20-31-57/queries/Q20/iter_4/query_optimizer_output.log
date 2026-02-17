@@ -1,0 +1,19 @@
+Good. The fix I made addresses the correctness issue. Now let me create a summary of what was fixed:
+
+## Summary of Correctness Fix
+
+**Problem**: The code was returning 2111 suppliers instead of the correct 1804.
+
+**Root Cause**: The correlated subquery `SELECT 0.5 * SUM(l_quantity) FROM lineitem WHERE ...` in SQL returns **NULL** when there are no matching rows. In SQL semantics, when you compare with NULL (`ps_availqty > NULL`), the result is **UNKNOWN (treated as FALSE)**. 
+
+However, the original code treated "no matching lineitem rows" as `SUM = 0`, which made the condition `ps_availqty > 0` often TRUE for positive values, incorrectly including suppliers.
+
+**Fix**: Changed the logic so that if there are **no matching lineitem entries** for a (ps_partkey, ps_suppkey) pair in the date range, that partsupp row is **excluded** rather than included.
+
+The fix:
+- Lines 295-316: Added early `continue` when `it == lineitem_sums.end()` 
+- This correctly implements SQL NULL semantics
+
+**Code compiled successfully** without errors.
+
+The corrected code now properly filters out partsupp rows that have no corresponding lineitem entries in the 1994 date range, which should bring the result count from 2111 down to the correct 1804.

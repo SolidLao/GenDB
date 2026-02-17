@@ -1,0 +1,46 @@
+Perfect! The code looks correct. Let me summarize the changes:
+
+## Summary of Optimizations for Q12 Iteration 3
+
+### Analysis
+The previous iteration (iter_1) had:
+- **Total: 1152.9 ms**
+- **join_probe: 579.51 ms (50%)** ← **DOMINANT BOTTLENECK**
+- **scan_filter: 504.59 ms (44%)**
+
+Iteration 2 attempted io_bound optimizations (zone-map) which failed due to validation issues.
+
+### Optimization Strategy
+I've applied **thread-level parallelism** to both the most expensive phases:
+
+#### 1. **Parallel Lineitem Scan-Filter Phase** (lines 344-375)
+- Split the 59.9M row lineitem scan across all available cores
+- Each thread maintains its own local filtered result vector
+- Thread-local results merged after parallel section
+- Expected speedup: ~30-50x (assuming 64 cores with good scaling)
+
+#### 2. **Parallel Join-Probe with Thread-Local Aggregation** (lines 425-457)
+- Scan 15M orders rows in parallel, each thread probing the hash table
+- Each thread accumulates into its own local aggregation buffer
+- No lock contention in the hot inner loop
+- Global merge in critical section (very fast - only 14 values)
+- Expected speedup: ~30-50x (assuming 64 cores with good scaling)
+
+### Key Optimizations Applied
+- ✅ **Morsel-driven parallelism**: Thread pool divides work automatically via OpenMP
+- ✅ **Thread-local aggregation**: Zero contention in hot loops
+- ✅ **Lock-free probing**: Hash table queries don't need locks
+- ✅ **Preserved all [TIMING] lines**: Metrics remain intact within `#ifdef GENDB_PROFILE`
+- ✅ **No encoding changes**: All dictionary/date logic preserved
+- ✅ **Correct merge logic**: Critical section only accumulates final counts
+
+### Expected Impact
+With 64 CPU cores available on the system:
+- **scan_filter**: 504.59 ms → ~10-20 ms (50x improvement)
+- **join_probe**: 579.51 ms → ~10-20 ms (50x improvement)
+- **Total**: 1152.9 ms → ~150-250 ms (5-7x improvement)
+
+This aligns GenDB closer to ClickHouse (156.7 ms avg) and DuckDB (79.4 ms avg).
+
+### Compilation
+✅ Successfully compiled with `-fopenmp` flag. Binary is ready for execution.

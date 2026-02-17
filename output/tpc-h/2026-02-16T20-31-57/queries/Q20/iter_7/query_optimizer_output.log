@@ -1,0 +1,13 @@
+Good, no compilation errors. The fix is straightforward: **rows without matching lineitem entries in the date range should not be included**, because in SQL, the correlated subquery returns NULL, and comparisons with NULL return false.
+
+Now let me document the fix and check what the expected performance will be after fixing correctness:
+
+**Summary of Correctness Fix:**
+
+The issue was in the **partsupp filtering logic (Step 5)**. The SQL has a correlated subquery that requires matching lineitem rows in the specific date range [1994-01-01, 1995-01-01). The original code treated missing lineitem entries (no sum) as 0, which allowed ps_availqty > 0 comparisons to pass. 
+
+In SQL semantics, when the subquery returns no rows, the SUM() is NULL, and **comparison with NULL returns false/unknown**. Thus, rows without matching lineitem entries should be filtered out entirely.
+
+**The fix:** Add an `if (it == lineitem_sums.end()) continue;` check to skip partsupp rows that have no matching lineitem in the date range. This reduces false positives by ~307 rows (from 2111 to expected 1804).
+
+This is a critical semantic fix that must be done before any performance optimization. The code will now be correct, allowing the Executor to validate and then optimize.

@@ -1,0 +1,72 @@
+Perfect! The code compiled successfully. Let me create a summary of the optimizations made:
+
+## Optimization Summary for Q14 - Iteration 1
+
+### Analysis of Baseline (iter_0):
+- **Total execution time**: 4087.14 ms
+- **Bottleneck breakdown**:
+  - `build_hash_table: 647.55 ms (16%)`
+  - `join_filter_aggregate: 3438.92 ms (84%)`
+
+The 84% bottleneck in the join_filter_aggregate phase indicates **severe underutilization of CPU and poor hash table performance**.
+
+### Critical Issues Identified (Level 0 Anti-Patterns):
+
+1. **`std::unordered_map` for join** — Uses chaining with linked lists, causing 2-5x slowdown vs. open-addressing due to:
+   - Pointer chasing destroying cache locality
+   - ~80 bytes overhead per entry
+   - Each `std::vector<int64_t>` in the map causes separate heap allocations
+
+2. **Single-threaded execution** — With 64 cores available, the entire join/aggregate loop runs on 1 core. The parallelizable loop (lines 272-321) uses zero threads, wasting ~98% of CPU.
+
+3. **Poor hash table structure** — Storing `std::vector<int64_t>` values causes cache misses and unpredictable memory access patterns during probe.
+
+### Optimizations Implemented:
+
+#### 1. **Compact Hash Table (Open-Addressing)**
+Replaced `std::unordered_map<int32_t, std::vector<int64_t>>` with:
+- `CompactHashTable<int32_t, PartEntry>` using Fibonacci hashing
+- Power-of-2 sizing with ~75% load factor
+- Linear probing for cache locality
+
+Plus a **two-array approach** for 1:N joins:
+- First pass: count occurrences per key
+- Second pass: prefix-sum scatter unique row indices into a `positions` array
+- Probe: contiguous, cache-friendly reads from `positions[]`
+
+**Expected impact**: 2-3x faster than `unordered_map` for build and probe.
+
+#### 2. **Parallel Join Probe with Thread-Local Aggregation**
+- Wrapped the block iteration loop with `#pragma omp parallel for collapse(1)`
+- Each thread maintains local aggregation buffers:
+  - `thread_promo_sums[tid]`
+  - `thread_total_sums[tid]`
+  - `thread_matched_rows[tid]`
+  - `thread_filtered_li_rows[tid]`
+- After parallel phase, merge results into global accumulators
+- Dynamic scheduling (`schedule(dynamic)`) to handle zone map pruning skips
+
+**Expected impact**: 40-50x improvement on 64 cores (with good load balancing). Conservative estimate: 30-40x given zone map pruning reduces work per block.
+
+#### 3. **Preserved Correctness**
+- All `[TIMING]` lines preserved inside `#ifdef GENDB_PROFILE` guards
+- Zone map pruning logic unchanged (correct skip conditions)
+- Revenue calculation logic unchanged
+- Dictionary-based PROMO prefix checking unchanged
+- Encoding logic unchanged (scale_factor computations)
+
+### Expected Performance Improvement:
+
+```
+Baseline (iter_0):  4087 ms
+After compact HT:   ~1400-1500 ms (2.7x)
+After parallelism:  ~35-50 ms (28-40x from parallel baseline, ~80-115x total from baseline)
+Target:             14 ms
+```
+
+**Conservative estimate**: We expect to reach **50-100 ms** range in this iteration, approaching 4-6x off the state-of-the-art 14ms GenDB. Further iterations will focus on:
+- Pre-built hash index loading (zero build time)
+- SIMD filtering for lineitem scan
+- Additional micro-optimizations
+
+The binary has been successfully compiled and is ready for execution.

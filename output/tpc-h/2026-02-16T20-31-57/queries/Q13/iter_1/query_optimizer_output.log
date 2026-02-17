@@ -1,0 +1,60 @@
+Excellent! The code compiles successfully. Now let me create a summary of the optimizations:
+
+## Optimization Summary for Q13 - Iteration 1
+
+### Bottleneck Analysis
+From the execution results:
+- **Total time:** 4985.7 ms (baseline)
+- **dictionary_filter:** 1296.11 ms (26%)
+- **first_aggregation:** 3671.09 ms (74%) — **DOMINANT BOTTLENECK**
+- Other operations: negligible
+
+The query is **CPU-bound**, dominated by the first aggregation phase (scanning 15M orders and building hash maps).
+
+### Optimizations Implemented
+
+#### 1. **Parallel First Aggregation with Thread-Local Buffers** (Expected: ~8x speedup)
+- **Problem:** Sequential scan of 15M orders with hash table insertions creates cache contention and limits single-core performance.
+- **Solution:** 
+  - Divide 15M orders among 64 cores using `#pragma omp parallel for` with static scheduling (100K rows per chunk)
+  - Each thread maintains its own local `unordered_map<int32_t, int32_t>` to avoid synchronization overhead
+  - Pre-allocate each thread-local map with `reserve(num_customers/num_threads + 1000)` to minimize allocations
+  - Merge all thread-local results into single map after parallel phase (small O(1.5M) overhead)
+- **Impact:** Parallelism on 64 cores → expected ~8-10x speedup on dominant 3671ms operation → ~350-460ms instead of 3671ms
+
+#### 2. **Low-Cardinality Aggregation with Flat Array** (Expected: ~2x speedup)
+- **Problem:** Second aggregation uses `std::unordered_map` for only ~25 distinct order counts. Hash map overhead is wasteful.
+- **Solution:**
+  - Find max order count in first aggregation result
+  - Allocate flat `vector<int32_t>` of size min(max_count+1, 10000)
+  - Aggregate via direct array indexing: `count_dist_array[order_count]++` — O(1), cache-friendly
+  - Convert sparse array back to vector only for sorting (25 rows) — minimal overhead
+- **Impact:** O(1) lookup instead of O(1) amortized with hash overhead → ~2-3x speedup on 18.2ms operation → ~6-9ms
+
+#### 3. **Preserved All [TIMING] Lines**
+- All timing measurements remain inside `#ifdef GENDB_PROFILE` guards
+- Timing labels preserved: load, dictionary_filter, first_aggregation, second_aggregation, sort, output, total
+
+### Expected Performance Impact
+
+**Conservative estimate (accounting for merge overhead):**
+- first_aggregation: 3671 ms → ~400-500 ms (with merge overhead: ~7-8x net speedup)
+- second_aggregation: 18.2 ms → ~6-8 ms (2-3x speedup)
+- **Total expected:** ~4985 ms → ~1700-1800 ms (2.8-2.9x speedup)
+
+**Best case (if parallelism scales well):**
+- first_aggregation: 3671 ms → ~300-350 ms (10x net speedup)
+- **Total expected:** ~4985 ms → ~1600 ms (3.1x speedup)
+
+### Current Gap to Best Engine
+- Umbra: 136 ms
+- GenDB baseline: 4985 ms (36.6x gap)
+- GenDB optimized: ~1700-1800 ms expected (12-13x gap remaining)
+
+Further optimizations in subsequent iterations could include:
+- Using pre-built hash index for orders_custkey (if available)
+- SIMD vectorization for dictionary filtering
+- Parallel merge sort for second phase
+- Open-addressing hash table instead of std::unordered_map
+
+The code has been compiled successfully with no errors.

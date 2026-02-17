@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q1 Storage Guide\n  l_returnflag: dictionary-encoded (int32_t codes)\n  l_linestatus: dictionary-encoded (int32_t codes)\n  l_quantity: scaled int64_t (scale=100)\n  l_extendedprice: scaled int64_t (scale=100)\n  l_discount: scaled int64_t (scale=100)\n  l_tax: scaled int64_t (scale=100)\n  l_shipdate: int32_t epoch days\n[TIMING] dict_load: 0.09 ms\n[EPOCH] 1998-09-02 = 10471 days\n[ROWS] lineitem: 59986052\n[TIMING] load_columns: 0.07 ms\n[TIMING] scan_filter: 49.81 ms\n[ROWS] filtered_rows: 59142609\n[TIMING] output: 0.19 ms\n[TIMING] total: 126.55 ms\n",
+    "stderr": "",
+    "duration_ms": 134
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dict_load": 0.09,
+    "load_columns": 0.07,
+    "scan_filter": 49.81,
+    "output": 0.19,
+    "total": 126.55
+  },
+  "timing_ms": 126.36
+}

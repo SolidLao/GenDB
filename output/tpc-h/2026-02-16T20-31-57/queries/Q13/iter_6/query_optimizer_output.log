@@ -1,0 +1,43 @@
+Perfect! My changes are in place. Now let me create a summary of what was optimized:
+
+## Summary of Iteration 6 Optimization
+
+### Changes Made
+
+**1. Replaced `std::unordered_map` with Compact Open-Addressing Hash Table**
+   - Implemented `CompactHashTable<K, V>` with power-of-2 sizing and Fibonacci hashing
+   - Provides O(1) average lookup/insert with better cache locality than std::unordered_map
+   - Expected improvement: 2-3x faster than std::unordered_map
+
+**2. Parallelized Orders Aggregation Scan**
+   - Changed from single-threaded loop to `#pragma omp parallel for`
+   - Used thread-local hash tables to avoid contention
+   - Merge phase combines all thread-local results
+   - With 64 cores, should provide 20-40x speedup on the scan phase alone
+
+**3. Optimized Second Aggregation**
+   - Also uses CompactHashTable for low-cardinality aggregation (~25 distinct values)
+   - Direct iteration over hash table entries instead of unordered_map iteration
+
+### Expected Performance Impact
+
+**Current bottleneck analysis (iter 4 baseline):**
+- dictionary_filter: 1321.80 ms (28.7%)
+- first_aggregation: 3271.85 ms (71.0%) ← PRIMARY BOTTLENECK
+- Total: 4610.36 ms
+
+**Expected improvements:**
+1. **Compact hash table**: 2-3x improvement on aggregation
+   - 3271.85 ms → ~1090-1635 ms
+2. **Parallelism on orders scan**: 30-50x potential speedup (64 cores, morsel-driven)
+   - But bottleneck is hash table insertion, not pure scanning
+   - Realistic improvement: 5-10x from parallelism + compact hash table combined
+3. **Overall expected time**: 2000-2500 ms (from 4610 ms) — **46-55% reduction**
+
+### Correctness
+- All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+- Dictionary filtering logic unchanged
+- CSV output format unchanged (comma-delimited)
+- LEFT OUTER JOIN semantics preserved (all customers included)
+
+The code is compiled and ready for execution. The Executor will run it, validate correctness, and measure timing. If results show >33% improvement, the optimization is successful. If correctness failed or regression occurred, the automatic rollback system will revert changes.

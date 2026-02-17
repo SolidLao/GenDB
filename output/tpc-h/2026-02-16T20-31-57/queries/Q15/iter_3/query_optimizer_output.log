@@ -1,0 +1,33 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## Summary of Optimizations for Q15 Iteration 3
+
+### Problem Analysis
+**Current bottleneck**: `scan_filter_aggregate` dominates at **180.6ms (84% of total 214.54ms)**. Full scan of 60M lineitem rows with only 3-month date filter.
+
+### Root Cause (Level 1 Plan Issue)
+The code was performing a **full sequential scan of all 60M lineitem rows**, even though:
+- The filter is **extremely selective**: only 3 months (1996-01-01 to 1996-04-01) out of 7 years of data
+- The storage guide provides a **zone map index** (`lineitem_shipdate_zonemap.bin`) with min/max per block
+- This zone map can prune ~95% of blocks, reducing actual rows scanned from 60M → ~2.2M
+
+### Optimization Applied
+**Zone Map Block Pruning**: 
+1. Load the zone map metadata for lineitem's l_shipdate column (600 blocks × 12 bytes)
+2. At block-level iteration (block_size = 100K rows), check if each block's [min, max] range overlaps with the filter date range [9496, 9587)
+3. Skip entire blocks when: `block.max_val < date_start OR block.min_val >= date_end`
+4. Only process blocks that overlap; still apply row-level filtering for boundary rows
+
+**Expected Impact**: 
+- Zone map pruning reduces scanned rows from 60M to ~2.2M (~97% reduction)
+- This should yield **~60-80ms** for `scan_filter_aggregate`, cutting total from 214ms → **~160-170ms**
+- Estimated total improvement: **~10-15% speedup** (conservative due to other operations)
+
+### Code Changes
+- Added `ZoneMapBlock` structure for zone map parsing
+- Load zone map index from `lineitem_shipdate_zonemap.bin`
+- Restructured scan to iterate at block granularity with zone map checks
+- Preserved all [TIMING] lines and correctness guarantees
+- Compilation successful with `-O3 -march=native`
+
+The optimization is correctness-preserving (zone map only skips blocks that cannot contain matching rows) and does not change encoding logic or output format.

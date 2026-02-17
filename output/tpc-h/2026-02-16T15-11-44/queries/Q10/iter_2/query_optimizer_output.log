@@ -1,0 +1,74 @@
+Perfect! Now let me create a summary of the optimizations made:
+
+## **Summary of Optimizations for Q10 Iteration 2**
+
+### **Problem Analysis**
+- **Iteration 1 regressed by 57%** (4.3s → 6.8s) due to inefficient implementation
+- `build_lineitem_ht` degraded from 1115ms to 2919ms (+161% regression)
+- `convert_sort` degraded from 985ms to 1461ms (+48% regression)
+
+### **Root Causes Identified**
+1. **Inefficient data structures**: `std::unordered_map` uses pointer chasing (linked list buckets), destroying cache locality
+2. **Suboptimal hash table design**: Each `std::unordered_map` entry carries ~80 bytes overhead
+3. **Missing pre-sizing**: Hash tables not pre-sized to expected cardinalities, causing excessive rehashing
+
+### **Optimizations Implemented**
+
+#### **1. Compact Open-Addressing Hash Tables (2-3x speedup expected)**
+- **Replaced** `std::unordered_map` with custom `CompactHashTable` using open-addressing
+- **Benefits**:
+  - Eliminated pointer chasing — better cache locality
+  - Reduced per-entry overhead from ~80B to ~16B (Entry struct)
+  - Fibonacci hashing for optimal distribution
+  - 2-3x faster build/probe compared to chained hash tables
+
+#### **2. Multi-Value Hash Table for Lineitem (1:N joins)**
+- **Custom `CompactHashTableMultiValue<K>`**:
+  - Stores `(key, offset, count)` per unique key
+  - Separate `positions[]` array for row indices (contiguous reads)
+  - Better cache locality than `vector<vector<>>`
+  - Expected 2-3x speedup for `build_lineitem_ht`
+
+#### **3. Pre-sized Hash Tables**
+- **Lineitem**: 400K unique orderkeys (estimated from 573K filtered orders)
+- **Customer**: 1.5M entries (all customer records)
+- **Nation**: 25 entries + padding
+- **Aggregation**: 400K pre-reserve (expect ~381K distinct groups)
+- **Benefit**: Eliminates rehashing during table construction
+
+#### **4. Correct Hash Table Lookups**
+- **Changed return type**: Compact hash tables return `Entry*` (pointer) instead of iterator
+- **Updated probe logic**: Uses `find()` returning `Entry*`, then accesses fields directly
+- **Positions array access**: For multi-value tables, accesses `li_ht.positions[offset + i]` for contiguous row indices
+
+### **Code Changes**
+1. Added `CompactHashTable<K, V>` for single-value lookups (customer, nation)
+2. Added `CompactHashTableMultiValue<K>` for 1:N joins (lineitem)
+3. Updated all three hash table builds to use compact structures
+4. Updated join + aggregation probe logic to use new API
+5. Pre-sized aggregation hash table to 400K entries
+
+### **Correctness Guarantees**
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Dictionary encoding/decoding unchanged
+- ✅ CSV output format unchanged (comma-delimited)
+- ✅ Floating-point aggregation logic unchanged
+- ✅ Filter predicates unchanged
+- ✅ Join logic unchanged (semantically equivalent)
+- ✅ Result validation: Same 20 rows expected
+
+### **Expected Performance Impact**
+| Operation | Before | After | Delta |
+|-----------|--------|-------|-------|
+| build_lineitem_ht | 1115.66 ms | ~450-500 ms | **-55% (-600ms)** |
+| build_customer_ht | 108.36 ms | ~50-70 ms | **-35% (-40ms)** |
+| build_nation_ht | 0.01 ms | ~0.01 ms | ~0% |
+| join_aggregate | 420.23 ms | ~300-350 ms | **-20% (-100ms)** |
+| **Total** | **4307.81 ms** | **~2800-3200 ms** | **-25-35% improvement** |
+
+### **Compilation**
+- ✅ Compiled successfully: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q10/iter_2/q10`
+- ✅ Binary size: 118 KB
+- ✅ Only benign format-truncation warnings (inherited from baseline)
+
+The code is ready for execution and validation. The Executor will run the query and compare results against the expected 20 rows.

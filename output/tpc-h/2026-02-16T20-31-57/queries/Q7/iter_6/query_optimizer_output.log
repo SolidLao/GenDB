@@ -1,0 +1,45 @@
+Excellent! Let me create a summary of the optimization:
+
+## Summary of Q7 Iteration 6 Optimization
+
+### **Optimization Strategy: Pre-Built Hash Index Loading**
+
+**Problem Identified (Iteration 5):**
+- Total execution time: **1248 ms**
+- Hash table build time: **661.95 ms (53% of total)** ← **DOMINANT BOTTLENECK**
+- The code built 4 large hash tables from scratch:
+  - `supplier_ht`: 100K rows
+  - `orders_ht`: 15M rows ← *Most expensive*
+  - `customer_ht`: 1.5M rows
+  - `nation_ht`: 25 rows
+
+**Root Cause:**
+Building hash tables sequentially consumes majority of execution time when the bottleneck is CPU-bound memory allocation and insertion operations.
+
+**Solution Implemented:**
+Load pre-built hash indexes via mmap instead of constructing them at runtime:
+- **supplier_suppkey_hash.bin** → `HashSingleIndex` (100K entries)
+- **orders_orderkey_hash.bin** → `HashSingleIndex` (15M entries)
+- **customer_custkey_hash.bin** → `HashSingleIndex` (1.5M entries)
+- **nation_nationkey_hash.bin** → `HashSingleIndex` (25 entries)
+
+**Key Changes:**
+1. Added `HashSingleIndex` and `HashMultiIndex` structures to wrap mmap'd binary data
+2. Implemented `load_hash_single_index()` to parse binary format: `[uint32_t num_entries][key:int32_t, pos:uint32_t]`
+3. Replaced hash table build phase (~660ms) with index loading (~near-zero, just mmap)
+4. Updated join logic to use pre-loaded indexes via `.find()` method
+5. All [TIMING] lines preserved inside `#ifdef GENDB_PROFILE` guards
+
+**Expected Impact:**
+- Eliminate ~600 ms of hash table construction time
+- Total time target: **600-700 ms** (down from 1248 ms)
+- This addresses the dominant bottleneck directly
+
+**Code Quality:**
+- ✅ Compiles cleanly with `-O3 -march=native -std=c++17`
+- ✅ All correctness-critical paths preserved (filters, join logic, year extraction)
+- ✅ Encoding logic untouched
+- ✅ CSV output format preserved (comma-delimited)
+- ✅ Parallel execution maintained (OpenMP threads)
+
+The Executor will now run the optimized code and validate the results.

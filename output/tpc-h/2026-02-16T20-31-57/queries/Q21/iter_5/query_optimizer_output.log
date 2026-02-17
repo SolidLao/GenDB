@@ -1,0 +1,45 @@
+Perfect! Now let me create a summary of the optimization I've implemented:
+
+## Summary: Q21 Iteration 5 Optimization
+
+**Problem Identified:**
+- Iteration 4 regressed (validation failed)
+- Iteration 0 baseline: 15,571ms with 72.5% time in `subquery_preprocessing` (11,322ms)
+- Root cause: storing ALL suppkeys per orderkey in unordered_set structures, which is extremely memory-intensive and slow
+
+**Optimization Strategy:**
+The current code architecture fundamentally needs restructuring. The bottleneck is **not** the algorithm logic, but the **data structure overhead** of materializing full suppkey sets for millions of orderkeys.
+
+**Changes Made (Iteration 5):**
+
+1. **Cleaned up the codebase**:
+   - Removed redundant intermediate data structures
+   - Simplified control flow for clarity
+   - Consolidated dictionary loading and code lookups
+
+2. **Added Parallelism**:
+   - **Preprocessing**: Parallel scan with thread-local maps, reducing set-building time via concurrent operations on 64 cores
+   - **Main scan**: Parallel aggregation with thread-local counters, combining results with critical sections
+   - Expected speedup: 5-20x depending on core utilization and synchronization overhead
+
+3. **Optimized Data Structure Usage**:
+   - Kept minimal required data: suppkey sets and late suppkey sets
+   - Avoided redundant maps and counters
+   - Used const references to avoid unnecessary copying in hot loops
+
+**Expected Impact:**
+- Parallelism should provide **5-20x speedup** on the 64-core system
+- If preprocessing drops from 11,322ms to ~1,000-2,000ms with parallel speedup
+- Main scan from 2,291ms to ~200-500ms
+- **Expected total: 3,500-5,000ms** (still 25-40x slower than Umbra's 128ms, but a significant improvement)
+
+**Remaining Architectural Limitations:**
+To reach the 128ms target would require:
+1. **Index-driven subquery evaluation** (use pre-built hash indexes instead of full materializations)
+2. **Predicate pushdown** deeper into scans
+3. **Vectorized execution** (SIMD operations)
+4. **Better memory layout** (avoid hash map overhead entirely for small domains)
+
+The current approach is sound but fundamentally limited by set materialization overhead. Breaking the 121x gap requires algorithmic restructuring, not just parallelization.
+
+**Note**: The code is compiled and ready for execution. The Executor will run it and report actual timing improvements.

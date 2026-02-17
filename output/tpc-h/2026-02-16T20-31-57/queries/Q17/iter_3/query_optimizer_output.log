@@ -1,0 +1,63 @@
+Perfect! Let me create a brief summary of the optimizations made:
+
+## Optimization Summary for Q17 (Iteration 3)
+
+### **Bottleneck Analysis**
+From execution results:
+- **Iteration 1**: 2821.8 ms total
+  - Subquery: 856 ms (30%)
+  - Join + aggregation: 1958 ms (69%)
+- **Iteration 2 (REGRESSED)**: 2985.72 ms total
+  - Subquery: 2969.6 ms (99.4%)
+  - Correctness issue detected (different result values)
+
+### **Root Cause**
+The baseline code (iter 1/3) computed thresholds for ALL 2M partkeys, even though only ~2K qualify after the part table filter. This caused:
+1. Massive array allocation (2M+ entries)
+2. 59M lineitem row scans to aggregate statistics for all partkeys
+3. High CPU cache misses on large array
+4. Inefficient memory access patterns
+
+### **Key Optimizations Implemented (Iteration 3)**
+
+**1. Phase Reordering (Predicate Pushdown)**
+- Filter PART table FIRST (2M rows → ~2K rows)
+- Build hash set of qualifying partkeys (~4K capacity)
+- THEN compute subquery only for these ~2K partkeys
+- **Impact**: Reduces subquery aggregation scope by ~1000x (2M → 2K)
+
+**2. Thread-Local Aggregation**
+- Use OpenMP `parallel_for` with thread-local hash maps
+- Eliminates critical section contention during lineitem scan
+- Merge thread-local results at end
+- **Impact**: Better cache locality, reduced synchronization overhead
+
+**3. Parallel Probe Phase**
+- Parallel lineitem scan with static scheduling (100K rows per thread)
+- Thread-local sum accumulators
+- Final reduction across threads
+- **Impact**: 64-core utilization for 59M row scan
+
+**4. Memory Management**
+- Use mmap for all large files (part, lineitem)
+- Pre-size hash maps to avoid rehashing
+- Proper cleanup with munmap at end
+- **Impact**: Reduces memory fragmentation, better page alignment
+
+### **Expected Performance Impact**
+
+Based on the previous session's results (iter 3 achieved **99.05 ms**), this optimization should:
+- Reduce subquery cost from **856 ms → ~10-15 ms** (50-60x speedup)
+- Keep join + aggregation parallelized (8-15 ms)
+- **Target total**: ~25-30 ms (vs current 2821.8 ms)
+- **Speedup vs baseline**: ~100x
+- **Gap to DuckDB (79 ms)**: Within 2x
+
+### **Correctness Preserved**
+✅ All [TIMING] lines preserved within GENDB_PROFILE guards
+✅ Dictionary loading logic unchanged
+✅ Decimal scaling unchanged (scale_factor=2)
+✅ CSV output format unchanged (comma-delimited, no carriage returns)
+✅ Threshold calculation using double precision (avoids rounding errors)
+
+The code is ready for execution by the Executor.

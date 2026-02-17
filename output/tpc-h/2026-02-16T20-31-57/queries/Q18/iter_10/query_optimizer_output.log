@@ -1,0 +1,53 @@
+Perfect! Let me now create a summary of the optimization made:
+
+## Q18 Optimization Summary (Iteration 10)
+
+### Optimization Target
+**Execution time** — Currently at 1654 ms, need to match DuckDB at 171 ms (9.7x gap)
+
+### Key Finding
+The subquery aggregation phase dominated execution at **1322.78 ms (80% of total)**, consuming most CPU cycles despite being already parallelized. The bottleneck was in the HAVING filter phase.
+
+### Optimization Strategy
+
+**Level 0 Anti-Pattern Check:**
+- ✓ No `std::unordered_map` for large joins
+- ✓ No loop-based date extraction
+- ✓ No large vector loads before filtering
+- ✓ No repeated scans of large tables
+- ✓ Code already uses open-addressing hash tables for aggregation
+
+**Optimization Applied:**
+1. **Replaced `std::unordered_set` with open-addressing hash table for qualifying_orderkeys** (lines 432-455)
+   - `std::unordered_set` uses pointer-chasing buckets → poor cache locality
+   - Open-addressing table provides contiguous memory, better for repeated lookups during join
+   - Expected improvement: 2-3x faster lookups (fewer cache misses)
+
+2. **Improved is_qualifying lambda** (lines 468-474)
+   - Now uses direct open-addressing probing instead of hash set count()
+   - Single inline lookup function avoids function call overhead
+   - Linear probing is cache-friendly for small lookups
+
+### Code Changes
+- Line 421-455: Refactored `std::unordered_set<int32_t> qualifying_orderkeys` → open-addressing `struct QualifyingKey` table
+- Line 468-474: Updated is_qualifying lambda to use open-addressing probing
+- Preserved all [TIMING] instrumentation for validation
+- No changes to encoding logic or algorithmic correctness
+
+### Expected Impact
+- **Subquery phase**: 1322 ms → ~1050-1200 ms (reduces qualifying_orderkeys lookup overhead by 10-20%)
+- **Total execution**: 1654 ms → **~1450-1550 ms**
+- **Improvement**: 5-15% faster than current baseline
+
+### Trade-offs
+- Slightly increased memory allocation for qualifying_table (small ~1MB)
+- Minimal code complexity increase (same lookup pattern as orders/customer hash tables)
+- Better cache locality and vectorization potential
+
+### Compilation Status
+✅ Successfully compiled with `-O3 -march=native`
+- Binary: `/home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q18/iter_10/q18`
+- Size: 66 KB
+- All [TIMING] markers preserved for metrics collection
+
+The Executor will now validate correctness and measure the performance improvement against the baseline.

@@ -1,0 +1,40 @@
+Perfect! The code looks correct. Let me create a summary of the optimizations made:
+
+## Optimization Summary for Q6 Iteration 2
+
+### Key Changes
+
+1. **Binary Search for Date Range Pruning** (Plan-level optimization)
+   - Added binary search to find the exact range of rows where `l_shipdate` is in [1994-01-01, 1995-01-01)
+   - This skips ~73% of the 60M rows without needing to check the date predicate in the inner loop
+   - Expected impact: **~4x reduction in rows scanned** (from 60M to ~15-16M)
+
+2. **Predicate Reordering for Better Branch Prediction**
+   - Evaluates `discount` predicate first (most selective: only 3 values out of 11)
+   - Then evaluates `quantity` predicate (~48% selectivity)
+   - Implicit date range check (rows are pre-selected)
+   - This ordering maximizes early-exit and cache efficiency
+
+3. **Removed Redundant Date Predicate Check**
+   - Since we binary-search to narrow the row range first, we don't need to check dates in the inner loop
+   - Reduces branch mispredictions and CPU cycles
+
+### Expected Performance Impact
+
+- **Previous**: 132.18ms (scan 60M rows with all 4 predicates)
+- **Expected**: ~35-40ms (scan ~15-16M rows with 2 predicates)
+  - Binary search overhead: ~0.5ms
+  - Reduced row count: 4x faster main scan
+  - Better branch prediction from predicate reordering: ~5-10% additional gain
+  - **Expected speedup: 3.3-3.8x**
+
+### Correctness
+
+- ✅ Binary search logic verified (finds first/last position correctly)
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged
+- ✅ Output format (CSV with 4 decimal places) preserved
+- ✅ Thread-local aggregation maintained
+- ✅ Compilation successful (no errors, pre-existing warnings)
+
+The code is ready for execution!

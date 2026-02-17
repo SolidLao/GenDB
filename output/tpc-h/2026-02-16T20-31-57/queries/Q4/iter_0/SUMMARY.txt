@@ -1,0 +1,134 @@
+================================================================================
+Q4 IMPLEMENTATION SUMMARY - Iteration 0
+================================================================================
+
+QUERY: Order Priority Checking
+SELECT o_orderpriority, COUNT(*) AS order_count
+FROM orders
+WHERE o_orderdate >= DATE '1993-07-01'
+  AND o_orderdate < DATE '1993-10-01' 
+  AND EXISTS (SELECT * FROM lineitem 
+             WHERE l_orderkey = o_orderkey 
+             AND l_commitdate < l_receiptdate)
+GROUP BY o_orderpriority
+ORDER BY o_orderpriority;
+
+================================================================================
+IMPLEMENTATION APPROACH
+================================================================================
+
+LOGICAL PLAN:
+1. Build semi-join set: scan 59M lineitem rows, collect distinct l_orderkey
+   where l_commitdate < l_receiptdate
+   Result: ~13.75M distinct order keys
+
+2. Scan 15M orders table:
+   - Filter by date range: o_orderdate ∈ [1993-07-01, 1993-10-01)
+   - Semi-join: keep only orders with l_orderkey in lineitem set
+   Result: ~525K matching orders
+
+3. Group by o_orderpriority (5 distinct values) and count
+   - Use flat array indexed by priority code [0..4]
+
+4. Output sorted by priority (CHAR comparison)
+
+PHYSICAL PLAN:
+- Lineitem scan: parallel with OpenMP (thread-local hash sets)
+  - Columns: l_orderkey, l_commitdate, l_receiptdate
+  - No zone maps needed (must scan all 59M rows)
+
+- Orders scan: sequential (small dataset post-filtering)
+  - Columns: o_orderkey, o_orderdate, o_orderpriority
+  - Zone map available but not exploited (simple sequential scan)
+
+- Aggregation: flat array (only 5 groups)
+  - No hash table overhead
+
+- Join strategy: hash semi-join (pre-built set from lineitem)
+
+================================================================================
+COMPILATION & VALIDATION
+================================================================================
+
+Compilation:
+  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE
+
+Status: ✅ SUCCESS (clean compile, no warnings)
+
+Validation:
+  Expected: 5 rows
+  Actual:   5 rows
+  Match:    ✅ TRUE
+
+Result Counts (Match Ground Truth):
+  1-URGENT:       105,214 ✅
+  2-HIGH:         104,821 ✅
+  3-MEDIUM:       105,227 ✅
+  4-NOT SPECIFIED: 105,422 ✅
+  5-LOW:          105,356 ✅
+
+================================================================================
+PERFORMANCE METRICS (with GENDB_PROFILE)
+================================================================================
+
+Operation Timing:
+  Lineitem load columns:      0.06 ms
+  Semi-join build:          9370.79 ms  (59M rows × 2 comparisons per row)
+  Zonemap load:                0.10 ms
+  Orders load columns:          0.04 ms
+  Orders scan+filter+join:    326.45 ms  (15M rows × hash set lookup)
+  Output (CSV write):           1.45 ms
+  ─────────────────────────────────────
+  Total computation:         9699.58 ms  (~9.7 seconds)
+
+Bottleneck Analysis:
+  - Semi-join build: 96.6% of total time
+    * Processing 59M lineitem rows with date comparisons
+    * Building hash set with 13.75M insertions
+    * Parallelized with OpenMP (thread-local sets to avoid contention)
+
+Optimization Applied:
+  - Thread-local hash sets with merge (avoids global synchronization)
+  - Direct integer comparisons (no decoding needed)
+  - Flat array for final aggregation (5 groups = O(1) access)
+
+================================================================================
+KEY IMPLEMENTATION DETAILS
+================================================================================
+
+Date Handling:
+  - Dates stored as int32_t (days since epoch 1970-01-01)
+  - 1993-07-01 = epoch day 8582
+  - 1993-10-01 = epoch day 8674
+  - Direct integer comparison (no conversion needed)
+
+Dictionary Encoding:
+  - o_orderpriority uses dictionary encoding
+  - Dictionary loaded at runtime from o_orderpriority_dict.txt
+  - Mapping: [0:"5-LOW", 1:"1-URGENT", 2:"4-NOT SPECIFIED", 3:"2-HIGH", 4:"3-MEDIUM"]
+  - Comparisons done on integer codes, decoded only for output
+
+Semi-Join Implementation:
+  - Pre-compute inner result (lineitem) into hash set
+  - Probe outer table (orders) with O(1) set membership check
+  - Avoids O(n×m) nested loop evaluation
+
+Aggregation:
+  - 5 distinct priority codes → use flat array [0..4]
+  - Much faster than hash table for low cardinality
+  - Direct array indexing: priority_counts[code]++
+
+CSV Output:
+  - Comma-delimited format
+  - Header row: "o_orderpriority,order_count"
+  - Sorted by priority string (lexicographic order)
+
+================================================================================
+FILES GENERATED
+================================================================================
+
+q4.cpp:                  Main query implementation
+SUMMARY.txt:             This file
+results/Q4.csv:          Query output
+
+================================================================================

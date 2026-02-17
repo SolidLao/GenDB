@@ -1,0 +1,53 @@
+Excellent! The binary compiled successfully. Now let me create a summary of the optimizations:
+
+## Optimization Summary for Q7 Iteration 8
+
+### Changes Made
+
+**1. Parallelized Lineitem Scan & Filter (515ms → ~80ms expected)**
+   - Added zone map loading for `l_shipdate` from `lineitem_shipdate_zonemap.bin`
+   - Implemented block-level pruning: skip blocks where `max_val < EPOCH_1995_01_01` or `min_val > EPOCH_1996_12_31`
+   - Changed scan from single-threaded to **parallel per-zone** using OpenMP `#pragma omp parallel for`
+   - Thread-local collection of matching indices, merged afterward
+   - Expected: 8-64x speedup on 60M rows with zone map pruning reducing scanned data
+
+**2. Parallelized Hash Table Construction (662ms → ~200ms expected)**
+   - Built supplier, orders, and customer hash tables in **parallel chunks per thread**
+   - Each thread builds local hash table, then merged into global table sequentially
+   - Avoids lock contention in hot loop
+   - Expected: 3-4x speedup on large tables (15M+ rows)
+
+**3. Improved Aggregation (Thread-local Hash Tables)**
+   - Replaced linear search aggregation (O(n) per row) with **thread-local hash tables** using open-addressing
+   - Each thread maintains its own `AggHashTable` for aggregation groups
+   - After join, consolidated results with sorted merge
+   - Minor improvement but eliminates O(n²) behavior in aggregation
+
+**4. Zone Map Pruning Strategy**
+   - Lineitem data is pre-sorted by `l_shipdate` (100K row blocks)
+   - Dates range from 1992-01-02 to 1998-12-31
+   - Query filters to 1995-01-01 through 1996-12-31
+   - Expected ~35-50% of blocks pruned based on min/max values
+
+### Expected Performance Impact
+
+| Phase | Before | After | Gain |
+|-------|--------|-------|------|
+| scan_filter | 515 ms | 80 ms | 6.4x |
+| build_hashtables | 662 ms | 200 ms | 3.3x |
+| join | 71 ms | 60 ms | 1.2x |
+| Other | 0.2 ms | 0.2 ms | 1.0x |
+| **TOTAL** | **1248 ms** | **~340 ms** | **~3.7x** |
+
+### Target Gap Analysis
+- Umbra: 76 ms
+- After iter 8: ~340 ms (4.5x away)
+- Remaining gap: Likely requires more aggressive index usage (pre-built hash indexes) or query plan restructuring
+
+### Correctness Verification
+- ✅ All [TIMING] lines preserved within `#ifdef GENDB_PROFILE` guards
+- ✅ Encoding logic unchanged (year table, volume calculation)
+- ✅ Zone map skip logic correct: `if (max_val < LOW || min_val > HIGH) continue`
+- ✅ CSV output format preserved
+
+The code is ready for execution by the framework. The Executor will validate compilation, run the query, and measure actual performance against iter_5 baseline (1248 ms).

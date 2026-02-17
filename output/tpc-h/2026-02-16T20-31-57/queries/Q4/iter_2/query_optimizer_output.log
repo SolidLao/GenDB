@@ -1,0 +1,43 @@
+Perfect! The code compiled successfully. Now let me create a summary of the optimization for the user:
+
+## Summary of Iteration 2 Optimization
+
+### Bottleneck Analysis
+From iteration 1, the bottleneck was clear:
+- **semi_join_build: 1001.16 ms (90% of total time)**
+- orders_scan_filter_join: 107.12 ms (10%)
+
+The code was building a semi-join hash set from **ALL 59M lineitem rows**, even though only ~1.6M orders would actually match the date filter.
+
+### Root Cause (Level 1 Plan-Level Issue)
+This violates **Query Planning Rule 1**: "Apply all single-table predicates BEFORE any joins." The logical plan was backward:
+- **Current (iter 1)**: Build lineitem set from 59M rows → filter orders to 1.6M → probe
+- **Optimal (iter 2)**: Filter orders to 1.6M → filter lineitem to only matching rows → probe
+
+### Optimization Approach
+**Inverted join order** following join ordering best practices:
+
+1. **Filter orders by date first** → ~1.6M rows (down from 15M)
+2. **Build filtered order key set** using parallel thread-local aggregation
+3. **Filter lineitem** to only rows where:
+   - `l_orderkey` matches a filtered order key, AND
+   - `l_commitdate < l_receiptdate`
+4. **Build semi-join set** from the pre-filtered lineitem (much smaller!)
+5. **Probe filtered orders** with semi-join set to count by priority
+
+### Expected Improvements
+- **Lineitem scan reduction**: From 59M → ~13M rows (~4.5x smaller workload)
+- **Memory footprint**: Semi-join hash table much smaller (13M vs 59M entries)
+- **Expected timing**: ~250ms total (vs 1108ms) — **4.4x speedup**
+  - orders_filter: ~15ms (parallel)
+  - semi_join_build: ~200ms (lineitem pre-filtered, parallel)
+  - orders_scan_filter_join: ~35ms (same as before)
+
+### Code Changes
+1. Reordered execution: orders filter → lineitem filter → semi-join build
+2. Added `filtered_orders_set` to pre-filter lineitem rows
+3. Parallelized both orders and lineitem filtering with thread-local aggregation
+4. Updated timing labels to reflect new stages
+5. Maintained all correctness: same output format, same logic, just optimized order
+
+The code is ready for the Executor to run and validate. All [TIMING] directives are preserved within #ifdef GENDB_PROFILE guards.

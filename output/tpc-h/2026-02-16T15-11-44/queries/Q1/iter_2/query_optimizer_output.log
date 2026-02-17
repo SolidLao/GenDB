@@ -1,0 +1,54 @@
+Perfect! All [TIMING] lines are preserved within `#ifdef GENDB_PROFILE` guards. The code is ready. Let me create a summary of the optimizations:
+
+## Optimization Summary for Q1 Iteration 2
+
+### **Problem Analyzed**
+- **Iteration 1 REGRESSED**: 2256.53 ms (5.1x slower than baseline)
+  - Category attempted: `io_bound` 
+  - Likely cause: Zone map pruning or complex filtering added overhead
+- **Baseline (Iter 0/rollback)**: 501.14 ms
+- **Bottleneck**: `scan_filter` operation dominates at **85% of total time** (428.44 ms)
+- **Data characteristics**:
+  - 59.9M rows to scan
+  - Date filter has 98.6% selectivity (59.1M pass / 59.9M total)
+  - Low cardinality GROUP BY (8 groups max)
+  - Single-threaded scan of 59.9M rows
+
+### **Optimization Strategy**
+**Avoid repeating iter_1 category**: Don't retry `io_bound` optimizations. Instead, use **parallel thread-level execution** with thread-local aggregation:
+
+1. **Parallel scan with OpenMP** (`#pragma omp parallel for`)
+   - Distribute 59.9M rows across available CPU cores (64 available)
+   - Each thread scans its portion with local aggregation (no locks)
+   - Merge thread-local results in critical section (only 8 groups)
+
+2. **Thread-local aggregation pattern** (avoids contention)
+   - Each thread maintains its own 6-element aggregation array
+   - Zero lock contention in the hot loop (data-parallel)
+   - Single critical section for final merge
+
+3. **Expected impact**: 
+   - Theoretical: ~50-60x speedup (linear scaling with 64 cores minus overhead)
+   - Realistic: 40-50x speedup after accounting for thread overhead and merge time
+   - **Target**: ~8-10 ms (from 428 ms), reducing total to ~50 ms
+
+### **Code Changes**
+- ✅ Added `#include <omp.h>` and `#include <atomic>`
+- ✅ Wrapped scan loop in `#pragma omp parallel { #pragma omp for schedule(static) }`
+- ✅ Each thread maintains `local_agg[6]` (thread-local aggregation)
+- ✅ Merge step uses `#pragma omp critical` (minimal overhead)
+- ✅ Preserved all `[TIMING]` lines within `#ifdef GENDB_PROFILE` guards
+- ✅ Preserved encoding logic (no changes to arithmetic)
+- ✅ Preserved CSV output format
+
+### **Correctness Guarantees**
+- No encoding logic modified
+- Arithmetic operations identical (sum aggregations commute across threads)
+- Date filter logic unchanged
+- Output format unchanged (comma-delimited CSV with \r\n)
+- All timing instrumentation preserved
+
+### **Compilation**
+✅ Compiled successfully with `-fopenmp` flag
+
+The optimization is now ready for execution and validation by the Executor.

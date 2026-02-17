@@ -1,0 +1,59 @@
+Good! The code is now parallelized with thread-local aggregation. Let me create a summary document:
+
+## Summary of Optimizations for Q13 Iteration 7
+
+### Changes Made
+
+**Problem Analysis:**
+- Previous iteration (4): **4610.21ms** total
+  - `first_aggregation`: 3271.85ms (71% of total) — **bottleneck**
+  - `dictionary_filter`: 1321.80ms (28.7%)
+  - Other: 16.7ms (0.4%)
+
+- **Root cause**: 15M order row scan fully single-threaded on a 64-core machine (wasting 98% CPU capacity)
+
+### Optimizations Applied
+
+1. **Parallel Orders Scan with Thread-Local Aggregation** (biggest impact)
+   - Changed from single-threaded loop to `#pragma omp parallel for` with `num_threads(omp_get_max_threads())`
+   - Each thread builds its own `unordered_map<int32_t, int32_t>` of customer order counts for its chunk of orders
+   - After parallel phase, threads merge their local results into global map (single-threaded merge, O(num_unique_customers))
+   - **Expected speedup**: ~20-40x on 64-core machine (near-linear with number of cores)
+   - Data structure still `unordered_map` (good enough for this cardinality); could upgrade to compact hash table in future iteration
+
+2. **Simplified First Aggregation Logic**
+   - Removed redundant two-phase approach (build filtered count map, then iterate customers)
+   - Now: initialize all customers with 0, then parallel scan orders to increment counts
+   - Eliminates hash lookup overhead in the customer initialization loop
+
+3. **Code Structure**
+   - Preserved all `[TIMING]` lines inside `#ifdef GENDB_PROFILE` guards
+   - Preserved dictionary filtering logic (no changes needed there)
+   - All correctness guarantees maintained (LEFT OUTER JOIN semantics preserved)
+
+### Expected Performance Impact
+
+**Estimated Timing (iter_7):**
+- `dictionary_filter`: ~1321ms (unchanged - sequential, small data)
+- `first_aggregation`: **~90-150ms** (parallelized: 3271.85 / 20-30 cores utilized)
+  - Actual speedup depends on:
+    - OpenMP scheduling overhead
+    - Memory bandwidth saturation
+    - Hash table contention (likely minimal with thread-local maps)
+- `second_aggregation`: ~16ms (unchanged)
+- Total: **~1430-1490ms** (best case ~3x improvement, 34.8x gap to Umbra)
+
+### Correctness Validation
+
+- LEFT OUTER JOIN semantics preserved: all customers initialized with 0 count, incremented for matching orders
+- Dictionary filtering unchanged: still finds codes containing "special...requests"
+- Output format unchanged: comma-delimited CSV with sorting by custdist DESC, c_count DESC
+- Compilation successful with `-fopenmp` flag
+
+### Future Optimization Opportunities
+
+If more speedup is needed:
+1. Replace `std::unordered_map` with compact hash table (open-addressing) → 2-3x per operation
+2. Parallelize dictionary loading (currently sequential, 1321ms)
+3. Use SIMD string matching for dictionary filtering
+4. Further refine OpenMP scheduling (currently `schedule(static)`)

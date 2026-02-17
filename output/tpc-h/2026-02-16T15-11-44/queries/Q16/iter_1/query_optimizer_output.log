@@ -1,0 +1,48 @@
+Perfect! Let me create a summary of the optimizations made:
+
+## Optimization Summary for Q16 (Iteration 1)
+
+### Bottleneck Analysis
+The execution results showed **`partsupp_join_and_aggregate` dominates at 471.86 ms (71% of total 661.62 ms)**. This operation handled 8M rows of partsupp data with single-threaded execution, leading to severe underutilization of the 64-core CPU.
+
+### Optimizations Implemented
+
+1. **Parallelized Partsupp Probe Phase** (#pragma omp parallel for)
+   - The 8M-row partsupp scan is now parallelized across 64 cores
+   - Uses static scheduling for cache-friendly access patterns
+   - Expected speedup: **~40-60x** (assuming near-linear scaling on hash table lookups)
+
+2. **Thread-Local Aggregation Buffers**
+   - Each thread builds its own local aggregation map to avoid lock contention
+   - After parallel phase completes, all local aggregations are merged into global map
+   - Expected speedup: **2-3x** (eliminates critical sections and atomic operations in hot loop)
+
+3. **Efficient Merge Strategy**
+   - Thread-local vectors are concatenated and deduplicated using sort + unique
+   - This is more efficient than per-thread locking or atomic operations
+
+### Expected Performance Impact
+
+**Before optimization:**
+- partsupp_join_and_aggregate: 471.86 ms (1 core)
+- total: 661.62 ms
+
+**Expected after optimization (conservative estimate):**
+- partsupp_join_and_aggregate: ~12-20 ms (40-60x improvement from parallelism)
+- total: ~170-180 ms (2.5-3.9x overall speedup)
+
+### Why This Approach
+
+- **Plan-level correctness**: No changes to join order or filtering logic. The plan is already optimal (filter part first, join with partsupp, aggregate by (brand, type, size))
+- **Operator-level optimization**: Parallelism is the highest-impact optimization for CPU-bound operations on multi-core systems
+- **Preservation of semantics**: Bitwise merge of thread-local distinct sets is correct (same as combining sets mathematically)
+- **Memory efficiency**: Thread-local buffers use less memory per thread than centralized locking
+
+### Code Changes
+
+- Added `#include <omp.h>` and `#include <atomic>` for parallelism
+- Replaced single-threaded partsupp loop with `#pragma omp parallel for` 
+- Introduced thread-local aggregation maps for each thread
+- Merge phase combines all thread results with vector concatenation + deduplication
+
+The code compiles successfully with `-fopenmp` flag and preserves all `[TIMING]` instrumentation for validation.

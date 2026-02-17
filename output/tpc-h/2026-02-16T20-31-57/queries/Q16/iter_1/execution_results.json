@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] subquery: 32.40 ms\n[TIMING] scan_filter_aggregate: 855.99 ms (groups: 27840)\n[TIMING] sort: 9.72 ms\n[TIMING] output: 6.84 ms\n[TIMING] total: 911.75 ms\nQ16 complete. Output: /home/jl4492/GenDB/output/tpc-h/2026-02-16T20-31-57/queries/Q16/iter_1/results/Q16.csv\nRows: 27840\n",
+    "stderr": "",
+    "duration_ms": 1271
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q16\": {\n      \"rows_expected\": 27840,\n      \"rows_actual\": 27840,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "subquery": 32.4,
+    "scan_filter_aggregate": 855.99,
+    "sort": 9.72,
+    "output": 6.84,
+    "total": 911.75
+  },
+  "timing_ms": 904.91
+}

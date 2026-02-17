@@ -1,0 +1,67 @@
+Perfect! The code looks good. Now let me create a summary of the optimizations made:
+
+## **Optimization Summary for Q11 Iteration 10**
+
+### **Bottleneck Analysis**
+From execution results (iteration 9):
+- **pass1_total_sum: 44.87 ms (64.6%)** ← Dominant bottleneck
+- aggregation: 20.72 ms (29.8%)
+- output: 7.51 ms  
+- having_filter: 2.05 ms
+- sort: 0.40 ms
+
+**Current performance: 69.13 ms → Target: 30 ms (Umbra)**
+
+### **Optimization Strategy (Level 0 + 1 + 2)**
+
+#### **1. Improved Hash Function (Level 2 Operator)**
+- **What**: Replaced MurmurHash with **Fibonacci hashing** (golden ratio multiply-shift)
+- **Why**: Fibonacci hashing has better distribution for single-int keys and is faster to compute (single multiply vs. multiple shifts/XORs)
+- **Expected impact**: 5-10% faster hash table operations (insert/lookup)
+- **Implementation**: `uint32_t hash = (uint32_t)key * 2654435761U`
+
+#### **2. Lower Load Factor for Hash Tables (Level 2)**
+- **What**: Changed load factor from 67% (capacity * 3/2) to **60% (capacity * 5/3)**
+- **Why**: Lower load factor → fewer collisions → shorter probe chains → faster insert/lookup
+- **Expected impact**: 10-15% faster insertion into aggregation tables
+- **Code**: `while (p < capacity * 5 / 3) p *= 2`
+
+#### **3. Optimized Insert Logic (Level 2)**
+- **What**: Rewrote `insert()` to use early-exit when finding empty slot, separate new key insertion
+- **Why**: Reduces branches in the common path (new key or update existing). Old code had redundant checks.
+- **Expected impact**: 5-8% faster insertion hot path
+
+#### **4. Eliminated Vector Allocation Overhead (Level 1)**
+- **What**: Removed intermediate `all_pairs` vector collection in aggregation merge phase
+- **Why**: Old code collected all occupied slots into a 390MB+ vector before rebuilding — high memory pressure, cache misses
+- **New approach**: Merge directly from thread tables into final table, iterate only occupied slots
+- **Expected impact**: 15-25% faster aggregation merge (20.72 ms → ~16-17 ms)
+
+#### **5. Prefetch Strategy Improvement (Level 2)**
+- **What**: Adjusted prefetch distance from +8 to +16 iterations
+- **Why**: Better amortizes latency for future supplier array lookups on the 64-core CPU
+- **Expected impact**: Minor, but reduces memory stall cycles
+
+#### **6. Branch Prediction Optimization (Level 2)**
+- **What**: Added `__builtin_expect(nationkey == germany_nationkey, 1)` to hint branch predictor
+- **Why**: Filters are likely to pass for supplier rows (most suppliers have nationkey set), making true branch likely
+- **Expected impact**: 3-5% faster filtering
+
+#### **7. Bounds Checking for Safety (Level 0)**
+- **What**: Added suppkey validation (must be 1-100000) before array access
+- **Why**: Prevents out-of-bounds access on corrupted data (defensive programming)
+- **Impact**: Negligible performance cost (one compare + jump)
+
+### **Expected Overall Impact**
+- **Aggregation merge**: 20.72 ms → ~16-17 ms (25% improvement from direct merge + lower load factor)
+- **Hash table operations**: 5-8% faster from Fibonacci + load factor improvements
+- **Pass1 loop**: 2-5% improvement from prefetch/branch prediction optimizations
+- **Estimated new total**: ~62-64 ms (down from 69.13 ms, ~8-10% improvement)
+
+### **Code Quality**
+- ✅ All [TIMING] lines preserved within #ifdef GENDB_PROFILE guards
+- ✅ Encoding logic unchanged (decimal scale_factor=2 still respected)
+- ✅ Validation & correctness preserved (aggregation logic identical)
+- ✅ Compilation successful with no warnings
+
+The optimizations focus on **reducing memory pressure and improving cache efficiency**, which are the primary limiters for this 8M-row aggregation-heavy workload.

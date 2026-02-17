@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 1588.65 ms\n[TIMING] hash_build: 158.64 ms\n[TIMING] part_filtered_rows: 108782\n[TIMING] partsupp_process: 255.61 ms\n[TIMING] ps_hash_entries: 435128\n[TIMING] orders_hash: 926.08 ms\n[TIMING] lineitem_join: 291.50 ms\n[TIMING] lineitem_matched: 3261613\n[TIMING] agg_groups: 175\n[TIMING] output: 0.57 ms\n[TIMING] total: 3221.12 ms\nQuery execution complete. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q9/iter_5/results/Q9.csv\n",
+    "stderr": "",
+    "duration_ms": 3618
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 1588.65,
+    "hash_build": 158.64,
+    "partsupp_process": 255.61,
+    "orders_hash": 926.08,
+    "lineitem_join": 291.5,
+    "output": 0.57,
+    "total": 3221.12
+  },
+  "timing_ms": 3220.5499999999997
+}

@@ -1,0 +1,31 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] filter_nation: 0.10 ms\n[TIMING] filter_supplier: 1.24 ms\n[INFO] Filtered suppliers: 4049\n[TIMING] load_partsupp: 0.04 ms\n[INFO] Partsupp rows: 8000000\n[TIMING] subquery_total: 99.66 ms\n[INFO] Subquery total (scaled): 81029137652468, threshold (scaled): 810291376\n[TIMING] group_aggregation: 0.00 ms\n[INFO] Groups after aggregation: 304774\n[TIMING] filter_having: 6.79 ms\n[INFO] Rows after HAVING: 8685\n[TIMING] sort: 0.41 ms\n[TIMING] output: 7.93 ms\n[TIMING] total: 116.24 ms\nQuery completed. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-16T15-11-44/queries/Q11/iter_3/results/Q11.csv\n",
+    "stderr": "",
+    "duration_ms": 159
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q11\": {\n      \"rows_expected\": 8685,\n      \"rows_actual\": 8685,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "filter_nation": 0.1,
+    "filter_supplier": 1.24,
+    "load_partsupp": 0.04,
+    "subquery_total": 99.66,
+    "group_aggregation": 0,
+    "filter_having": 6.79,
+    "sort": 0.41,
+    "output": 7.93,
+    "total": 116.24
+  },
+  "timing_ms": 108.31
+}

@@ -1,0 +1,37 @@
+Perfect! Now let me write a summary of the optimization made:
+
+## Optimization Summary for Q4 Iteration 1
+
+### Bottleneck Analysis
+- **Previous bottleneck**: `semi_join_build: 1491.97 ms` (99% of total execution time)
+- **Root cause**: Using `std::unordered_set` for hash set construction is inefficient due to:
+  - Poor cache locality (pointer chasing through bucket chains)
+  - High memory overhead (~80 bytes per entry vs ~4 bytes for open addressing)
+  - Expensive rehashing on load factor threshold
+
+### Optimization Applied
+
+**1. Replaced `std::unordered_set` with `FastHashSet` (open-addressing hash table)**
+- Custom `FastHashSet` class using linear probing
+- Power-of-2 sizing for O(1) modulo via bitwise AND
+- Better hash function: Murmur-inspired `((uint64_t)key * 2654435761U) >> 32`
+- Memory footprint: ~4 bytes per entry (single int32_t array) vs ~80 bytes for unordered_set
+
+**2. Key improvements in `FastHashSet`**:
+- Cache-friendly linear probing (contiguous memory access)
+- No dynamic allocation of buckets (pre-allocated single vector)
+- Avoids STL overhead
+
+### Expected Impact
+- **Hash set insertion**: 2-3x faster due to better cache locality and eliminated pointer chasing
+- **Overall semi-join_build**: Should reduce from ~1492ms to ~500-750ms (targeted 500ms is close to GenDB baseline)
+- **Total query time**: Expected to drop from ~1505ms to ~700-900ms
+
+### Code Changes
+- Modified `q4.cpp` with new `FastHashSet` class
+- Updated semi-join build to use `FastHashSet` instead of `std::unordered_set`
+- Updated probe code to use `contains()` method
+- All `[TIMING]` annotations preserved within `#ifdef GENDB_PROFILE` guards
+- Encoding logic unchanged
+
+The optimization targets **plan-level efficiency** by keeping the same logical structure but using a dramatically more efficient data structure for the hash table construction phase, which was consuming 99% of execution time.
