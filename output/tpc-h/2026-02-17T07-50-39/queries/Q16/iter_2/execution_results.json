@@ -1,0 +1,68 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q16/iter_2/q16.cpp: In function ‘std::vector<std::__cxx11::basic_string<char> > load_string_column(const string&, size_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q16/iter_2/q16.cpp:100:19: warning: comparison of integer expressions of different signedness: ‘size_t’ {aka ‘long unsigned int’} and ‘__off_t’ {aka ‘long int’} [-Wsign-compare]\n  100 |     while (offset < sb.st_size) {\n      |            ~~~~~~~^~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q16/iter_2/q16.cpp:105:26: warning: comparison of integer expressions of different signedness: ‘size_t’ {aka ‘long unsigned int’} and ‘__off_t’ {aka ‘long int’} [-Wsign-compare]\n  105 |         if (offset + len > sb.st_size) break;\n      |             ~~~~~~~~~~~~~^~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] anti_join_build: 15.82 ms\n[TIMING] scan_filter_part: 324.10 ms\n[TIMING] join: 4802.13 ms\n[TIMING] sort: 69.24 ms\n[TIMING] total: 5211.37 ms\n[TIMING] output: 5.58 ms\nQ16 complete. Results: 27840 rows\n",
+    "stderr": "",
+    "duration_ms": 5755
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q16\": {\n      \"rows_expected\": 27840,\n      \"rows_actual\": 27840,\n      \"match\": false,\n      \"error\": \"17 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"supplier_cnt\": {\n          \"category\": \"exact_count\",\n          \"failure_count\": 17,\n          \"samples\": [\n            {\n              \"expected\": \"36\",\n              \"actual\": \"35\",\n              \"abs_diff\": 1.0,\n              \"rel_diff_pct\": 2.7778,\n              \"row\": 860\n            },\n            {\n              \"expected\": \"48\",\n              \"actual\": \"47\",\n              \"abs_diff\": 1.0,\n              \"rel_diff_pct\": 2.0833,\n              \"row\": 1262\n            },\n            {\n              \"expected\": \"52\",\n              \"actual\": \"51\",\n              \"abs_diff\": 1.0,\n              \"rel_diff_pct\": 1.9231,\n              \"row\": 1464\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q16": {
+          "rows_expected": 27840,
+          "rows_actual": 27840,
+          "match": false,
+          "error": "17 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "supplier_cnt": {
+              "category": "exact_count",
+              "failure_count": 17,
+              "samples": [
+                {
+                  "expected": "36",
+                  "actual": "35",
+                  "abs_diff": 1,
+                  "rel_diff_pct": 2.7778,
+                  "row": 860
+                },
+                {
+                  "expected": "48",
+                  "actual": "47",
+                  "abs_diff": 1,
+                  "rel_diff_pct": 2.0833,
+                  "row": 1262
+                },
+                {
+                  "expected": "52",
+                  "actual": "51",
+                  "abs_diff": 1,
+                  "rel_diff_pct": 1.9231,
+                  "row": 1464
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "anti_join_build": 15.82,
+    "scan_filter_part": 324.1,
+    "join": 4802.13,
+    "sort": 69.24,
+    "total": 5211.37,
+    "output": 5.58
+  },
+  "timing_ms": 5205.79
+}

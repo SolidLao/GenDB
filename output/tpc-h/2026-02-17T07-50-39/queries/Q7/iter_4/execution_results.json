@@ -1,0 +1,72 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 12.13 ms\n[TIMING] zone_map_setup: 0.01 ms\n[TIMING] scan_filter_join: 36.41 ms\n[TIMING] aggregation: 0.00 ms\n[TIMING] sort: 0.30 ms\n[TIMING] total: 49.10 ms\n[TIMING] output: 0.20 ms\nQ7 completed: 4 rows\n",
+    "stderr": "",
+    "duration_ms": 74
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q7\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"4 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"521960141.7003\",\n              \"actual\": \"133317544.90\",\n              \"abs_diff\": 388642596.8,\n              \"rel_diff_pct\": 74.4583,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"524796110.3842\",\n              \"actual\": \"135326459.94\",\n              \"abs_diff\": 389469650.44,\n              \"rel_diff_pct\": 74.2135,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"542199700.0546\",\n              \"actual\": \"140088580.75\",\n              \"abs_diff\": 402111119.3,\n              \"rel_diff_pct\": 74.1629,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q7": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "4 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "521960141.7003",
+                  "actual": "133317544.90",
+                  "abs_diff": 388642596.8,
+                  "rel_diff_pct": 74.4583,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "524796110.3842",
+                  "actual": "135326459.94",
+                  "abs_diff": 389469650.44,
+                  "rel_diff_pct": 74.2135,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "542199700.0546",
+                  "actual": "140088580.75",
+                  "abs_diff": 402111119.3,
+                  "rel_diff_pct": 74.1629,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_data": 12.13,
+    "zone_map_setup": 0.01,
+    "scan_filter_join": 36.41,
+    "aggregation": 0,
+    "sort": 0.3,
+    "total": 49.1,
+    "output": 0.2
+  },
+  "timing_ms": 48.9
+}

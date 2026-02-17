@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 573.94 ms\n[TIMING] zone_map_setup: 0.01 ms\n[TIMING] scan_filter_join: 117576.83 ms\n[TIMING] aggregation: 0.00 ms\n[TIMING] sort: 27.36 ms\n[TIMING] total: 118178.39 ms\n[TIMING] output: 0.18 ms\nQ7 completed: 4 rows\n",
+    "stderr": "",
+    "duration_ms": 118200
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q7\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_data": 573.94,
+    "zone_map_setup": 0.01,
+    "scan_filter_join": 117576.83,
+    "aggregation": 0,
+    "sort": 27.36,
+    "total": 118178.39,
+    "output": 0.18
+  },
+  "timing_ms": 118178.21
+}

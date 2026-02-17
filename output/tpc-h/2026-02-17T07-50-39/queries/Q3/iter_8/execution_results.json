@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 0.22 ms\n[TIMING] scan_filter_customer: 31.00 ms (300276 filtered)\n[TIMING] scan_filter_join_orders: 90.48 ms (1461923 filtered)\n[TIMING] scan_filter_join_aggregate: 73.81 ms (302114 matches)\n[TIMING] sort: 7.09 ms\n[TIMING] total: 202.66 ms\n[TIMING] output: 0.16 ms\n",
+    "stderr": "",
+    "duration_ms": 232
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 0.22,
+    "scan_filter_customer": 31,
+    "scan_filter_join_orders": 90.48,
+    "scan_filter_join_aggregate": 73.81,
+    "sort": 7.09,
+    "total": 202.66,
+    "output": 0.16
+  },
+  "timing_ms": 202.5
+}

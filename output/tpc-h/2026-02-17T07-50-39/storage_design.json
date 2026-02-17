@@ -1,0 +1,172 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "tpch_sf10.gendb"
+  },
+  "tables": {
+    "lineitem": {
+      "columns": [
+        {"name": "l_orderkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "l_partkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "l_suppkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "l_linenumber", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "l_quantity", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "l_extendedprice", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "l_discount", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "l_tax", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "l_returnflag", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "l_linestatus", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "l_shipdate", "cpp_type": "int32_t", "semantic_type": "DATE", "encoding": "none"},
+        {"name": "l_commitdate", "cpp_type": "int32_t", "semantic_type": "DATE", "encoding": "none"},
+        {"name": "l_receiptdate", "cpp_type": "int32_t", "semantic_type": "DATE", "encoding": "none"},
+        {"name": "l_shipinstruct", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "l_shipmode", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "l_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "lineitem.tbl", "delimiter": "|", "column_order": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]},
+      "sort_order": ["l_shipdate"],
+      "block_size": 100000,
+      "estimated_rows": "59986052",
+      "indexes": [
+        {"name": "lineitem_shipdate_zone", "type": "zone_map", "columns": ["l_shipdate"]},
+        {"name": "lineitem_orderkey_hash", "type": "hash_multi_value", "columns": ["l_orderkey"]},
+        {"name": "lineitem_partkey_suppkey_hash", "type": "hash_multi_value", "columns": ["l_partkey", "l_suppkey"]}
+      ]
+    },
+    "orders": {
+      "columns": [
+        {"name": "o_orderkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "o_custkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "o_orderstatus", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "o_totalprice", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "o_orderdate", "cpp_type": "int32_t", "semantic_type": "DATE", "encoding": "none"},
+        {"name": "o_orderpriority", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "o_clerk", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "o_shippriority", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "o_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "orders.tbl", "delimiter": "|", "column_order": [0,1,2,3,4,5,6,7,8]},
+      "sort_order": ["o_orderdate"],
+      "block_size": 100000,
+      "estimated_rows": "15000000",
+      "indexes": [
+        {"name": "orders_orderdate_zone", "type": "zone_map", "columns": ["o_orderdate"]},
+        {"name": "orders_orderkey_hash", "type": "hash_single", "columns": ["o_orderkey"]},
+        {"name": "orders_custkey_hash", "type": "hash_multi_value", "columns": ["o_custkey"]}
+      ]
+    },
+    "customer": {
+      "columns": [
+        {"name": "c_custkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "c_name", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "c_address", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "c_nationkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "c_phone", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "c_acctbal", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "c_mktsegment", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "c_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "customer.tbl", "delimiter": "|", "column_order": [0,1,2,3,4,5,6,7]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "1500000",
+      "indexes": [
+        {"name": "customer_custkey_hash", "type": "hash_single", "columns": ["c_custkey"]}
+      ]
+    },
+    "part": {
+      "columns": [
+        {"name": "p_partkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "p_name", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "p_mfgr", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "p_brand", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "p_type", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "p_size", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "p_container", "cpp_type": "int32_t", "semantic_type": "STRING", "encoding": "dictionary"},
+        {"name": "p_retailprice", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "p_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "part.tbl", "delimiter": "|", "column_order": [0,1,2,3,4,5,6,7,8]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "2000000",
+      "indexes": [
+        {"name": "part_partkey_hash", "type": "hash_single", "columns": ["p_partkey"]}
+      ]
+    },
+    "partsupp": {
+      "columns": [
+        {"name": "ps_partkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "ps_suppkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "ps_availqty", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "ps_supplycost", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "ps_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "partsupp.tbl", "delimiter": "|", "column_order": [0,1,2,3,4]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "8000000",
+      "indexes": [
+        {"name": "partsupp_partkey_suppkey_hash", "type": "hash_single", "columns": ["ps_partkey", "ps_suppkey"]}
+      ]
+    },
+    "supplier": {
+      "columns": [
+        {"name": "s_suppkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "s_name", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "s_address", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "s_nationkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "s_phone", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "s_acctbal", "cpp_type": "int64_t", "semantic_type": "DECIMAL", "encoding": "none", "scale_factor": "100"},
+        {"name": "s_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "supplier.tbl", "delimiter": "|", "column_order": [0,1,2,3,4,5,6]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "100000",
+      "indexes": [
+        {"name": "supplier_suppkey_hash", "type": "hash_single", "columns": ["s_suppkey"]}
+      ]
+    },
+    "nation": {
+      "columns": [
+        {"name": "n_nationkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "n_name", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "n_regionkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "n_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "nation.tbl", "delimiter": "|", "column_order": [0,1,2,3]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "25",
+      "indexes": []
+    },
+    "region": {
+      "columns": [
+        {"name": "r_regionkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "none"},
+        {"name": "r_name", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"},
+        {"name": "r_comment", "cpp_type": "std::string", "semantic_type": "STRING", "encoding": "none"}
+      ],
+      "file_format": {"filename": "region.tbl", "delimiter": "|", "column_order": [0,1,2]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "5",
+      "indexes": []
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DECIMAL": "int64_t",
+    "DATE": "int32_t",
+    "CHAR": "std::string",
+    "VARCHAR": "std::string"
+  },
+  "date_encoding": "days_since_epoch_1970",
+  "hardware_config": {
+    "cpu_cores": "64",
+    "l3_cache_mb": "44",
+    "disk_type": "hdd",
+    "total_memory_gb": "376"
+  },
+  "summary": "Binary columnar storage with zone maps on date columns, hash indexes on join keys, sorted by l_shipdate and o_orderdate for range filtering. Dictionary encoding for low-cardinality strings."
+}

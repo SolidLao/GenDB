@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 707.44 ms\n[TIMING] zone_map_setup: 0.01 ms\n[TIMING] scan_filter_join: 35.93 ms\n[TIMING] aggregation: 0.01 ms\n[TIMING] sort: 0.01 ms\n[TIMING] total: 743.65 ms\n[TIMING] output: 1.17 ms\nQ7 completed: 5 rows\n",
+    "stderr": "",
+    "duration_ms": 772
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q7\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 5,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 4, got 5\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q7": {
+          "rows_expected": 4,
+          "rows_actual": 5,
+          "match": false,
+          "error": "row count mismatch: expected 4, got 5"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_data": 707.44,
+    "zone_map_setup": 0.01,
+    "scan_filter_join": 35.93,
+    "aggregation": 0.01,
+    "sort": 0.01,
+    "total": 743.65,
+    "output": 1.17
+  },
+  "timing_ms": 742.48
+}

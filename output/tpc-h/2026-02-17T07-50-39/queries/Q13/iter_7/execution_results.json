@@ -1,0 +1,41 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_customer: 0.04 ms\n[TIMING] load_orders: 52.59 ms\n[TIMING] build_index: 200.85 ms\n[TIMING] aggregate: 98.18 ms\n[TIMING] distribute: 39.22 ms\n[TIMING] sort: 0.00 ms\n[TIMING] total: 390.94 ms\n[TIMING] output: 0.19 ms\n",
+    "stderr": "",
+    "duration_ms": 435
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q13\": {\n      \"rows_expected\": 46,\n      \"rows_actual\": 6,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 46, got 6\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q13": {
+          "rows_expected": 46,
+          "rows_actual": 6,
+          "match": false,
+          "error": "row count mismatch: expected 46, got 6"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_customer": 0.04,
+    "load_orders": 52.59,
+    "build_index": 200.85,
+    "aggregate": 98.18,
+    "distribute": 39.22,
+    "sort": 0,
+    "total": 390.94,
+    "output": 0.19
+  },
+  "timing_ms": 390.75
+}

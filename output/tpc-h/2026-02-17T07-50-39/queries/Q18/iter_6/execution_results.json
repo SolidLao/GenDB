@@ -1,0 +1,193 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp: In function ‘void run_q18(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp:171:14: warning: unused variable ‘li_idx_num_unique’ [-Wunused-variable]\n  171 |     uint32_t li_idx_num_unique = index_header[0];\n      |              ^~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp:304:14: warning: unused variable ‘cust_idx_num_entries’ [-Wunused-variable]\n  304 |     uint32_t cust_idx_num_entries = cust_index_header[0];\n      |              ^~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp: In function ‘std::string epoch_to_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp:139:43: warning: ‘%02d’ directive output may be truncated writing between 2 and 11 bytes into a region of size between 2 and 8 [-Wformat-truncation=]\n  139 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day_of_month);\n      |                                           ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp:139:32: note: directive argument in the range [-2147483647, 2147483647]\n  139 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day_of_month);\n      |                                ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q18/iter_6/q18.cpp:27:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 16\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 0.06 ms\n[TIMING] subquery_aggregation: 99.93 ms (found 624 qualifying orderkeys)\n[TIMING] filter_orders: 4.52 ms (found 624 qualifying orders)\n[TIMING] load_customer: 0.03 ms\n[TIMING] join_aggregation: 1223.28 ms (aggregated 624 groups)\n[TIMING] sort: 0.07 ms\n[TIMING] total: 1327.96 ms\n[TIMING] output: 0.27 ms\n",
+    "stderr": "",
+    "duration_ms": 1370
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": false,\n      \"error\": \"96 row(s) differ across 6 column(s)\",\n      \"column_failures\": {\n        \"c_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 96,\n          \"samples\": [\n            {\n              \"expected\": \"Customer#000008782\",\n              \"actual\": \"Customer#000018472\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"Customer#000015127\",\n              \"actual\": \"Customer#000059597\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"Customer#000018472\",\n              \"actual\": \"Customer#000070007\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_custkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 96,\n          \"samples\": [\n            {\n              \"expected\": \"8782\",\n              \"actual\": \"18472\",\n              \"abs_diff\": 9690.0,\n              \"rel_diff_pct\": 110.3393,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"15127\",\n              \"actual\": \"59597\",\n              \"abs_diff\": 44470.0,\n              \"rel_diff_pct\": 293.9777,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"18472\",\n              \"actual\": \"70007\",\n              \"abs_diff\": 51535.0,\n              \"rel_diff_pct\": 278.9898,\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_orderkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 96,\n          \"samples\": [\n            {\n              \"expected\": \"29294434\",\n              \"actual\": \"22291718\",\n              \"abs_diff\": 7002716.0,\n              \"rel_diff_pct\": 23.9046,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"34551296\",\n              \"actual\": \"18871616\",\n              \"abs_diff\": 15679680.0,\n              \"rel_diff_pct\": 45.3809,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"22291718\",\n              \"actual\": \"6899299\",\n              \"abs_diff\": 15392419.0,\n              \"rel_diff_pct\": 69.0499,\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_orderdate\": {\n          \"category\": \"exact\",\n          \"failure_count\": 96,\n          \"samples\": [\n            {\n              \"expected\": \"1993-01-05\",\n              \"actual\": \"1992-09-03\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"1998-04-12\",\n              \"actual\": \"1992-07-31\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1992-09-03\",\n              \"actual\": \"1995-06-09\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_totalprice\": {\n          \"category\": \"exact\",\n          \"failure_count\": 96,\n          \"samples\": [\n            {\n              \"expected\": \"518140.85\",\n              \"actual\": \"500694.69\",\n              \"abs_diff\": 17446.159999999974,\n              \"rel_diff_pct\": 3.3671,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"508442.04\",\n              \"actual\": \"443986.59\",\n              \"abs_diff\": 64455.44999999995,\n              \"rel_diff_pct\": 12.677,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"500694.69\",\n              \"actual\": \"406777.26\",\n              \"abs_diff\": 93917.43,\n              \"rel_diff_pct\": 18.7574,\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_qty\": {\n          \"category\": \"exact_sum_qty\",\n          \"failure_count\": 92,\n          \"samples\": [\n            {\n              \"expected\": \"322.00\",\n              \"actual\": \"306.00\",\n              \"abs_diff\": 16.0,\n              \"rel_diff_pct\": 4.9689,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"306.00\",\n              \"actual\": \"304.00\",\n              \"abs_diff\": 2.0,\n              \"rel_diff_pct\": 0.6536,\n              \"row\": 2\n            },\n            {\n              \"expected\": \"303.00\",\n              \"actual\": \"306.00\",\n              \"abs_diff\": 3.0,\n              \"rel_diff_pct\": 0.9901,\n              \"row\": 3\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q18": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "96 row(s) differ across 6 column(s)",
+          "column_failures": {
+            "c_name": {
+              "category": "exact",
+              "failure_count": 96,
+              "samples": [
+                {
+                  "expected": "Customer#000008782",
+                  "actual": "Customer#000018472",
+                  "row": 0
+                },
+                {
+                  "expected": "Customer#000015127",
+                  "actual": "Customer#000059597",
+                  "row": 1
+                },
+                {
+                  "expected": "Customer#000018472",
+                  "actual": "Customer#000070007",
+                  "row": 2
+                }
+              ]
+            },
+            "c_custkey": {
+              "category": "exact",
+              "failure_count": 96,
+              "samples": [
+                {
+                  "expected": "8782",
+                  "actual": "18472",
+                  "abs_diff": 9690,
+                  "rel_diff_pct": 110.3393,
+                  "row": 0
+                },
+                {
+                  "expected": "15127",
+                  "actual": "59597",
+                  "abs_diff": 44470,
+                  "rel_diff_pct": 293.9777,
+                  "row": 1
+                },
+                {
+                  "expected": "18472",
+                  "actual": "70007",
+                  "abs_diff": 51535,
+                  "rel_diff_pct": 278.9898,
+                  "row": 2
+                }
+              ]
+            },
+            "o_orderkey": {
+              "category": "exact",
+              "failure_count": 96,
+              "samples": [
+                {
+                  "expected": "29294434",
+                  "actual": "22291718",
+                  "abs_diff": 7002716,
+                  "rel_diff_pct": 23.9046,
+                  "row": 0
+                },
+                {
+                  "expected": "34551296",
+                  "actual": "18871616",
+                  "abs_diff": 15679680,
+                  "rel_diff_pct": 45.3809,
+                  "row": 1
+                },
+                {
+                  "expected": "22291718",
+                  "actual": "6899299",
+                  "abs_diff": 15392419,
+                  "rel_diff_pct": 69.0499,
+                  "row": 2
+                }
+              ]
+            },
+            "o_orderdate": {
+              "category": "exact",
+              "failure_count": 96,
+              "samples": [
+                {
+                  "expected": "1993-01-05",
+                  "actual": "1992-09-03",
+                  "row": 0
+                },
+                {
+                  "expected": "1998-04-12",
+                  "actual": "1992-07-31",
+                  "row": 1
+                },
+                {
+                  "expected": "1992-09-03",
+                  "actual": "1995-06-09",
+                  "row": 2
+                }
+              ]
+            },
+            "o_totalprice": {
+              "category": "exact",
+              "failure_count": 96,
+              "samples": [
+                {
+                  "expected": "518140.85",
+                  "actual": "500694.69",
+                  "abs_diff": 17446.159999999974,
+                  "rel_diff_pct": 3.3671,
+                  "row": 0
+                },
+                {
+                  "expected": "508442.04",
+                  "actual": "443986.59",
+                  "abs_diff": 64455.44999999995,
+                  "rel_diff_pct": 12.677,
+                  "row": 1
+                },
+                {
+                  "expected": "500694.69",
+                  "actual": "406777.26",
+                  "abs_diff": 93917.43,
+                  "rel_diff_pct": 18.7574,
+                  "row": 2
+                }
+              ]
+            },
+            "sum_qty": {
+              "category": "exact_sum_qty",
+              "failure_count": 92,
+              "samples": [
+                {
+                  "expected": "322.00",
+                  "actual": "306.00",
+                  "abs_diff": 16,
+                  "rel_diff_pct": 4.9689,
+                  "row": 0
+                },
+                {
+                  "expected": "306.00",
+                  "actual": "304.00",
+                  "abs_diff": 2,
+                  "rel_diff_pct": 0.6536,
+                  "row": 2
+                },
+                {
+                  "expected": "303.00",
+                  "actual": "306.00",
+                  "abs_diff": 3,
+                  "rel_diff_pct": 0.9901,
+                  "row": 3
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_data": 0.06,
+    "subquery_aggregation": 99.93,
+    "filter_orders": 4.52,
+    "load_customer": 0.03,
+    "join_aggregation": 1223.28,
+    "sort": 0.07,
+    "total": 1327.96,
+    "output": 0.27
+  },
+  "timing_ms": 1327.69
+}

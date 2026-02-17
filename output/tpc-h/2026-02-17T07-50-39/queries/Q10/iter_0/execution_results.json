@@ -1,0 +1,64 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp: In function ‘std::vector<ZoneMapEntry> load_zone_map(const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp:246:9: warning: ignoring return value of ‘ssize_t read(int, void*, size_t)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]\n  246 |     read(fd, zones.data(), num_entries * sizeof(ZoneMapEntry));\n      |     ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp:109:38: warning: ‘%02d’ directive output may be truncated writing 2 bytes into a region of size between 1 and 7 [-Wformat-truncation=]\n  109 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day);\n      |                                      ^~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp:109:32: note: directive argument in the range [1, 13]\n  109 |     snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", year, month, day);\n      |                                ^~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp:109:32: note: directive argument in the range [-2147483647, 366]\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q10/iter_0/q10.cpp:39:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 11 and 26 bytes into a destination of size 12\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_nation: 0.09 ms\n[TIMING] scan_filter_orders: 118.33 ms (filtered to 573157 rows)\n[TIMING] load_customer: 0.04 ms\n[TIMING] load_lineitem: 0.08 ms (returnflag 'R' code = 1)\n[TIMING] join_aggregate: 2097.82 ms (groups: 381105)\n[TIMING] decode_strings: 940.35 ms\n[TIMING] sort: 182.47 ms\n[TIMING] total: 3339.25 ms\n[TIMING] output: 50.55 ms\n",
+    "stderr": "",
+    "duration_ms": 3827
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q10\": {\n      \"rows_expected\": 20,\n      \"rows_actual\": 20,\n      \"match\": false,\n      \"error\": \"2 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"c_acctbal\": {\n          \"category\": \"exact\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"-276.92\",\n              \"actual\": \"-275.08\",\n              \"abs_diff\": 1.8400000000000318,\n              \"rel_diff_pct\": 0.6645,\n              \"row\": 12\n            },\n            {\n              \"expected\": \"-380.30\",\n              \"actual\": \"-379.70\",\n              \"abs_diff\": 0.6000000000000227,\n              \"rel_diff_pct\": 0.1578,\n              \"row\": 18\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q10": {
+          "rows_expected": 20,
+          "rows_actual": 20,
+          "match": false,
+          "error": "2 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "c_acctbal": {
+              "category": "exact",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "-276.92",
+                  "actual": "-275.08",
+                  "abs_diff": 1.8400000000000318,
+                  "rel_diff_pct": 0.6645,
+                  "row": 12
+                },
+                {
+                  "expected": "-380.30",
+                  "actual": "-379.70",
+                  "abs_diff": 0.6000000000000227,
+                  "rel_diff_pct": 0.1578,
+                  "row": 18
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_nation": 0.09,
+    "scan_filter_orders": 118.33,
+    "load_customer": 0.04,
+    "load_lineitem": 0.08,
+    "join_aggregate": 2097.82,
+    "decode_strings": 940.35,
+    "sort": 182.47,
+    "total": 3339.25,
+    "output": 50.55
+  },
+  "timing_ms": 3288.7
+}

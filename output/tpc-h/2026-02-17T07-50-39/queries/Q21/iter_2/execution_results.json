@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q21/iter_2/q21.cpp: In function ‘HashMultiIndex load_hash_multi_index(const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T07-50-39/queries/Q21/iter_2/q21.cpp:231:14: warning: unused variable ‘pos_count’ [-Wunused-variable]\n  231 |     uint32_t pos_count = after_entries[0];\n      |              ^~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] orders_filter: 1392.21 ms\n[TIMING] subquery_decorrelation: 157562.66 ms\n[TIMING] join_aggregation: 28246.47 ms\n[TIMING] sort: 0.95 ms\n[TIMING] total: 187203.92 ms\n[TIMING] output: 0.17 ms\n",
+    "stderr": "",
+    "duration_ms": 211273
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q21\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "orders_filter": 1392.21,
+    "subquery_decorrelation": 157562.66,
+    "join_aggregation": 28246.47,
+    "sort": 0.95,
+    "total": 187203.92,
+    "output": 0.17
+  },
+  "timing_ms": 187203.75
+}
