@@ -1,16 +1,17 @@
 /**
- * GenDB Orchestrator v20
+ * GenDB Orchestrator v21
  *
- * Two-phase agentic system with true per-query pipeline parallelism:
+ * Three-phase agentic system with 6 agents:
  *   Phase 1 (Offline Data Storage Optimization):
- *     Workload Analyzer → Storage/Index Designer (design + ingest + build_indexes + per-query guides)
+ *     Workload Analyzer → Storage/Index Designer → DBA Stage A (predict risks, extend utilities)
  *   Phase 2 (Online Per-Query Pipeline-Parallel Optimization):
- *     Each query runs independently: CodeGen → Execute → [Optimize → Execute]* → done
+ *     Each query runs independently: CodeGen → Inspector → [fix] → Execute → [Optimize → Inspector → Execute]* → done
  *     LLM calls gated by Semaphore, execution serialized via ExecutionQueue.
+ *   Phase 3 (Post-Run):
+ *     DBA Stage B — Retrospective analysis, proposals for improvement
  *
- * v20 changes: True per-query pipelining (no batch boundaries), per-query benchmark context
- * (replaces full JSON dump), stall detection with restructure override, knowledge base
- * technique files, anti-pattern scan in optimizer, getBestBaselineTime fix, maxIterations=10.
+ * v21 changes: DBA agent (pre-gen risk analysis + post-run retrospective), Code Inspector
+ * (experience-based code review), utility library (-I flag), experience base, RAII timing.
  *
  * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue,
  * Mutex on run.json, PipelineProgressTracker, Iter0Barrier for storage checkpoint.
@@ -37,11 +38,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const KNOWLEDGE_BASE_PATH = resolve(__dirname, "knowledge");
 const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
+const UTILS_PATH = resolve(__dirname, "utils");
+const EXPERIENCE_BASE_PATH = resolve(__dirname, "knowledge", "experience.md");
 import { defaults } from "./gendb.config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
 import { config as queryOptimizerConfig } from "./agents/query-optimizer/index.mjs";
 import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
+import { config as codeInspectorConfig } from "./agents/code-inspector/index.mjs";
+import { config as dbaConfig } from "./agents/dba/index.mjs";
 import {
   createRunId,
   getWorkloadName,
@@ -97,6 +102,10 @@ function parseArgs(argv) {
 function getAgentModel(agentConfigName, args) {
   if (args.modelOverride) return args.modelOverride;
   return defaults.agentModels[agentConfigName] || args.model;
+}
+
+function getAgentTimeout(agentConfigName) {
+  return defaults.agentTimeoutOverrides?.[agentConfigName] || defaults.agentTimeoutMs;
 }
 
 /**
@@ -177,7 +186,8 @@ function formatDuration(ms) {
  * Invoke a Claude Code subprocess with the given system prompt and user prompt.
  * Returns { result, durationMs, tokens, costUsd }.
  */
-function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) {
+function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs }) {
+  const timeout = timeoutMs || defaults.agentTimeoutMs;
   return new Promise((resolveP, rejectP) => {
     const args = [
       "--print",
@@ -190,16 +200,26 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     args.push(userPrompt);
 
     console.log(`\n[${"=".repeat(60)}]`);
-    console.log(`[Orchestrator] Spawning agent: ${name}`);
+    console.log(`[Orchestrator] Spawning agent: ${name} (timeout: ${formatDuration(timeout)})`);
     console.log(`[${"=".repeat(60)}]\n`);
 
     const startTime = Date.now();
+    let killed = false;
 
     const child = spawn("claude", args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
     });
+
+    const timer = setTimeout(() => {
+      killed = true;
+      console.error(`\n[Orchestrator] Agent "${name}" timed out after ${formatDuration(timeout)}, killing...`);
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch {}
+      }, 5000);
+    }, timeout);
 
     let stdout = "";
     let stderr = "";
@@ -208,8 +228,11 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
     child.on("close", (code, signal) => {
+      clearTimeout(timer);
       const durationMs = Date.now() - startTime;
-      if (code !== 0) {
+      if (killed) {
+        rejectP(new Error(`Agent "${name}" timed out after ${formatDuration(timeout)}`));
+      } else if (code !== 0) {
         const exitInfo = signal ? `signal ${signal}` : `exit ${code}`;
         console.error(`\n[Orchestrator] Agent "${name}" exited with ${exitInfo} (${formatDuration(durationMs)})`);
         if (stderr) console.error(`[stderr] ${stderr}`);
@@ -240,6 +263,7 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd }) 
     });
 
     child.on("error", (err) => {
+      clearTimeout(timer);
       rejectP(new Error(`Failed to spawn agent "${name}": ${err.message}`));
     });
   });
@@ -632,6 +656,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     allowedTools: storageDesignerConfig.allowedTools,
     model: getAgentModel("storage_designer", args),
     cwd: runDir,
+    timeoutMs: getAgentTimeout("storage_designer"),
   });
   recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
 
@@ -657,7 +682,54 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     meta.phase1.steps.index_building.completedAt = new Date().toISOString();
   });
 
+  // --- Phase 1 Step 3: DBA Stage A (predict risks, extend utilities) ---
+  console.log("\n[Orchestrator] === Phase 1 Step 3: DBA Stage A (Pre-Generation Risk Analysis) ===");
   await updateRunMeta(runDir, (meta) => {
+    meta.phase1.steps.dba_stage_a = { status: "running", startedAt: new Date().toISOString() };
+  });
+
+  const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
+  const dbaStageAPrompt = [
+    `Stage A: Pre-generation analysis.`,
+    ``,
+    `## Workload Analysis`,
+    `Read from: ${workloadAnalysisPath}`,
+    ``,
+    `## Storage Design`,
+    `Read from: ${storageDesignPath}`,
+    ``,
+    `## Queries`,
+    `Read from: ${args.queries}`,
+    ``,
+    `## Utility Library`,
+    `Headers at: ${UTILS_PATH}`,
+    `Files: date_utils.h, hash_utils.h, mmap_utils.h, timing_utils.h`,
+    ``,
+    `## Experience Base`,
+    `Read and update: ${EXPERIENCE_BASE_PATH}`,
+    ``,
+    `Review all queries, predict correctness and performance risks,`,
+    `extend utility library if gaps found, add workload-specific warnings to experience base.`,
+    `Compile any modified headers: g++ -c -std=c++17 -fsyntax-only <header>`,
+  ].join("\n");
+
+  try {
+    const dbaResult = await runAgent(dbaConfig.name, {
+      systemPrompt: dbaSystemPrompt,
+      userPrompt: dbaStageAPrompt,
+      allowedTools: dbaConfig.allowedTools,
+      model: getAgentModel("dba", args),
+      cwd: runDir,
+    });
+    recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+    console.log("[Orchestrator] DBA Stage A completed.");
+  } catch (err) {
+    console.error(`[Orchestrator] DBA Stage A failed (non-fatal): ${err.message}`);
+  }
+
+  await updateRunMeta(runDir, (meta) => {
+    meta.phase1.steps.dba_stage_a.status = "completed";
+    meta.phase1.steps.dba_stage_a.completedAt = new Date().toISOString();
     meta.phase1.status = "completed";
     meta.phase1.completedAt = new Date().toISOString();
   });
@@ -796,7 +868,49 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
 }
 
 // ---------------------------------------------------------------------------
-// Per-Query Full Pipeline (Code Gen → Execute → [Optimize → Execute]*)
+// Code Inspector: review generated code against experience base
+// ---------------------------------------------------------------------------
+
+async function runCodeInspection(queryId, cppPath, args, queryPhase) {
+  const inspectorSystemPrompt = await readFile(codeInspectorConfig.promptPath, "utf-8");
+  const inspectorUserPrompt = [
+    `Review the C++ query code for ${queryId}.`,
+    ``,
+    `## Code File`,
+    `Read: ${cppPath}`,
+    ``,
+    `## Experience Base`,
+    `Read: ${EXPERIENCE_BASE_PATH}`,
+    ``,
+    `Check the code against ALL entries in the experience base.`,
+    `Output your review as a JSON block with verdict and issues.`,
+  ].join("\n");
+
+  const result = await runAgent(codeInspectorConfig.name, {
+    systemPrompt: inspectorSystemPrompt,
+    userPrompt: inspectorUserPrompt,
+    allowedTools: codeInspectorConfig.allowedTools,
+    model: getAgentModel("code_inspector", args),
+    cwd: dirname(cppPath),
+  });
+  recordAgentTelemetry(queryPhase, "code_inspector", result.durationMs, result.tokens, result.costUsd);
+
+  // Parse inspection result
+  try {
+    const jsonMatch = result.result.match(/\{[\s\S]*"verdict"[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+  } catch {}
+  return { verdict: "PASS", issues: [] };
+}
+
+function hasCriticalIssues(inspection) {
+  return inspection.issues?.some(i => i.severity === "critical");
+}
+
+// ---------------------------------------------------------------------------
+// Per-Query Full Pipeline (Code Gen → Inspector → Execute → [Optimize → Inspector → Execute]*)
 // ---------------------------------------------------------------------------
 
 /**
@@ -896,8 +1010,8 @@ async function runQueryFullPipeline(
       `- Write .cpp file to: ${iterCppPath}`,
       ``,
       `## Validation Loop`,
-      `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${queryId.toLowerCase()} ${cppName}`,
-      `Run → Validate correctness (up to 2 fix attempts)`,
+      `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${queryId.toLowerCase()} ${cppName}`,
+      `Run -> Validate correctness (up to 2 fix attempts)`,
       hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
     ].join("\n");
 
@@ -927,6 +1041,37 @@ async function runQueryFullPipeline(
     }
   } finally {
     semaphore.release();
+  }
+
+  // === ITERATION 0: CODE INSPECTOR ===
+  progressTracker.update(queryId, "inspect-0");
+  console.log(`[Orchestrator] [${queryId}] Iteration 0: Code Inspector`);
+  const inspection0 = await runCodeInspection(queryId, iterCppPath, args, queryPhase);
+  if (inspection0.verdict === "NEEDS_FIX" && hasCriticalIssues(inspection0)) {
+    console.log(`[Orchestrator] [${queryId}] Inspector found critical issues, requesting fix`);
+    await semaphore.acquire();
+    try {
+      const fixPrompt = [
+        `The Code Inspector found critical issues in your generated code for ${queryId}.`,
+        `Fix the following issues in: ${iterCppPath}`,
+        ``,
+        `## Issues`,
+        JSON.stringify(inspection0.issues, null, 2),
+        ``,
+        `Use the Edit tool to fix each issue. Then recompile:`,
+        `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${queryId.toLowerCase()} ${cppName}`,
+      ].join("\n");
+      const fixResult = await runAgent(codeGeneratorConfig.name, {
+        systemPrompt: cgSystemPrompt,
+        userPrompt: fixPrompt,
+        allowedTools: codeGeneratorConfig.allowedTools,
+        model: getAgentModel("code_generator", args),
+        cwd: iterDir,
+      });
+      recordAgentTelemetry(queryPhase, "code_generator_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
+    } finally {
+      semaphore.release();
+    }
   }
 
   // === ITERATION 0: EXECUTE (enters ExecutionQueue immediately) ===
@@ -1118,7 +1263,7 @@ async function runQueryFullPipeline(
         "",
         `## Compilation`,
         `Compile (do NOT run — Executor handles validation):`,
-        `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -o ${resolve(optIterDir, queryId.toLowerCase())} ${optIterCppPath}`,
+        `  g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${resolve(optIterDir, queryId.toLowerCase())} ${optIterCppPath}`,
         `Ensure the code compiles successfully (up to 3 fix attempts).`,
       ].join("\n");
 
@@ -1134,7 +1279,38 @@ async function runQueryFullPipeline(
       semaphore.release();
     }
 
-    // --- Execute via ExecutionQueue (enters immediately after QO) ---
+    // --- Code Inspector (after optimization) ---
+    progressTracker.update(queryId, `inspect-${iteration}`);
+    console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Code Inspector`);
+    const inspectionN = await runCodeInspection(queryId, optIterCppPath, args, queryPhase);
+    if (inspectionN.verdict === "NEEDS_FIX" && hasCriticalIssues(inspectionN)) {
+      console.log(`[Orchestrator] [${queryId}] Inspector found critical issues in iteration ${iteration}, requesting fix`);
+      await semaphore.acquire();
+      try {
+        const fixPrompt = [
+          `The Code Inspector found critical issues in optimized code for ${queryId} (iteration ${iteration}).`,
+          `Fix the following issues in: ${optIterCppPath}`,
+          ``,
+          `## Issues`,
+          JSON.stringify(inspectionN.issues, null, 2),
+          ``,
+          `Use the Edit tool to fix each issue. Then recompile:`,
+          `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${resolve(optIterDir, queryId.toLowerCase())} ${optIterCppPath}`,
+        ].join("\n");
+        const fixResult = await runAgent(queryOptimizerConfig.name, {
+          systemPrompt: qoSystemPrompt,
+          userPrompt: fixPrompt,
+          allowedTools: queryOptimizerConfig.allowedTools,
+          model: getAgentModel("query_optimizer", args),
+          cwd: optIterDir,
+        });
+        recordAgentTelemetry(queryPhase, "optimizer_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
+      } finally {
+        semaphore.release();
+      }
+    }
+
+    // --- Execute via ExecutionQueue (enters immediately after QO + Inspector) ---
     progressTracker.update(queryId, `exec-${iteration}`);
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Executor (compile + run + validate)`);
     await executionQueue.requestExecution(queryId, async () => {
@@ -1208,7 +1384,7 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
   try {
     const compileOutput = await runProcess("g++", [
       "-O3", "-march=native", "-std=c++17", "-Wall", "-lpthread", "-fopenmp",
-      "-DGENDB_PROFILE",
+      "-DGENDB_PROFILE", `-I${UTILS_PATH}`,
       "-o", binaryPath, cppPath,
     ], { cwd: iterDir, timeout: 120000 });
     results.compile = { status: "pass", output: compileOutput };
@@ -1456,7 +1632,7 @@ async function assembleFinalBuild(results, runDir, args) {
   const querySources = queryTargets.map(q => `queries/${q}.cpp`);
   const makefile = [
     "CXX = g++",
-    "CXXFLAGS = -O3 -march=native -flto -std=c++17 -Wall -lpthread -fopenmp -DGENDB_LIBRARY",
+    `CXXFLAGS = -O3 -march=native -flto -std=c++17 -Wall -lpthread -fopenmp -DGENDB_LIBRARY -I${UTILS_PATH}`,
     "",
     `QUERY_SRCS = ${querySources.join(" ")}`,
     "",
@@ -1630,7 +1806,7 @@ async function main() {
     console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline v20");
+  console.log("[Orchestrator] GenDB Pipeline v21");
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
@@ -1652,6 +1828,49 @@ async function main() {
 
   // Phase 2: Online Per-Query Parallel Optimization
   await runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath);
+
+  // Phase 3: DBA Stage B (Post-Run Retrospective)
+  console.log("\n[Orchestrator] ========== PHASE 3: DBA RETROSPECTIVE ==========\n");
+  const retroDir = resolve(runDir, "retrospective");
+  await mkdir(retroDir, { recursive: true });
+
+  try {
+    const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
+    const dbaStageBPrompt = [
+      `Stage B: Post-run retrospective.`,
+      ``,
+      `## Run Directory`,
+      `${runDir}`,
+      ``,
+      `## Retrospective Output Directory`,
+      `Write to: ${retroDir}/`,
+      ``,
+      `Review all execution results (execution_results.json) and optimization histories`,
+      `(optimization_history.json) under ${resolve(runDir, "queries")}/`,
+      ``,
+      `For each query: classify as SUCCESS (correct + fast), SLOW (correct but slow),`,
+      `or FAILED (incorrect results).`,
+      ``,
+      `Write:`,
+      `1. ${resolve(retroDir, "summary.md")} — High-level findings`,
+      `2. ${resolve(retroDir, "proposals.json")} — Structured improvement proposals`,
+      ``,
+      `## Experience Base (for reference)`,
+      `${EXPERIENCE_BASE_PATH}`,
+    ].join("\n");
+
+    const dbaResult = await runAgent(dbaConfig.name, {
+      systemPrompt: dbaSystemPrompt,
+      userPrompt: dbaStageBPrompt,
+      allowedTools: dbaConfig.allowedTools,
+      model: getAgentModel("dba", args),
+      cwd: runDir,
+    });
+    recordAgentTelemetry("phase3", "dba_stage_b", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+    console.log("[Orchestrator] DBA Stage B (Retrospective) completed.");
+  } catch (err) {
+    console.error(`[Orchestrator] DBA Stage B failed (non-fatal): ${err.message}`);
+  }
 
   // Finalize
   await updateRunMeta(runDir, (meta) => {

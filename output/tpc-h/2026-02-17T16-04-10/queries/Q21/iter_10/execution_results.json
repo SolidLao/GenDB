@@ -1,0 +1,32 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q21/iter_10/q21.cpp: In function ‘std::string format_date(int32_t)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q21/iter_10/q21.cpp:200:31: warning: ‘-’ directive output may be truncated writing 1 byte into a region of size between 0 and 7 [-Wformat-truncation=]\n  200 |     snprintf(buf, 11, \"%d-%02d-%02d\", year + days_since_epoch / 365, month, day);\n      |                               ^\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /usr/include/c++/11/bits/locale_classes.h:40,\n                 from /usr/include/c++/11/bits/ios_base.h:41,\n                 from /usr/include/c++/11/ios:42,\n                 from /usr/include/c++/11/ostream:38,\n                 from /usr/include/c++/11/iostream:39,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q21/iter_10/q21.cpp:1:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:71:35: note: ‘__builtin___snprintf_chk’ output between 8 and 15 bytes into a destination of size 11\n   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   72 |                                    __glibc_objsize (__s), __fmt,\n      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   73 |                                    __va_arg_pack ());\n      |                                    ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load: 723.96 ms\n[TIMING] filter_nation: 0.01 ms\n[TIMING] filter_supplier: 0.47 ms (kept 4010 suppliers)\n[TIMING] filter_orders: 1768.90 ms (kept 7309184 orders)\n[TIMING] precompute_subqueries: 38666.87 ms (exists=12856058, excluded=34556609)\n[TIMING] scan_filter: 93.40 ms (passed 39448 rows)\n[TIMING] aggregation: 2.39 ms (4009 groups)\n[TIMING] sort: 0.87 ms\n[TIMING] output: 0.14 ms\n[TIMING] total: 41269.62 ms\n",
+    "stderr": "",
+    "duration_ms": 49762
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q21\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load": 723.96,
+    "filter_nation": 0.01,
+    "filter_supplier": 0.47,
+    "filter_orders": 1768.9,
+    "precompute_subqueries": 38666.87,
+    "scan_filter": 93.4,
+    "aggregation": 2.39,
+    "sort": 0.87,
+    "output": 0.14,
+    "total": 41269.62
+  },
+  "timing_ms": 41269.48
+}

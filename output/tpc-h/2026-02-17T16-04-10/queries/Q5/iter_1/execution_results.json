@@ -1,0 +1,71 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q5 Input Parameters:\n  gendb_dir: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\n  results_dir: /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q5/iter_1/results\n[METADATA CHECK] Found ASIA region with key: 2\n[METADATA CHECK] Found 5 ASIA nations\n[METADATA CHECK] Found 20037 suppliers in ASIA nations\n[TIMING] load_dimension_tables: 8.19 ms\n[METADATA CHECK] Found 2275919 orders in date range [1994-01-01, 1995-01-01)\n[TIMING] build_orders_hash: 123.42 ms\n[TIMING] scan_join_lineitem: 50.47 ms\n[METADATA CHECK] Matched lineitem rows: 1825042\n[TIMING] aggregation_merge: 0.01 ms\n[TIMING] output: 0.20 ms\n[TIMING] total: 182.35 ms\nQuery execution complete. Results written to: /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q5/iter_1/results/Q5.csv\n",
+    "stderr": "",
+    "duration_ms": 236
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": false,\n      \"error\": \"5 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"revenue\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 5,\n          \"samples\": [\n            {\n              \"expected\": \"535350829.9282\",\n              \"actual\": \"13209117920.7012\",\n              \"abs_diff\": 12673767090.77,\n              \"rel_diff_pct\": 2367.376,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"536862587.9995\",\n              \"actual\": \"13463205541.8657\",\n              \"abs_diff\": 12926342953.87,\n              \"rel_diff_pct\": 2407.7563,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"523176852.3189\",\n              \"actual\": \"13133375012.1835\",\n              \"abs_diff\": 12610198159.86,\n              \"rel_diff_pct\": 2410.3127,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q5": {
+          "rows_expected": 5,
+          "rows_actual": 5,
+          "match": false,
+          "error": "5 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "revenue": {
+              "category": "sum_money",
+              "failure_count": 5,
+              "samples": [
+                {
+                  "expected": "535350829.9282",
+                  "actual": "13209117920.7012",
+                  "abs_diff": 12673767090.77,
+                  "rel_diff_pct": 2367.376,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "536862587.9995",
+                  "actual": "13463205541.8657",
+                  "abs_diff": 12926342953.87,
+                  "rel_diff_pct": 2407.7563,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "523176852.3189",
+                  "actual": "13133375012.1835",
+                  "abs_diff": 12610198159.86,
+                  "rel_diff_pct": 2410.3127,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_dimension_tables": 8.19,
+    "build_orders_hash": 123.42,
+    "scan_join_lineitem": 50.47,
+    "aggregation_merge": 0.01,
+    "output": 0.2,
+    "total": 182.35
+  },
+  "timing_ms": 182.15
+}

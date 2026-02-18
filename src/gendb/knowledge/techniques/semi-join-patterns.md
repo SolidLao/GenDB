@@ -84,7 +84,22 @@ for (int64_t i = 0; i < inner_rows; i++) {
 if (nation_qualifies[outer_nationkey[i]]) { ... }
 ```
 
+## Combined EXISTS + NOT EXISTS Pattern (e.g., TPC-H Q21)
+When a query uses both EXISTS and NOT EXISTS on the same table with different conditions:
+```cpp
+// Q21: Find suppliers where EXISTS(other supplier) AND NOT EXISTS(other late supplier)
+// Step 1: For each orderkey, collect ALL suppkeys and which ones were late
+std::unordered_map<int32_t, std::vector<std::pair<int32_t, bool>>> order_suppliers;
+// order_suppliers[orderkey] = [(suppkey1, late1), (suppkey2, late2), ...]
+
+// Step 2: For each (orderkey, suppkey) from l1:
+//   EXISTS: check if order_suppliers[orderkey] has any suppkey != l1.suppkey
+//   NOT EXISTS: check if order_suppliers[orderkey] has any suppkey != l1.suppkey that is late
+// Combine into single pass over the precomputed structure
+```
+This avoids two separate scans of lineitem for EXISTS and NOT EXISTS.
+
 ## Performance Impact
-- Nested loop: O(n × m) — millions × millions = catastrophic
+- Nested loop: O(n x m) — millions x millions = catastrophic
 - Hash semi-join: O(n + m) — build set O(m) + probe O(n)
 - Speedup: 1000x+ for large tables

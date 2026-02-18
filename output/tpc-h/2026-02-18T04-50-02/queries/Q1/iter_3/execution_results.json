@@ -1,0 +1,184 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_3/q1.cpp: In function ‘void run_q1(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_3/q1.cpp:140:18: warning: ignoring return value of ‘size_t fread(void*, size_t, size_t, FILE*)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]\n  140 |             fread(&num_blocks, sizeof(uint32_t), 1, zf);\n      |             ~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_3/q1.cpp:142:18: warning: ignoring return value of ‘size_t fread(void*, size_t, size_t, FILE*)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]\n  142 |             fread(entries.data(), sizeof(ZoneMapEntry), num_blocks, zf);\n      |             ~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.09 ms\n[TIMING] build_joins: 0.09 ms\n[TIMING] main_scan: 4788.80 ms\n[TIMING] output: 1.06 ms\n[TIMING] total: 4843.23 ms\n",
+    "stderr": "",
+    "duration_ms": 4850
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"4 row(s) differ across 5 column(s)\",\n      \"column_failures\": {\n        \"sum_qty\": {\n          \"category\": \"exact_sum_qty\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"377518399.00\",\n              \"actual\": \"17247352494.00\",\n              \"abs_diff\": 16869834095.0,\n              \"rel_diff_pct\": 4468.6124,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"9851614.00\",\n              \"actual\": \"899507081.00\",\n              \"abs_diff\": 889655467.0,\n              \"rel_diff_pct\": 9030.5555,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"743124873.00\",\n              \"actual\": \"101469418165.00\",\n              \"abs_diff\": 100726293292.0,\n              \"rel_diff_pct\": 13554.4236,\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_base_price\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"566065727797.25\",\n              \"actual\": \"25860935433192.22\",\n              \"abs_diff\": 25294869705394.97,\n              \"rel_diff_pct\": 4468.5393,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"14767438399.17\",\n              \"actual\": \"1348350705056.13\",\n              \"abs_diff\": 1333583266656.96,\n              \"rel_diff_pct\": 9030.566,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1114302286901.88\",\n              \"actual\": \"152150837885362.88\",\n              \"abs_diff\": 151036535598461.0,\n              \"rel_diff_pct\": 13554.3593,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_disc_price\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"537759104278.0656\",\n              \"actual\": \"24568019745877.10\",\n              \"abs_diff\": 24030260641599.04,\n              \"rel_diff_pct\": 4468.5921,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"14028805792.2114\",\n              \"actual\": \"1280909071667.80\",\n              \"abs_diff\": 1266880265875.59,\n              \"rel_diff_pct\": 9030.5639,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1058580922144.9638\",\n              \"actual\": \"144542766444378.47\",\n              \"abs_diff\": 143484185522233.5,\n              \"rel_diff_pct\": 13554.3899,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_charge\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"559276670892.116819\",\n              \"actual\": \"7104295340406.24\",\n              \"abs_diff\": 6545018669514.12,\n              \"rel_diff_pct\": 1170.2649,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"14590490998.366737\",\n              \"actual\": \"1332194605458.85\",\n              \"abs_diff\": 1317604114460.48,\n              \"rel_diff_pct\": 9030.5673,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1100937000170.591854\",\n              \"actual\": \"2752283999438.50\",\n              \"abs_diff\": 1651346999267.91,\n              \"rel_diff_pct\": 149.9947,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"count_order\": {\n          \"category\": \"exact_count\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"14804077\",\n              \"actual\": \"676233186\",\n              \"abs_diff\": 661429109.0,\n              \"rel_diff_pct\": 4467.8848,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"385998\",\n              \"actual\": \"35243724\",\n              \"abs_diff\": 34857726.0,\n              \"rel_diff_pct\": 9030.5458,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"29144351\",\n              \"actual\": \"3979431660\",\n              \"abs_diff\": 3950287309.0,\n              \"rel_diff_pct\": 13554.2126,\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "4 row(s) differ across 5 column(s)",
+          "column_failures": {
+            "sum_qty": {
+              "category": "exact_sum_qty",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "377518399.00",
+                  "actual": "17247352494.00",
+                  "abs_diff": 16869834095,
+                  "rel_diff_pct": 4468.6124,
+                  "row": 0
+                },
+                {
+                  "expected": "9851614.00",
+                  "actual": "899507081.00",
+                  "abs_diff": 889655467,
+                  "rel_diff_pct": 9030.5555,
+                  "row": 1
+                },
+                {
+                  "expected": "743124873.00",
+                  "actual": "101469418165.00",
+                  "abs_diff": 100726293292,
+                  "rel_diff_pct": 13554.4236,
+                  "row": 2
+                }
+              ]
+            },
+            "sum_base_price": {
+              "category": "sum_money",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "566065727797.25",
+                  "actual": "25860935433192.22",
+                  "abs_diff": 25294869705394.97,
+                  "rel_diff_pct": 4468.5393,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "14767438399.17",
+                  "actual": "1348350705056.13",
+                  "abs_diff": 1333583266656.96,
+                  "rel_diff_pct": 9030.566,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "1114302286901.88",
+                  "actual": "152150837885362.88",
+                  "abs_diff": 151036535598461,
+                  "rel_diff_pct": 13554.3593,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "sum_disc_price": {
+              "category": "sum_money",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "537759104278.0656",
+                  "actual": "24568019745877.10",
+                  "abs_diff": 24030260641599.04,
+                  "rel_diff_pct": 4468.5921,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "14028805792.2114",
+                  "actual": "1280909071667.80",
+                  "abs_diff": 1266880265875.59,
+                  "rel_diff_pct": 9030.5639,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "1058580922144.9638",
+                  "actual": "144542766444378.47",
+                  "abs_diff": 143484185522233.5,
+                  "rel_diff_pct": 13554.3899,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "sum_charge": {
+              "category": "sum_money",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "559276670892.116819",
+                  "actual": "7104295340406.24",
+                  "abs_diff": 6545018669514.12,
+                  "rel_diff_pct": 1170.2649,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "14590490998.366737",
+                  "actual": "1332194605458.85",
+                  "abs_diff": 1317604114460.48,
+                  "rel_diff_pct": 9030.5673,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "1100937000170.591854",
+                  "actual": "2752283999438.50",
+                  "abs_diff": 1651346999267.91,
+                  "rel_diff_pct": 149.9947,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "count_order": {
+              "category": "exact_count",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "14804077",
+                  "actual": "676233186",
+                  "abs_diff": 661429109,
+                  "rel_diff_pct": 4467.8848,
+                  "row": 0
+                },
+                {
+                  "expected": "385998",
+                  "actual": "35243724",
+                  "abs_diff": 34857726,
+                  "rel_diff_pct": 9030.5458,
+                  "row": 1
+                },
+                {
+                  "expected": "29144351",
+                  "actual": "3979431660",
+                  "abs_diff": 3950287309,
+                  "rel_diff_pct": 13554.2126,
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 0.09,
+    "build_joins": 0.09,
+    "main_scan": 4788.8,
+    "output": 1.06,
+    "total": 4843.23
+  },
+  "timing_ms": 4842.169999999999
+}

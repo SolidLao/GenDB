@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] customer_filter: 6.78 ms\n[TIMING] orders_filter_join: 686.72 ms\n[TIMING] lineitem_filter_join_agg: 1624.03 ms\n[TIMING] sort: 8.11 ms\n[TIMING] output: 0.22 ms\n[TIMING] total: 2848.43 ms\n",
+    "stderr": "",
+    "duration_ms": 3096
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "customer_filter": 6.78,
+    "orders_filter_join": 686.72,
+    "lineitem_filter_join_agg": 1624.03,
+    "sort": 8.11,
+    "output": 0.22,
+    "total": 2848.43
+  },
+  "timing_ms": 2848.21
+}

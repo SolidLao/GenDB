@@ -1,0 +1,33 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_data: 0.21 ms\n[TIMING] filter_lineitem: 76.14 ms (selected 14808183 rows)\n[TIMING] filter_orders: 10.65 ms (selected 573157 rows)\n[TIMING] join_lineitem_orders: 138.58 ms (result 1147084 rows)\n[TIMING] join_customer: 0.00 ms (result 1147084 rows)\n[TIMING] join_nation: 0.00 ms (result 1147084 rows)\n[TIMING] aggregation: 0.00 ms (aggregated 381105 groups)\n[TIMING] convert_results: 402.52 ms\n[TIMING] sort: 13.47 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 1252.05 ms\n",
+    "stderr": "",
+    "duration_ms": 1535
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q10\": {\n      \"rows_expected\": 20,\n      \"rows_actual\": 20,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_data": 0.21,
+    "filter_lineitem": 76.14,
+    "filter_orders": 10.65,
+    "join_lineitem_orders": 138.58,
+    "join_customer": 0,
+    "join_nation": 0,
+    "aggregation": 0,
+    "convert_results": 402.52,
+    "sort": 13.47,
+    "output": 0.17,
+    "total": 1252.05
+  },
+  "timing_ms": 1251.8799999999999
+}

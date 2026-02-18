@@ -13,7 +13,7 @@
 ```cpp
 template<typename K, typename V>
 struct CompactHashTable {
-    struct Entry { K key; V value; uint8_t dist; bool occupied; };
+    struct Entry { K key; V value; uint16_t dist; bool occupied; };
     std::vector<Entry> table;
     size_t mask;
 
@@ -54,7 +54,30 @@ struct CompactHashTable {
 };
 ```
 
+## GenDB Utility Library
+The `hash_utils.h` header provides ready-to-use implementations:
+```cpp
+#include "hash_utils.h"
+
+// Hash map (replaces std::unordered_map)
+gendb::CompactHashMap<int32_t, int64_t> map(expected_size);
+map.insert(key, value);
+auto* ptr = map.find(key);  // returns nullptr if not found
+map[key] += delta;          // operator[] with default construction
+
+// Hash set (replaces std::unordered_set)
+gendb::CompactHashSet<int32_t> set(expected_size);
+set.insert(key);
+if (set.contains(key)) { ... }
+
+// Hash utilities
+uint64_t h = gendb::hash_int(key);
+uint64_t combined = gendb::hash_combine(h1, h2);  // for composite keys
+```
+**Always use hash_utils.h instead of std::unordered_map/set for >1000 entries.**
+
 ## Pitfalls
 - Never use `std::hash<int32_t>` — it is often the identity function, causing severe clustering
 - Forgetting to pre-size leads to excessive resizing and rehashing
 - Load factor >90% causes exponential probe chain growth
+- Auto-resize: `hash_utils.h` now auto-rehashes at 75% load, so maps won't infinite-loop if undersized. Still pre-size accurately to avoid rehash overhead. When merging thread-local maps, size the target for total distinct keys across all threads.

@@ -1,5 +1,22 @@
--- TPC-H Focused Queries (13 queries: 8 CRITICAL + 5 TARGET)
+-- TPC-H Focus Queries (5 queries: Q1, Q3, Q6, Q9, Q18)
 -- Full 22-query set available in queries_all.sql
+
+-- Q1: Pricing Summary Report
+SELECT
+    l_returnflag,
+    l_linestatus,
+    SUM(l_quantity) AS sum_qty,
+    SUM(l_extendedprice) AS sum_base_price,
+    SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    AVG(l_quantity) AS avg_qty,
+    AVG(l_extendedprice) AS avg_price,
+    AVG(l_discount) AS avg_disc,
+    COUNT(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus;
 
 -- Q3: Shipping Priority
 SELECT
@@ -18,24 +35,6 @@ GROUP BY l_orderkey, o_orderdate, o_shippriority
 ORDER BY revenue DESC, o_orderdate
 LIMIT 10;
 
--- Q5: Local Supplier Volume
-SELECT
-    n_name,
-    SUM(l_extendedprice * (1 - l_discount)) AS revenue
-FROM customer, orders, lineitem, supplier, nation, region
-WHERE
-    c_custkey = o_custkey
-    AND l_orderkey = o_orderkey
-    AND l_suppkey = s_suppkey
-    AND c_nationkey = s_nationkey
-    AND s_nationkey = n_nationkey
-    AND n_regionkey = r_regionkey
-    AND r_name = 'ASIA'
-    AND o_orderdate >= DATE '1994-01-01'
-    AND o_orderdate < DATE '1994-01-01' + INTERVAL '1' YEAR
-GROUP BY n_name
-ORDER BY revenue DESC;
-
 -- Q6: Forecasting Revenue Change
 SELECT
     SUM(l_extendedprice * l_discount) AS revenue
@@ -45,34 +44,6 @@ WHERE
     AND l_shipdate < DATE '1994-01-01' + INTERVAL '1' YEAR
     AND l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01
     AND l_quantity < 24;
-
--- Q7: Volume Shipping
-SELECT
-    supp_nation,
-    cust_nation,
-    l_year,
-    SUM(volume) AS revenue
-FROM (
-    SELECT
-        n1.n_name AS supp_nation,
-        n2.n_name AS cust_nation,
-        EXTRACT(YEAR FROM l_shipdate) AS l_year,
-        l_extendedprice * (1 - l_discount) AS volume
-    FROM supplier, lineitem, orders, customer, nation n1, nation n2
-    WHERE
-        s_suppkey = l_suppkey
-        AND o_orderkey = l_orderkey
-        AND c_custkey = o_custkey
-        AND s_nationkey = n1.n_nationkey
-        AND c_nationkey = n2.n_nationkey
-        AND (
-            (n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
-            OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')
-        )
-        AND l_shipdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
-) AS shipping
-GROUP BY supp_nation, cust_nation, l_year
-ORDER BY supp_nation, cust_nation, l_year;
 
 -- Q9: Product Type Profit Measure
 SELECT
@@ -97,85 +68,6 @@ FROM (
 GROUP BY nation, o_year
 ORDER BY nation, o_year DESC;
 
--- Q10: Returned Item Reporting
-SELECT
-    c_custkey,
-    c_name,
-    SUM(l_extendedprice * (1 - l_discount)) AS revenue,
-    c_acctbal,
-    n_name,
-    c_address,
-    c_phone,
-    c_comment
-FROM customer, orders, lineitem, nation
-WHERE
-    c_custkey = o_custkey
-    AND l_orderkey = o_orderkey
-    AND o_orderdate >= DATE '1993-10-01'
-    AND o_orderdate < DATE '1993-10-01' + INTERVAL '3' MONTH
-    AND l_returnflag = 'R'
-    AND c_nationkey = n_nationkey
-GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
-ORDER BY revenue DESC
-LIMIT 20;
-
--- Q12: Shipping Modes and Order Priority
-SELECT
-    l_shipmode,
-    SUM(CASE
-        WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1
-        ELSE 0
-    END) AS high_line_count,
-    SUM(CASE
-        WHEN o_orderpriority <> '1-URGENT' AND o_orderpriority <> '2-HIGH' THEN 1
-        ELSE 0
-    END) AS low_line_count
-FROM orders, lineitem
-WHERE
-    o_orderkey = l_orderkey
-    AND l_shipmode IN ('MAIL', 'SHIP')
-    AND l_commitdate < l_receiptdate
-    AND l_shipdate < l_commitdate
-    AND l_receiptdate >= DATE '1994-01-01'
-    AND l_receiptdate < DATE '1994-01-01' + INTERVAL '1' YEAR
-GROUP BY l_shipmode
-ORDER BY l_shipmode;
-
--- Q13: Customer Distribution
-SELECT
-    c_count,
-    COUNT(*) AS custdist
-FROM (
-    SELECT
-        c_custkey,
-        COUNT(o_orderkey) AS c_count
-    FROM customer LEFT OUTER JOIN orders ON
-        c_custkey = o_custkey
-        AND o_comment NOT LIKE '%special%requests%'
-    GROUP BY c_custkey
-) AS c_orders
-GROUP BY c_count
-ORDER BY custdist DESC, c_count DESC;
-
--- Q16: Parts/Supplier Relationship
-SELECT
-    p_brand,
-    p_type,
-    p_size,
-    COUNT(DISTINCT ps_suppkey) AS supplier_cnt
-FROM partsupp, part
-WHERE
-    p_partkey = ps_partkey
-    AND p_brand <> 'Brand#45'
-    AND p_type NOT LIKE 'MEDIUM POLISHED%'
-    AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
-    AND ps_suppkey NOT IN (
-        SELECT s_suppkey FROM supplier
-        WHERE s_comment LIKE '%Customer%Complaints%'
-    )
-GROUP BY p_brand, p_type, p_size
-ORDER BY supplier_cnt DESC, p_brand, p_type, p_size;
-
 -- Q18: Large Volume Customer
 SELECT
     c_name,
@@ -196,81 +88,3 @@ WHERE
 GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
 ORDER BY o_totalprice DESC, o_orderdate
 LIMIT 100;
-
--- Q20: Potential Part Promotion
-SELECT
-    s_name,
-    s_address
-FROM supplier, nation
-WHERE
-    s_suppkey IN (
-        SELECT ps_suppkey FROM partsupp
-        WHERE
-            ps_partkey IN (
-                SELECT p_partkey FROM part WHERE p_name LIKE 'forest%'
-            )
-            AND ps_availqty > (
-                SELECT 0.5 * SUM(l_quantity)
-                FROM lineitem
-                WHERE
-                    l_partkey = ps_partkey
-                    AND l_suppkey = ps_suppkey
-                    AND l_shipdate >= DATE '1994-01-01'
-                    AND l_shipdate < DATE '1994-01-01' + INTERVAL '1' YEAR
-            )
-    )
-    AND s_nationkey = n_nationkey
-    AND n_name = 'CANADA'
-ORDER BY s_name;
-
--- Q21: Suppliers Who Kept Orders Waiting
-SELECT
-    s_name,
-    COUNT(*) AS numwait
-FROM supplier, lineitem l1, orders, nation
-WHERE
-    s_suppkey = l1.l_suppkey
-    AND o_orderkey = l1.l_orderkey
-    AND o_orderstatus = 'F'
-    AND l1.l_receiptdate > l1.l_commitdate
-    AND EXISTS (
-        SELECT * FROM lineitem l2
-        WHERE l2.l_orderkey = l1.l_orderkey
-          AND l2.l_suppkey <> l1.l_suppkey
-    )
-    AND NOT EXISTS (
-        SELECT * FROM lineitem l3
-        WHERE l3.l_orderkey = l1.l_orderkey
-          AND l3.l_suppkey <> l1.l_suppkey
-          AND l3.l_receiptdate > l3.l_commitdate
-    )
-    AND s_nationkey = n_nationkey
-    AND n_name = 'SAUDI ARABIA'
-GROUP BY s_name
-ORDER BY numwait DESC, s_name
-LIMIT 100;
-
--- Q22: Global Sales Opportunity
-SELECT
-    cntrycode,
-    COUNT(*) AS numcust,
-    SUM(c_acctbal) AS totacctbal
-FROM (
-    SELECT
-        SUBSTRING(c_phone, 1, 2) AS cntrycode,
-        c_acctbal
-    FROM customer
-    WHERE
-        SUBSTRING(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
-        AND c_acctbal > (
-            SELECT AVG(c_acctbal) FROM customer
-            WHERE
-                c_acctbal > 0.00
-                AND SUBSTRING(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')
-        )
-        AND NOT EXISTS (
-            SELECT * FROM orders WHERE o_custkey = c_custkey
-        )
-) AS custsale
-GROUP BY cntrycode
-ORDER BY cntrycode;

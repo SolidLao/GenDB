@@ -1,0 +1,40 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.64 ms\n[TIMING] dim_filter_part: 22.76 ms\n[TIMING] build_joins: 18.82 ms\n[TIMING] build_joins_orders: 12.23 ms\n[TIMING] main_scan: 24.14 ms\n[TIMING] output: 0.11 ms\n[TIMING] total: 111.00 ms\n",
+    "stderr": "",
+    "duration_ms": 117
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 0,\n      \"match\": false,\n      \"error\": \"row count mismatch: expected 175, got 0\"\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q9": {
+          "rows_expected": 175,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 175, got 0"
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 0.64,
+    "dim_filter_part": 22.76,
+    "build_joins": 18.82,
+    "build_joins_orders": 12.23,
+    "main_scan": 24.14,
+    "output": 0.11,
+    "total": 111
+  },
+  "timing_ms": 110.89
+}

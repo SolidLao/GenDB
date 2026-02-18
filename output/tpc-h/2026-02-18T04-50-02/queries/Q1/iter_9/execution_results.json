@@ -1,0 +1,108 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.48 ms\n[TIMING] build_joins: 0.05 ms\n[TIMING] main_scan: 52.12 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 104.09 ms\n",
+    "stderr": "",
+    "duration_ms": 110
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"1 row(s) differ across 5 column(s)\",\n      \"column_failures\": {\n        \"sum_qty\": {\n          \"category\": \"exact_sum_qty\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"743124873.00\",\n              \"actual\": \"764635193.00\",\n              \"abs_diff\": 21510320.0,\n              \"rel_diff_pct\": 2.8946,\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_base_price\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"1114302286901.88\",\n              \"actual\": \"1146548935600.94\",\n              \"abs_diff\": 32246648699.06,\n              \"rel_diff_pct\": 2.8939,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_disc_price\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"1058580922144.9638\",\n              \"actual\": \"1089215873201.89\",\n              \"abs_diff\": 30634951056.93,\n              \"rel_diff_pct\": 2.894,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_charge\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"1100937000170.591854\",\n              \"actual\": \"1132796761431.36\",\n              \"abs_diff\": 31859761260.77,\n              \"rel_diff_pct\": 2.8939,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"count_order\": {\n          \"category\": \"exact_count\",\n          \"failure_count\": 1,\n          \"samples\": [\n            {\n              \"expected\": \"29144351\",\n              \"actual\": \"29987794\",\n              \"abs_diff\": 843443.0,\n              \"rel_diff_pct\": 2.894,\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "1 row(s) differ across 5 column(s)",
+          "column_failures": {
+            "sum_qty": {
+              "category": "exact_sum_qty",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "743124873.00",
+                  "actual": "764635193.00",
+                  "abs_diff": 21510320,
+                  "rel_diff_pct": 2.8946,
+                  "row": 2
+                }
+              ]
+            },
+            "sum_base_price": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "1114302286901.88",
+                  "actual": "1146548935600.94",
+                  "abs_diff": 32246648699.06,
+                  "rel_diff_pct": 2.8939,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "sum_disc_price": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "1058580922144.9638",
+                  "actual": "1089215873201.89",
+                  "abs_diff": 30634951056.93,
+                  "rel_diff_pct": 2.894,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "sum_charge": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "1100937000170.591854",
+                  "actual": "1132796761431.36",
+                  "abs_diff": 31859761260.77,
+                  "rel_diff_pct": 2.8939,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            },
+            "count_order": {
+              "category": "exact_count",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "29144351",
+                  "actual": "29987794",
+                  "abs_diff": 843443,
+                  "rel_diff_pct": 2.894,
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 0.48,
+    "build_joins": 0.05,
+    "main_scan": 52.12,
+    "output": 0.17,
+    "total": 104.09
+  },
+  "timing_ms": 103.92
+}

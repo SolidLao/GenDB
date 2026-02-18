@@ -1,0 +1,70 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.09 ms\n[TIMING] build_joins: 0.02 ms\n[TIMING] main_scan: 61.71 ms\n[TIMING] output: 0.16 ms\n[TIMING] total: 107.19 ms\n",
+    "stderr": "",
+    "duration_ms": 114
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"4 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"sum_charge\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"559276670892.116819\",\n              \"actual\": \"5592828437.223819\",\n              \"abs_diff\": 553683842454.89,\n              \"rel_diff_pct\": 99.0,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"14590490998.366737\",\n              \"actual\": \"145906517.537337\",\n              \"abs_diff\": 14444584480.83,\n              \"rel_diff_pct\": 99.0,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1100937000170.591854\",\n              \"actual\": \"11009491539.438253\",\n              \"abs_diff\": 1089927508631.15,\n              \"rel_diff_pct\": 99.0,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "4 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "sum_charge": {
+              "category": "sum_money",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "559276670892.116819",
+                  "actual": "5592828437.223819",
+                  "abs_diff": 553683842454.89,
+                  "rel_diff_pct": 99,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "14590490998.366737",
+                  "actual": "145906517.537337",
+                  "abs_diff": 14444584480.83,
+                  "rel_diff_pct": 99,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "1100937000170.591854",
+                  "actual": "11009491539.438253",
+                  "abs_diff": 1089927508631.15,
+                  "rel_diff_pct": 99,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 0.09,
+    "build_joins": 0.02,
+    "main_scan": 61.71,
+    "output": 0.16,
+    "total": 107.19
+  },
+  "timing_ms": 107.03
+}

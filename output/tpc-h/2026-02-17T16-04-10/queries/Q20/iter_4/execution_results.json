@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] nation_filter: 0.09 ms\n[TIMING] part_filter: 344.56 ms\n[TIMING] lineitem_aggregation: 531.82 ms\n[TIMING] partsupp_filter: 177.47 ms\n[TIMING] supplier_filter: 37.62 ms\n[TIMING] sort: 0.15 ms\n[TIMING] output: 0.78 ms\n[TIMING] total: 1092.53 ms\n",
+    "stderr": "",
+    "duration_ms": 1258
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q20\": {\n      \"rows_expected\": 1804,\n      \"rows_actual\": 1804,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "nation_filter": 0.09,
+    "part_filter": 344.56,
+    "lineitem_aggregation": 531.82,
+    "partsupp_filter": 177.47,
+    "supplier_filter": 37.62,
+    "sort": 0.15,
+    "output": 0.78,
+    "total": 1092.53
+  },
+  "timing_ms": 1091.75
+}

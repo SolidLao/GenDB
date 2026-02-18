@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[METADATA CHECK] Q5 Input Parameters:\n  gendb_dir: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb\n  results_dir: /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q5/iter_8/results\n[METADATA CHECK] Found ASIA region with key: 2\n[METADATA CHECK] Found 5 ASIA nations\n[METADATA CHECK] Found 20037 suppliers in ASIA nations\n[METADATA CHECK] Found 300270 customers in ASIA nations\n[TIMING] load_dimension_tables: 29.86 ms\n[METADATA CHECK] Found 456771 orders in date range [1994-01-01, 1995-01-01)\n[TIMING] build_orders_hash: 30.97 ms\n[TIMING] scan_join_lineitem: 43.20 ms\n[METADATA CHECK] Matched lineitem rows: 72985\n[TIMING] aggregation_merge: 0.01 ms\n[TIMING] output: 1.12 ms\n[TIMING] total: 105.26 ms\nQuery execution complete. Results written to: /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q5/iter_8/results/Q5.csv\n",
+    "stderr": "",
+    "duration_ms": 154
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q5\": {\n      \"rows_expected\": 5,\n      \"rows_actual\": 5,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dimension_tables": 29.86,
+    "build_orders_hash": 30.97,
+    "scan_join_lineitem": 43.2,
+    "aggregation_merge": 0.01,
+    "output": 1.12,
+    "total": 105.26
+  },
+  "timing_ms": 104.14
+}

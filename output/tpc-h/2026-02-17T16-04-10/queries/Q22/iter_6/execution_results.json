@@ -1,0 +1,83 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_customer_data: 0.06 ms\n[TIMING] load_orders_data: 27.02 ms\n[TIMING] compute_average: 10.88 ms\n[DEBUG] Average threshold (scaled): 499815 (actual: 4998.15)\n[DEBUG] Count for average: 381776\n[TIMING] filter_and_aggregate: 16.69 ms\n[DEBUG] Total filtered rows: 63916\n[TIMING] output: 0.22 ms\n[TIMING] total: 59.95 ms\nQ22 complete. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q22/iter_6/results/Q22.csv\n",
+    "stderr": "",
+    "duration_ms": 66
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q22\": {\n      \"rows_expected\": 7,\n      \"rows_actual\": 7,\n      \"match\": false,\n      \"error\": \"2 row(s) differ across 2 column(s)\",\n      \"column_failures\": {\n        \"numcust\": {\n          \"category\": \"exact_count\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"9025\",\n              \"actual\": \"9026\",\n              \"abs_diff\": 1.0,\n              \"rel_diff_pct\": 0.0111,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"9210\",\n              \"actual\": \"9211\",\n              \"abs_diff\": 1.0,\n              \"rel_diff_pct\": 0.0109,\n              \"row\": 2\n            }\n          ]\n        },\n        \"totacctbal\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"67592468.28\",\n              \"actual\": \"67601489.40\",\n              \"abs_diff\": 9021.12,\n              \"rel_diff_pct\": 0.0133,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"69312783.61\",\n              \"actual\": \"69320915.94\",\n              \"abs_diff\": 8132.33,\n              \"rel_diff_pct\": 0.0117,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q22": {
+          "rows_expected": 7,
+          "rows_actual": 7,
+          "match": false,
+          "error": "2 row(s) differ across 2 column(s)",
+          "column_failures": {
+            "numcust": {
+              "category": "exact_count",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "9025",
+                  "actual": "9026",
+                  "abs_diff": 1,
+                  "rel_diff_pct": 0.0111,
+                  "row": 0
+                },
+                {
+                  "expected": "9210",
+                  "actual": "9211",
+                  "abs_diff": 1,
+                  "rel_diff_pct": 0.0109,
+                  "row": 2
+                }
+              ]
+            },
+            "totacctbal": {
+              "category": "sum_money",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "67592468.28",
+                  "actual": "67601489.40",
+                  "abs_diff": 9021.12,
+                  "rel_diff_pct": 0.0133,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "69312783.61",
+                  "actual": "69320915.94",
+                  "abs_diff": 8132.33,
+                  "rel_diff_pct": 0.0117,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_customer_data": 0.06,
+    "load_orders_data": 27.02,
+    "compute_average": 10.88,
+    "filter_and_aggregate": 16.69,
+    "output": 0.22,
+    "total": 59.95
+  },
+  "timing_ms": 59.730000000000004
+}

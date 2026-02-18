@@ -1,0 +1,136 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C13",
+      "category": "correctness",
+      "title": "Date Threshold Off-By-One Under Optimization (Q1 l_shipdate cutoff)",
+      "detect": "Q1-type date-filter failures where actual row counts are ~2-3% larger than expected across ALL aggregated columns uniformly; or where the epoch-day threshold for 'DATE X - INTERVAL N DAY' is recomputed inline (e.g., date_to_epoch(\"1998-12-01\") - 90) instead of being hardcoded from the verified correct value",
+      "fix": "Never recompute the epoch-day threshold for a known constant date expression during optimization. The correct threshold for Q1 is epoch_day 10471 (1998-09-02). Hardcode it in the comment and the predicate. If using date_utils.h, precompute once at query entry: `const int32_t cutoff = gendb::date_str_to_epoch_days(\"1998-12-01\") + gendb::add_days(0, -90);` and never alter it in subsequent iterations. Any change to the scan boundary that yields a ~2-3% change in row count for the 'N' returnflag group is a regression.",
+      "queries": ["Q1"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "C14",
+      "category": "correctness",
+      "title": "Wrong Revenue Formula: Discount Applied as Multiplication Instead of Complement",
+      "detect": "Q3 revenue actual is approximately 0.1-0.2% of expected (not 99% of expected). The actual values are O(hundreds) when expected is O(hundreds of thousands). This indicates the formula used `l_extendedprice * l_discount / 10000` instead of `l_extendedprice * (100 - l_discount) / 10000`. At mean discount 5%, this gives 5% * 1/100 = 0.05% of the correct value.",
+      "fix": "The revenue expression `l_extendedprice*(1-l_discount)` must be implemented as `ep * (100 - disc)` in integer arithmetic (where both are scale-100), then divided by 10000 for output. Never use `ep * disc / 10000`. The complement term is `(100 - l_discount)`, NOT `l_discount`. Verify: for a row with ep=1000000, disc=5, the formula gives 1000000*(100-5)/10000 = 9500.0, which is $95.00 — correct for a $1000 item at 5% discount.",
+      "queries": ["Q3"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "C15",
+      "category": "correctness",
+      "title": "Q3 Aggregation Key Missing o_shippriority → Wrong GROUP BY and Wrong TOP-10",
+      "detect": "Q3 validation fails with wrong `l_orderkey` AND wrong `o_orderdate` (both differ, and the actual dates are all in roughly the right time range but wrong specific rows). This indicates the GROUP BY key is incomplete — the code groups by (l_orderkey) alone or (l_orderkey, o_orderdate) without shippriority, producing different aggregate groups that then sort differently.",
+      "fix": "Q3's GROUP BY must include all three columns: (l_orderkey, o_orderdate, o_shippriority). Even though o_shippriority is functionally dependent on l_orderkey via the orders join, it must be included in the output key. The aggregation map key should be a 3-tuple or the revenue map should key on l_orderkey and carry o_orderdate and o_shippriority as payload from the orders hash map. When the orders map is built, store struct OrderInfo { int32_t orderdate; int32_t shippriority; }; and carry both fields through to output.",
+      "queries": ["Q3"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "P9",
+      "category": "performance",
+      "title": "Q3 build_joins Dominated by orders Hash Map Build (>100ms) → Use Bitset for custkey Pre-filter",
+      "detect": "Q3 `build_joins` phase > 100 ms. The orders table (15M rows) is scanned and filtered on o_custkey membership and o_orderdate < threshold. If the customer pre-filter set is implemented as a CompactHashSet<int32_t> rather than a flat bitset, the hash probe overhead on 15M rows adds significant cost.",
+      "fix": "Use a flat bitset for custkey pre-filter: `std::vector<uint8_t> cust_bits((max_custkey/8)+1, 0)` with bit-test on each o_custkey. The custkey range is 1..1,500,000 (SF10) → 187 KB bitset fits in L2 cache. This reduces the orders scan from hash-probe (cache-miss-heavy) to bitset-test (sequential-read-friendly). Also, the orders map itself should be pre-sized for ~3M qualifying orders (54% of 15M) to avoid rehash.",
+      "queries": ["Q3"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "C16",
+      "category": "correctness",
+      "title": "Q18 Optimization Regresses to Unscaled HAVING Threshold (C8 Recurrence Pattern)",
+      "detect": "Q18 fails with 98/100 rows wrong, subquery_precompute time grows to >2000ms (vs ~179ms when correct), and the failing rows are completely different customer/order combinations. The sum_qty in output is slightly off (e.g., 303 vs 322). This is the C8 threshold-scaling failure: HAVING SUM(l_quantity) > 300 applied as `> 300` against raw int64_t scale-100 data instead of `> 30000`.",
+      "fix": "Any time the Q18 optimizer rewrites the subquery phase, it must preserve the scaled threshold `sum_qty_raw > 30000LL` (not `> 300`). Add a compile-time constant: `constexpr int64_t QTY_THRESHOLD = 300LL * 100;` and use it everywhere. Regression check: if subquery_precompute runtime doubles compared to the previous passing iteration, the threshold is likely wrong (larger qualifying set = more work). The correct qualifying set size is ~10,000-15,000 orders at SF10; if the set grows to millions, the threshold is unscaled.",
+      "queries": ["Q18"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "P10",
+      "category": "performance",
+      "title": "Optimizer Loses Parallel Subquery When Rewriting Q18 → Reverts to 4x Slowdown",
+      "detect": "Q18 subquery_precompute jumps from ~180ms back to ~3900ms after an optimization iteration. The optimizer abandoned the OMP-parallel hash-build and reverted to a sequential two-pass approach over 60M lineitem rows.",
+      "fix": "Treat the parallel subquery structure in Q18 as a locked optimization: once subquery_precompute <= 250ms with correct results, freeze that phase and only optimize the orders_scan and dim_filter phases in subsequent iterations. The parallel subquery pattern is: (1) single OMP parallel loop over lineitem building thread-local `CompactHashMap<int32_t,int64_t>` orderkey→sum_qty; (2) sequential merge into global map sized for ~30M distinct orderkeys (not per-thread cardinality — see C9); (3) sequential filter pass to build `CompactHashSet<int32_t>` of qualifying orderkeys where sum_qty > 30000. Never replace this with a sequential loop.",
+      "queries": ["Q18"]
+    },
+    {
+      "type": "experience_entry",
+      "id": "C17",
+      "category": "correctness",
+      "title": "date_utils.h epoch_days_to_date_str Buffer Too Small for Negative Month/Day (sprintf overflow)",
+      "detect": "Compiler warning at date_utils.h line 52: `sprintf(buf, \"%04d-%02d-%02d\", y, m, d)` — 'output between 11 and 17 bytes into a destination of size 11 (or 16)'. GCC deduces that the month/day arguments could be negative (range [-128,127] for int8_t), which would add a minus sign and overflow the buffer. Seen in every Q3 and Q18 iteration.",
+      "fix": "In date_utils.h, either: (a) increase the buffer size to `char buf[12]` (10 digits + null + 1 safety byte) and cast year/month/day arguments to unsigned int before the sprintf: `std::sprintf(buf, \"%04u-%02u-%02u\", (unsigned)y, (unsigned)m, (unsigned)d);` — this eliminates the negative-range warning; OR (b) replace std::sprintf with snprintf: `std::snprintf(buf, sizeof(buf), \"%04d-%02d-%02d\", y, m, d);`. The root issue is that the epoch-days-to-date conversion functions return int8_t for month/day, which GCC conservatively treats as potentially negative. Casting to unsigned removes the false-positive warning without changing runtime behavior.",
+      "queries": ["Q3", "Q18"]
+    },
+    {
+      "type": "process_improvement",
+      "id": "PROC1",
+      "category": "optimization_loop",
+      "title": "Cascading Skip Loop Prevents Recovery After Multiple Failures",
+      "detect": "optimization_history.json shows 6+ consecutive `validation: skipped` entries for Q3 (iters 5–10) and Q18 (iters 5–9). This means once the loop encounters 2–3 consecutive failures, it enters a skip mode that wastes the remaining iteration budget.",
+      "fix": "The optimization loop should implement a rollback strategy: if the current iteration fails validation, roll back to the last known-good iteration's .cpp as the base for the next LLM prompt, rather than continuing to mutate a failing code base. For Q3, the best-ever passing iteration was iter_0 (correct but slow at 1235ms) — all subsequent iterations should have used iter_0 as the base. Track `last_passing_cpp_path` separately from `best_cpp_path` and use it for rollback after failure."
+    },
+    {
+      "type": "process_improvement",
+      "id": "PROC2",
+      "category": "correctness_regression",
+      "title": "Optimization Must Not Change Date Threshold Constants",
+      "detect": "Q1 fails in iters 6, 8, 9, 10 with a consistent ~2.89% row count excess on row 2 (the 'N' l_linestatus='O' group). The iter_7 solution embeds the correct epoch cutoff `10471` in the code; subsequent iterations recomputed it with a slightly different formula.",
+      "fix": "Date threshold constants that have been validated correct (e.g., Q1 cutoff = 10471, Q6 shipdate range, Q3 threshold = 9205) should be treated as immutable named constants. The optimization prompt should explicitly instruct: 'Do not change any hardcoded date threshold constants. Do not recompute epoch-day cutoffs inline. Use only the date_utils.h functions and verify the value matches the previously confirmed constant.'"
+    }
+  ],
+  "meta": {
+    "workload": "tpc-h",
+    "scale_factor": 10,
+    "timestamp": "2026-02-18T04-50-02",
+    "queries_total": 5,
+    "queries_success": 1,
+    "queries_slow": 3,
+    "queries_failed": 1,
+    "query_breakdown": {
+      "Q1": {
+        "classification": "SLOW",
+        "best_iter": 7,
+        "best_timing_ms": 112.48,
+        "final_validation": "pass",
+        "note": "Correct in iter_7 but optimizer regressed in iters 8-10 with date threshold off-by-~1-day"
+      },
+      "Q3": {
+        "classification": "FAILED",
+        "best_iter": 0,
+        "best_timing_ms": 1234.78,
+        "final_validation": "fail",
+        "note": "Never correct. Revenue formula wrong (discount complement error + C5 scale). Cascading skip from iter_5 onward."
+      },
+      "Q6": {
+        "classification": "SUCCESS",
+        "best_iter": 0,
+        "best_timing_ms": 22.1,
+        "final_validation": "pass",
+        "note": "Solved at first generation. No optimization iterations needed."
+      },
+      "Q9": {
+        "classification": "SLOW",
+        "best_iter": 8,
+        "best_timing_ms": 268.18,
+        "final_validation": "pass",
+        "note": "Correct from iter_1. dim_filter (partsupp+orders hash build) dominates. iter_9 regressed with over-division."
+      },
+      "Q18": {
+        "classification": "SLOW",
+        "best_iter": 2,
+        "best_timing_ms": 435.4,
+        "final_validation": "pass",
+        "note": "Huge improvement iter_0→iter_2 (4057ms→435ms). Iters 3-4 introduced C8 threshold error. Iter_10 reverted to sequential."
+      }
+    },
+    "top_failure_patterns": [
+      "C5/C14: Decimal scale² output (Q3 revenue, Q9 sum_profit iter_0)",
+      "C8/C16: Unscaled HAVING threshold (Q18 iters 3-4)",
+      "C13: Date threshold off-by-one under optimization (Q1 iters 6,8,9,10)",
+      "PROC1: Cascading skip loop wastes iteration budget (Q3 iter_5-10, Q18 iter_5-9)",
+      "P8/P10: Q18 optimizer loses parallel subquery structure"
+    ]
+  }
+}

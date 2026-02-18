@@ -1,0 +1,28 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_customer_data: 0.06 ms\n[TIMING] load_orders_data: 33.73 ms\n[TIMING] compute_average: 56.06 ms\n[DEBUG] Average threshold (scaled): 499815 (actual: 4998.15)\n[DEBUG] Count for average: 381776\n[TIMING] filter_and_aggregate: 57.62 ms\n[DEBUG] Total filtered rows: 63914\n[TIMING] output: 0.19 ms\n[TIMING] total: 153.21 ms\nQ22 complete. Results written to /home/jl4492/GenDB/output/tpc-h/2026-02-17T16-04-10/queries/Q22/iter_0/results/Q22.csv\n",
+    "stderr": "",
+    "duration_ms": 160
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q22\": {\n      \"rows_expected\": 7,\n      \"rows_actual\": 7,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_customer_data": 0.06,
+    "load_orders_data": 33.73,
+    "compute_average": 56.06,
+    "filter_and_aggregate": 57.62,
+    "output": 0.19,
+    "total": 153.21
+  },
+  "timing_ms": 153.02
+}

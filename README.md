@@ -9,70 +9,67 @@ GenDB takes a different approach to query execution: instead of routing queries 
 ## Key Ideas
 
 - **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
-- **Multi-agent architecture** — 4 specialized agents collaborate to analyze, generate, and optimize
-- **Separation of concerns** — agent prompts contain only identity, workflow, and correctness rules; all technique knowledge lives in the knowledge base
-- **Per-query storage guides** — Storage/Index Designer generates concise, strict-format markdown guides (~30-50 lines) listing data file paths, types, encodings, and index binary layouts for each query
-- **True per-query pipelining** — each query flows independently through CodeGen→Execute→[Optimize→Execute]* with no batch boundaries; LLM calls gated by semaphore, execution serialized via ExecutionQueue
-- **Per-query benchmark targets** — optimizer receives focused comparison table (current GenDB vs all engines for that specific query) and pre-computed performance profile with dominant bottleneck
-- **Stall detection** — after 3 consecutive non-improving iterations with >5x gap to best engine, triggers architectural restructure via optimizer
-- **Architecture-level failure detection** — optimizer checks for high-impact structural problems (wrong build side, undecorelated subqueries, unused pre-built indexes, sequential merge bottlenecks) before micro-optimization
+- **6-agent architecture** — Workload Analyzer, Storage Designer, DBA, Code Generator, Code Inspector, Query Optimizer
+- **Utility library** — shared C++ headers (date_utils.h, hash_utils.h, mmap_utils.h, timing_utils.h) eliminate repeated reimplementation of common patterns
+- **Experience base** — evolving knowledge of correctness bugs and performance anti-patterns, checked by Code Inspector before execution
+- **DBA agent** — predicts risks pre-generation (Stage A), writes retrospective post-run (Stage B)
+- **Code Inspector** — cheap Haiku-based review agent catches known issues before execution
+- **RAII phase timing** — `GENDB_PHASE("name")` replaces 6-line `#ifdef` blocks with one-line scoped timers
+- **True per-query pipelining** — each query flows independently through CodeGen→Inspector→Execute→[Optimize→Inspector→Execute]* with no batch boundaries
 - **Knowledge-driven autonomy** — agents receive deep domain knowledge (40+ technique files across 9 domains) and reason about which techniques to apply
-- **Dual-mode timing** — `[TIMING]` instrumentation uses `#ifdef GENDB_PROFILE` guards; compiled in during optimization iterations, stripped from final build
-- **Logical→Physical→Code planning** — Code Generator produces a logical plan and physical plan before writing any C++ code
 - **Programmatic optimization control** — continue/stop decisions and improvement checks are deterministic JavaScript functions, not LLM calls
-- **Rollback capability** — failed optimizations are automatically detected and rolled back
-- **Self-contained per-query code** — each query gets a specialized .cpp file with all operations inlined
-- **Aggressive compilation** — -O3 -march=native -fopenmp for auto-vectorization, -flto for link-time optimization
 
 ## System Architecture
 
-**Phase 1: Offline Data Storage Optimization**
+**Phase 1: Offline Data Storage + Pre-Generation Analysis**
 ```
-Workload Analyzer (with data sampling) → Storage/Index Designer → Data Ingestion → Index Building → Per-Query Storage Guides
+Workload Analyzer → Storage/Index Designer → Per-Query Storage Guides → DBA Stage A (predict risks, extend utilities)
 ```
 
 **Phase 2: Online Per-Query Pipeline-Parallel Optimization**
 ```
 Each query runs independently (true pipelining):
-  CodeGen (LLM, semaphore-gated) → Execute (serial via ExecutionQueue)
-  → [shouldContinue() → Query Optimizer (LLM) → Execute]* (up to 10 iterations)
+  CodeGen → Inspector → [fix if critical] → Execute
+  → [shouldContinue() → Optimizer → Inspector → [fix] → Execute]* (up to 10 iterations)
   → done
+```
 
-All queries progress independently — no batch boundaries.
-Final Assembly: collect best .cpp per query → main.cpp + Makefile
+**Phase 3: Post-Run Retrospective**
+```
+DBA Stage B → Review all results, identify patterns, write retrospective/
 ```
 
 **Agents:**
 
-| Agent | Phase | Role |
-|-------|-------|------|
-| **Workload Analyzer** | 1 | Parses SQL workload, detects hardware, samples actual data for statistics (70 lines) |
-| **Storage/Index Designer** | 1 | Designs storage layout, generates + runs ingest.cpp and build_indexes.cpp, generates per-query storage guides (112 lines) |
-| **Code Generator** | 2 | Iteration 0: produces logical+physical query plan, then generates correct code with per-query benchmark targets (82 lines) |
-| **Query Optimizer** | 2 | Iterations 1+: architecture-level failure detection, bottleneck-targeted optimization, stall detection triggers restructure (40 lines) |
-| **Executor** | 2 | Non-LLM function: compile → run → validate → parse `[TIMING]` output |
+| Agent | Model | Phase | Role |
+|-------|-------|-------|------|
+| **Workload Analyzer** | Haiku | 1 | Parse SQL workload, detect hardware, sample data |
+| **Storage Designer** | Haiku | 1 | Design storage, generate + run ingestion, per-query guides |
+| **DBA** | Sonnet | 1 + 3 | Predict risks, extend utilities, post-run retrospective |
+| **Code Generator** | Sonnet | 2 | Iteration 0: logical+physical plan → C++ with utility library |
+| **Code Inspector** | Haiku | 2 | Review code against experience base before execution |
+| **Query Optimizer** | Sonnet | 2 | Iterations 1+: bottleneck-targeted optimization with utility library |
+
+## Utility Library
+
+Shared C++ headers in `src/gendb/utils/`, compiled via `-I` flag:
+
+| Header | Purpose |
+|--------|---------|
+| `date_utils.h` | O(1) date extraction, epoch↔string conversion |
+| `hash_utils.h` | CompactHashMap/Set with Robin Hood hashing (2-5x faster than std::unordered_map) |
+| `mmap_utils.h` | MmapColumn<T> RAII wrapper for zero-copy column access |
+| `timing_utils.h` | GENDB_PHASE("name") RAII scoped timer macro |
 
 ## Knowledge Base
 
-Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 40+ technique files across 9 domains:
+Agents have access to a structured knowledge base (`src/gendb/knowledge/`) with 40+ technique files across 9 domains, plus an experience base (`experience.md`) of known correctness and performance issues.
 
-| Domain | Topics |
-|--------|--------|
-| **techniques** | Beating general-purpose engines, O(1) date operations, semi-join/anti-join patterns, direct array lookup, bloom filter joins, late materialization |
-| **parallelism** | Thread parallelism (morsel-driven), SIMD (AVX2/SSE), data partitioning |
-| **storage** | Columnar vs row, compression, memory layout, string optimization, persistent binary storage, encoding handling |
-| **indexing** | Hash indexes (multi-value), B+ Trees & sorted indexes, zone maps, bloom filters |
-| **query-execution** | Query planning (logical→physical→code pipeline + OLAP optimization principles), vectorized execution, operator fusion, compiled queries, pipeline breakers, scan/filter optimization, sort/Top-K, subquery optimization |
-| **joins** | Hash join variants, sort-merge join, join ordering, sampling-based order determination |
-| **aggregation** | Hash aggregation, sorted aggregation, partial aggregation |
-| **data-structures** | Compact hash tables, arena allocation, flat structures |
-| **patterns** | Parallel hash join, zone map pruning |
-
-## Benchmarks (TPC-H SF10, 22 queries)
+## Benchmarks (TPC-H SF10)
 
 | System | Total Time | vs DuckDB |
 |--------|-----------|-----------|
 | DuckDB | 2,231ms | 1.0x |
 | GenDB | 37,817ms | 17x |
 
-GenDB beats DuckDB on Q6 (25ms vs 19ms) and Q14 (14ms vs 67ms). Primary optimization targets: Q21 (93x gap), Q20 (20x), Q7 (14x), Q12 (12x), Q9 (11x), Q13 (11x), Q18 (9x), Q10 (7x). All 22 queries produce correct results validated against DuckDB ground truth.
+GenDB beats DuckDB on Q6 and Q14. All queries produce correct results validated against DuckDB ground truth.

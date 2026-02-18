@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_0/q1.cpp: In function ‘void run_q1(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_0/q1.cpp:127:18: warning: ignoring return value of ‘size_t fread(void*, size_t, size_t, FILE*)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]\n  127 |             fread(&num_blocks, sizeof(uint32_t), 1, zf);\n      |             ~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q1/iter_0/q1.cpp:131:18: warning: ignoring return value of ‘size_t fread(void*, size_t, size_t, FILE*)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]\n  131 |             fread(entries.data(), sizeof(ZoneMapEntry), num_blocks, zf);\n      |             ~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.09 ms\n[TIMING] build_joins: 0.05 ms\n[TIMING] main_scan: 62.61 ms\n[TIMING] output: 0.27 ms\n[TIMING] total: 121.38 ms\n",
+    "stderr": "",
+    "duration_ms": 127
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dim_filter": 0.09,
+    "build_joins": 0.05,
+    "main_scan": 62.61,
+    "output": 0.27,
+    "total": 121.38
+  },
+  "timing_ms": 121.11
+}

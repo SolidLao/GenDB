@@ -63,6 +63,19 @@ Techniques to transform expensive subquery patterns into more efficient join-bas
 - **RANK/ROW_NUMBER optimization**: Track rank during sorted scan — no need for a separate ranking pass.
 - **Frame optimization**: For fixed-size frames (`ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING`), use a sliding window with O(1) update per row.
 
+### Self-Referencing Aggregate Subquery (e.g., TPC-H Q18)
+When a table's subquery references itself with aggregation:
+```sql
+-- Q18: orders where total lineitem quantity > 300
+WHERE o_orderkey IN (
+    SELECT l_orderkey FROM lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300
+)
+```
+- **Implementation**: Single scan of lineitem to build hash map: `orderkey -> sum(quantity)`
+- **Then filter**: Keep only orderkeys where sum > threshold (scaled by column scale factor!)
+- **Common bug**: Forgetting to scale the threshold — if l_quantity is stored as int64_t with scale 100, the threshold is 300 * 100 = 30000, not 300.
+- **Result**: A CompactHashSet of qualifying orderkeys for O(1) probe during the main join.
+
 ### Common Subexpression Elimination
 - **Shared subquery results**: If the same subquery appears multiple times (or computes an intermediate result used by multiple outer expressions), materialize it once into a temporary structure.
 - **CTE-style materialization**: Compute the common expression into a vector/hash map, reference it from multiple consumers.

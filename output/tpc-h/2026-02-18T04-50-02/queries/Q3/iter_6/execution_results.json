@@ -1,0 +1,21 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q3/iter_6/q3.cpp:92:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_q3(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:33: warning: ‘-’ directive writing 1 byte into a region of size between 0 and 4 [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                 ^\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:23: note: directive argument in the range [-128, 127]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-18T04-50-02/queries/Q3/iter_6/q3.cpp:78:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 11\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "fail",
+    "output": "",
+    "stderr": "terminate called after throwing an instance of 'std::runtime_error'\n  what():  'BUILDING' not found in c_mktsegment_dict.txt\n",
+    "duration_ms": 117
+  },
+  "validation": {
+    "status": "skipped",
+    "output": ""
+  },
+  "operation_timings": {},
+  "timing_ms": null
+}

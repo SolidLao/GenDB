@@ -1,0 +1,69 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] main_scan: 42.69 ms\n[TIMING] output: 5.35 ms\n[TIMING] dim_filter: 429.95 ms\n[TIMING] total: 430.15 ms\n",
+    "stderr": "",
+    "duration_ms": 438
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": false,\n      \"error\": \"175 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"sum_profit\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 175,\n          \"samples\": [\n            {\n              \"expected\": \"459548354.7680\",\n              \"actual\": \"70472878291.6700\",\n              \"abs_diff\": 70013329936.9,\n              \"rel_diff_pct\": 15235.2477,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"456449926.4138\",\n              \"actual\": \"70393497658.2200\",\n              \"abs_diff\": 69937047731.81,\n              \"rel_diff_pct\": 15321.954,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"456444975.7127\",\n              \"actual\": \"69920592713.0300\",\n              \"abs_diff\": 69464147737.32,\n              \"rel_diff_pct\": 15218.5151,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q9": {
+          "rows_expected": 175,
+          "rows_actual": 175,
+          "match": false,
+          "error": "175 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "sum_profit": {
+              "category": "sum_money",
+              "failure_count": 175,
+              "samples": [
+                {
+                  "expected": "459548354.7680",
+                  "actual": "70472878291.6700",
+                  "abs_diff": 70013329936.9,
+                  "rel_diff_pct": 15235.2477,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "456449926.4138",
+                  "actual": "70393497658.2200",
+                  "abs_diff": 69937047731.81,
+                  "rel_diff_pct": 15321.954,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "456444975.7127",
+                  "actual": "69920592713.0300",
+                  "abs_diff": 69464147737.32,
+                  "rel_diff_pct": 15218.5151,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "main_scan": 42.69,
+    "output": 5.35,
+    "dim_filter": 429.95,
+    "total": 430.15
+  },
+  "timing_ms": 424.79999999999995
+}

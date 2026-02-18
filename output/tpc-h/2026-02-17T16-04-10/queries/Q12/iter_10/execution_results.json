@@ -1,0 +1,30 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_dictionaries: 0.04 ms\n[TIMING] load_lineitem: 0.02 ms\n[TIMING] scan_filter_lineitem: 30.14 ms\n[TIMING] load_orders: 0.04 ms\n[TIMING] build_hash_join: 51.45 ms\n[TIMING] join_aggregate: 29.18 ms\n[TIMING] output: 3.28 ms\n[TIMING] total: 114.20 ms\n",
+    "stderr": "",
+    "duration_ms": 188
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q12\": {\n      \"rows_expected\": 2,\n      \"rows_actual\": 2,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "load_dictionaries": 0.04,
+    "load_lineitem": 0.02,
+    "scan_filter_lineitem": 30.14,
+    "load_orders": 0.04,
+    "build_hash_join": 51.45,
+    "join_aggregate": 29.18,
+    "output": 3.28,
+    "total": 114.2
+  },
+  "timing_ms": 110.92
+}

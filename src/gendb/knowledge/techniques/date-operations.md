@@ -82,7 +82,23 @@ int32_t year_start[100]; // year_start[i] = epoch day for Jan 1 of (1970+i)
 // Or even simpler: just precompute the range for the years you need
 ```
 
+## GenDB Utility Library
+The `date_utils.h` header provides ready-to-use implementations of all date operations:
+```cpp
+#include "date_utils.h"
+
+gendb::init_date_tables();  // call once at startup
+int year = gendb::extract_year(epoch_day);    // O(1)
+int month = gendb::extract_month(epoch_day);  // O(1)
+int day = gendb::extract_day(epoch_day);      // O(1)
+
+char buf[11];
+gendb::epoch_days_to_date_str(epoch_day, buf);  // "YYYY-MM-DD"
+int32_t days = gendb::date_str_to_epoch_days("1995-03-15");
+```
+**NEVER write custom date conversion functions.** Always use date_utils.h.
+
 ## Performance Impact
-- Loop-based: ~30 iterations × 60M rows = 1.8B operations
-- Lookup table: 1 array access × 60M rows = 60M operations
+- Loop-based: ~30 iterations x 60M rows = 1.8B operations
+- Lookup table: 1 array access x 60M rows = 60M operations
 - Speedup: ~30x for date extraction alone
