@@ -32,3 +32,17 @@ Join columns often have **duplicate keys** (e.g., foreign key column in fact tab
 - **OpenMP** for parallel construction (histogram, scatter, zone map building)
 - **Compile with**: `-O3 -march=native -fopenmp` for build_indexes.cpp
 - **Load factor 0.5–0.6** for multi-value hash tables (small because one entry per unique key)
+
+## Construction Anti-Patterns
+
+**NEVER use `std::unordered_map<K, std::vector<uint32_t>>` for histogram building.** This pattern allocates a dynamic vector per unique key, causing millions of heap allocations and pointer-chasing on large columns. For 60M rows with 15M unique keys, this can take 30+ minutes single-threaded vs <2 minutes with sort-based grouping.
+
+**Preferred construction pattern (sort-based grouping):**
+1. Create position array `[0, 1, 2, ..., N-1]`
+2. Sort positions by key value (`std::sort` with key comparator)
+3. Linear scan sorted positions to find group boundaries → `(key, offset, count)` per unique key
+4. Insert into open-addressing hash table with multiply-shift hash
+
+**Benefits**: O(N log N) but cache-friendly, no dynamic allocation, positions array is the final output (no copy needed).
+
+**Index selectivity — skip tiny tables:** Do NOT build hash indexes on tables with fewer than 10,000 rows (nation, region, supplier). These fit in L1 cache; a linear scan is faster than an index lookup. Only build indexes on columns that are actually join keys or heavily-filtered in the workload queries.

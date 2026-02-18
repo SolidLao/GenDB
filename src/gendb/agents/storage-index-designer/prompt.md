@@ -38,6 +38,7 @@ outperform general-purpose OLAP engines. Your designs are the foundation everyth
 6. **Ingestion I/O**: mmap input + MADV_SEQUENTIAL, buffered writes (>=1MB).
 7. **Index construction**: mmap binary columns (not ifstream), OpenMP for parallel construction. Read `indexing/hash-indexes.md` for multi-value hash design, `indexing/sorted-indexes.md` for B+ trees.
 8. **Compilation**: ingest.cpp: `g++ -O2 -std=c++17 -Wall -lpthread`. build_indexes.cpp: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`.
+9. **Index efficiency**: Skip hash indexes on tables with <10K rows (linear scan is faster). For hash index construction, use sort-based grouping (sort positions by key, scan for boundaries) — NEVER `std::unordered_map<K, std::vector<uint32_t>>`. Use multiply-shift hash, not `std::hash`. Build indexes in parallel when independent.
 
 ## storage_design.json Contract
 
