@@ -5,6 +5,8 @@
 #include <utility>
 #include <algorithm>
 #include <functional>
+#include <atomic>
+#include <climits>
 
 namespace gendb {
 
@@ -391,6 +393,161 @@ struct TopKHeap {
     }
 
     size_t size() const { return h.size(); }
+};
+
+// ---------------------------------------------------------------------------
+// DenseBitmap — for dimension key filtering when key range is known.
+// E.g., custkey 1-150K: use bitset instead of hash set for O(1) test.
+// ---------------------------------------------------------------------------
+struct DenseBitmap {
+    std::vector<uint8_t> bits;
+    size_t max_key;
+
+    explicit DenseBitmap(size_t max_key_) : bits((max_key_ + 7) / 8, 0), max_key(max_key_) {}
+
+    void set(size_t key) { bits[key >> 3] |= (1 << (key & 7)); }
+    bool test(size_t key) const { return key <= max_key && (bits[key >> 3] & (1 << (key & 7))); }
+    size_t capacity() const { return max_key + 1; }
+};
+
+// ---------------------------------------------------------------------------
+// ConcurrentCompactHashMap — lock-free concurrent construction using atomic CAS.
+// Safe for parallel build phase, then read-only probe phase.
+// Uses open-addressing with linear probing and atomic compare-exchange for inserts.
+// ---------------------------------------------------------------------------
+template<typename K, typename V>
+struct ConcurrentCompactHashMap {
+    struct Entry {
+        std::atomic<int64_t> key_atom;  // empty sentinel = INT64_MIN
+        V value;
+    };
+    std::vector<Entry> table;
+    size_t mask;
+    std::atomic<size_t> count{0};
+
+    static constexpr int64_t EMPTY_KEY = INT64_MIN;
+
+    ConcurrentCompactHashMap() : mask(0) {}
+
+    explicit ConcurrentCompactHashMap(size_t expected) {
+        size_t cap = 16;
+        while (cap < expected * 4 / 3) cap <<= 1;
+        table.resize(cap);
+        mask = cap - 1;
+        for (auto& e : table) {
+            e.key_atom.store(EMPTY_KEY, std::memory_order_relaxed);
+            e.value = V{};
+        }
+    }
+
+    // Thread-safe insert. Returns pointer to value slot (may be existing or new).
+    // Caller must use atomic operations on the value if concurrent updates are needed.
+    V* insert_or_find(K key) {
+        size_t pos = hash_int(static_cast<int64_t>(key)) & mask;
+        int64_t k64 = static_cast<int64_t>(key);
+        while (true) {
+            int64_t expected = EMPTY_KEY;
+            if (table[pos].key_atom.compare_exchange_strong(
+                    expected, k64, std::memory_order_acq_rel)) {
+                count.fetch_add(1, std::memory_order_relaxed);
+                return &table[pos].value;
+            }
+            if (expected == k64) {
+                return &table[pos].value;
+            }
+            pos = (pos + 1) & mask;
+        }
+    }
+
+    // Read-only probe (safe after build phase completes).
+    V* find(K key) {
+        size_t pos = hash_int(static_cast<int64_t>(key)) & mask;
+        int64_t k64 = static_cast<int64_t>(key);
+        while (true) {
+            int64_t stored = table[pos].key_atom.load(std::memory_order_acquire);
+            if (stored == EMPTY_KEY) return nullptr;
+            if (stored == k64) return &table[pos].value;
+            pos = (pos + 1) & mask;
+        }
+    }
+
+    const V* find(K key) const {
+        size_t pos = hash_int(static_cast<int64_t>(key)) & mask;
+        int64_t k64 = static_cast<int64_t>(key);
+        while (true) {
+            int64_t stored = table[pos].key_atom.load(std::memory_order_acquire);
+            if (stored == EMPTY_KEY) return nullptr;
+            if (stored == k64) return &table[pos].value;
+            pos = (pos + 1) & mask;
+        }
+    }
+
+    bool contains(K key) const { return find(key) != nullptr; }
+    size_t size() const { return count.load(std::memory_order_relaxed); }
+};
+
+// ---------------------------------------------------------------------------
+// PartitionedHashMap — N partition-local CompactHashMaps to avoid contention.
+// Partitions by hash(key) >> shift; each partition is an independent CompactHashMap.
+// No synchronization needed during parallel build if each thread only writes to
+// its own partition range. Iterate all partitions for global lookup.
+// ---------------------------------------------------------------------------
+template<typename K, typename V, size_t N_PARTITIONS = 16>
+struct PartitionedHashMap {
+    CompactHashMap<K, V> partitions[N_PARTITIONS];
+
+    PartitionedHashMap() = default;
+
+    explicit PartitionedHashMap(size_t total_expected) {
+        size_t per_part = (total_expected + N_PARTITIONS - 1) / N_PARTITIONS;
+        for (size_t i = 0; i < N_PARTITIONS; i++) {
+            partitions[i].reserve(per_part);
+        }
+    }
+
+    size_t partition_of(K key) const {
+        return (hash_int(static_cast<int64_t>(key)) >> 48) % N_PARTITIONS;
+    }
+
+    // Insert into the correct partition. NOT thread-safe for same partition.
+    // For parallel build: ensure each thread writes to its own partition.
+    void insert(K key, V value) {
+        partitions[partition_of(key)].insert(key, value);
+    }
+
+    V& operator[](K key) {
+        return partitions[partition_of(key)][key];
+    }
+
+    V* find(K key) {
+        return partitions[partition_of(key)].find(key);
+    }
+
+    const V* find(K key) const {
+        return partitions[partition_of(key)].find(key);
+    }
+
+    bool contains(K key) const { return find(key) != nullptr; }
+
+    size_t size() const {
+        size_t total = 0;
+        for (size_t i = 0; i < N_PARTITIONS; i++) total += partitions[i].size();
+        return total;
+    }
+
+    // Iterate all entries across all partitions
+    template<typename Fn>
+    void for_each(Fn&& fn) const {
+        for (size_t i = 0; i < N_PARTITIONS; i++) {
+            for (auto [key, value] : partitions[i]) {
+                fn(key, value);
+            }
+        }
+    }
+
+    static constexpr size_t num_partitions() { return N_PARTITIONS; }
+    CompactHashMap<K, V>& partition(size_t i) { return partitions[i]; }
+    const CompactHashMap<K, V>& partition(size_t i) const { return partitions[i]; }
 };
 
 } // namespace gendb

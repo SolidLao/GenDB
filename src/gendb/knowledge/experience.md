@@ -28,7 +28,7 @@
 ### P1: std::unordered_map for Large Hash Tables
 - Detect: std::unordered_map or std::unordered_set with >1000 expected entries
 - Impact: 2-5x slower than open-addressing
-- Fix: #include "hash_utils.h", use gendb::CompactHashMap/CompactHashSet
+- Fix: #include "hash_utils.h", use gendb::CompactHashMap/CompactHashSet. For concurrent parallel builds, use gendb::ConcurrentCompactHashMap. For partitioned parallel aggregation, use gendb::PartitionedHashMap. For dense integer key filtering (e.g., custkey 1-150K), use gendb::DenseBitmap.
 
 ### P2: Copying mmap'd Data into Vectors
 - Detect: Function that mmap's file, copies to vector, munmaps
@@ -124,3 +124,18 @@
 - Impact: BETWEEN 0.05 AND 0.07 against raw int64_t always false (raw values are 5–7 for 0.05–0.07); zero rows pass filter
 - Fix: Scale both bounds: lo_scaled = (int64_t)round(lo * 100), hi_scaled = (int64_t)round(hi * 100). For Q6: l_discount >= 5 AND l_discount <= 7; l_quantity < 2400 (not < 24).
 - Queries: Q6 (l_discount BETWEEN 0.05 AND 0.07; l_quantity < 24)
+
+### C13: Date Threshold Recomputation During Optimization
+- Detect: Optimizer changed a date epoch_day constant or date_str_to_epoch_days() argument that was correct in a previous passing iteration
+- Impact: Off-by-one or off-by-N day errors, wrong row counts, incorrect date ranges
+- Fix: Preserve original date constants from passing iteration. Do not recompute. If the query was already correct, date thresholds are validated — do not change them.
+
+### C14: Revenue/Discount Formula Modification
+- Detect: Changed arithmetic in revenue = ep * (scale - disc) / scale pattern during optimization
+- Impact: Revenue off by 100x or inverted discount
+- Fix: Keep formula structure: multiply by (scale_factor - discount_column), divide by scale_factor. The canonical pattern is `ep * (100 - disc) / 100` for scale_factor=100. Do not rearrange.
+
+### C15: Missing GROUP BY Dimension in Aggregation
+- Detect: Hash map key missing a dimension that appears in SQL GROUP BY clause
+- Impact: Wrong aggregation groups, wrong top-K results, fewer output rows than expected
+- Fix: Ensure hash map key includes ALL columns from GROUP BY. Verify the key struct/hash covers every dimension.

@@ -9,24 +9,42 @@ Think step by step: identify the dominant bottleneck, then fix it.
 
 ## Workflow
 1. Read execution_results.json: parse [TIMING] breakdown, identify dominant operation
-2. Read `INDEX.md`, then `query-execution/query-planning.md` (MANDATORY)
-3. Read optimization_history.json: don't repeat failed approaches
-4. Check for architecture-level failures (see below)
-5. Read relevant technique files for identified bottleneck
-6. Plan 1-3 targeted changes (or full rewrite if stalled)
-7. Modify code using Edit tool. Use GenDB utility library.
-8. Compile (do NOT run — Executor handles validation)
+2. Read the current execution plan (plan.json) if available — understand the architectural choices
+3. Read `INDEX.md`, then `query-execution/query-planning.md` (MANDATORY)
+4. Read optimization_history.json: don't repeat failed approaches
+5. Check for architecture-level failures (see below)
+6. Read relevant technique files for identified bottleneck
+7. You may modify BOTH the plan (plan.json) AND the code. For architectural bottlenecks
+   (>50% time in one phase), consider plan-level changes first (different join order,
+   different data structures, different parallelism strategy).
+8. Modify code using Edit tool. Use GenDB utility library.
+9. Compile (do NOT run — Executor handles validation)
 
 ## GenDB Utility Library
-All optimized code MUST use these headers. Do NOT reimplement their functionality.
+Generated code SHOULD use the GenDB utility library as the default choice. The library includes
+CompactHashMap, CompactHashSet, ConcurrentCompactHashMap, PartitionedHashMap, DenseBitmap, and
+TopKHeap for advanced patterns. You MAY implement custom alternatives when the plan specifies
+patterns not covered by the library. When using custom implementations, add a brief comment
+explaining why.
+
+The following headers are MANDATORY — do NOT reimplement their functionality:
 - `#include "date_utils.h"`: gendb::init_date_tables(), gendb::epoch_days_to_date_str(),
   gendb::extract_year(), gendb::extract_month(). NEVER write custom date conversion.
-- `#include "hash_utils.h"`: gendb::CompactHashMap<K,V>, gendb::CompactHashSet<K>.
-  Use instead of std::unordered_map/set for >1000 entries.
 - `#include "mmap_utils.h"`: gendb::MmapColumn<T> for zero-copy column access.
   NEVER copy mmap'd data into std::vector.
 - `#include "timing_utils.h"`: GENDB_PHASE("name") for block-scoped RAII timing.
-  Use instead of manual #ifdef GENDB_PROFILE blocks.
+
+The following header SHOULD be used (default choice):
+- `#include "hash_utils.h"`: gendb::CompactHashMap<K,V>, gendb::CompactHashSet<K>,
+  gendb::ConcurrentCompactHashMap<K,V>, gendb::PartitionedHashMap<K,V>,
+  gendb::DenseBitmap, gendb::TopKHeap<T,Cmp>.
+  Use instead of std::unordered_map/set for >1000 entries.
+
+## Correctness Anchors
+If the user prompt includes a "Correctness Anchors" section, those constants were validated
+in a passing iteration. DO NOT modify them. They include date literals, scaled thresholds,
+and revenue formulas. Modify only the data structures, parallelism, and execution strategy
+around these anchors.
 
 ## Architecture-Level Failures (check BEFORE micro-optimization)
 These cause 10-100x gaps. Fix them first:
@@ -40,7 +58,7 @@ These cause 10-100x gaps. Fix them first:
 
 ## Optimization Stall Recovery
 If the user prompt says "OPTIMIZATION STALL DETECTED", the current code architecture is fundamentally limited.
-Do NOT make incremental changes. Instead: rewrite the core algorithm. Start from the SQL, re-derive the logical plan, and implement a different physical strategy.
+Do NOT make incremental changes. Instead: rewrite the core algorithm. Start from the SQL, re-derive the logical plan, and implement a different physical strategy. Consider updating plan.json with the new strategy.
 
 ## Key Rules
 1. Preserve GENDB_PHASE timing blocks — do not remove them.

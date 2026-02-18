@@ -1,24 +1,28 @@
 /**
- * GenDB Orchestrator v21
+ * GenDB Orchestrator v22
  *
- * Three-phase agentic system with 6 agents:
+ * Three-phase agentic system with 7 agents:
  *   Phase 1 (Offline Data Storage Optimization):
  *     Workload Analyzer → Storage/Index Designer → DBA Stage A (predict risks, extend utilities)
  *   Phase 2 (Online Per-Query Pipeline-Parallel Optimization):
- *     Each query runs independently: CodeGen → Inspector → [fix] → Execute → [Optimize → Inspector → Execute]* → done
+ *     Iter 0: Query Planner → Query Coder → Inspector → [fix] → Execute
+ *     Iter 1+: Query Optimizer → Inspector → Execute (optimizer can modify plan AND code)
  *     LLM calls gated by Semaphore, execution serialized via ExecutionQueue.
  *   Phase 3 (Post-Run):
  *     DBA Stage B — Retrospective analysis, proposals for improvement
  *
- * v21 changes: DBA agent (pre-gen risk analysis + post-run retrospective), Code Inspector
- * (experience-based code review), utility library (-I flag), experience base, RAII timing.
+ * v22 changes: Query Planner agent (plan design separated from code generation),
+ * correctness anchors (prevent optimizer from breaking validated constants),
+ * adaptive iteration budget (stop early on stall), leaner optimizer prompts,
+ * relaxed utility library policy (SHOULD use, not MUST use).
  *
  * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue,
  * Mutex on run.json, PipelineProgressTracker, Iter0Barrier for storage checkpoint.
  *
  * Usage: node src/gendb/orchestrator.mjs [--schema <path>] [--queries <path>] [--data-dir <path>]
- *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--model <name>]
- *        [--model-override <name>] [--optimization-target <target>] [--max-concurrent <N>]
+ *        [--gendb-dir <path>] [--sf <N>] [--max-iterations <N>] [--stall-threshold <N>]
+ *        [--model <name>] [--model-override <name>] [--optimization-target <target>]
+ *        [--max-concurrent <N>]
  */
 
 import { spawn } from "child_process";
@@ -46,6 +50,7 @@ import { config as storageDesignerConfig } from "./agents/storage-index-designer
 import { config as queryOptimizerConfig } from "./agents/query-optimizer/index.mjs";
 import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
 import { config as codeInspectorConfig } from "./agents/code-inspector/index.mjs";
+import { config as queryPlannerConfig } from "./agents/query-planner/index.mjs";
 import { config as dbaConfig } from "./agents/dba/index.mjs";
 import {
   createRunId,
@@ -68,6 +73,7 @@ function parseArgs(argv) {
     gendbDir: null,
     scaleFactor: defaults.scaleFactor,
     maxIterations: defaults.maxOptimizationIterations,
+    stallThreshold: defaults.stallThreshold,
     model: defaults.model,
     modelOverride: null,
     optimizationTarget: defaults.optimizationTarget,
@@ -80,6 +86,7 @@ function parseArgs(argv) {
     if (argv[i] === "--gendb-dir" && argv[i + 1]) args.gendbDir = resolve(argv[++i]);
     if (argv[i] === "--sf" && argv[i + 1]) args.scaleFactor = parseInt(argv[++i], 10);
     if (argv[i] === "--max-iterations" && argv[i + 1]) args.maxIterations = parseInt(argv[++i], 10);
+    if (argv[i] === "--stall-threshold" && argv[i + 1]) args.stallThreshold = parseInt(argv[++i], 10);
     if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     if (argv[i] === "--model-override" && argv[i + 1]) args.modelOverride = argv[++i];
     if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
@@ -461,21 +468,30 @@ function getBestBaselineTime(benchmarkResults, queryId) {
   return best === Infinity ? null : best;
 }
 
-function shouldContinue(queryId, history, benchmarkResults, execResults, iteration, maxIter) {
+function shouldContinue(queryId, history, benchmarkResults, execResults, iteration, maxIter, stallThreshold) {
   if (iteration > maxIter) return { action: 'stop', reason: 'Max iterations reached' };
 
-  // Never stop if results are still incorrect
+  // Never stop if results are still incorrect — but cap correctness-fix attempts
   if (execResults?.validation?.status === 'fail') {
+    const failCount = history.iterations.filter(i => i.validation === 'fail').length;
+    if (failCount >= 3) return { action: 'stop', reason: 'Too many correctness failures — needs manual review' };
     return { action: 'continue', reason: 'Fix correctness first' };
   }
 
   const timing = execResults?.timing_ms;
   if (timing && timing < 50) return { action: 'stop', reason: 'Already fast (<50ms)' };
 
-  // Already 1.2x faster than best baseline
+  // Already competitive with baseline
   if (benchmarkResults && timing) {
     const best = getBestBaselineTime(benchmarkResults, queryId);
-    if (best && timing < best / 1.2) return { action: 'stop', reason: `1.2x faster than baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
+    if (best && timing < best / 1.2) return { action: 'stop', reason: `Competitive with baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
+  }
+
+  // Adaptive: stop after stallThreshold consecutive non-improvements
+  const thresh = stallThreshold || defaults.stallThreshold;
+  const recent = history.iterations.slice(-thresh);
+  if (recent.length >= thresh && recent.every(i => !i.improved)) {
+    return { action: 'stop', reason: `Stalled: ${thresh} consecutive non-improving iterations` };
   }
 
   return { action: 'continue', reason: 'Optimization potential remains' };
@@ -493,6 +509,61 @@ function checkExecutionImprovement(prevExec, newExec) {
   // Compare timing
   if (prevExec?.timing_ms && newExec?.timing_ms) return newExec.timing_ms < prevExec.timing_ms;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Correctness Anchors: extract validated constants from passing code
+// ---------------------------------------------------------------------------
+
+function extractCorrectnessAnchors(cppPath) {
+  try {
+    const code = readFileSync(cppPath, 'utf-8');
+    const anchors = [];
+
+    // Extract date threshold constants
+    const dateMatches = code.matchAll(/(?:date_str_to_epoch_days|epoch_days)\s*\(\s*"([^"]+)"\s*\)/g);
+    for (const m of dateMatches) anchors.push({ type: 'date_literal', value: m[1] });
+
+    // Extract add_years/add_months/add_days calls with their arguments
+    const dateArithMatches = code.matchAll(/(?:add_years|add_months|add_days)\s*\([^,]+,\s*(-?\d+)\s*\)/g);
+    for (const m of dateArithMatches) anchors.push({ type: 'date_arithmetic', value: m[0] });
+
+    // Extract scaled threshold constants (large int literals with scale comments)
+    const scaleMatches = code.matchAll(/(\d{4,})LL?\s*(?:\/\*.*?scale.*?\*\/|\/\/.*?scale)/gi);
+    for (const m of scaleMatches) anchors.push({ type: 'scaled_constant', value: m[1] });
+
+    // Extract well-known scaled thresholds (e.g., 30000 for Q18, 2400 for Q6)
+    const knownThresholds = code.matchAll(/(?:>=?|<=?|==|!=)\s*(\d{4,})(?:LL)?(?:\s|;|\))/g);
+    for (const m of knownThresholds) {
+      const val = parseInt(m[1]);
+      if (val >= 100 && val % 100 === 0) {
+        anchors.push({ type: 'threshold_constant', value: m[1] });
+      }
+    }
+
+    // Extract revenue formula patterns
+    const revenueMatches = code.matchAll(/((?:ep|extendedprice|price)\w*\s*\*\s*\([^)]*(?:scale|100)[^)]*\))/gi);
+    for (const m of revenueMatches) anchors.push({ type: 'revenue_formula', value: m[1].trim() });
+
+    return anchors;
+  } catch {
+    return [];
+  }
+}
+
+function formatCorrectnessAnchors(anchors) {
+  if (!anchors || anchors.length === 0) return "";
+  const lines = [
+    "",
+    "## Correctness Anchors (DO NOT MODIFY)",
+    "These constants were validated in a passing iteration. Changing them will break correctness:",
+  ];
+  for (const a of anchors) {
+    lines.push(`- ${a.type}: ${a.value}`);
+  }
+  lines.push("Modify only the data structures, parallelism, and execution strategy around these anchors.");
+  lines.push("");
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +898,7 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
   // Shared resources
   const executionQueue = new ExecutionQueue();
   const semaphore = new Semaphore(args.maxConcurrent);
+  const qpSystemPrompt = await readFile(queryPlannerConfig.promptPath, "utf-8");
   const cgSystemPrompt = await readFile(codeGeneratorConfig.promptPath, "utf-8");
   const qoSystemPrompt = await readFile(queryOptimizerConfig.promptPath, "utf-8");
   const iter0Barrier = new Iter0Barrier(parsedQueries.length);
@@ -839,7 +911,7 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
         return await runQueryFullPipeline(
           query, args, runDir, workloadAnalysisPath, storageDesignPath,
           schema, groundTruthDir, hasGroundTruth,
-          executionQueue, semaphore, cgSystemPrompt, qoSystemPrompt,
+          executionQueue, semaphore, qpSystemPrompt, cgSystemPrompt, qoSystemPrompt,
           iter0Barrier, progressTracker
         );
       } catch (err) {
@@ -871,7 +943,7 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
 // Code Inspector: review generated code against experience base
 // ---------------------------------------------------------------------------
 
-async function runCodeInspection(queryId, cppPath, args, queryPhase) {
+async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPassingCppPath) {
   const inspectorSystemPrompt = await readFile(codeInspectorConfig.promptPath, "utf-8");
   const inspectorUserPrompt = [
     `Review the C++ query code for ${queryId}.`,
@@ -882,6 +954,12 @@ async function runCodeInspection(queryId, cppPath, args, queryPhase) {
     `## Experience Base`,
     `Read: ${EXPERIENCE_BASE_PATH}`,
     ``,
+    previousPassingCppPath ? [
+      `## Previous Passing Code (for C13-C15 regression detection)`,
+      `Compare against: ${previousPassingCppPath}`,
+      `Flag any changes to date constants, scale thresholds, or revenue formulas.`,
+      ``,
+    ].join("\n") : "",
     `Check the code against ALL entries in the experience base.`,
     `Output your review as a JSON block with verdict and issues.`,
   ].join("\n");
@@ -925,7 +1003,7 @@ function hasCriticalIssues(inspection) {
 async function runQueryFullPipeline(
   query, args, runDir, workloadAnalysisPath, storageDesignPath,
   schema, groundTruthDir, hasGroundTruth,
-  executionQueue, semaphore, cgSystemPrompt, qoSystemPrompt,
+  executionQueue, semaphore, qpSystemPrompt, cgSystemPrompt, qoSystemPrompt,
   iter0Barrier, progressTracker
 ) {
   const queryId = query.id;
@@ -961,13 +1039,80 @@ async function runQueryFullPipeline(
   let storageGuide = "";
   try { storageGuide = await readFile(guidePath, "utf-8"); } catch {}
 
+  // === ITERATION 0: QUERY PLANNER (gated by semaphore) ===
+  const planPath = resolve(iterDir, "plan.json");
+  progressTracker.update(queryId, "planner");
+  await semaphore.acquire();
+  try {
+    console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Query Planner`);
+
+    const qpUserPrompt = [
+      `Design an execution plan for ${queryId}.`,
+      ``,
+      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
+      ``,
+      `## Hardware Configuration`,
+      `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
+      `- Disk type: ${hw.disk_type || 'unknown'}`,
+      `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
+      `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
+      ``,
+      storageGuide ? [
+        `## Storage & Index Guide`,
+        storageGuide,
+      ].join("\n") : "",
+      "",
+      `## Workload Analysis (${queryId})`,
+      "```json",
+      JSON.stringify(filteredWorkload, null, 2),
+      "```",
+      "",
+      `## Query to plan`,
+      "```sql",
+      query.sql,
+      "```",
+      ``,
+      `## GenDB Storage Directory`,
+      `Binary columnar data: ${args.gendbDir}`,
+      ``,
+      formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, null),
+      ``,
+      `## Output`,
+      `Write plan JSON to: ${planPath}`,
+    ].join("\n");
+
+    const qpResult = await runAgent(queryPlannerConfig.name, {
+      systemPrompt: qpSystemPrompt,
+      userPrompt: qpUserPrompt,
+      allowedTools: queryPlannerConfig.allowedTools,
+      model: getAgentModel("query_planner", args),
+      cwd: iterDir,
+    });
+    recordAgentTelemetry(queryPhase, "query_planner", qpResult.durationMs, qpResult.tokens, qpResult.costUsd);
+  } finally {
+    semaphore.release();
+  }
+
+  // Read the plan (may be null if planner failed — coder proceeds without it)
+  let planJson = null;
+  try { planJson = JSON.parse(await readFile(planPath, "utf-8")); } catch {}
+
   // === ITERATION 0: CODE GENERATION (gated by semaphore) ===
+  progressTracker.update(queryId, "codegen");
   await semaphore.acquire();
   try {
     console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Code Generator`);
 
     const cgUserPrompt = [
       `Generate a correct, self-contained C++ implementation for ${queryId} (iteration 0).`,
+      ``,
+      planJson ? [
+        `## Execution Plan (from Query Planner)`,
+        `Implement this plan in C++. The plan specifies data structures, join strategy, parallelism approach, and index usage. Follow the plan exactly.`,
+        "```json",
+        JSON.stringify(planJson, null, 2),
+        "```",
+      ].join("\n") : "",
       ``,
       `## Optimization Target: ${args.optimizationTarget}`,
       `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
@@ -1099,7 +1244,7 @@ async function runQueryFullPipeline(
   for (let iteration = 1; iteration <= maxIter; iteration++) {
     // --- Programmatic shouldContinue() check ---
     const bestExecResults = await readJSON(bestExecResultsPath);
-    const continueDecision = shouldContinue(queryId, optimizationHistory, args.benchmarkResults, bestExecResults, iteration, maxIter);
+    const continueDecision = shouldContinue(queryId, optimizationHistory, args.benchmarkResults, bestExecResults, iteration, maxIter, args.stallThreshold);
 
     progressTracker.update(queryId, `iter-${iteration}`);
     console.log(`\n[Orchestrator] [${queryId}] --- Iteration ${iteration}/${maxIter} --- shouldContinue: ${continueDecision.action} (${continueDecision.reason})`);
@@ -1122,6 +1267,12 @@ async function runQueryFullPipeline(
     // Copy best code as starting point
     if (bestCppPath && existsSync(bestCppPath)) {
       await writeFile(optIterCppPath, await readFile(bestCppPath, "utf-8"));
+    }
+
+    // Copy plan.json for optimizer reference
+    const optIterPlanPath = resolve(optIterDir, "plan.json");
+    if (existsSync(planPath)) {
+      try { await writeFile(optIterPlanPath, await readFile(planPath, "utf-8")); } catch {}
     }
 
     // --- Stall detection ---
@@ -1195,6 +1346,18 @@ async function runQueryFullPipeline(
     let qoStorageGuide = "";
     try { qoStorageGuide = await readFile(qoGuidePath, "utf-8"); } catch {}
 
+    // --- Extract correctness anchors from best passing code ---
+    let anchorsSection = "";
+    if (bestExecResults?.validation?.status === 'pass' && bestCppPath) {
+      const anchors = extractCorrectnessAnchors(bestCppPath);
+      anchorsSection = formatCorrectnessAnchors(anchors);
+    }
+
+    // --- Build optimization history summary (lean, one-line per iteration) ---
+    const historySummary = optimizationHistory.iterations.map(it =>
+      `Iter ${it.iteration}: ${it.timing_ms ? Math.round(it.timing_ms) + 'ms' : 'N/A'} ${(it.validation || 'unknown').toUpperCase()} (${it.improved ? 'improved' : 'no improvement'})`
+    ).join("\n");
+
     // --- Query Optimizer (gated by semaphore) ---
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer`);
     await semaphore.acquire();
@@ -1203,32 +1366,24 @@ async function runQueryFullPipeline(
         `Optimize the existing C++ code for ${queryId}. This is iteration ${iteration}.`,
         stallSection,
         correctnessSection,
+        anchorsSection,
         `## Optimization Target: ${args.optimizationTarget}`,
         ``,
         `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
         "",
+        // Include plan.json path for plan-level modifications
+        existsSync(planPath) ? `## Current Execution Plan\nYou may modify the plan for architectural changes: ${planPath}\n` : "",
         qoStorageGuide ? [
-          `## Storage & Index Guide (from Storage/Index Designer)`,
-          `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
-          `Use this to leverage pre-built indexes for performance.`,
-          ``,
+          `## Storage & Index Guide`,
           qoStorageGuide,
         ].join("\n") : "",
         "",
-        `## Workload Analysis (${queryId})`,
-        "```json",
-        JSON.stringify(qoFilteredWorkload, null, 2),
-        "```",
-        "",
-        "## Input Files",
-        `- Execution results (timing + validation): ${bestExecResultsPath}`,
-        `- Optimization history: ${historyPath}`,
-        // Pre-computed timing summary so optimizer doesn't have to parse JSON
+        // Pre-computed timing summary (lean — no raw workload analysis JSON)
         (() => {
           const ot = bestExecResults?.operation_timings || {};
           const total = parseFloat(ot.total || bestExecResults?.timing_ms || 0);
           if (total <= 0) return "";
-          const lines = ["", "## Current Performance Profile"];
+          const lines = ["## Current Performance Profile"];
           let dominantOp = "", dominantPct = 0;
           for (const [op, ms] of Object.entries(ot)) {
             if (op === "total" || op === "output") continue;
@@ -1242,6 +1397,8 @@ async function runQueryFullPipeline(
         })(),
         formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, bestExecResults?.timing_ms),
         "",
+        // Optimization history summary (lean)
+        historySummary ? `## Optimization History\n${historySummary}\n` : "",
         `## Hardware Configuration`,
         `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
         `- Disk type: ${hw.disk_type || 'unknown'}`,
@@ -1279,10 +1436,11 @@ async function runQueryFullPipeline(
       semaphore.release();
     }
 
-    // --- Code Inspector (after optimization) ---
+    // --- Code Inspector (after optimization, with regression detection) ---
     progressTracker.update(queryId, `inspect-${iteration}`);
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Code Inspector`);
-    const inspectionN = await runCodeInspection(queryId, optIterCppPath, args, queryPhase);
+    const previousPassingPath = (bestExecResults?.validation?.status === 'pass') ? bestCppPath : null;
+    const inspectionN = await runCodeInspection(queryId, optIterCppPath, args, queryPhase, previousPassingPath);
     if (inspectionN.verdict === "NEEDS_FIX" && hasCriticalIssues(inspectionN)) {
       console.log(`[Orchestrator] [${queryId}] Inspector found critical issues in iteration ${iteration}, requesting fix`);
       await semaphore.acquire();
@@ -1806,13 +1964,14 @@ async function main() {
     console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline v21");
+  console.log("[Orchestrator] GenDB Pipeline v22");
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);
   console.log(`[Orchestrator] GenDB Dir:           ${args.gendbDir}`);
   console.log(`[Orchestrator] Scale Factor:        ${args.scaleFactor}`);
   console.log(`[Orchestrator] Max Iterations:      ${args.maxIterations}`);
+  console.log(`[Orchestrator] Stall Threshold:     ${args.stallThreshold}`);
   console.log(`[Orchestrator] Max Concurrent:      ${args.maxConcurrent}`);
   console.log(`[Orchestrator] Default Model:       ${args.model}`);
   console.log(`[Orchestrator] Model Override:      ${args.modelOverride || "(none)"}`);
