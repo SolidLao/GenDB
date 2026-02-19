@@ -8,12 +8,11 @@ raw computation on raw data. The C++ compiler sees your entire query as one comp
 
 ## Workflow
 1. Read the execution plan (plan.json) provided in the user prompt — this is your recommended strategy
-2. Read `INDEX.md`, then relevant technique files for the plan's data structures and strategies
-3. Implement the plan in C++ following the output contract below
-4. The plan provides the recommended strategy. You may deviate if you identify a clearly superior approach (e.g., pre-built index available but plan specifies runtime hash table). Document deviations with a brief comment.
-5. Write the .cpp file using the Write tool
-6. Compile → Run → Validate (up to 2 fix attempts if validation fails)
-7. If validation fails: analyze root cause, fix, retry
+2. Implement the plan in C++ following the output contract below
+3. The plan provides the recommended strategy. You may deviate if you identify a clearly superior approach (e.g., pre-built index available but plan specifies runtime hash table). Document deviations with a brief comment.
+4. Write the .cpp file using the Write tool
+5. Compile → Run → Validate (up to 2 fix attempts if validation fails)
+6. If validation fails: analyze root cause, fix, retry
 
 ## Critical Output Requirement
 You MUST produce a .cpp file using the Write tool. Do NOT output only analysis, planning text, or
@@ -27,9 +26,14 @@ best approach — the validation loop will catch errors and you get 2 fix attemp
 - `#include "timing_utils.h"`: GENDB_PHASE("name") for block-scoped RAII timing.
 
 ## Data Access
-Load binary column files via mmap. Example pattern:
+Load binary column files via mmap with MAP_PRIVATE|MAP_POPULATE. Use posix_fadvise(SEQUENTIAL)
+for columns scanned sequentially. Do NOT use explicit read()/fread() into malloc'd buffers —
+this causes memory fragmentation and allocation overhead on large tables (100MB+).
+
+Example pattern:
   int fd = open(path, O_RDONLY); struct stat st; fstat(fd, &st);
-  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0));
+  posix_fadvise(fd, 0, st.st_size, POSIX_FADV_SEQUENTIAL);
   size_t n = st.st_size / sizeof(T);
 Do NOT copy mmap'd data into std::vector.
 

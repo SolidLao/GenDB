@@ -10,15 +10,19 @@ Think step by step: identify the dominant bottleneck, then fix it.
 ## Workflow
 1. Read execution_results.json: parse [TIMING] breakdown, identify dominant operation
 2. Read the current execution plan (plan.json) if available — understand the architectural choices
-3. Read `INDEX.md`, then `query-execution/query-planning.md` (MANDATORY)
-4. Read optimization_history.json: don't repeat failed approaches
-5. Check for architecture-level failures (see below)
-6. Read relevant technique files for identified bottleneck
-7. You may modify BOTH the plan (plan.json) AND the code. For architectural bottlenecks
+3. Read optimization_history.json: don't repeat failed approaches
+4. Check for architecture-level failures (see below)
+5. You may modify BOTH the plan (plan.json) AND the code. For architectural bottlenecks
    (>50% time in one phase), consider plan-level changes first (different join order,
    different data structures, different parallelism strategy).
-8. Modify code using Edit tool. Use GenDB utility library.
-9. Compile (do NOT run — Executor handles validation)
+6. Modify code using Edit tool. Use GenDB utility library.
+7. Compile (do NOT run — Executor handles validation)
+
+## Output Discipline
+- Use Edit tool for targeted changes. NEVER use Write tool to replace the entire file.
+- Keep reasoning concise — focus on WHAT to change, not lengthy explanations of WHY.
+- Make one logical change at a time. Compile after each major structural change.
+- Do NOT output the entire file contents in your reasoning or explanation.
 
 ## System Utilities (MANDATORY)
 - `#include "date_utils.h"`: gendb::init_date_tables(), gendb::epoch_days_to_date_str(),
@@ -26,9 +30,14 @@ Think step by step: identify the dominant bottleneck, then fix it.
 - `#include "timing_utils.h"`: GENDB_PHASE("name") for block-scoped RAII timing.
 
 ## Data Access
-Load binary column files via mmap. Example pattern:
+Load binary column files via mmap with MAP_PRIVATE|MAP_POPULATE. Use posix_fadvise(SEQUENTIAL)
+for columns scanned sequentially. Do NOT use explicit read()/fread() into malloc'd buffers —
+this causes memory fragmentation and allocation overhead on large tables (100MB+).
+
+Example pattern:
   int fd = open(path, O_RDONLY); struct stat st; fstat(fd, &st);
-  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE|MAP_POPULATE, fd, 0));
+  posix_fadvise(fd, 0, st.st_size, POSIX_FADV_SEQUENTIAL);
   size_t n = st.st_size / sizeof(T);
 Do NOT copy mmap'd data into std::vector.
 
@@ -53,7 +62,7 @@ around these anchors.
 These cause 10-100x gaps. Fix them first:
 - Hash table build >50% of time -> filter before building, use indexes from Query Guide, or restructure
 - Same large table scanned multiple times -> fuse into single pass
-- EXISTS/NOT EXISTS as per-row operations -> pre-compute into hash sets (see `techniques/semi-join-patterns.md`)
+- EXISTS/NOT EXISTS as per-row operations -> pre-compute into hash sets
 - Thread-local hash tables merged sequentially -> use partitioned or atomic approaches
 - `std::unordered_map` for joins/aggregation with >256 groups -> use custom open-addressing hash table
 - Wrong join build side (larger table as build) -> swap to build on smaller filtered side

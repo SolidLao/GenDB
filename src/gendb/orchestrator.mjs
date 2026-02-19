@@ -1194,7 +1194,6 @@ async function runQueryFullPipeline(
       ].join("\n") : "",
       ``,
       `## Optimization Target: ${args.optimizationTarget}`,
-      `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
       ``,
       `## Hardware Configuration`,
       `- CPU cores: ${hw.cpu_cores || 'unknown'}`,
@@ -1446,8 +1445,6 @@ async function runQueryFullPipeline(
         anchorsSection,
         `## Optimization Target: ${args.optimizationTarget}`,
         ``,
-        `## Knowledge Base: ${KNOWLEDGE_BASE_PATH}`,
-        "",
         // Include plan.json path for plan-level modifications
         existsSync(planPath) ? `## Current Execution Plan\nYou may modify the plan for architectural changes: ${planPath}\n` : "",
         qoQueryGuide ? [
