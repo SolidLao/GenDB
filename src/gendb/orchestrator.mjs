@@ -238,24 +238,14 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
       killAgent(`Agent "${name}" timed out after ${formatDuration(timeout)}, killing...`);
     }, timeout);
 
-    // Inactivity timeout: kill if no stdout/stderr for 5 minutes
-    const INACTIVITY_MS = 5 * 60 * 1000;
-    let lastActivity = Date.now();
-    const inactivityCheck = setInterval(() => {
-      if (Date.now() - lastActivity > INACTIVITY_MS) {
-        killAgent(`Agent "${name}" killed due to inactivity (no output for 5m) — likely hit max_output_token limit`);
-      }
-    }, 30000);
-
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => { lastActivity = Date.now(); stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { lastActivity = Date.now(); stderr += chunk.toString(); });
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
     child.on("close", (code, signal) => {
       clearTimeout(timer);
-      clearInterval(inactivityCheck);
       const durationMs = Date.now() - startTime;
       if (killed) {
         rejectP(new Error(killReason));
@@ -291,7 +281,6 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      clearInterval(inactivityCheck);
       rejectP(new Error(`Failed to spawn agent "${name}": ${err.message}`));
     });
   });
