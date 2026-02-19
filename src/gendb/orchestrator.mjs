@@ -1,20 +1,21 @@
 /**
- * GenDB Orchestrator v22
+ * GenDB Orchestrator v23
  *
  * Three-phase agentic system with 7 agents:
  *   Phase 1 (Offline Data Storage Optimization):
- *     Workload Analyzer → Storage/Index Designer → DBA Stage A (predict risks, extend utilities)
+ *     Workload Analyzer → Storage/Index Designer → DBA Stage A (optional, --dba-stage-a)
  *   Phase 2 (Online Per-Query Pipeline-Parallel Optimization):
- *     Iter 0: Query Planner → Query Coder → Inspector → [fix] → Execute
+ *     Iter 0: Query Planner → Query Coder (compile+run+validate) → Inspector → Execute (safety net)
  *     Iter 1+: Query Optimizer → Inspector → Execute (optimizer can modify plan AND code)
  *     LLM calls gated by Semaphore, execution serialized via ExecutionQueue.
  *   Phase 3 (Post-Run):
  *     DBA Stage B — Retrospective analysis, proposals for improvement
  *
- * v22 changes: Query Planner agent (plan design separated from code generation),
- * correctness anchors (prevent optimizer from breaking validated constants),
- * adaptive iteration budget (stop early on stall), leaner optimizer prompts,
- * relaxed utility library policy (SHOULD use, not MUST use).
+ * v23 changes: Code generator does compile+run+validate internally (as before),
+ * but orchestrator always calls executeQuery() as safety net (survives agent timeout),
+ * DBA Stage A optional (saves ~6 min),
+ * utility library advisory (not mandatory), pre-built index emphasis,
+ * relaxed plan rigidity, earlier stall detection (2 iterations, 3x gap).
  *
  * Features: Per-agent LLM model config, per-operation timing, notification-based execution queue,
  * Mutex on run.json, PipelineProgressTracker, Iter0Barrier for storage checkpoint.
@@ -28,7 +29,7 @@
 import { spawn } from "child_process";
 import { readFile, writeFile, mkdir, cp } from "fs/promises";
 import { resolve, dirname } from "path";
-import { existsSync, readFileSync, rmSync } from "fs";
+import { existsSync, readFileSync, rmSync, readdirSync } from "fs";
 import { fileURLToPath } from "url";
 import {
   DEFAULT_SCHEMA,
@@ -78,6 +79,7 @@ function parseArgs(argv) {
     modelOverride: null,
     optimizationTarget: defaults.optimizationTarget,
     maxConcurrent: defaults.maxConcurrentQueries,
+    dbaStageA: false,
   };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
@@ -91,6 +93,7 @@ function parseArgs(argv) {
     if (argv[i] === "--model-override" && argv[i + 1]) args.modelOverride = argv[++i];
     if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
     if (argv[i] === "--max-concurrent" && argv[i + 1]) args.maxConcurrent = parseInt(argv[++i], 10);
+    if (argv[i] === "--dba-stage-a") args.dbaStageA = true;
   }
   if (!args.dataDir) {
     args.dataDir = getDataDir(defaults.targetBenchmark, args.scaleFactor);
@@ -212,33 +215,50 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
 
     const startTime = Date.now();
     let killed = false;
+    let killReason = "";
 
     const child = spawn("claude", args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000" },
     });
 
-    const timer = setTimeout(() => {
+    const killAgent = (reason) => {
+      if (killed) return;
       killed = true;
-      console.error(`\n[Orchestrator] Agent "${name}" timed out after ${formatDuration(timeout)}, killing...`);
+      killReason = reason;
+      console.error(`\n[Orchestrator] ${reason}`);
       child.kill("SIGTERM");
       setTimeout(() => {
         try { child.kill("SIGKILL"); } catch {}
       }, 5000);
+    };
+
+    const timer = setTimeout(() => {
+      killAgent(`Agent "${name}" timed out after ${formatDuration(timeout)}, killing...`);
     }, timeout);
+
+    // Inactivity timeout: kill if no stdout/stderr for 5 minutes
+    const INACTIVITY_MS = 5 * 60 * 1000;
+    let lastActivity = Date.now();
+    const inactivityCheck = setInterval(() => {
+      if (Date.now() - lastActivity > INACTIVITY_MS) {
+        killAgent(`Agent "${name}" killed due to inactivity (no output for 5m) — likely hit max_output_token limit`);
+      }
+    }, 30000);
 
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.stdout.on("data", (chunk) => { lastActivity = Date.now(); stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { lastActivity = Date.now(); stderr += chunk.toString(); });
 
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      clearInterval(inactivityCheck);
       const durationMs = Date.now() - startTime;
       if (killed) {
-        rejectP(new Error(`Agent "${name}" timed out after ${formatDuration(timeout)}`));
+        rejectP(new Error(killReason));
       } else if (code !== 0) {
         const exitInfo = signal ? `signal ${signal}` : `exit ${code}`;
         console.error(`\n[Orchestrator] Agent "${name}" exited with ${exitInfo} (${formatDuration(durationMs)})`);
@@ -271,6 +291,7 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      clearInterval(inactivityCheck);
       rejectP(new Error(`Failed to spawn agent "${name}": ${err.message}`));
     });
   });
@@ -512,6 +533,50 @@ function checkExecutionImprovement(prevExec, newExec) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation failure diagnosis: detect common patterns in column mismatches
+// ---------------------------------------------------------------------------
+
+function diagnoseValidationFailure(execResults) {
+  const details = execResults?.validation?.details;
+  if (!details) return "";
+  const hints = [];
+
+  for (const [qid, qResult] of Object.entries(details.queries || {})) {
+    for (const [col, failure] of Object.entries(qResult.column_failures || {})) {
+      const samples = failure.samples || [];
+
+      // Detect consistent Nx multiplier
+      const ratios = samples
+        .filter(s => parseFloat(s.expected) !== 0)
+        .map(s => parseFloat(s.actual) / parseFloat(s.expected));
+
+      if (ratios.length > 0) {
+        const avgRatio = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+        if (Math.abs(avgRatio - 100) < 5) {
+          hints.push(`Column "${col}": values ~100× too large. Check arithmetic — possible extra multiplication or missing division in the output formula.`);
+        } else if (Math.abs(avgRatio - 0.01) < 0.005) {
+          hints.push(`Column "${col}": values ~100× too small. Check arithmetic — possible extra division in the output formula.`);
+        }
+      }
+
+      // Detect zero output
+      if (samples.every(s => parseFloat(s.actual) === 0 && parseFloat(s.expected) !== 0)) {
+        hints.push(`Column "${col}": all values are 0 when expected non-zero. A filter predicate may be too restrictive — check that filter thresholds match SQL values directly (DECIMAL columns are stored as double).`);
+      }
+    }
+
+    // Row count mismatch
+    if (qResult.rows_expected !== undefined && qResult.rows_actual !== undefined && qResult.rows_expected !== qResult.rows_actual) {
+      hints.push(`Row count mismatch: expected ${qResult.rows_expected}, got ${qResult.rows_actual}. Check join/filter predicate logic.`);
+    }
+  }
+
+  return hints.length > 0
+    ? "\n**Diagnosis**: " + hints.join(" ") + " Refer to the Query Guide's Column Reference for correct column types and conversion patterns."
+    : "";
+}
+
+// ---------------------------------------------------------------------------
 // Correctness Anchors: extract validated constants from passing code
 // ---------------------------------------------------------------------------
 
@@ -532,7 +597,7 @@ function extractCorrectnessAnchors(cppPath) {
     const scaleMatches = code.matchAll(/(\d{4,})LL?\s*(?:\/\*.*?scale.*?\*\/|\/\/.*?scale)/gi);
     for (const m of scaleMatches) anchors.push({ type: 'scaled_constant', value: m[1] });
 
-    // Extract well-known scaled thresholds (e.g., 30000 for Q18, 2400 for Q6)
+    // Extract numeric threshold constants from comparison operators
     const knownThresholds = code.matchAll(/(?:>=?|<=?|==|!=)\s*(\d{4,})(?:LL)?(?:\s|;|\))/g);
     for (const m of knownThresholds) {
       const val = parseInt(m[1]);
@@ -542,7 +607,7 @@ function extractCorrectnessAnchors(cppPath) {
     }
 
     // Extract revenue formula patterns
-    const revenueMatches = code.matchAll(/((?:ep|extendedprice|price)\w*\s*\*\s*\([^)]*(?:scale|100)[^)]*\))/gi);
+    const revenueMatches = code.matchAll(/((?:\w+price\w*|\w+cost\w*|\w+revenue\w*)\s*\*\s*\([^)]+\))/gi);
     for (const m of revenueMatches) anchors.push({ type: 'revenue_formula', value: m[1].trim() });
 
     return anchors;
@@ -625,7 +690,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     queries.trim(),
     "```",
     "",
-    `## Data Directory (source .tbl files for sampling)`,
+    `## Data Directory (source data files for sampling)`,
     `${args.dataDir}`,
     `Use this to profile actual data: row counts (wc -l), column samples (head -100), selectivity estimates.`,
     "",
@@ -701,9 +766,9 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     ``,
     `## Query Guides Output Directory`,
     `Write per-query storage guides to: ${queryGuidesDir}`,
-    `Each file: <QUERY_ID>_storage_guide.md`,
+    `Each file: <QUERY_ID>_guide.md`,
     ``,
-    `## Data Directory (source .tbl files)`,
+    `## Data Directory (source data files)`,
     `${args.dataDir}`,
     "",
     `## GenDB Storage Directory (output)`,
@@ -753,54 +818,61 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     meta.phase1.steps.index_building.completedAt = new Date().toISOString();
   });
 
-  // --- Phase 1 Step 3: DBA Stage A (predict risks, extend utilities) ---
-  console.log("\n[Orchestrator] === Phase 1 Step 3: DBA Stage A (Pre-Generation Risk Analysis) ===");
-  await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.dba_stage_a = { status: "running", startedAt: new Date().toISOString() };
-  });
-
-  const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
-  const dbaStageAPrompt = [
-    `Stage A: Pre-generation analysis.`,
-    ``,
-    `## Workload Analysis`,
-    `Read from: ${workloadAnalysisPath}`,
-    ``,
-    `## Storage Design`,
-    `Read from: ${storageDesignPath}`,
-    ``,
-    `## Queries`,
-    `Read from: ${args.queries}`,
-    ``,
-    `## Utility Library`,
-    `Headers at: ${UTILS_PATH}`,
-    `Files: date_utils.h, hash_utils.h, mmap_utils.h, timing_utils.h`,
-    ``,
-    `## Experience Base`,
-    `Read and update: ${EXPERIENCE_BASE_PATH}`,
-    ``,
-    `Review all queries, predict correctness and performance risks,`,
-    `extend utility library if gaps found, add workload-specific warnings to experience base.`,
-    `Compile any modified headers: g++ -c -std=c++17 -fsyntax-only <header>`,
-  ].join("\n");
-
-  try {
-    const dbaResult = await runAgent(dbaConfig.name, {
-      systemPrompt: dbaSystemPrompt,
-      userPrompt: dbaStageAPrompt,
-      allowedTools: dbaConfig.allowedTools,
-      model: getAgentModel("dba", args),
-      cwd: runDir,
+  // --- Phase 1 Step 3: DBA Stage A (predict risks, extend utilities) --- OPTIONAL
+  if (args.dbaStageA) {
+    console.log("\n[Orchestrator] === Phase 1 Step 3: DBA Stage A (Pre-Generation Risk Analysis) ===");
+    await updateRunMeta(runDir, (meta) => {
+      meta.phase1.steps.dba_stage_a = { status: "running", startedAt: new Date().toISOString() };
     });
-    recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
-    console.log("[Orchestrator] DBA Stage A completed.");
-  } catch (err) {
-    console.error(`[Orchestrator] DBA Stage A failed (non-fatal): ${err.message}`);
+
+    const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
+    const dbaStageAPrompt = [
+      `Stage A: Pre-generation analysis.`,
+      ``,
+      `## Workload Analysis`,
+      `Read from: ${workloadAnalysisPath}`,
+      ``,
+      `## Storage Design`,
+      `Read from: ${storageDesignPath}`,
+      ``,
+      `## Queries`,
+      `Read from: ${args.queries}`,
+      ``,
+      `## Utility Library`,
+      `Headers at: ${UTILS_PATH}`,
+      `Files: date_utils.h, timing_utils.h`,
+      ``,
+      `## Experience Base`,
+      `Read and update: ${EXPERIENCE_BASE_PATH}`,
+      ``,
+      `Review all queries, predict correctness and performance risks,`,
+      `extend utility library if gaps found, add workload-specific warnings to experience base.`,
+      `Compile any modified headers: g++ -c -std=c++17 -fsyntax-only <header>`,
+    ].join("\n");
+
+    try {
+      const dbaResult = await runAgent(dbaConfig.name, {
+        systemPrompt: dbaSystemPrompt,
+        userPrompt: dbaStageAPrompt,
+        allowedTools: dbaConfig.allowedTools,
+        model: getAgentModel("dba", args),
+        cwd: runDir,
+      });
+      recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+      console.log("[Orchestrator] DBA Stage A completed.");
+    } catch (err) {
+      console.error(`[Orchestrator] DBA Stage A failed (non-fatal): ${err.message}`);
+    }
+
+    await updateRunMeta(runDir, (meta) => {
+      meta.phase1.steps.dba_stage_a.status = "completed";
+      meta.phase1.steps.dba_stage_a.completedAt = new Date().toISOString();
+    });
+  } else {
+    console.log("\n[Orchestrator] === Phase 1 Step 3: DBA Stage A SKIPPED (use --dba-stage-a to enable) ===");
   }
 
   await updateRunMeta(runDir, (meta) => {
-    meta.phase1.steps.dba_stage_a.status = "completed";
-    meta.phase1.steps.dba_stage_a.completedAt = new Date().toISOString();
     meta.phase1.status = "completed";
     meta.phase1.completedAt = new Date().toISOString();
   });
@@ -943,8 +1015,16 @@ async function runPerQueryParallelOptimization(args, runDir, workloadAnalysisPat
 // Code Inspector: review generated code against experience base
 // ---------------------------------------------------------------------------
 
-async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPassingCppPath) {
+async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPassingCppPath, runDir) {
   const inspectorSystemPrompt = await readFile(codeInspectorConfig.promptPath, "utf-8");
+
+  // Read query guide for encoding verification
+  let inspectorGuide = "";
+  if (runDir) {
+    const inspectorGuidePath = resolve(runDir, "query_guides", `${queryId}_guide.md`);
+    try { inspectorGuide = await readFile(inspectorGuidePath, "utf-8"); } catch {}
+  }
+
   const inspectorUserPrompt = [
     `Review the C++ query code for ${queryId}.`,
     ``,
@@ -954,6 +1034,14 @@ async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPas
     `## Experience Base`,
     `Read: ${EXPERIENCE_BASE_PATH}`,
     ``,
+    inspectorGuide ? [
+      `## Query Guide (Column Reference)`,
+      inspectorGuide,
+      ``,
+      `Verify that the code's constants (filter thresholds, scale divisors, dict patterns)`,
+      `match the Column Reference above. Flag mismatches as critical issues.`,
+      ``,
+    ].join("\n") : "",
     previousPassingCppPath ? [
       `## Previous Passing Code (for C13-C15 regression detection)`,
       `Compare against: ${previousPassingCppPath}`,
@@ -1026,18 +1114,14 @@ async function runQueryFullPipeline(
   const iterResultsDir = resolve(iterDir, "results");
   await mkdir(iterResultsDir, { recursive: true });
 
-  // Read hardware info and filtered context
+  // Read hardware info
   const storageDesign = await readJSON(storageDesignPath);
-  const workloadAnalysis = await readJSON(workloadAnalysisPath);
   const hw = storageDesign?.hardware_config || {};
-  const { filteredWorkload } = (storageDesign && workloadAnalysis)
-    ? extractQueryContext(query, storageDesign, workloadAnalysis)
-    : { filteredWorkload: null };
 
-  // Read per-query storage guide if available
-  const guidePath = resolve(runDir, "query_guides", `${queryId}_storage_guide.md`);
-  let storageGuide = "";
-  try { storageGuide = await readFile(guidePath, "utf-8"); } catch {}
+  // Read per-query guide if available
+  const guidePath = resolve(runDir, "query_guides", `${queryId}_guide.md`);
+  let queryGuide = "";
+  try { queryGuide = await readFile(guidePath, "utf-8"); } catch {}
 
   // === ITERATION 0: QUERY PLANNER (gated by semaphore) ===
   const planPath = resolve(iterDir, "plan.json");
@@ -1057,15 +1141,10 @@ async function runQueryFullPipeline(
       `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
       `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
       ``,
-      storageGuide ? [
-        `## Storage & Index Guide`,
-        storageGuide,
+      queryGuide ? [
+        `## Query Guide`,
+        queryGuide,
       ].join("\n") : "",
-      "",
-      `## Workload Analysis (${queryId})`,
-      "```json",
-      JSON.stringify(filteredWorkload, null, 2),
-      "```",
       "",
       `## Query to plan`,
       "```sql",
@@ -1108,7 +1187,7 @@ async function runQueryFullPipeline(
       ``,
       planJson ? [
         `## Execution Plan (from Query Planner)`,
-        `Implement this plan in C++. The plan specifies data structures, join strategy, parallelism approach, and index usage. Follow the plan exactly.`,
+        `Implement this plan in C++. The plan provides the recommended strategy for data structures, join strategy, parallelism approach, and index usage. You may deviate if you identify a clearly superior approach.`,
         "```json",
         JSON.stringify(planJson, null, 2),
         "```",
@@ -1123,18 +1202,13 @@ async function runQueryFullPipeline(
       `- L3 cache: ${hw.l3_cache_mb || 'unknown'} MB`,
       `- Total memory: ${hw.total_memory_gb || 'unknown'} GB`,
       ``,
-      storageGuide ? [
-        `## Storage & Index Guide (from Storage/Index Designer)`,
-        `This guide describes the exact data file formats, index binary layouts, and usage recommendations.`,
-        `Use this to load data correctly and leverage pre-built indexes for performance.`,
+      queryGuide ? [
+        `## Query Guide (from Storage/Index Designer)`,
+        `This is the authoritative reference for column types, encodings, index layouts,`,
+        `table stats, and query analysis. Use this to load data correctly and leverage pre-built indexes.`,
         ``,
-        storageGuide,
+        queryGuide,
       ].join("\n") : "",
-      "",
-      `## Workload Analysis (${queryId})`,
-      "```json",
-      JSON.stringify(filteredWorkload, null, 2),
-      "```",
       "",
       `- Schema: ${args.schema}`,
       ``,
@@ -1156,33 +1230,33 @@ async function runQueryFullPipeline(
       ``,
       `## Validation Loop`,
       `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${queryId.toLowerCase()} ${cppName}`,
-      `Run -> Validate correctness (up to 2 fix attempts)`,
-      hasGroundTruth ? `Compare results: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No validation available - just compile and run`,
+      `Run: ./${queryId.toLowerCase()} ${args.gendbDir} ${iterResultsDir}`,
+      hasGroundTruth ? `Validate: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No ground truth available - just compile and run`,
+      `If validation fails: analyze root cause, fix, retry (up to 2 fix attempts)`,
     ].join("\n");
 
-    // Retry loop: up to 2 attempts
-    const maxCgAttempts = 2;
-    for (let cgAttempt = 1; cgAttempt <= maxCgAttempts; cgAttempt++) {
-      const attemptPrompt = cgAttempt === 1
-        ? cgUserPrompt
-        : `RETRY: Previous attempt failed to produce a .cpp file. You MUST write C++ code to ${iterCppPath} using the Write tool. Do NOT output analysis or planning text only.\n\n${cgUserPrompt}`;
-
+    // Run code generator — resilient to timeout (still try executeQuery on whatever .cpp exists)
+    let cgTimedOut = false;
+    try {
       const cgResult = await runAgent(codeGeneratorConfig.name, {
         systemPrompt: cgSystemPrompt,
-        userPrompt: attemptPrompt,
+        userPrompt: cgUserPrompt,
         allowedTools: codeGeneratorConfig.allowedTools,
         model: getAgentModel("code_generator", args),
         cwd: iterDir,
       });
       recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
-
-      if (existsSync(iterCppPath)) break;
-
-      if (cgAttempt < maxCgAttempts) {
-        console.log(`[Orchestrator] Code Generator attempt ${cgAttempt} failed to produce ${iterCppPath}, retrying...`);
+    } catch (err) {
+      if (err.message.includes("timed out")) {
+        console.log(`[Orchestrator] [${queryId}] Code Generator timed out — will try executeQuery on existing .cpp`);
+        cgTimedOut = true;
       } else {
-        throw new Error(`Code Generator failed to produce ${iterCppPath} after ${maxCgAttempts} attempts`);
+        throw err;
       }
+    }
+
+    if (!existsSync(iterCppPath)) {
+      throw new Error(`Code Generator failed to produce ${iterCppPath}`);
     }
   } finally {
     semaphore.release();
@@ -1191,7 +1265,7 @@ async function runQueryFullPipeline(
   // === ITERATION 0: CODE INSPECTOR ===
   progressTracker.update(queryId, "inspect-0");
   console.log(`[Orchestrator] [${queryId}] Iteration 0: Code Inspector`);
-  const inspection0 = await runCodeInspection(queryId, iterCppPath, args, queryPhase);
+  const inspection0 = await runCodeInspection(queryId, iterCppPath, args, queryPhase, null, runDir);
   if (inspection0.verdict === "NEEDS_FIX" && hasCriticalIssues(inspection0)) {
     console.log(`[Orchestrator] [${queryId}] Inspector found critical issues, requesting fix`);
     await semaphore.acquire();
@@ -1219,7 +1293,7 @@ async function runQueryFullPipeline(
     }
   }
 
-  // === ITERATION 0: EXECUTE (enters ExecutionQueue immediately) ===
+  // === ITERATION 0: EXECUTE (orchestrator safety net — always runs, even if agent already validated) ===
   progressTracker.update(queryId, "exec-0");
   console.log(`[Orchestrator] [${queryId}] Iteration 0: Executor (compile + run + validate)`);
   await executionQueue.requestExecution(queryId, async () => {
@@ -1234,14 +1308,14 @@ async function runQueryFullPipeline(
   let bestCppPath = iterCppPath;
   let bestExecResultsPath = resolve(iterDir, "execution_results.json");
 
-  const { filteredWorkload: qoFilteredWorkload } = (storageDesign && workloadAnalysis)
-    ? extractQueryContext(query, storageDesign, workloadAnalysis)
-    : { filteredWorkload: null };
+  // Track best result for fault tolerance — return even if later iterations throw
+  let bestResult = { queryId, status: "completed", bestCppPath: iterCppPath, iterations: 0 };
 
   const maxIter = args.maxIterations;
   let previousIterationOutcome = null;
 
   for (let iteration = 1; iteration <= maxIter; iteration++) {
+  try {
     // --- Programmatic shouldContinue() check ---
     const bestExecResults = await readJSON(bestExecResultsPath);
     const continueDecision = shouldContinue(queryId, optimizationHistory, args.benchmarkResults, bestExecResults, iteration, maxIter, args.stallThreshold);
@@ -1275,18 +1349,19 @@ async function runQueryFullPipeline(
       try { await writeFile(optIterPlanPath, await readFile(planPath, "utf-8")); } catch {}
     }
 
-    // --- Stall detection ---
+    // --- Stall detection (trigger after 2 non-improving iterations with 3x gap) ---
     let stallSection = "";
-    const recentHistory = optimizationHistory.iterations.slice(-3);
-    if (recentHistory.length >= 3 && recentHistory.every(it => !it.improved)) {
+    const recentHistory = optimizationHistory.iterations.slice(-2);
+    if (recentHistory.length >= 2 && recentHistory.every(it => !it.improved)) {
       const bestBaseline = getBestBaselineTime(args.benchmarkResults, queryId);
       const currentBest = bestExecResults?.timing_ms;
-      if (bestBaseline && currentBest && currentBest > bestBaseline * 5) {
+      if (bestBaseline && currentBest && currentBest > bestBaseline * 3) {
         stallSection = [
           "",
           "## OPTIMIZATION STALL DETECTED",
           `${recentHistory.length} consecutive iterations failed to improve. Current: ${Math.round(currentBest)}ms, best engine: ${Math.round(bestBaseline)}ms (${(currentBest / bestBaseline).toFixed(1)}x gap).`,
           "The current code architecture is fundamentally limited. See optimizer system prompt for stall recovery guidance.",
+          "Read the Query Guide below for pre-built indexes you may not be using.",
           "",
         ].join("\n");
         console.log(`[Orchestrator] [${queryId}] STALL DETECTED: ${recentHistory.length} non-improving iterations, ${(currentBest / bestBaseline).toFixed(1)}x gap`);
@@ -1328,6 +1403,7 @@ async function runQueryFullPipeline(
       const details = bestExecResults.validation.details
         ? JSON.stringify(bestExecResults.validation.details, null, 2)
         : (bestExecResults.validation.output || "unknown mismatch");
+      const diagnosis = diagnoseValidationFailure(bestExecResults);
       correctnessSection = [
         "",
         "## CORRECTNESS FAILURE — FIX THIS FIRST",
@@ -1336,15 +1412,16 @@ async function runQueryFullPipeline(
         "```json",
         details,
         "```",
+        diagnosis,
         "Common causes: wrong filter predicate, encoding/decoding bug, wrong join logic, incorrect aggregation.",
         "",
       ].join("\n");
     }
 
-    // Read storage guide
-    const qoGuidePath = resolve(runDir, "query_guides", `${queryId}_storage_guide.md`);
-    let qoStorageGuide = "";
-    try { qoStorageGuide = await readFile(qoGuidePath, "utf-8"); } catch {}
+    // Read query guide
+    const qoGuidePath = resolve(runDir, "query_guides", `${queryId}_guide.md`);
+    let qoQueryGuide = "";
+    try { qoQueryGuide = await readFile(qoGuidePath, "utf-8"); } catch {}
 
     // --- Extract correctness anchors from best passing code ---
     let anchorsSection = "";
@@ -1373,9 +1450,9 @@ async function runQueryFullPipeline(
         "",
         // Include plan.json path for plan-level modifications
         existsSync(planPath) ? `## Current Execution Plan\nYou may modify the plan for architectural changes: ${planPath}\n` : "",
-        qoStorageGuide ? [
-          `## Storage & Index Guide`,
-          qoStorageGuide,
+        qoQueryGuide ? [
+          `## Query Guide`,
+          qoQueryGuide,
         ].join("\n") : "",
         "",
         // Pre-computed timing summary (lean — no raw workload analysis JSON)
@@ -1440,7 +1517,7 @@ async function runQueryFullPipeline(
     progressTracker.update(queryId, `inspect-${iteration}`);
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Code Inspector`);
     const previousPassingPath = (bestExecResults?.validation?.status === 'pass') ? bestCppPath : null;
-    const inspectionN = await runCodeInspection(queryId, optIterCppPath, args, queryPhase, previousPassingPath);
+    const inspectionN = await runCodeInspection(queryId, optIterCppPath, args, queryPhase, previousPassingPath, runDir);
     if (inspectionN.verdict === "NEEDS_FIX" && hasCriticalIssues(inspectionN)) {
       console.log(`[Orchestrator] [${queryId}] Inspector found critical issues in iteration ${iteration}, requesting fix`);
       await semaphore.acquire();
@@ -1499,21 +1576,38 @@ async function runQueryFullPipeline(
       bestIterDir = optIterDir;
       bestCppPath = optIterCppPath;
       bestExecResultsPath = optIterExecResultsPath;
+      bestResult = { queryId, status: "completed", bestCppPath: optIterCppPath, iterations: iteration };
       previousIterationOutcome = `Iteration ${iteration} IMPROVED. Changes kept.`;
     } else {
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration} did not improve. Rolling back.`);
       previousIterationOutcome = `Iteration ${iteration} REGRESSED — rolled back. Avoid repeating the same approach.`;
     }
+  } catch (err) {
+    console.error(`[Orchestrator] [${queryId}] Iteration ${iteration} error: ${err.message}`);
+    console.error(err.stack);
+    previousIterationOutcome = `Iteration ${iteration} CRASHED: ${err.message}`;
+
+    // Attempt to execute whatever .cpp exists in this iteration dir (prevents gaps in execution_results.json)
+    try {
+      const failedIterDir = resolve(queryDir, `iter_${iteration}`);
+      const failedCppPath = resolve(failedIterDir, cppName);
+      const failedResultsDir = resolve(failedIterDir, "results");
+      if (existsSync(failedCppPath)) {
+        console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: running fallback execution on existing .cpp`);
+        await mkdir(failedResultsDir, { recursive: true });
+        await executionQueue.requestExecution(queryId, async () => {
+          return await executeQuery(query, failedIterDir, failedCppPath, args.gendbDir, groundTruthDir, failedResultsDir);
+        });
+      }
+    } catch (fallbackErr) {
+      console.error(`[Orchestrator] [${queryId}] Fallback execution also failed: ${fallbackErr.message}`);
+    }
+  }
   }
 
   progressTracker.update(queryId, "done");
 
-  return {
-    queryId,
-    status: "completed",
-    bestCppPath,
-    iterations: optimizationHistory.iterations.length,
-  };
+  return bestResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,11 +1732,13 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
  * Run a subprocess and return its stdout. Rejects on non-zero exit.
  */
 function runProcess(cmd, cmdArgs, opts = {}) {
+  const timeoutVal = opts.timeout || 120000;
   return new Promise((resolveP, rejectP) => {
+    const startTime = Date.now();
     const child = spawn(cmd, cmdArgs, {
       cwd: opts.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: opts.timeout || 120000,
+      timeout: timeoutVal,
     });
     let stdout = "";
     let stderr = "";
@@ -1652,9 +1748,19 @@ function runProcess(cmd, cmdArgs, opts = {}) {
       if (code === 0) {
         resolveP({ stdout, stderr });
       } else {
-        const err = new Error(stderr || `Process exited with code ${code}`);
+        const durationMs = Date.now() - startTime;
+        let msg;
+        if (code === null && durationMs >= timeoutVal * 0.9) {
+          msg = `Process timed out after ${Math.round(timeoutVal / 1000)}s`;
+        } else if (code === null) {
+          msg = `Process killed by signal (duration: ${Math.round(durationMs / 1000)}s)`;
+        } else {
+          msg = `Process exited with code ${code}`;
+        }
+        const err = new Error(stderr || msg);
         err.stdout = stdout;
         err.stderr = stderr;
+        err.timedOut = code === null && durationMs >= timeoutVal * 0.9;
         rejectP(err);
       }
     });
@@ -1861,18 +1967,30 @@ async function printPerQuerySummary(runDir, parsedQueries) {
 
   for (const query of parsedQueries) {
     const qDir = resolve(runDir, "queries", query.id);
-    const iters = [];
-    for (let i = 0; ; i++) {
-      const execPath = resolve(qDir, `iter_${i}`, "execution_results.json");
+    const iters = new Map(); // iteration number -> data
+    // Scan all iter_* directories instead of breaking on first gap
+    let dirs = [];
+    try { dirs = readdirSync(qDir); } catch { /* query dir may not exist */ }
+    for (const d of dirs) {
+      const m = d.match(/^iter_(\d+)$/);
+      if (!m) continue;
+      const iterNum = parseInt(m[1], 10);
+      const execPath = resolve(qDir, d, "execution_results.json");
       const exec = await readJSON(execPath);
-      if (!exec) break;
-      iters.push({
+      if (!exec) continue;
+      iters.set(iterNum, {
         timing_ms: exec.timing_ms,
         validation: exec.validation?.status || "-",
       });
     }
-    if (iters.length > maxIter) maxIter = iters.length;
-    queryData.push({ id: query.id, iters });
+    // Convert map to sparse array indexed by iteration number
+    const maxIterNum = iters.size > 0 ? Math.max(...iters.keys()) + 1 : 0;
+    const iterArray = [];
+    for (let i = 0; i < maxIterNum; i++) {
+      iterArray.push(iters.get(i) || { timing_ms: null, validation: "-" });
+    }
+    if (maxIterNum > maxIter) maxIter = maxIterNum;
+    queryData.push({ id: query.id, iters: iterArray });
   }
 
   if (queryData.length === 0 || maxIter === 0) return;
@@ -1945,7 +2063,7 @@ async function main() {
 
   if (!existsSync(args.dataDir)) {
     console.error(`[Orchestrator] Error: data directory not found: ${args.dataDir}`);
-    console.error(`[Orchestrator] Run 'bash benchmarks/tpc-h/setup_data.sh ${args.scaleFactor}' first to generate TPC-H data.`);
+    console.error(`[Orchestrator] Data directory not found. Ensure source data files exist at: ${args.dataDir}`);
     process.exit(1);
   }
 
@@ -1964,7 +2082,7 @@ async function main() {
     console.log(`[Orchestrator] Benchmark comparison data loaded from: ${benchmarkResultsPath}`);
   }
 
-  console.log("[Orchestrator] GenDB Pipeline v22");
+  console.log("[Orchestrator] GenDB Pipeline v23");
   console.log(`[Orchestrator] Schema:              ${args.schema}`);
   console.log(`[Orchestrator] Queries:             ${args.queries}`);
   console.log(`[Orchestrator] Data Dir:            ${args.dataDir}`);

@@ -1,0 +1,81 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "scan_filter", "aggregate", "sort_output"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "selectivity_estimate": 0.988,
+        "note": "lineitem is physically sorted by l_shipdate ascending; zone map skips ~7 trailing blocks (min > 10471) out of 600 total. 593 blocks scanned, ~59,316,666 rows pass."
+      }
+    ],
+    "columns_accessed": [
+      "l_shipdate", "l_returnflag", "l_linestatus",
+      "l_quantity", "l_extendedprice", "l_discount", "l_tax"
+    ],
+    "columns_skipped": ["l_orderkey", "l_partkey", "l_suppkey", "l_linenumber",
+                        "l_comment", "l_shipinstruct", "l_shipmode"],
+    "group_by_cardinality": 6,
+    "group_by_note": "l_returnflag has 3 codes (0=R,1=N,2=A), l_linestatus has 2 codes (0=F,1=O) -> 3x2=6 possible slots. Use flat 2D array indexed by [rf_code][ls_code]; zero hash overhead. Derive AVG from SUM/COUNT at output time.",
+    "output_sort": "trivial_sort_on_6_rows"
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "direct_array[3][2]",
+      "aggregation_detail": "Flat 2D array of 6 AggSlot structs. Each slot holds: sum_qty, sum_base_price, sum_disc_price, sum_charge, sum_discount, count (all double/int64). Indexed by [rf_code][ls_code] directly — O(1) with no branching, no hashing. Thread-local copies merged sequentially after parallel phase.",
+      "zone_map": "mmap_readonly",
+      "column_files": "mmap_readonly — 7 column files memory-mapped for zero-copy sequential access"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 32,
+      "morsel_unit": "block",
+      "total_blocks": 600,
+      "blocks_skipped_by_zone_map": 7,
+      "blocks_scanned": 593,
+      "blocks_per_thread": 19,
+      "synchronization": "thread_local_merge",
+      "merge_cost": "trivial — 6 slots x 6 accumulators = 36 additions after parallel phase",
+      "merge_note": "Each thread maintains its own direct_array[3][2]; after all threads complete, a single sequential merge sums the 32 local arrays into one final array. No locking, no atomics needed during scan."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "uint32_t num_blocks=600, then 600x{int32_t min, int32_t max, uint32_t block_size} (12 bytes each)",
+        "purpose": "skip_blocks_outside_range",
+        "skip_condition": "block_min > 10471",
+        "expected_blocks_skipped": 7,
+        "benefit": "minor (~1.2% blocks skipped) but zero-cost to apply; always use"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_detail": "One pass over all 7 column files simultaneously, block by block. For each block: (1) check zone map — skip if block_min > 10471; (2) inner loop over rows: test l_shipdate[i] <= 10471, if pass compute all aggregates and accumulate into local direct_array[rf][ls]. No intermediate materialization.",
+    "inner_loop_detail": {
+      "predicate": "l_shipdate[i] <= 10471  (int32 compare, branchless-friendly)",
+      "group_key": "group = rf_code * 2 + ls_code  (single multiply-add, avoids 2D indexing overhead)",
+      "accumulate": [
+        "slot.sum_qty       += l_quantity[i]",
+        "slot.sum_price     += l_extendedprice[i]",
+        "slot.sum_disc_price += l_extendedprice[i] * (1.0 - l_discount[i])",
+        "slot.sum_charge    += l_extendedprice[i] * (1.0 - l_discount[i]) * (1.0 + l_tax[i])",
+        "slot.sum_discount  += l_discount[i]",
+        "slot.count         += 1"
+      ],
+      "avg_derivation": "Computed at output: avg_qty = sum_qty/count, avg_price = sum_price/count, avg_disc = sum_discount/count"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_detail": "All 7 column files are accessed sequentially block-by-block. Each column is a contiguous flat array — prefetch-friendly, no random access. With mmap and sequential access, OS read-ahead covers HDD latency. L3 cache (44MB) can hold ~1.5M rows of all 7 columns simultaneously (7 cols × 4-8 bytes × 1.5M ≈ 42MB), fitting a full morsel comfortably."
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_scan_and_aggregate",
+    "bottleneck": "HDD sequential read bandwidth across 7 columns x ~59.3M rows",
+    "bytes_read": "~59.3M rows x (4+1+1+8+8+8+8) bytes = ~2.26 GB (7 columns)",
+    "estimated_ms": 85,
+    "estimation_rationale": "32-thread parallel scan over 593 active blocks (~59.3M rows). Sequential HDD read at ~2-3 GB/s effective throughput for mmap. 2.26 GB / 2.5 GB/s ≈ 900ms single-threaded IO; with 32 parallel threads and OS read-ahead, effective ~80-90ms wall time. Merge phase: <1ms. Output sort of 6 rows: negligible. Target: match Umbra/DuckDB at 83ms."
+  }
+}

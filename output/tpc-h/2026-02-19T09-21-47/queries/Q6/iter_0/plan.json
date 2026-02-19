@@ -1,0 +1,102 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_block_skip", "filter_shipdate", "filter_discount", "filter_quantity", "aggregate_revenue"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_accumulator",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "selectivity_estimate": 0.14,
+        "block_skip_via_zone_map": true,
+        "blocks_skipped": "~510 of 600 (85% skip rate)",
+        "note": "l_shipdate is sorted ascending — binary search on zone map to find first qualifying block (max_val >= 8766) and last qualifying block (min_val < 9131)"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount >= 0.05 - 1e-9 AND l_discount <= 0.07 + 1e-9",
+        "selectivity_estimate": 0.27,
+        "block_skip_via_zone_map": false,
+        "note": "l_discount zone map provides no skipping — all blocks span [0.00, 0.10]. Apply as row-level filter only."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 24.0",
+        "selectivity_estimate": 0.48,
+        "block_skip_via_zone_map": false,
+        "note": "l_quantity zone map provides no skipping — all blocks span [1, 50]. Apply as row-level filter only."
+      }
+    ],
+    "filter_application_order": [
+      "l_shipdate (block-level zone map skip first, then row-level; cheapest/most selective)",
+      "l_discount (row-level, 27% pass rate — applied second to candidate rows)",
+      "l_quantity (row-level, 48% pass rate — applied third to further reduce survivors)",
+      "l_extendedprice (loaded last via late materialization; only for ~1.8% of rows that pass all filters)"
+    ],
+    "late_materialization": {
+      "enabled": true,
+      "deferred_column": "l_extendedprice",
+      "reason": "Only ~1.1M of 9M scanned rows pass all three filters. Load l_extendedprice only for surviving rows to minimize memory bandwidth."
+    },
+    "estimated_qualifying_rows": 1079000,
+    "estimated_scanned_rows": 9000000
+  },
+  "physical_plan": {
+    "data_structures": {
+      "dim_filter": "none",
+      "fact_join": "none",
+      "aggregation": "thread_local_double_scalar",
+      "note": "No hash tables needed. Each thread accumulates a local double `partial_sum`. Final result is a single reduction across threads."
+    },
+    "parallelism": {
+      "strategy": "block_parallel",
+      "thread_count": "auto(nproc=64)",
+      "work_unit": "block",
+      "qualifying_blocks": 90,
+      "blocks_per_thread": "~1-2 (use dynamic scheduling: each thread grabs the next unprocessed block)",
+      "synchronization": "thread_local_scalar_merge",
+      "merge_strategy": "sum all thread-local partial_sum values after parallel phase — O(nthreads) sequential step",
+      "note": "With only ~90 qualifying blocks and 64 threads, use dynamic block assignment (std::atomic<int> next_block) to avoid load imbalance from variable block fill rates near zone map boundaries."
+    },
+    "index_usage": [
+      {
+        "index": "l_shipdate_zonemap",
+        "file": "lineitem/indexes/l_shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600] then [double min_val, double max_val, uint32_t row_count, uint32_t _pad] per block (24 bytes/entry)",
+        "purpose": "skip_blocks_outside_shipdate_range",
+        "skip_condition": "skip block i if entry[i].max_val < 8766.0 OR entry[i].min_val >= 9131.0",
+        "optimization": "binary search for first block with max_val >= 8766 and last block with min_val < 9131; scan only that contiguous range of ~90 blocks",
+        "blocks_eliminated": "~510 of 600",
+        "block_row_offset": "block i starts at row i * 100000 (direct array index into col_ptr)"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_detail": {
+      "pass_1": "Load l_shipdate_zonemap (14KB) once. Identify qualifying block range via binary search. Build list of ~90 block IDs.",
+      "pass_2_per_block": [
+        "Load l_shipdate chunk (100K × 4 bytes = 400KB). Apply row-level filter: 8766 <= val < 9131. Build row bitmask or compact index.",
+        "Load l_discount chunk. For candidate rows only: apply 0.05-1e-9 <= val <= 0.07+1e-9. Narrow candidate set.",
+        "Load l_quantity chunk. For remaining candidates: apply val < 24.0. Narrow further.",
+        "Load l_extendedprice chunk. For final survivors (~1.8%): accumulate partial_sum += extprice[i] * discount[i]."
+      ]
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_detail": "Each column is read sequentially within each qualifying block. All four column chunks for a block fit in L3 cache (4 × 100K × 8B = 3.2MB per block vs 44MB L3). Prefetch next block's l_shipdate while processing current block's later columns."
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_block_scan_with_late_materialization",
+    "data_loaded_mb": {
+      "l_shipdate_zonemap": 0.014,
+      "l_shipdate_qualifying_blocks": 36,
+      "l_discount_qualifying_blocks": 36,
+      "l_quantity_qualifying_blocks": 36,
+      "l_extendedprice_qualifying_rows_only": 8.6,
+      "total_approx_mb": 117
+    },
+    "estimated_ms": 15,
+    "bottleneck": "memory_bandwidth_over_~90_blocks",
+    "target_comparison": "Umbra=14ms — plan is designed to match via zone-map block skip + late materialization + 64-thread block parallelism"
+  }
+}

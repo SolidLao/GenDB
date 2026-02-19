@@ -1,0 +1,191 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-18T21-55-30/queries/Q18/iter_0/q18.cpp:24:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q18(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:34: warning: ‘%02d’ directive writing between 2 and 4 bytes into a region of size between 0 and 4 [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                  ^~~~\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:23: note: directive argument in the range [-128, 127]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-18T21-55-30/queries/Q18/iter_0/q18.cpp:11:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 12\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] phase1_lineitem_scan: 1198.94 ms\n[TIMING] phase2_orders_scan: 12.56 ms\n[TIMING] phase3_phase4_index_lookups: 18.08 ms\n[TIMING] sort_topk: 0.01 ms\n[TIMING] output: 0.48 ms\n[TIMING] total: 1254.60 ms\n",
+    "stderr": "",
+    "duration_ms": 1259
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": false,\n      \"error\": \"100 row(s) differ across 6 column(s)\",\n      \"column_failures\": {\n        \"c_name\": {\n          \"category\": \"exact\",\n          \"failure_count\": 100,\n          \"samples\": [\n            {\n              \"expected\": \"Customer#000008782\",\n              \"actual\": \"Customer#000003544\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"Customer#000015127\",\n              \"actual\": \"Customer#000008782\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"Customer#000018472\",\n              \"actual\": \"Customer#000008846\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"c_custkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 100,\n          \"samples\": [\n            {\n              \"expected\": \"8782\",\n              \"actual\": \"3544\",\n              \"abs_diff\": 5238.0,\n              \"rel_diff_pct\": 59.6447,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"15127\",\n              \"actual\": \"8782\",\n              \"abs_diff\": 6345.0,\n              \"rel_diff_pct\": 41.9449,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"18472\",\n              \"actual\": \"8846\",\n              \"abs_diff\": 9626.0,\n              \"rel_diff_pct\": 52.1113,\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_orderkey\": {\n          \"category\": \"exact\",\n          \"failure_count\": 100,\n          \"samples\": [\n            {\n              \"expected\": \"29294434\",\n              \"actual\": \"48526950\",\n              \"abs_diff\": 19232516.0,\n              \"rel_diff_pct\": 65.6525,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"34551296\",\n              \"actual\": \"29294434\",\n              \"abs_diff\": 5256862.0,\n              \"rel_diff_pct\": 15.2147,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"22291718\",\n              \"actual\": \"39702437\",\n              \"abs_diff\": 17410719.0,\n              \"rel_diff_pct\": 78.104,\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_orderdate\": {\n          \"category\": \"exact\",\n          \"failure_count\": 100,\n          \"samples\": [\n            {\n              \"expected\": \"1993-01-05\",\n              \"actual\": \"1995-11-23\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"1998-04-12\",\n              \"actual\": \"1993-01-05\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"1992-09-03\",\n              \"actual\": \"1995-11-23\",\n              \"row\": 2\n            }\n          ]\n        },\n        \"o_totalprice\": {\n          \"category\": \"exact\",\n          \"failure_count\": 100,\n          \"samples\": [\n            {\n              \"expected\": \"518140.85\",\n              \"actual\": \"437674.55\",\n              \"abs_diff\": 80466.29999999999,\n              \"rel_diff_pct\": 15.5298,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"508442.04\",\n              \"actual\": \"518140.85\",\n              \"abs_diff\": 9698.809999999998,\n              \"rel_diff_pct\": 1.9076,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"500694.69\",\n              \"actual\": \"475436.36\",\n              \"abs_diff\": 25258.330000000016,\n              \"rel_diff_pct\": 5.0447,\n              \"row\": 2\n            }\n          ]\n        },\n        \"sum_qty\": {\n          \"category\": \"exact_sum_qty\",\n          \"failure_count\": 92,\n          \"samples\": [\n            {\n              \"expected\": \"322.00\",\n              \"actual\": \"304.00\",\n              \"abs_diff\": 18.0,\n              \"rel_diff_pct\": 5.5901,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"312.00\",\n              \"actual\": \"322.00\",\n              \"abs_diff\": 10.0,\n              \"rel_diff_pct\": 3.2051,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"306.00\",\n              \"actual\": \"321.00\",\n              \"abs_diff\": 15.0,\n              \"rel_diff_pct\": 4.902,\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q18": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "100 row(s) differ across 6 column(s)",
+          "column_failures": {
+            "c_name": {
+              "category": "exact",
+              "failure_count": 100,
+              "samples": [
+                {
+                  "expected": "Customer#000008782",
+                  "actual": "Customer#000003544",
+                  "row": 0
+                },
+                {
+                  "expected": "Customer#000015127",
+                  "actual": "Customer#000008782",
+                  "row": 1
+                },
+                {
+                  "expected": "Customer#000018472",
+                  "actual": "Customer#000008846",
+                  "row": 2
+                }
+              ]
+            },
+            "c_custkey": {
+              "category": "exact",
+              "failure_count": 100,
+              "samples": [
+                {
+                  "expected": "8782",
+                  "actual": "3544",
+                  "abs_diff": 5238,
+                  "rel_diff_pct": 59.6447,
+                  "row": 0
+                },
+                {
+                  "expected": "15127",
+                  "actual": "8782",
+                  "abs_diff": 6345,
+                  "rel_diff_pct": 41.9449,
+                  "row": 1
+                },
+                {
+                  "expected": "18472",
+                  "actual": "8846",
+                  "abs_diff": 9626,
+                  "rel_diff_pct": 52.1113,
+                  "row": 2
+                }
+              ]
+            },
+            "o_orderkey": {
+              "category": "exact",
+              "failure_count": 100,
+              "samples": [
+                {
+                  "expected": "29294434",
+                  "actual": "48526950",
+                  "abs_diff": 19232516,
+                  "rel_diff_pct": 65.6525,
+                  "row": 0
+                },
+                {
+                  "expected": "34551296",
+                  "actual": "29294434",
+                  "abs_diff": 5256862,
+                  "rel_diff_pct": 15.2147,
+                  "row": 1
+                },
+                {
+                  "expected": "22291718",
+                  "actual": "39702437",
+                  "abs_diff": 17410719,
+                  "rel_diff_pct": 78.104,
+                  "row": 2
+                }
+              ]
+            },
+            "o_orderdate": {
+              "category": "exact",
+              "failure_count": 100,
+              "samples": [
+                {
+                  "expected": "1993-01-05",
+                  "actual": "1995-11-23",
+                  "row": 0
+                },
+                {
+                  "expected": "1998-04-12",
+                  "actual": "1993-01-05",
+                  "row": 1
+                },
+                {
+                  "expected": "1992-09-03",
+                  "actual": "1995-11-23",
+                  "row": 2
+                }
+              ]
+            },
+            "o_totalprice": {
+              "category": "exact",
+              "failure_count": 100,
+              "samples": [
+                {
+                  "expected": "518140.85",
+                  "actual": "437674.55",
+                  "abs_diff": 80466.29999999999,
+                  "rel_diff_pct": 15.5298,
+                  "row": 0
+                },
+                {
+                  "expected": "508442.04",
+                  "actual": "518140.85",
+                  "abs_diff": 9698.809999999998,
+                  "rel_diff_pct": 1.9076,
+                  "row": 1
+                },
+                {
+                  "expected": "500694.69",
+                  "actual": "475436.36",
+                  "abs_diff": 25258.330000000016,
+                  "rel_diff_pct": 5.0447,
+                  "row": 2
+                }
+              ]
+            },
+            "sum_qty": {
+              "category": "exact_sum_qty",
+              "failure_count": 92,
+              "samples": [
+                {
+                  "expected": "322.00",
+                  "actual": "304.00",
+                  "abs_diff": 18,
+                  "rel_diff_pct": 5.5901,
+                  "row": 0
+                },
+                {
+                  "expected": "312.00",
+                  "actual": "322.00",
+                  "abs_diff": 10,
+                  "rel_diff_pct": 3.2051,
+                  "row": 1
+                },
+                {
+                  "expected": "306.00",
+                  "actual": "321.00",
+                  "abs_diff": 15,
+                  "rel_diff_pct": 4.902,
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "phase1_lineitem_scan": 1198.94,
+    "phase2_orders_scan": 12.56,
+    "phase3_phase4_index_lookups": 18.08,
+    "sort_topk": 0.01,
+    "output": 0.48,
+    "total": 1254.6
+  },
+  "timing_ms": 1254.12
+}

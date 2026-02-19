@@ -6,7 +6,7 @@ Analyze SQL schemas and queries to produce structured workload characterization.
 ## Input
 - Schema SQL (CREATE TABLE statements)
 - Query SQL (SELECT queries)
-- Data directory (source `.tbl` files for sampling)
+- Data directory (source data files for sampling)
 - Knowledge base (`INDEX.md`)
 
 ## Output
@@ -16,8 +16,9 @@ Write JSON analysis to the exact file path specified in the user prompt.
 
 1. **Detect hardware**: `nproc`, `lscpu | grep -E "cache|Thread|Core|Flags"`, `lsblk -d -o name,rota`, `free -h`
 2. **Profile data** from data directory:
-   - Row counts: `wc -l <data_dir>/<table>.tbl` (mandatory, exact cardinalities)
-   - Column stats: `head -100 <data_dir>/<table>.tbl` (min/max, distinct counts for key columns)
+   - Detect file format: check extensions and delimiters in data directory (common: .tbl with |, .csv with ,, .tsv with tab)
+   - Row counts: `wc -l <data_dir>/<table>.<ext>` (mandatory, exact cardinalities)
+   - Column stats: `head -100 <data_dir>/<table>.<ext>` (min/max, distinct counts for key columns)
    - Selectivity: `head -1000` sampling for important filter predicates
    - Total profiling overhead: < 10 seconds
 3. **Read schema and queries** from the prompt

@@ -1,0 +1,61 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-19T03-28-25/queries/Q18/iter_0/q18.cpp:27:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q18(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:34: warning: ‘%02d’ directive writing between 2 and 4 bytes into a region of size between 0 and 4 [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                  ^~~~\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:23: note: directive argument in the range [-128, 127]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-19T03-28-25/queries/Q18/iter_0/q18.cpp:13:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 12\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] extract_qualifying: 12.97 ms\n[TIMING] lineitem_scan_aggregate: 111.11 ms\n[TIMING] orders_scan_semijoin: 12.76 ms\n[TIMING] sort_topk: 0.02 ms\n[TIMING] output: 0.91 ms\n[TIMING] total: 125.21 ms\n",
+    "stderr": "",
+    "duration_ms": 131
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": false,\n      \"error\": \"2 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"o_totalprice\": {\n          \"category\": \"exact\",\n          \"failure_count\": 2,\n          \"samples\": [\n            {\n              \"expected\": \"549380.08\",\n              \"actual\": \"549380.07\",\n              \"abs_diff\": 0.010000000009313226,\n              \"rel_diff_pct\": 0.0,\n              \"row\": 37\n            },\n            {\n              \"expected\": \"532057.45\",\n              \"actual\": \"532057.44\",\n              \"abs_diff\": 0.010000000009313226,\n              \"rel_diff_pct\": 0.0,\n              \"row\": 58\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q18": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "2 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "o_totalprice": {
+              "category": "exact",
+              "failure_count": 2,
+              "samples": [
+                {
+                  "expected": "549380.08",
+                  "actual": "549380.07",
+                  "abs_diff": 0.010000000009313226,
+                  "rel_diff_pct": 0,
+                  "row": 37
+                },
+                {
+                  "expected": "532057.45",
+                  "actual": "532057.44",
+                  "abs_diff": 0.010000000009313226,
+                  "rel_diff_pct": 0,
+                  "row": 58
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "extract_qualifying": 12.97,
+    "lineitem_scan_aggregate": 111.11,
+    "orders_scan_semijoin": 12.76,
+    "sort_topk": 0.02,
+    "output": 0.91,
+    "total": 125.21
+  },
+  "timing_ms": 124.3
+}

@@ -1,0 +1,70 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.25 ms\n[TIMING] build_joins: 0.39 ms\n[TIMING] main_scan: 55.44 ms\n[TIMING] output: 0.28 ms\n[TIMING] total: 149.25 ms\n",
+    "stderr": "",
+    "duration_ms": 156
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"4 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"avg_qty\": {\n          \"category\": \"avg\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"25.50\",\n              \"actual\": \"2550.10\",\n              \"abs_diff\": 2524.6,\n              \"rel_diff_pct\": 9900.3922,\n              \"tolerance\": \"1%\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"25.52\",\n              \"actual\": \"2552.24\",\n              \"abs_diff\": 2526.72,\n              \"rel_diff_pct\": 9900.9404,\n              \"tolerance\": \"1%\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"25.50\",\n              \"actual\": \"2549.81\",\n              \"abs_diff\": 2524.31,\n              \"rel_diff_pct\": 9899.2549,\n              \"tolerance\": \"1%\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "4 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "avg_qty": {
+              "category": "avg",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "25.50",
+                  "actual": "2550.10",
+                  "abs_diff": 2524.6,
+                  "rel_diff_pct": 9900.3922,
+                  "tolerance": "1%",
+                  "row": 0
+                },
+                {
+                  "expected": "25.52",
+                  "actual": "2552.24",
+                  "abs_diff": 2526.72,
+                  "rel_diff_pct": 9900.9404,
+                  "tolerance": "1%",
+                  "row": 1
+                },
+                {
+                  "expected": "25.50",
+                  "actual": "2549.81",
+                  "abs_diff": 2524.31,
+                  "rel_diff_pct": 9899.2549,
+                  "tolerance": "1%",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 0.25,
+    "build_joins": 0.39,
+    "main_scan": 55.44,
+    "output": 0.28,
+    "total": 149.25
+  },
+  "timing_ms": 148.97
+}

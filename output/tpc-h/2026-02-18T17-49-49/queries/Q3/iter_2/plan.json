@@ -1,0 +1,165 @@
+{
+  "query_id": "Q3",
+  "logical_plan": {
+    "pipeline": [
+      "filter_customer",
+      "build_customer_bitset",
+      "scan_orders_zone_map",
+      "filter_orders_date",
+      "probe_customer_bitset",
+      "build_orders_hash_map",
+      "scan_lineitem_zone_map",
+      "filter_lineitem_shipdate",
+      "probe_orders_hash_map",
+      "aggregate",
+      "topk"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(filtered: c_mktsegment='BUILDING')",
+        "build_estimated_rows": 300000,
+        "probe": "orders(filtered: o_orderdate < 1995-03-15)",
+        "probe_estimated_rows": 7200000,
+        "join_predicate": "o_custkey = c_custkey",
+        "intermediate_estimated_rows": 1440000,
+        "notes": "customer bitset indexed by c_custkey (dense 1..1500000, fits in ~188KB bitset); probe orders rows that pass zone-map + date filter"
+      },
+      {
+        "step": 2,
+        "build": "orders(joined with customer, filtered)",
+        "build_estimated_rows": 1440000,
+        "probe": "lineitem(filtered: l_shipdate > 1995-03-15)",
+        "probe_estimated_rows": 31200000,
+        "join_predicate": "l_orderkey = o_orderkey",
+        "intermediate_estimated_rows": 4300000,
+        "notes": "build compact hash map keyed by o_orderkey from ~1.44M matched orders; probe ~31M qualifying lineitem rows with bloom filter pre-check"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "partitioned_hash_group_by",
+    "aggregation_notes": "GROUP BY (l_orderkey, o_orderdate, o_shippriority). Estimated distinct groups ~1.44M (upper bound = matched orders). High cardinality → thread-local hash tables + final merge. Key is l_orderkey (int32); store (revenue_sum, o_orderdate, o_shippriority) per group.",
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment = 'BUILDING'",
+        "encoding": "dictionary int16_t — resolve 'BUILDING' to dict code at startup, compare codes",
+        "selectivity_estimate": 0.2,
+        "estimated_output_rows": 300000
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < DATE '1995-03-15'",
+        "encoding": "days_since_epoch int32_t — 1995-03-15 = 9204",
+        "selectivity_estimate": 0.48,
+        "estimated_output_rows": 7200000,
+        "index": "orders_o_orderdate zone_map — skip blocks with min > 9204"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > DATE '1995-03-15'",
+        "encoding": "days_since_epoch int32_t — 1995-03-15 = 9204",
+        "selectivity_estimate": 0.52,
+        "estimated_output_rows": 31200000,
+        "index": "lineitem sort order is l_shipdate — zone_map skip early blocks with max <= 9204"
+      }
+    ],
+    "topk": {
+      "k": 10,
+      "order_by": ["revenue DESC", "o_orderdate ASC"],
+      "strategy": "parallel_local_min_heap_merge",
+      "notes": "Each thread maintains a min-heap of size 10 keyed by (revenue DESC, o_orderdate ASC). After parallel aggregation, merge up to 64 local heaps (640 elements) with std::partial_sort to extract global top 10."
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "customer_filter": "bitset(1500001 bits, ~188KB) — dense integer domain c_custkey in [1,1500000]; set bit at c_custkey for each matching 'BUILDING' customer; O(1) probe via bit test; fits comfortably in L3 cache (44MB)",
+      "orders_join_build": "compact_open_addressing_hash_map pre_sized(1440000 * 4/3 = ~1920000 slots, power-of-2) keyed by o_orderkey (int32_t), payload: {o_orderdate int32_t, o_shippriority int32_t}; Robin Hood or linear probing; ~46MB — fits in L3",
+      "orders_bloom_filter": "BloomFilter(1440000 keys, 10 bits/key = ~1.8MB, fits L3) on o_orderkey — pre-filter lineitem probe to skip ~70-80% of non-matching l_orderkey values before hash table lookup",
+      "aggregation": "thread_local_compact_hash_map per thread, keyed by l_orderkey (int32_t), payload: {revenue_sum int64_t, o_orderdate int32_t, o_shippriority int32_t}; pre-sized at estimated_groups/num_threads; final sequential merge into global result map",
+      "topk_heap": "thread_local std::priority_queue<AggResult, size=10> (min-heap by revenue then o_orderdate); merge 64 local heaps with std::partial_sort"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 65536,
+      "morsel_size_rationale": "L3_cache(44MB) / 64_threads / ~4_columns_active ≈ 172KB per morsel; round down to 65536 rows for alignment",
+      "phases": [
+        {
+          "phase": "customer_scan_and_bitset_build",
+          "parallelism": "sequential",
+          "rationale": "1.5M rows, single column (c_mktsegment int16_t), fast; bitset writes are non-atomic (single-threaded build avoids false sharing); takes ~2ms"
+        },
+        {
+          "phase": "orders_scan_filter_join_build",
+          "parallelism": "parallel_morsel_driven(64 threads)",
+          "synchronization": "thread_local_row_buffers — each thread collects matched order rows locally, then inserts into shared hash map with atomic CAS or partition-by-hash-of-orderkey to avoid contention",
+          "preferred": "partition_parallel: hash o_orderkey mod 64 → each thread owns 1/64 of hash map partitions; no locking needed"
+        },
+        {
+          "phase": "lineitem_scan_filter_aggregate",
+          "parallelism": "parallel_morsel_driven(64 threads)",
+          "synchronization": "thread_local_aggregation_hash_maps + thread_local_topk_heaps; no shared state during hot loop",
+          "notes": "Bloom filter check on l_orderkey before hash map probe; eliminates ~70% of lineitem rows that have no matching order"
+        },
+        {
+          "phase": "merge_aggregation",
+          "parallelism": "sequential_merge of 64 thread-local maps",
+          "estimated_entries": "~1.44M total across all threads; sequential merge takes ~20-50ms"
+        },
+        {
+          "phase": "topk_finalize",
+          "parallelism": "sequential",
+          "notes": "Collect up to 64*10=640 local top-10 candidates; std::partial_sort to extract global top 10"
+        }
+      ],
+      "partition_count": 64,
+      "synchronization": "partitioned_no_contention"
+    },
+    "index_usage": [
+      {
+        "index": "orders_o_orderdate_zone_map",
+        "file": "indexes/orders_o_orderdate.bin",
+        "purpose": "skip_blocks_where_min > 9204 (1995-03-15 in days_since_epoch); orders are sorted by o_orderdate so later blocks (date >= 1995-03-15) can be entirely skipped; expected to eliminate ~52% of orders blocks"
+      },
+      {
+        "index": "lineitem_l_shipdate_zone_map_implicit",
+        "purpose": "lineitem is sorted by l_shipdate; zone maps on l_shipdate blocks allow skipping early blocks where max <= 9204; expected to skip ~48% of lineitem blocks with dates before cutoff",
+        "notes": "No explicit zone map index file listed for lineitem l_shipdate — use sort-order-aware block skipping by reading first value of each block"
+      }
+    ],
+    "index_not_used": [
+      {
+        "index": "lineitem_l_orderkey hash_multi_value",
+        "reason": "Would require random access per o_orderkey (1.44M lookups into 60M row index); scanning lineitem sequentially with filter+bloom+probe is faster on HDD due to sequential I/O vs random I/O; sequential scan at 64 threads is ~2s, random index lookups would be much worse on HDD"
+      },
+      {
+        "index": "orders_o_custkey hash_multi_value",
+        "reason": "Customer bitset probe during orders sequential scan is O(1) per row; no benefit from index when we already scan all (date-filtered) orders blocks sequentially"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "customer": "single_pass: scan c_mktsegment (int16_t dict code), filter == BUILDING_CODE, read c_custkey, set bit in bitset; fused in one loop",
+      "orders": "zone_map_pruned_single_pass: skip blocks with o_orderdate zone_map min > 9204; for qualifying blocks, fused loop: check o_orderdate < 9204, probe customer bitset on o_custkey, collect (o_orderkey, o_orderdate, o_shippriority) into hash map",
+      "lineitem": "zone_map_aware_single_pass: skip early blocks where l_shipdate zone max <= 9204 (sort-order exploitation); for qualifying blocks, fused loop: check l_shipdate > 9204, bloom filter on l_orderkey, probe orders hash map, accumulate revenue into thread-local aggregation hash map"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_pattern_notes": "All three table scans are sequential column reads — optimal for HDD prefetch. Hash map probes introduce random access but are bounded by L3 cache (orders hash map ~46MB ≈ L3 44MB, borderline — consider partitioning if cache thrash observed). Bitset (188KB) is fully L2/L3 resident.",
+    "date_encoding": "days_since_epoch int32_t; 1995-03-15 = (1995-1970)*365 + leap_days + day_of_year = 9204; compare directly as integers, no conversion needed at runtime",
+    "revenue_computation": "l_extendedprice * (100 - l_discount) / 100 in scaled int64_t arithmetic (scale_factor=100 for both columns); final output divide by 10000 for correct decimal representation; avoids floating-point precision issues"
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_filter_aggregate",
+    "phase_estimates_ms": {
+      "customer_scan_bitset_build": 3,
+      "orders_scan_filter_join_build": 25,
+      "lineitem_scan_filter_aggregate": 55,
+      "aggregation_merge": 10,
+      "topk_finalize": 1
+    },
+    "estimated_ms": 94,
+    "target_comparison": "DuckDB=79ms, Umbra=80ms; target competitive with top systems at ~80-100ms with 64 threads and full parallelism",
+    "bottleneck_risk": "orders hash map (~46MB) slightly exceeds L3 cache (44MB) — if cache thrash is observed, switch to partitioned hash map (16 partitions) to keep each partition in L3"
+  }
+}

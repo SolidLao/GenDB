@@ -1,0 +1,163 @@
+{
+  "query_id": "Q18",
+  "logical_plan": {
+    "pipeline": [
+      "phase1_scan_lineitem_build_qty_map",
+      "phase1_filter_qualifying_orderkeys",
+      "phase2_scan_orders_semi_join_qualifying",
+      "phase2_lookup_customer_by_custkey",
+      "phase3_lookup_lineitem_by_orderkey_aggregate",
+      "sort_topk"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "operation": "subquery_decorrelation",
+        "description": "Single pass over lineitem (59.9M rows): build hash_map<l_orderkey, sum(l_quantity)>, then threshold-filter to compact_hash_set<qualifying_orderkeys> where sum > 30000 (scaled: 300 * 100)",
+        "output_cardinality_estimate": "~57 qualifying orderkeys (TPC-H SF10 typical)"
+      },
+      {
+        "step": 2,
+        "build": "qualifying_orderkeys (compact_hash_set, ~57 entries)",
+        "probe": "orders (15M rows, full scan)",
+        "join_type": "hash_semi_join",
+        "predicate": "o_orderkey IN qualifying_orderkeys",
+        "output_cardinality_estimate": "~57 matching orders"
+      },
+      {
+        "step": 3,
+        "build": "prebuilt_index_load(hash_c_custkey)",
+        "probe": "qualifying_orders (~57 rows)",
+        "join_type": "index_lookup",
+        "predicate": "c_custkey = o_custkey",
+        "note": "Load pre-built hash_c_custkey index via mmap; perform ~57 point lookups to fetch c_name. O(mmap) build cost ~0ms.",
+        "output_cardinality_estimate": "~57 rows with c_name attached"
+      },
+      {
+        "step": 4,
+        "build": "prebuilt_index_load(hash_l_orderkey)",
+        "probe": "qualifying_orderkeys (~57 keys)",
+        "join_type": "index_multi_lookup",
+        "predicate": "l_orderkey = o_orderkey",
+        "note": "Load pre-built hash_l_orderkey multi-value index via mmap; for each of ~57 qualifying orderkeys, fetch all matching lineitem positions and accumulate SUM(l_quantity). O(mmap) build cost ~0ms.",
+        "output_cardinality_estimate": "~57 aggregated groups (one per orderkey)"
+      }
+    ],
+    "subquery_strategy": "hash_precompute",
+    "subquery_detail": {
+      "type": "IN (SELECT ... GROUP BY ... HAVING SUM > threshold)",
+      "plan": "Phase 1: single scan of lineitem l_quantity column, build hash_map<int32_t orderkey, int64_t qty_sum>. After scan, iterate map and insert orderkeys with qty_sum > 30000 into compact_hash_set<int32_t>. Scale factor: l_quantity stored as int64_t with scale_factor=2, so threshold = 300 * 100 = 30000.",
+      "critical_note": "SCALE FACTOR: l_quantity has scale_factor=2, so 300 units = 30000 in raw stored values. Use 30000 as the HAVING threshold."
+    },
+    "aggregation": "hash_group_by (tiny cardinality ~57 groups — effectively flat in-register; use compact_hash_map pre-sized to 64)",
+    "filter_pushdown": [
+      {
+        "table": "lineitem (phase 1)",
+        "predicate": "HAVING SUM(l_quantity) > 30000 (scaled)",
+        "selectivity_estimate": "~57/15000000 ≈ 0.000004 of orderkeys qualify",
+        "applied_at": "post-aggregation during phase 1 map construction"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderkey IN qualifying_orderkeys",
+        "selectivity_estimate": "~57/15000000 ≈ 0.0000038",
+        "applied_at": "during orders scan via hash_semi_join probe"
+      }
+    ],
+    "late_materialization": {
+      "enabled": true,
+      "description": "c_name (VARCHAR) is loaded only after orders scan identifies ~57 qualifying custkeys, using hash_c_custkey index for targeted point lookups. Avoids scanning 1.5M customer rows."
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "phase1_qty_map": "compact_hash_map<int32_t, int64_t>(pre_sized_power2 >= 15M * 1.33 ≈ 33554432) — open-addressing, robin-hood or linear probing. One entry per unique l_orderkey. Built in parallel with thread-local maps + merge.",
+      "qualifying_orderkeys_set": "compact_hash_set<int32_t>(pre_sized 128) — holds ~57 qualifying orderkeys after HAVING filter. Used for O(1) semi-join probe during orders scan.",
+      "orders_semi_join_probe": "orders full scan probing qualifying_orderkeys_set; matching rows collected into small vector (~57 entries) with columns: o_orderkey, o_custkey, o_orderdate, o_totalprice",
+      "customer_lookup": "prebuilt_index_load(hash_c_custkey) — mmap the 16MB pre-built single-value hash index; ~57 point lookups to resolve c_name. No runtime hash table build.",
+      "lineitem_lookup": "prebuilt_index_load(hash_l_orderkey) — mmap the ~400MB pre-built multi-value hash index; ~57 multi-value lookups, read l_quantity at each returned position, accumulate sum.",
+      "aggregation": "flat_vector<AggEntry>(~57 entries) — struct { c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum_qty }; one entry per qualifying order. No hash table needed at this scale."
+    },
+    "execution_phases": {
+      "phase1_parallel_lineitem_scan": {
+        "description": "Parallel morsel-driven scan of l_orderkey and l_quantity columns (2 columns only). Each thread maintains a thread-local compact_hash_map<int32_t, int64_t> accumulating sum(l_quantity) per orderkey. After parallel phase, merge thread-local maps into a single global map by iterating each local map and adding to global. Then single-pass filter: iterate global map, insert keys with sum > 30000 into qualifying_orderkeys_set.",
+        "parallelism": "64 threads, morsel_size = 44MB_L3 / 64_threads / 2_cols ≈ ~90000 rows per morsel",
+        "note": "Only load l_orderkey and l_quantity — skip all other lineitem columns. This halves I/O vs full row scan."
+      },
+      "phase2_orders_scan": {
+        "description": "Sequential scan of o_orderkey column. For each row, probe qualifying_orderkeys_set (tiny ~57 entry set, fits in L1 cache). On match, collect o_orderkey, o_custkey, o_orderdate, o_totalprice into result vector. Expected ~57 matches from 15M rows.",
+        "parallelism": "parallel scan with 64 threads, thread-local match vectors, merge after. Qualifying set is read-only so no synchronization needed during probe.",
+        "note": "qualifying_orderkeys_set is tiny (~57 entries), so it stays hot in L1 cache across all threads."
+      },
+      "phase3_customer_lookup": {
+        "description": "For each of ~57 qualifying orders, perform point lookup in pre-built hash_c_custkey index using o_custkey as key. Returns position in c_name column. Load c_name string at that position only. Sequential — ~57 lookups, negligible cost.",
+        "parallelism": "sequential (57 lookups, no parallelism needed)",
+        "index": "prebuilt_index_load(hash_c_custkey)"
+      },
+      "phase4_lineitem_quantity_sum": {
+        "description": "For each of ~57 qualifying orderkeys, perform multi-value lookup in pre-built hash_l_orderkey index. For each returned position list, load l_quantity values and accumulate sum. Attach final sum_qty to each result row. Sequential — ~57 lookups.",
+        "parallelism": "sequential (57 lookups, negligible cost)",
+        "index": "prebuilt_index_load(hash_l_orderkey)"
+      },
+      "phase5_sort_topk": {
+        "description": "Sort ~57 result rows by (o_totalprice DESC, o_orderdate ASC). Since result set << LIMIT 100, return all rows sorted. Use std::sort with compound comparator — at 57 elements this is O(57 log 57) ≈ trivial.",
+        "parallelism": "sequential"
+      }
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "partition_count": 64,
+      "parallel_phases": ["phase1_lineitem_scan_and_aggregate"],
+      "sequential_phases": ["phase2_orders_scan (parallelizable but qualifying_set is tiny)", "phase3_customer_lookup", "phase4_lineitem_quantity_sum", "phase5_sort"],
+      "synchronization": "thread_local_merge for phase1 qty_map; read_only_shared for qualifying_orderkeys probe"
+    },
+    "index_usage": [
+      {
+        "index": "hash_c_custkey",
+        "file": "indexes/hash_c_custkey.bin",
+        "type": "hash_single",
+        "purpose": "point_lookup_customer_by_custkey — avoids full customer table scan (1.5M rows). ~57 lookups after qualifying orders identified.",
+        "load_strategy": "mmap — O(0ms) build cost"
+      },
+      {
+        "index": "hash_l_orderkey",
+        "file": "indexes/hash_l_orderkey.bin",
+        "type": "hash_multi_value",
+        "purpose": "multi_value_lookup_lineitem_by_orderkey — retrieve all lineitem positions for ~57 qualifying orderkeys to compute SUM(l_quantity) in phase 4. Avoids second full lineitem scan.",
+        "load_strategy": "mmap — O(0ms) build cost"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "lineitem_phase1": "Single columnar scan of l_orderkey + l_quantity only (2 of N columns). Parallel morsel-driven. This is the dominant I/O cost.",
+      "orders_phase2": "Single columnar scan of o_orderkey + o_custkey + o_orderdate + o_totalprice. Parallel morsel-driven. Probe qualifying_orderkeys_set inline.",
+      "customer": "No scan — use hash_c_custkey index for targeted lookups only",
+      "lineitem_phase4": "No full scan — use hash_l_orderkey index for targeted multi-value lookups only"
+    },
+    "memory_pattern": "streaming_sequential for phase1 and phase2 scans; random_access_with_prefetch for index lookups in phase3 and phase4",
+    "memory_budget": {
+      "phase1_thread_local_maps": "64 threads × compact_hash_map(~15M/64 entries avg) ≈ 64 × ~1MB = ~64MB peak during parallel build",
+      "phase1_global_merged_map": "compact_hash_map(~15M entries) × 12 bytes ≈ ~180MB after merge",
+      "qualifying_orderkeys_set": "~57 entries × 8 bytes ≈ negligible",
+      "orders_result_vector": "~57 entries × ~32 bytes ≈ negligible",
+      "hash_c_custkey_mmap": "~16MB (2097152 × 8 bytes)",
+      "hash_l_orderkey_mmap": "~400MB (33554432 × 12 bytes + positions array)",
+      "total_estimate": "~660MB well within 376GB available"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "phase1_lineitem_scan_parallel",
+    "phase_breakdown": {
+      "phase1_lineitem_scan_build_qty_map": "~60-80ms (59.9M rows × 2 cols, parallel 64 threads, HDD I/O bound)",
+      "phase1_merge_thread_local_maps": "~10-20ms (merge 64 maps of ~234K entries each)",
+      "phase2_orders_scan_semi_join": "~20-30ms (15M rows × 4 cols, parallel, qualifying_set in L1)",
+      "phase3_customer_index_lookup": "<1ms (57 point lookups via mmap index)",
+      "phase4_lineitem_index_lookup_aggregate": "<1ms (57 multi-value lookups via mmap index)",
+      "phase5_sort_topk": "<1ms (57 rows)",
+      "index_mmap_load": "~5-10ms (mmap hash_c_custkey + hash_l_orderkey — OS page faults on first access)"
+    },
+    "estimated_ms": 140,
+    "target_comparison": "DuckDB 175ms, Umbra 180ms — target <150ms by exploiting pre-built indexes to eliminate second full lineitem scan and full customer scan"
+  }
+}

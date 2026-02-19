@@ -1,0 +1,175 @@
+{
+  "query_id": "Q18",
+  "query_summary": "Large Volume Customer — find customers/orders where total lineitem quantity exceeds 300, return top-100 by o_totalprice DESC, o_orderdate ASC",
+
+  "analysis": {
+    "subquery_cardinality_estimate": "~500–1000 qualifying orderkeys (SUM(l_quantity)>300 is extremely selective at SF10; ~0.003–0.007% of 15M orders)",
+    "key_insight": "The subquery SUM(l_quantity) per l_orderkey IS the outer query's SUM(l_quantity) for qualifying groups — a single lineitem scan computes both. No second lineitem pass needed.",
+    "dominant_phase": "lineitem full scan + partitioned aggregation (60M rows, 2 columns)",
+    "join_ordering_rationale": "After subquery pre-computation: qualifying_orderkeys (~1K) → probe orders (15M) to get ~1K qualifying order rows → probe customer flat-array for c_name. All probe phases are trivially fast relative to the lineitem scan."
+  },
+
+  "logical_plan": {
+    "pipeline": [
+      "scan_lineitem_aggregate",
+      "extract_qualifying_orderkeys",
+      "scan_orders_semijoin_filter",
+      "probe_customer_flat_array",
+      "trivial_groupby",
+      "topk_100"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "operation": "lineitem full scan → hash aggregate SUM(l_quantity) per l_orderkey",
+        "output": "compact_hash_map<int32_t, int64_t> orderkey_to_sumqty (~15M unique keys during build, ~1K survive HAVING filter)",
+        "note": "Single pass over lineitem satisfies both the IN-subquery and the outer SUM(l_quantity)"
+      },
+      {
+        "step": 2,
+        "operation": "Filter orderkey_to_sumqty map: keep entries where sum_qty > 300*100 (scaled int64)",
+        "output": "qualifying_set: compact_hash_map<int32_t, int64_t> with ~1K entries (orderkey → sum_qty)"
+      },
+      {
+        "step": 3,
+        "operation": "orders full scan → semi-join probe qualifying_set on o_orderkey",
+        "build": "qualifying_set (read-only, already built)",
+        "probe": "orders (15M rows), columns: o_orderkey, o_custkey, o_orderdate, o_totalprice",
+        "output": "qualifying_orders vector<{o_orderkey, o_custkey, o_orderdate, o_totalprice, sum_qty}> (~1K rows)"
+      },
+      {
+        "step": 4,
+        "operation": "customer full scan → build flat_array[c_custkey] = c_name_string_offset",
+        "note": "c_custkey is dense integer [1, 1500000] — flat array of size 1500001 gives O(1) lookup with zero hash overhead. Load c_custkey + c_name only.",
+        "output": "customer_name_array: std::vector<std::string> indexed by c_custkey (size 1500001)"
+      },
+      {
+        "step": 5,
+        "operation": "Enrich qualifying_orders with c_name via flat array lookup (trivial, ~1K probes)",
+        "output": "result_rows vector<{c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum_qty}>"
+      },
+      {
+        "step": 6,
+        "operation": "GROUP BY (c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice) → trivially 1 row per (o_orderkey) since o_orderkey is unique per order",
+        "note": "No actual grouping work needed — each qualifying order is already 1 row with sum_qty pre-computed"
+      },
+      {
+        "step": 7,
+        "operation": "TopK(100) by o_totalprice DESC, o_orderdate ASC using max-heap of size 100",
+        "note": "Result set is ~1K rows; partial_sort is sufficient and fast"
+      }
+    ],
+    "subquery_strategy": "hash_precompute",
+    "subquery_detail": "Decorrelate IN(subquery) to single-pass lineitem aggregation. Build compact_hash_map<int32_t,int64_t> of orderkey→sum_qty across all 60M lineitems. Filter map entries where sum_qty > 30000 (300 * scale_factor=100) to produce qualifying_set. Reuse sum_qty for outer SUM(l_quantity).",
+    "aggregation": "hash_group_by (phase 1: partitioned parallel over lineitem for 15M-group aggregation; phase 2: trivial since qualifying groups ~1K)",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "HAVING SUM(l_quantity) > 300 applied post-aggregation",
+        "selectivity_estimate": 0.00007,
+        "note": "~1K out of ~15M unique orderkeys survive the HAVING filter"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderkey IN qualifying_set",
+        "selectivity_estimate": 0.00007,
+        "note": "Semi-join probe reduces 15M orders to ~1K rows"
+      }
+    ],
+    "late_materialization": {
+      "customer": "Scan c_custkey + c_name only (c_name needed for output but customer scan is cheap at 1.5M rows)",
+      "lineitem": "Scan l_orderkey + l_quantity only (2 columns out of many)"
+    }
+  },
+
+  "physical_plan": {
+    "data_structures": {
+      "lineitem_agg_phase1": "partitioned_hash_map(32 partitions, int32_t→int64_t, pre_sized ~500K slots per partition) for parallel thread-local SUM(l_quantity) per l_orderkey",
+      "lineitem_agg_merge": "After parallel phase, merge 64 thread-local partitioned maps → single compact_hash_map<int32_t,int64_t> (~15M entries total)",
+      "qualifying_set": "compact_hash_map<int32_t,int64_t>(pre_sized ~2048 slots) mapping qualifying orderkey→sum_qty_scaled; built by filtering merged agg map",
+      "customer_lookup": "flat_array<std::string>(1500001) indexed directly by c_custkey — O(1) lookup, zero hash overhead, fits in ~500MB (or store offsets into a string pool)",
+      "qualifying_orders_buffer": "std::vector<{int32_t o_orderkey, int32_t o_custkey, int32_t o_orderdate, int64_t o_totalprice, int64_t sum_qty}> expected ~1K entries",
+      "topk_heap": "std::priority_queue<result_row, vector, comparator>(size=100) for O(n log 100) Top-K extraction"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size": 65536,
+      "phases": [
+        {
+          "phase": "lineitem_scan_aggregate",
+          "method": "OpenMP parallel for over 60M rows in 65K-row morsels",
+          "thread_local": "Each thread maintains its own partitioned_hash_map(32 partitions) for l_orderkey→sum_qty accumulation",
+          "synchronization": "thread_local_merge — no locks during scan; sequential merge of 64 thread-local maps after parallel phase"
+        },
+        {
+          "phase": "orders_scan_semijoin",
+          "method": "OpenMP parallel for over 15M rows; qualifying_set is read-only (no synchronization needed)",
+          "output_collection": "Thread-local result vectors, concatenated after parallel phase",
+          "synchronization": "partitioned_no_contention — read-only probe of qualifying_set"
+        },
+        {
+          "phase": "customer_scan",
+          "method": "Single-threaded or parallel scan of 1.5M rows to populate flat_array",
+          "note": "Can be parallelized but 1.5M rows is fast enough single-threaded (~5ms); parallel only if overlapping with other phases"
+        },
+        {
+          "phase": "enrich_and_topk",
+          "method": "Sequential — ~1K rows, trivial",
+          "synchronization": "none"
+        }
+      ],
+      "partition_count": 32,
+      "synchronization": "thread_local_merge"
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_l_orderkey (hash_multi_value)",
+        "decision": "NOT USED",
+        "rationale": "Full lineitem scan is required for the subquery aggregation over all 60M rows. Index lookup would add overhead over a sequential columnar scan. The qualifying_set (post-filter) is used to probe orders instead."
+      },
+      {
+        "index": "orders_o_custkey (hash_multi_value)",
+        "decision": "NOT USED",
+        "rationale": "After orders semi-join filter produces ~1K qualifying orders, customer lookup is done via flat_array on c_custkey — more cache-friendly than index indirection."
+      },
+      {
+        "index": "customer_c_custkey (hash_multi_value)",
+        "decision": "NOT USED",
+        "rationale": "Replaced by flat_array[c_custkey] → O(1) direct indexed lookup with no hash overhead."
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "lineitem": "Fused scan of l_orderkey + l_quantity (2 columns only). Sequential block reads of 65K rows, parallel across threads. No predicate filtering during scan — all rows feed into hash aggregation.",
+      "orders": "Fused scan of o_orderkey + o_custkey + o_orderdate + o_totalprice (4 columns). Parallel morsel scan with inline qualifying_set probe per row.",
+      "customer": "Fused scan of c_custkey + c_name (2 columns). Single pass to build flat_array lookup structure."
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_details": {
+      "lineitem_agg": "Thread-local partitioned maps avoid false sharing. ~15M unique l_orderkeys × 8 bytes value + 4 bytes key × load_factor = ~360MB across all threads (thread-local ~5.6MB each at 64 threads)",
+      "qualifying_set": "~1K entries × 12 bytes = negligible (~12KB), fits in L1 cache",
+      "customer_flat_array": "1.5M entries; string storage via string_pool with 16-byte average name → ~24MB total, fits in L3 cache (44MB)",
+      "orders_result_buffer": "~1K rows × ~24 bytes = ~24KB, trivially in L1 cache"
+    },
+    "output_encoding": {
+      "o_totalprice": "Divide by 100 for display (scale_factor=100)",
+      "sum_qty": "Divide by 100 for display (l_quantity scale_factor=100)",
+      "o_orderdate": "Convert from days_since_epoch to YYYY-MM-DD for output"
+    }
+  },
+
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_aggregate",
+    "phase_breakdown": [
+      {"phase": "lineitem_scan_aggregate (60M rows, 2 cols, 64 threads)", "estimated_ms": 80},
+      {"phase": "merge_64_thread_local_maps (~15M entries)", "estimated_ms": 30},
+      {"phase": "extract_qualifying_set (filter merged map)", "estimated_ms": 5},
+      {"phase": "orders_scan_semijoin (15M rows, 4 cols, 64 threads)", "estimated_ms": 25},
+      {"phase": "customer_scan_flat_array (1.5M rows, 2 cols)", "estimated_ms": 5},
+      {"phase": "enrich_orders + topk_100 (~1K rows)", "estimated_ms": 1}
+    ],
+    "estimated_ms": 150,
+    "target_comparison": "DuckDB=175ms, Umbra=180ms — plan targets sub-175ms via single lineitem pass + flat-array customer lookup + 64-thread parallelism"
+  }
+}

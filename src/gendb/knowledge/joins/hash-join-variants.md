@@ -46,5 +46,5 @@ struct MultiValueHT {
 - Building hash table on the larger side is the #1 cause of slow joins
 - `std::unordered_map` for joins with >10K entries wastes 2-5x performance
 - Forgetting to apply single-table predicates before join → building on unfiltered data
-- Pre-built hash indexes (from Storage Guide) can eliminate build time entirely — check before building from scratch
+- Pre-built hash indexes (from Query Guide) can eliminate build time entirely — check before building from scratch
 - See `patterns/parallel-hash-join.md` for a complete open-addressing implementation template

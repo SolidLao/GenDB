@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q3/iter_10/q3.cpp:50:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q3(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:34: warning: ‘%02d’ directive writing between 2 and 4 bytes into a region of size between 0 and 4 [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                  ^~~~\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:23: note: directive argument in the range [-128, 127]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q3/iter_10/q3.cpp:41:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 12\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 10.23 ms\n[TIMING] build_joins: 135.65 ms\n[TIMING] main_scan: 153.34 ms\n[TIMING] aggregation_merge: 42.87 ms\n[TIMING] sort_topk: 0.49 ms\n[TIMING] output: 0.13 ms\n[TIMING] total: 357.47 ms\n",
+    "stderr": "",
+    "duration_ms": 366
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dim_filter": 10.23,
+    "build_joins": 135.65,
+    "main_scan": 153.34,
+    "aggregation_merge": 42.87,
+    "sort_topk": 0.49,
+    "output": 0.13,
+    "total": 357.47
+  },
+  "timing_ms": 357.34000000000003
+}

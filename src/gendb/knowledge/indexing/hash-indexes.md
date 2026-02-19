@@ -45,4 +45,4 @@ Join columns often have **duplicate keys** (e.g., foreign key column in fact tab
 
 **Benefits**: O(N log N) but cache-friendly, no dynamic allocation, positions array is the final output (no copy needed).
 
-**Index selectivity — skip tiny tables:** Do NOT build hash indexes on tables with fewer than 10,000 rows (nation, region, supplier). These fit in L1 cache; a linear scan is faster than an index lookup. Only build indexes on columns that are actually join keys or heavily-filtered in the workload queries.
+**Index selectivity — skip tiny tables:** Do NOT build hash indexes on tables with fewer than 10,000 rows (e.g., small dimension/lookup tables). These fit in L1 cache; a linear scan is faster than an index lookup. Only build indexes on columns that are actually join keys or heavily-filtered in the workload queries.

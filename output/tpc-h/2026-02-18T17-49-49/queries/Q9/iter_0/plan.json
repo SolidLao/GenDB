@@ -1,0 +1,185 @@
+{
+  "query_id": "Q9",
+  "logical_plan": {
+    "pipeline": [
+      "scan_nation_build_direct_array",
+      "scan_supplier_build_flat_array",
+      "scan_part_filter_green_build_bitset",
+      "scan_partsupp_probe_bitset_build_composite_hashmap",
+      "scan_orders_build_hashmap",
+      "scan_lineitem_probe_all_aggregate"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "nation(25 rows → direct_array[n_nationkey])",
+        "probe": "supplier(100K rows)",
+        "output": "flat_array[s_suppkey → n_name dict_id] (100K entries)",
+        "rationale": "Nation is trivially small (25 rows); supplier keys are dense 1-100K, enabling O(1) flat array lookup"
+      },
+      {
+        "step": 2,
+        "build": "part(2M) filtered by p_name LIKE '%green%' → ~108K rows → bitset(2M bits)",
+        "probe": "partsupp(8M) probing bitset on ps_partkey",
+        "output": "compact_hash_map<uint64_t {ps_partkey<<32|ps_suppkey} → int64_t ps_supplycost> (~432K entries)",
+        "rationale": "Part filter reduces 2M to ~108K (5.4% selectivity); bitset is O(1) membership; partsupp reduces 8M to ~432K (each green part has 4 suppliers)"
+      },
+      {
+        "step": 3,
+        "build": "orders(15M) → compact_hash_map<int32_t o_orderkey → int32_t o_orderdate>",
+        "probe": "lineitem(60M rows) — main probe side",
+        "output": "per-row: nation_str, year, amount = l_extendedprice*(1-l_discount) - ps_supplycost*l_quantity",
+        "rationale": "Orders has no single-table filter; build once, probe 60M lineitem rows. Lineitem is always the probe side (largest table)"
+      },
+      {
+        "step": 4,
+        "build": "lineitem probe pipeline: for each l row, probe partsupp_map({l_partkey,l_suppkey}), probe supplier_flat[l_suppkey], probe orders_map[l_orderkey]",
+        "probe": "lineitem(60M) single-pass fused scan",
+        "output": "group-by (nation, year) → flat aggregation array[25][8]",
+        "rationale": "Single-pass fused scan over lineitem avoids rematerialization; all probes are O(1) lookups"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "flat_array_direct",
+    "aggregation_detail": "~175 groups (25 nations × 7 years 1992-1998); use flat 2D array agg[nation_idx][year-1992] += amount; thread-local arrays merged after parallel scan",
+    "filter_pushdown": [
+      {
+        "table": "part",
+        "predicate": "p_name LIKE '%green%'",
+        "selectivity_estimate": 0.054,
+        "filtered_rows": 108000,
+        "technique": "substring scan on dictionary strings; the p_name dictionary is small (~1.8M distinct but string scan on 2M rows with SIMD strstr)"
+      }
+    ],
+    "year_extraction": "O(1) lookup table YEAR_TABLE[epoch_day] from date_utils.h — applied to o_orderdate after orders hash probe"
+  },
+  "physical_plan": {
+    "data_structures": {
+      "nation_lookup": "direct_array int16_t nation_dict_id[26] indexed by n_nationkey (25 entries, trivial)",
+      "supplier_to_nation": "flat_array int16_t supplier_nation[100001] indexed by s_suppkey (dense 1-100K, cache-friendly O(1))",
+      "part_filter": "bitset(2000001 bits = 250KB) on p_partkey — set bit for each green part; fits in L3 cache",
+      "partsupp_join": "compact_hash_map<uint64_t composite_key, int64_t ps_supplycost> pre_sized(432K * 1.5 = 648K slots, open-addressing robin-hood)",
+      "orders_join": "compact_hash_map<int32_t o_orderkey, int32_t o_orderdate> pre_sized(15M * 1.5 = 22.5M slots, partitioned build across 64 threads to avoid contention)",
+      "aggregation": "thread_local flat_array double agg[25][8] (nation_idx × (year-1992)); merge after parallel phase; 200 slots per thread = ~12KB total per thread"
+    },
+    "build_phases": [
+      {
+        "phase": "P1_nation",
+        "table": "nation",
+        "rows": 25,
+        "structure": "direct_array[26]",
+        "parallel": false,
+        "estimated_ms": 0.1
+      },
+      {
+        "phase": "P2_supplier",
+        "table": "supplier",
+        "rows": 100000,
+        "structure": "flat_array[100001]",
+        "parallel": false,
+        "estimated_ms": 1
+      },
+      {
+        "phase": "P3_part_scan_and_filter",
+        "table": "part",
+        "rows": 2000000,
+        "filter": "p_name LIKE '%green%'",
+        "filtered_rows": 108000,
+        "structure": "bitset(2M)",
+        "parallel": true,
+        "threads": 64,
+        "estimated_ms": 5
+      },
+      {
+        "phase": "P4_partsupp_build",
+        "table": "partsupp",
+        "rows": 8000000,
+        "probes": "bitset on ps_partkey",
+        "filtered_rows": 432000,
+        "structure": "compact_hash_map<uint64_t, int64_t>",
+        "parallel": true,
+        "threads": 64,
+        "synchronization": "partitioned_no_contention (partition by high bits of composite key, 64 partitions)",
+        "estimated_ms": 10
+      },
+      {
+        "phase": "P5_orders_build",
+        "table": "orders",
+        "rows": 15000000,
+        "structure": "compact_hash_map<int32_t, int32_t>",
+        "parallel": true,
+        "threads": 64,
+        "synchronization": "partitioned_build_64_partitions (each thread owns its partitions; final merge into single map)",
+        "estimated_ms": 40
+      }
+    ],
+    "probe_phase": {
+      "table": "lineitem",
+      "rows": 59986052,
+      "scan_strategy": "single_pass_fused",
+      "columns_read": ["l_partkey", "l_suppkey", "l_orderkey", "l_extendedprice", "l_discount", "l_quantity"],
+      "per_row_operations": [
+        "1. probe partsupp_map({l_partkey, l_suppkey}) → ps_supplycost (skip row if miss)",
+        "2. lookup supplier_nation[l_suppkey] → nation_dict_id",
+        "3. probe orders_map[l_orderkey] → o_orderdate",
+        "4. year = YEAR_TABLE[o_orderdate] (O(1) lookup)",
+        "5. amount = l_extendedprice*(100-l_discount)/10000 - ps_supplycost*l_quantity/100",
+        "6. agg[nation_idx][year-1992] += amount (thread-local flat array)"
+      ],
+      "filter_chain": "partsupp probe acts as primary filter (~432K/60M ≈ 0.72% hit rate on lineitem); majority of rows exit at step 1",
+      "parallel": true,
+      "threads": 64,
+      "morsel_size": 65536,
+      "synchronization": "thread_local_agg_merge"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size": 65536,
+      "partition_count": 64,
+      "synchronization": "thread_local_merge",
+      "build_parallelism": "partitioned_no_contention for partsupp and orders builds",
+      "probe_parallelism": "independent morsels on lineitem; all hash structures read-only during probe"
+    },
+    "index_usage": [
+      {
+        "index": "none_used_for_part",
+        "rationale": "part needs full scan for LIKE '%green%' substring match; no index can accelerate this"
+      },
+      {
+        "index": "partsupp_ps_partkey (hash_multi_value)",
+        "purpose": "considered but not used — building in-memory hash map from scanned partsupp is faster than random-access index I/O for 8M rows",
+        "decision": "sequential scan + in-memory filter preferred"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "memory_pattern": "streaming_sequential for all table scans; random_access for hash probes (orders 15M map may cause cache misses — mitigated by 376GB RAM fitting entire working set)",
+    "memory_budget": {
+      "nation_array": "~52B",
+      "supplier_flat_array": "~200KB",
+      "part_bitset": "~250KB",
+      "partsupp_hashmap": "~10MB (648K slots × 16B)",
+      "orders_hashmap": "~540MB (22.5M slots × 24B)",
+      "thread_local_agg": "64 threads × 1.6KB = ~100KB",
+      "total_estimated": "~560MB — well within 376GB"
+    }
+  },
+  "output_phase": {
+    "merge": "Sum thread-local agg[25][8] arrays into global result (sequential, trivial for 200 slots)",
+    "sort": "ORDER BY nation ASC, o_year DESC — sort 175 result rows (trivial std::sort)"
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_probe_scan (60M rows × 3 hash probes)",
+    "phase_estimates_ms": {
+      "nation_build": 0.1,
+      "supplier_build": 1,
+      "part_scan_filter": 5,
+      "partsupp_build": 10,
+      "orders_build": 40,
+      "lineitem_probe": 110,
+      "merge_and_sort": 1
+    },
+    "estimated_total_ms": 167,
+    "target_vs_umbra": "Umbra=200ms → target <200ms with 64-thread parallelism and specialized flat structures"
+  }
+}

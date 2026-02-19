@@ -487,6 +487,157 @@ struct ConcurrentCompactHashMap {
 };
 
 // ---------------------------------------------------------------------------
+// Composite key: triple of int32_t — used for three-column GROUP BY in Q3.
+// (l_orderkey, o_orderdate, o_shippriority) all int32_t.
+// ---------------------------------------------------------------------------
+struct Key32Triple {
+    int32_t a, b, c;
+    bool operator==(const Key32Triple& o) const {
+        return a == o.a && b == o.b && c == o.c;
+    }
+};
+
+inline uint64_t hash_key32triple(Key32Triple k) {
+    uint64_t ha = (uint64_t)k.a * 0x9E3779B97F4A7C15ULL;
+    uint64_t hb = (uint64_t)k.b * 0x9E3779B97F4A7C15ULL;
+    uint64_t hc = (uint64_t)k.c * 0x9E3779B97F4A7C15ULL;
+    return hash_combine(hash_combine(ha, hb), hc);
+}
+
+// CompactHashMap specialised for Key32Triple keys.
+// Usage: CompactHashMapTriple<V> map(expected_size);
+//        map.insert({l_orderkey, o_orderdate, o_shippriority}, value);
+//        V* v = map.find({l_orderkey, o_orderdate, o_shippriority});
+template<typename V>
+struct CompactHashMapTriple {
+    struct Entry { Key32Triple key; V value; uint16_t dist; bool occupied; };
+    std::vector<Entry> table;
+    size_t mask;
+    size_t count;
+
+    CompactHashMapTriple() : mask(0), count(0) {}
+
+    explicit CompactHashMapTriple(size_t expected) : count(0) {
+        size_t cap = 16;
+        while (cap < expected * 4 / 3) cap <<= 1;
+        table.resize(cap);
+        mask = cap - 1;
+        for (auto& e : table) { e.occupied = false; e.dist = 0; }
+    }
+
+    void reserve(size_t expected) {
+        size_t cap = 16;
+        while (cap < expected * 4 / 3) cap <<= 1;
+        table.resize(cap);
+        mask = cap - 1;
+        for (auto& e : table) { e.occupied = false; e.dist = 0; }
+        count = 0;
+    }
+
+    size_t hash_key(Key32Triple k) const { return hash_key32triple(k); }
+
+    void rehash(size_t new_cap) {
+        std::vector<Entry> old_table = std::move(table);
+        table.resize(new_cap);
+        mask = new_cap - 1;
+        count = 0;
+        for (auto& e : table) { e.occupied = false; e.dist = 0; }
+        for (auto& e : old_table) {
+            if (e.occupied) insert(e.key, e.value);
+        }
+    }
+
+    void insert(Key32Triple key, V value) {
+        if (count >= (table.size() * 3) / 4) {
+            rehash(table.size() == 0 ? 16 : table.size() * 2);
+        }
+        size_t pos = hash_key(key) & mask;
+        Entry entry{key, value, 0, true};
+        while (table[pos].occupied) {
+            if (table[pos].key == key) { table[pos].value = value; return; }
+            if (entry.dist > table[pos].dist) std::swap(entry, table[pos]);
+            pos = (pos + 1) & mask;
+            entry.dist++;
+        }
+        table[pos] = entry;
+        count++;
+    }
+
+    V& operator[](Key32Triple key) {
+        if (count >= (table.size() * 3) / 4) {
+            rehash(table.size() == 0 ? 16 : table.size() * 2);
+        }
+        size_t pos = hash_key(key) & mask;
+        uint16_t dist = 0;
+        while (table[pos].occupied) {
+            if (table[pos].key == key) return table[pos].value;
+            if (dist > table[pos].dist) {
+                Entry entry{key, V{}, dist, true};
+                std::swap(entry, table[pos]);
+                key = entry.key;
+                dist = entry.dist;
+                pos = (pos + 1) & mask;
+                dist++;
+                while (table[pos].occupied) {
+                    if (dist > table[pos].dist) std::swap(entry, table[pos]);
+                    pos = (pos + 1) & mask;
+                    entry.dist++;
+                    dist = entry.dist;
+                }
+                table[pos] = entry;
+                count++;
+                return operator[](key);
+            }
+            pos = (pos + 1) & mask;
+            dist++;
+        }
+        table[pos] = {key, V{}, dist, true};
+        count++;
+        return table[pos].value;
+    }
+
+    V* find(Key32Triple key) {
+        size_t pos = hash_key(key) & mask;
+        uint16_t dist = 0;
+        while (table[pos].occupied) {
+            if (table[pos].key == key) return &table[pos].value;
+            if (dist > table[pos].dist) return nullptr;
+            pos = (pos + 1) & mask;
+            dist++;
+        }
+        return nullptr;
+    }
+
+    const V* find(Key32Triple key) const {
+        size_t pos = hash_key(key) & mask;
+        uint16_t dist = 0;
+        while (table[pos].occupied) {
+            if (table[pos].key == key) return &table[pos].value;
+            if (dist > table[pos].dist) return nullptr;
+            pos = (pos + 1) & mask;
+            dist++;
+        }
+        return nullptr;
+    }
+
+    bool contains(Key32Triple key) const { return find(key) != nullptr; }
+    size_t size() const { return count; }
+
+    // Iterator support
+    struct Iterator {
+        const Entry* ptr;
+        const Entry* end;
+        Iterator(const Entry* p, const Entry* e) : ptr(p), end(e) { advance(); }
+        void advance() { while (ptr < end && !ptr->occupied) ptr++; }
+        bool operator!=(const Iterator& o) const { return ptr != o.ptr; }
+        Iterator& operator++() { ptr++; advance(); return *this; }
+        std::pair<Key32Triple, const V&> operator*() const { return {ptr->key, ptr->value}; }
+    };
+    Iterator begin() const { return Iterator(table.data(), table.data() + table.size()); }
+    Iterator end() const { return Iterator(table.data() + table.size(), table.data() + table.size()); }
+};
+
+// ---------------------------------------------------------------------------
 // PartitionedHashMap — N partition-local CompactHashMaps to avoid contention.
 // Partitions by hash(key) >> shift; each partition is an independent CompactHashMap.
 // No synchronization needed during parallel build if each thread only writes to

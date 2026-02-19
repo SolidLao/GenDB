@@ -1,0 +1,51 @@
+{
+  "query_id": "Q9",
+  "iteration": 2,
+  "logical_plan": {
+    "pipeline": [
+      "scan_nation_to_flat_array",
+      "scan_supplier_to_flat_array",
+      "PARALLEL_scan_part_filter_like_green_to_bitset_atomic_or",
+      "PARALLEL_scan_partsupp_collect_qualifying_entries_sequential_hash_insert",
+      "PARALLEL_build_year_arr_from_orders_flat_uint8_array",
+      "parallel_scan_lineitem_fused_probe_all",
+      "thread_local_merge_aggregates",
+      "sort_output_nation_asc_year_desc"
+    ],
+    "changes_from_iter_1": [
+      "dim_filter: part scan parallelized with 32 OpenMP threads + atomic bitset OR",
+      "build_joins: partsupp scan parallelized with 32 OpenMP threads + per-thread vectors",
+      "orders lookup: replaced 268MB pre-built hash index with 60MB flat uint8_t year_arr",
+      "psmap.init(): replaced initialization loop with memset (SIMD-accelerated)"
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "nation_lookup": "flat_array[25] int8_t; L1 resident",
+      "supplier_lookup": "flat_array[100001] int8_t indexed by s_suppkey; 100KB, L1/L2 resident",
+      "part_filter": "bitset(2000001 bits = 245KB) indexed by p_partkey; L2 resident; built with atomic OR in 32-thread OpenMP loop",
+      "partsupp_join": "compact_hash_map open-addressing CAP=1<<20 uint64->double; 16MB; built from per-thread collected entries",
+      "orders_join": "FLAT uint8_t year_arr[60000001]; 60MB; year_arr[o_orderkey]=year-1992; 4.5x denser than 268MB hash index; direct array access, no probe needed",
+      "aggregation": "flat_array double[25][8] thread_local; 1600 bytes per thread; fully L1 resident"
+    },
+    "parallelism": {
+      "dim_filter_part_scan": "OpenMP 32 threads; 2M rows / 32 = 62.5K per thread; atomic OR for bitset updates",
+      "build_joins_partsupp_scan": "OpenMP 32 threads; 8M rows / 32 = 250K per thread; per-thread AlignedPSVec(cache-line aligned) collects qualifying entries; sequential insert ~384K entries into psmap",
+      "build_joins_year_arr": "OpenMP 32 threads; 15M orders / 32; each o_orderkey is unique (no write race)",
+      "lineitem_scan": "32 pthreads; morsel-driven chunking; thread-local double[25][8] aggregation"
+    },
+    "orders_lookup_analysis": {
+      "iter_1_approach": "mmap pre-built orders_orderkey_hash.bin; 33.5M slots x 8 bytes = 268MB; hash+probe per lookup",
+      "iter_2_approach": "flat uint8_t year_arr[60000001]; 60MB; direct array access year_arr[ok]",
+      "density_improvement": "4.5x (1 byte/entry vs 8 bytes/slot)",
+      "cache_line_coverage": "64 entries/cache-line vs 8 slots/cache-line",
+      "expected_cache_miss_reduction": "significant; 2.88M qualifying lookups benefit from much denser packing"
+    },
+    "estimated_phase_times": {
+      "dim_filter": "~8ms (50ms/32 threads + atomic overhead; 112MB scanned at full bandwidth)",
+      "build_joins": "~12ms (partsupp: 8ms parallel scan + 4ms sequential insert; year_arr: 3ms parallel build)",
+      "main_scan": "~50ms (unchanged worker count; reduced orders cache miss penalty from denser year_arr)",
+      "total_estimate": "~75ms"
+    }
+  }
+}

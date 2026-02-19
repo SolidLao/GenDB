@@ -1,0 +1,112 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "filter_shipdate", "filter_discount", "filter_quantity", "late_materialize_extendedprice", "aggregate_sum"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_accumulator",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "selectivity_estimate": 0.15,
+        "mechanism": "zone_map_block_skip — skip all blocks where block_max < 8766 OR block_min >= 9131; only ~90 of 600 blocks need I/O"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+        "selectivity_estimate": 0.27,
+        "note": "applied per-row within qualifying blocks after shipdate check; 3 of 11 distinct values qualify"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 24.0",
+        "selectivity_estimate": 0.46,
+        "note": "applied last; l_extendedprice loaded ONLY for rows passing all three predicates (late materialization)"
+      }
+    ],
+    "cardinality_estimates": {
+      "lineitem_total_rows": 59986052,
+      "after_zone_map_block_skip": 9000000,
+      "after_discount_filter": 2430000,
+      "after_quantity_filter": 1148000,
+      "output_rows": 1
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "thread_local_double_accumulator — one double per thread; final reduction is a sequential sum over 32 values; no hash table needed (scalar SUM, no GROUP BY)"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven_block_parallel",
+      "thread_count": 32,
+      "morsel_unit": "zone_map_block",
+      "qualifying_blocks": 90,
+      "blocks_per_thread": 3,
+      "synchronization": "thread_local_accumulator_then_sequential_merge — zero contention during scan; main thread sums 32 doubles at the end",
+      "notes": "Distribute the ~90 qualifying block indices across 32 threads before launch. Each thread iterates its assigned blocks, applies fused predicates, accumulates into a local double. No atomics needed."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "uint32_t num_blocks, then per-block: int32_t min, int32_t max, uint32_t block_size (12 bytes each)",
+        "purpose": "skip_blocks_outside_1994_range",
+        "skip_condition": "block_max < 8766 OR block_min >= 9131",
+        "expected_blocks_skipped": 510,
+        "expected_blocks_scanned": 90,
+        "load_method": "mmap entire 7204-byte file; iterate all 600 entries; collect qualifying block indices into a flat vector before launching threads"
+      }
+    ],
+    "scan_strategy": "zone_map_driven_single_pass_fused",
+    "column_load_order": [
+      {
+        "step": 1,
+        "column": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "predicate": "val >= 8766 && val < 9131",
+        "note": "within a qualifying block the zone map guarantees overlap but individual rows near block boundaries may still miss — check per row"
+      },
+      {
+        "step": 2,
+        "column": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "predicate": "val >= 0.05 && val <= 0.07",
+        "note": "load only for rows passing shipdate"
+      },
+      {
+        "step": 3,
+        "column": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "predicate": "val < 24.0",
+        "note": "load only for rows passing shipdate AND discount"
+      },
+      {
+        "step": 4,
+        "column": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "predicate": "none — multiply with already-loaded l_discount and add to accumulator",
+        "note": "late materialization — loaded only for the ~1.15M qualifying rows; avoids reading 480MB of extendedprice data for rows that will be rejected"
+      }
+    ],
+    "inner_loop_strategy": {
+      "description": "Fused scan loop over each qualifying block. For each row i in [row_offset, row_offset+block_size): check shipdate, then discount, then quantity; on triple-pass multiply extendedprice*discount and add to local_sum.",
+      "branch_prediction": "early-exit per predicate; discount and quantity checks short-circuit ~81% of shipdate-passing rows; SIMD gather can be applied to discount/quantity arrays for vectorized predicate evaluation",
+      "simd_opportunity": "All filter columns are double (64-bit) or int32. AVX2 processes 4 doubles or 8 int32s per register. Discount and quantity predicates can be vectorized as 4-wide double comparisons."
+    },
+    "memory_pattern": "streaming_sequential_within_qualifying_blocks — mmap all four column files; OS prefetcher handles sequential access within each 100K-row block; non-qualifying blocks are never touched (no page faults)"
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_fused_scan_of_90_qualifying_blocks",
+    "data_volume_bytes": 261120000,
+    "data_volume_note": "~90 blocks × 100K rows × (4B shipdate + 8B discount + 8B quantity) = ~180MB for filter columns; extendedprice adds ~9.2MB for the 1.15M qualifying rows (late mat.)",
+    "estimated_ms": 20,
+    "bottleneck": "memory_bandwidth_and_predicate_evaluation — HDD latency avoided by mmap+OS page cache on repeated runs; 32-thread parallelism amortizes scan cost",
+    "per_thread_rows": 281250,
+    "notes": "Zone map cuts I/O by 85%. Late materialization avoids ~480MB of extendedprice reads. Thread-local accumulators eliminate all synchronization during the scan. Target: match or beat DuckDB (20ms), approach Umbra (14ms)."
+  }
+}

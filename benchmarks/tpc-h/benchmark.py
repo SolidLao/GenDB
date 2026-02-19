@@ -1481,11 +1481,16 @@ def read_gendb_iteration_history(run_dir: Path) -> dict:
     max_iter = -1
     for qid in query_ids:
         data[qid] = {}
-        i = 0
-        while True:
-            exec_path = queries_dir / qid / f"iter_{i}" / "execution_results.json"
+        qid_dir = queries_dir / qid
+        # Scan all iter_* directories instead of breaking on first gap
+        for iter_dir in sorted(qid_dir.glob("iter_*")):
+            match = re.match(r"^iter_(\d+)$", iter_dir.name)
+            if not match:
+                continue
+            i = int(match.group(1))
+            exec_path = iter_dir / "execution_results.json"
             if not exec_path.exists():
-                break
+                continue
             with open(exec_path) as f:
                 exec_data = json.load(f)
             data[qid][i] = {
@@ -1494,7 +1499,6 @@ def read_gendb_iteration_history(run_dir: Path) -> dict:
             }
             if i > max_iter:
                 max_iter = i
-            i += 1
 
     # Compute best valid timing per query
     best = {}

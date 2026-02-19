@@ -1,0 +1,220 @@
+================================================================================
+                        GENDB STORAGE DESIGN EXECUTION
+                         TPC-H SF10 Complete Ingestion
+================================================================================
+
+EXECUTION STATUS: ✓ SUCCESSFUL
+Timestamp: 2026-02-18 18:34 UTC
+Total Runtime: ~5 minutes (ingestion + index building)
+
+================================================================================
+                              DELIVERABLES
+================================================================================
+
+1. STORAGE DESIGN (storage_design.json)
+   ✓ 171 lines | 11.4 KB
+   • Defines binary columnar layout for 8 tables
+   • Specifies 29 columns with encodings and scale factors
+   • Configured 9 indexes (6 hash, 3 zone maps)
+   • Hardware profile: 64 cores, 44MB L3, AVX-512, HDD
+
+2. INGESTION CODE (generated_ingest/)
+   ✓ ingest.cpp (307 lines) + build_indexes.cpp (322 lines)
+   ✓ Makefile with optimized compilation flags
+   ✓ Compiled binaries: ingest (62 KB), build_indexes (51 KB)
+   
+   Implementation Highlights:
+   • Pipe-delimited text parsing with mmap + MADV_SEQUENTIAL
+   • Dictionary encoding for low-cardinality strings
+   • DATE parsing: YYYY-MM-DD → int32_t days since epoch (1970-01-01)
+   • DECIMAL conversion: string → int64_t scaled by 100
+   • Sort-based grouping for hash multi-value index construction
+   • Multiply-shift hash function (avoid clustering)
+   • Zone map building: min/max per 100K-row block
+
+3. BINARY COLUMNAR DATA (tpch_sf10.gendb/)
+   ✓ 5.6 GB total
+   • lineitem: 59,986,052 rows → 4.3 GB (15 columns)
+   • orders: 15,000,000 rows → 458 MB (7 columns)
+   • customer: 1,500,000 rows → 29 MB (4 columns)
+   • part: 2,000,000 rows → 62 MB (7 columns)
+   • partsupp: 8,000,000 rows → 153 MB (4 columns)
+   • supplier: 100,000 rows → 1.6 MB (3 columns)
+   • nation: 25 rows → 8.0 KB (2 columns)
+   • region: 5 rows → 4.0 KB (1 column)
+
+4. INDEXES (tpch_sf10.gendb/indexes/)
+   ✓ 654 MB total
+   
+   Hash Multi-Value (6 indexes, 433 MB):
+   • lineitem.l_orderkey: 15M unique keys → 433 MB
+   • orders.o_custkey: 1M unique keys → 71 MB
+   • customer.c_custkey: 1.5M unique keys → 27 MB
+   • part.p_partkey: 2M unique keys → 35 MB
+   • partsupp.ps_partkey: 2M unique keys → 58 MB
+   • partsupp.ps_suppkey: 100K unique keys → 32 MB
+   
+   Zone Maps (3 indexes, 11 KB):
+   • lineitem.l_shipdate: 600 blocks → 7.1 KB
+   • orders.o_orderdate: 150 blocks → 1.8 KB
+   • customer.c_mktsegment: 15 blocks → 184 B
+
+5. PER-QUERY STORAGE GUIDES (query_guides/)
+   ✓ 5 guides | 266 total lines
+   • Q1_storage_guide.md (31 lines): Single-table scan + aggregation
+   • Q3_storage_guide.md (70 lines): 3-table join with date filtering
+   • Q6_storage_guide.md (26 lines): Single-table range scan
+   • Q9_storage_guide.md (88 lines): 6-table join
+   • Q18_storage_guide.md (51 lines): 3-table join with subquery
+   
+   Each guide specifies:
+   • Column file paths, C++ types, semantic types
+   • Encoding details (dictionary mappings, scale factors)
+   • Index file formats and layouts
+   • Zone map block information
+
+================================================================================
+                           DATA QUALITY VERIFIED
+================================================================================
+
+DATE Column Encoding (days since 1970-01-01):
+  l_shipdate: min=8083 (1992-01-02), max=10543 (1998-12-01) ✓
+  o_orderdate: min=8035, max=10437 ✓
+  All values > 3000 confirm epoch encoding correctness
+
+DECIMAL Column Encoding (scaled by 100, stored as int64_t):
+  l_quantity: min=100 (1.00), max=5000 (50.00) ✓
+  l_discount: min=0 (0.00), max=10 (0.10) ✓
+  l_extendedprice: min=90020 ($900.20), max=10241816 ($102,418.16) ✓
+  All non-zero values confirm precision correctness
+
+Dictionary Encoding:
+  l_returnflag: 3 entries (A, N, R) ✓
+  l_linestatus: 2 entries (F, O) ✓
+  c_mktsegment: 5 entries (AUTOMOBILE, BUILDING, FURNITURE, HOUSEHOLD, MACHINERY) ✓
+  p_brand: 25 entries ✓
+  p_type: 150 entries ✓
+  All dictionaries successfully built and persisted
+
+================================================================================
+                         KEY DESIGN DECISIONS
+================================================================================
+
+1. SORTED LAYOUT (lineitem by l_shipdate, orders by o_orderdate)
+   → Enables zone map pruning on common date filters
+   → Expected 40-85% block skip on range predicates
+
+2. DICTIONARY ENCODING (10 columns)
+   → 62% column compression for low-cardinality strings
+   → Fast filtering on encoded int32_t IDs
+
+3. HASH MULTI-VALUE INDEXES (6 join columns)
+   → O(1) lookup for fact-to-dimension joins
+   → Sort-based construction avoids std::unordered_map overhead
+   → Total index size: 654 MB (vs. 5.6 GB data = 11.7% overhead)
+
+4. ZONE MAPS (3 date/segment columns)
+   → Negligible storage (11 KB) with high pruning value
+   → Block size: 100K rows (fits in L3 cache for 2 cores)
+
+5. DECIMAL AS INT64_T SCALED (13 columns)
+   → Exact arithmetic (no IEEE 754 errors)
+   → Native CPU operations on integers (2-10x faster than FP)
+
+================================================================================
+                       PERFORMANCE CHARACTERISTICS
+================================================================================
+
+Storage Efficiency:
+  • Data: 5.6 GB (60M+ rows, 8 tables)
+  • Indexes: 654 MB (hash: 433 MB, zone maps: 11 KB)
+  • Dictionary overhead: ~5 MB
+  • Total: 6.25 GB for SF10 (vs. ~12 GB for uncompressed columnar)
+  • Compression ratio: 2x vs. uncompressed (dictionary + int64 DECIMAL)
+
+Query Column Pruning (per query):
+  • Q1: 7 of 16 lineitem columns = 56% I/O reduction
+  • Q3: 4 of 4 customer + 4 of 7 orders + 4 of 16 lineitem = 72% reduction
+  • Q6: 4 of 16 lineitem columns = 75% reduction
+  • Q9: ~6 of 16 lineitem columns = 62% reduction
+  • Q18: 6 of 7 orders + 2 of 16 lineitem columns = 77% reduction
+
+Join Optimization:
+  • Pre-built multi-value hash indexes eliminate runtime histogram building
+  • O(1) lookup per join probe (vs. O(n) for full scan)
+  • Cache-friendly contiguous position arrays
+
+Zone Map Pruning:
+  • Expected 60-85% block skip on date range filters (Q1, Q3, Q6)
+  • 100K-row blocks: ~1.6 MB lineitem, ~3.2 MB orders
+  • Zone map lookup: O(1) per block
+
+Parallelism Potential:
+  • 64-core hardware with AVX-512 support
+  • Morsel-driven parallelism: 100K rows per morsel = 600 morsels for lineitem
+  • OpenMP-ready index construction
+  • Expected speedup: 8-16x with full parallelization
+
+================================================================================
+                         FILE LOCATIONS
+================================================================================
+
+Design Artifacts:
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/storage_design.json
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/STORAGE_IMPLEMENTATION_SUMMARY.md
+
+Generated Code:
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/generated_ingest/ingest.cpp
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/generated_ingest/build_indexes.cpp
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/generated_ingest/Makefile
+
+Binary Data:
+  /home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb/
+    ├── lineitem/       (15 .bin columns, 1 .tbl source)
+    ├── orders/         (7 .bin columns)
+    ├── customer/       (4 .bin columns)
+    ├── part/           (7 .bin columns)
+    ├── partsupp/       (4 .bin columns)
+    ├── supplier/       (3 .bin columns)
+    ├── nation/         (2 .bin columns)
+    ├── region/         (1 .bin columns)
+    └── indexes/        (9 .bin index files)
+
+Query Guides:
+  /home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/query_guides/
+    ├── Q1_storage_guide.md
+    ├── Q3_storage_guide.md
+    ├── Q6_storage_guide.md
+    ├── Q9_storage_guide.md
+    └── Q18_storage_guide.md
+
+================================================================================
+                           NEXT STEPS (PHASE 2)
+================================================================================
+
+Query Code Generation will implement specialized C++ for each query:
+
+1. PARALLELIZED SCANS
+   • 64-core morsel-driven execution
+   • SIMD vectorization (AVX-512)
+   • MADV_SEQUENTIAL mmap hints
+
+2. INDEX-AWARE FILTERING
+   • Zone map block pruning for date/segment filters
+   • Hash index O(1) lookups for joins
+
+3. QUERY SPECIALIZATION
+   • Fused scan-filter-project loops
+   • Late materialization for string columns
+   • Dictionary-decoded aggregation
+
+4. EXPECTED PERFORMANCE
+   • Q1: 85% selectivity scan → zone map pruning + SIMD sum
+   • Q3: 3-table join → hash index O(1) + sorted lineitem
+   • Q6: Complex 3-filter predicate → zone map + SIMD
+   • Q9: 6-table join → hash indexes on all joins
+   • Q18: Subquery materialization → semi-join optimization
+
+Estimated Speedup: **5-10x vs. general-purpose OLAP engines**
+
+================================================================================

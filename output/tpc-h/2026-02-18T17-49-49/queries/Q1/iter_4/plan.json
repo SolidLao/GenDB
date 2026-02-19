@@ -1,0 +1,115 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": [
+      "zone_map_prune_lineitem",
+      "scan_and_filter_lineitem",
+      "aggregate_by_returnflag_linestatus",
+      "sort_6_groups"
+    ],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "encoding_note": "DATE encoded as int32_t days_since_epoch; 1998-09-02 = 10471",
+        "selectivity_estimate": 0.985,
+        "qualifying_rows_estimate": 59086161
+      }
+    ],
+    "group_by": {
+      "columns": ["l_returnflag", "l_linestatus"],
+      "distinct_combinations": 6,
+      "encoding": "dictionary int16_t",
+      "group_key_strategy": "composite_flat_array_index",
+      "note": "3 l_returnflag values x 2 l_linestatus values = 6 groups max; index = returnflag_id * 2 + linestatus_id"
+    },
+    "order_by": {
+      "columns": ["l_returnflag ASC", "l_linestatus ASC"],
+      "note": "Only 6 groups — trivial sort after aggregation, O(1) effectively"
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array[6] of struct{sum_qty, sum_base_price, sum_disc_price, sum_charge, sum_qty_for_avg, sum_price_for_avg, sum_disc_for_avg, count} per thread — direct-indexed by (returnflag_id * 2 + linestatus_id)",
+      "thread_local_accumulators": "64 x flat_array[6] — no synchronization during scan phase",
+      "final_merge": "sequential merge of 64 x 6-entry arrays into 1 x 6-entry global result"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size_rows": 100000,
+      "total_morsels_estimate": 600,
+      "partition_count": 64,
+      "synchronization": "thread_local_merge",
+      "note": "Each thread owns thread-local flat_array[6]. No locks during scan. Single sequential merge pass after all threads finish."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_l_shipdate_zone_map",
+        "file": "indexes/lineitem_l_shipdate.bin",
+        "purpose": "skip_trailing_blocks_after_cutoff_date",
+        "layout": "[uint32_t num_zones] then per zone: [int32_t min, int32_t max, uint32_t count, uint32_t offset] (16B/zone)",
+        "skip_condition": "zone.min > 10471 => skip entire zone",
+        "expected_zones_skipped": "~1.5% of ~600 zones = ~9 zones skipped",
+        "note": "Data sorted by l_shipdate so trailing zones with min > cutoff are skippable"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_detail": {
+      "columns_loaded": [
+        "l_shipdate (int32_t) — filter predicate",
+        "l_returnflag (int16_t) — group key",
+        "l_linestatus (int16_t) — group key",
+        "l_quantity (int64_t) — aggregate: SUM, AVG",
+        "l_extendedprice (int64_t) — aggregate: SUM, AVG",
+        "l_discount (int64_t) — aggregate: SUM, AVG; used in disc_price and charge",
+        "l_tax (int64_t) — aggregate: used in charge"
+      ],
+      "fused_operations": [
+        "1. Load zone map, identify qualifying zones",
+        "2. For each qualifying zone morsel: load l_shipdate block, apply filter predicate (l_shipdate <= 10471)",
+        "3. For qualifying rows: load group keys (l_returnflag, l_linestatus), compute group index",
+        "4. Load aggregate columns and compute: sum_qty, sum_base_price, sum_disc_price = ep*(100-disc)/100, sum_charge = ep*(100-disc)*(100+tax)/10000, count",
+        "5. Accumulate into thread-local flat_array[6]"
+      ],
+      "note": "All 7 columns loaded in single coordinated pass per morsel. No intermediate materialization."
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_detail": {
+      "access_pattern": "Sequential columnar reads per zone/morsel; cache-friendly block-at-a-time access",
+      "working_set_per_thread": "morsel_size * 7_columns * avg_bytes ≈ 100K * (4+2+2+8+8+8+8) = ~40MB per thread morsel (streamed, not resident)",
+      "aggregation_state_size": "6 groups * ~64 bytes per group = 384 bytes per thread — fits in L1 cache"
+    },
+    "decimal_arithmetic": {
+      "l_extendedprice_scale": 100,
+      "l_discount_scale": 100,
+      "l_tax_scale": 100,
+      "sum_disc_price": "SUM(l_extendedprice * (100 - l_discount)) / 100  [integer arithmetic, divide at output]",
+      "sum_charge": "SUM(l_extendedprice * (100 - l_discount) * (100 + l_tax)) / 1000000  [integer arithmetic, divide at output]",
+      "avg_qty": "sum_qty / count  [l_quantity scale=1, no scaling needed]",
+      "avg_price": "sum_base_price / count / 100",
+      "avg_disc": "sum_disc / count / 100"
+    },
+    "dictionary_handling": {
+      "l_returnflag": "Read dictionary file lineitem/l_returnflag_dict.txt at startup to map int16_t -> char; used for output only",
+      "l_linestatus": "Read dictionary file lineitem/l_linestatus_dict.txt at startup; used for output only",
+      "group_index_computation": "group_idx = returnflag_code * 2 + linestatus_code; direct array index, O(1)"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_scan_and_aggregate",
+    "breakdown": {
+      "zone_map_read": "<1ms — ~600 zones * 16 bytes = 9.6KB",
+      "parallel_scan_59M_rows_7_cols": "~65ms — 59M * 40 bytes / 64 threads at ~600MB/s effective HDD throughput",
+      "thread_local_aggregation": "~0ms — 6-entry flat array always in L1 cache",
+      "merge_64_local_arrays": "<1ms — 64 * 6 entries",
+      "final_sort_6_groups": "<1ms — trivial"
+    },
+    "estimated_ms": 70,
+    "target_vs_duckdb": "Beat DuckDB (83ms) by ~15% via specialized flat-array aggregation (no hash overhead) and morsel-driven 64-thread parallelism",
+    "bottleneck": "HDD I/O bandwidth — 59M rows * 7 columns * ~5 bytes avg = ~2.1GB data read"
+  }
+}

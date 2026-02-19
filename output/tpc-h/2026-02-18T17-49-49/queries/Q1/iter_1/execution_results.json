@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.11 ms\n[TIMING] build_joins: 0.08 ms\n[TIMING] main_scan: 46.32 ms\n[TIMING] aggregation_merge: 0.01 ms\n[TIMING] sort_topk: 0.00 ms\n[TIMING] output: 0.17 ms\n[TIMING] total: 113.39 ms\n",
+    "stderr": "",
+    "duration_ms": 120
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dim_filter": 0.11,
+    "build_joins": 0.08,
+    "main_scan": 46.32,
+    "aggregation_merge": 0.01,
+    "sort_topk": 0,
+    "output": 0.17,
+    "total": 113.39
+  },
+  "timing_ms": 113.22
+}

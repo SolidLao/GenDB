@@ -1,0 +1,138 @@
+{
+  "query_id": "Q3",
+  "logical_plan": {
+    "pipeline": [
+      "filter_customer",
+      "build_custkey_bitset",
+      "scan_orders_zone_map_pruned",
+      "filter_orders_by_custkey_bitset_and_date",
+      "build_orders_hash_map",
+      "scan_lineitem_from_shipdate_cutoff",
+      "probe_orders_hash_map",
+      "hash_aggregate",
+      "topk_10"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(filtered by c_mktsegment='BUILDING', ~300K rows)",
+        "build_structure": "bitset(1500001) on c_custkey",
+        "probe": "orders(zone_map_pruned + o_orderdate < 1995-03-15, ~7.5M candidate rows → ~3.75M after custkey filter)",
+        "output": "qualifying_orders: {o_orderkey, o_orderdate, o_shippriority}"
+      },
+      {
+        "step": 2,
+        "build": "qualifying_orders(~3.75M rows keyed by o_orderkey)",
+        "build_structure": "compact_hash_map(pre_sized, ~7.5M slots) on o_orderkey",
+        "probe": "lineitem(l_shipdate > 1995-03-15, ~30M rows scanned from sorted midpoint)",
+        "output": "joined tuples for aggregation"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "partitioned_hash_group_by",
+    "aggregation_key": "(l_orderkey, o_orderdate, o_shippriority)",
+    "aggregation_value": "SUM(l_extendedprice * (1 - l_discount)) as revenue",
+    "estimated_output_groups": "~3750000",
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment = 'BUILDING'",
+        "selectivity_estimate": 0.2,
+        "estimated_rows_out": 300000,
+        "note": "dictionary-encoded; lookup BUILDING code once, compare integers"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < DATE '1995-03-15' (encoded as days_since_epoch)",
+        "selectivity_estimate": 0.50,
+        "estimated_rows_out": 7500000,
+        "note": "orders sorted by o_orderdate; zone map prunes ~50% of blocks (those fully after cutoff)"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_custkey IN customer_bitset (semi-join reduction)",
+        "selectivity_estimate": 0.50,
+        "estimated_rows_out": 3750000,
+        "note": "bitset probe eliminates non-BUILDING customers; no hash lookup overhead"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > DATE '1995-03-15' (encoded as days_since_epoch)",
+        "selectivity_estimate": 0.50,
+        "estimated_rows_out": 30000000,
+        "note": "lineitem sorted by l_shipdate; binary-search for cutoff offset, scan only latter ~50%"
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "customer_filter": "bitset(1500001) — dense c_custkey domain [1..1500000], 187KB, fits in L2 cache; O(1) probe with no hash computation",
+      "orders_join_build": "compact_hash_map(pre_sized, power-of-2 slots ~8388608) on o_orderkey → {o_orderdate: int32_t, o_shippriority: int32_t}; multiply-shift hash, open addressing, load factor ~0.45",
+      "aggregation": "partitioned_hash_map(32 partitions) keyed by (l_orderkey, o_orderdate, o_shippriority) → int64_t revenue_sum; thread-local per-partition tables merged at end; ~3.75M groups estimated",
+      "topk": "min-heap of size 10 (priority_queue) for ORDER BY revenue DESC, o_orderdate LIMIT 10; O(N log 10)"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size": 65536,
+      "phase_1_customer_scan": "parallel scan over 15 blocks (1.5M rows / 100K block), filter mktsegment, write to shared bitset using atomic OR on 64-bit words (race-free since each bit is set monotonically)",
+      "phase_2_orders_scan": "parallel scan over zone-map-pruned order blocks; each thread probes shared bitset (read-only after phase 1) and date filter; threads write matching rows to thread-local vectors, then parallel-build into shared compact_hash_map using partitioned insert (no locks: partition by o_orderkey hash, each partition owned by one thread)",
+      "phase_3_lineitem_scan": "parallel scan from binary-search cutoff offset to end of lineitem (sorted by l_shipdate); each thread probes orders compact_hash_map (read-only), accumulates into thread-local partitioned aggregation tables",
+      "phase_4_merge_aggregate": "sequential merge of 64 thread-local partitioned aggregation tables into global result (or partition-parallel merge: thread i merges partition i across all local tables)",
+      "phase_5_topk": "parallel local TopK(10) per thread over merged partitions, then final merge of 64×10 candidates",
+      "synchronization": "partitioned_no_contention — bitset phase uses atomic word writes; hash map build uses partition ownership; aggregation uses thread-local tables"
+    },
+    "index_usage": [
+      {
+        "index": "zone_map_o_orderdate",
+        "file": "indexes/zone_map_o_orderdate.bin",
+        "purpose": "skip order blocks where max(o_orderdate) >= cutoff_epoch; orders sorted by o_orderdate means all blocks past the cutoff can be entirely skipped — expected ~50% block reduction",
+        "layout": "150 blocks × {int32_t min, int32_t max, uint32_t count}; skip block if min > cutoff_epoch (1995-03-15 = 9204 days since 1970-01-01)"
+      },
+      {
+        "index": "hash_l_orderkey",
+        "file": "indexes/hash_l_orderkey.bin",
+        "purpose": "NOT used as primary probe structure — scanning lineitem filtered by l_shipdate is more efficient since lineitem is sorted by l_shipdate (50% rows can be skipped via binary search on the sorted column). The pre-built index would require random-access reads across all 60M rows.",
+        "note": "Considered but rejected: probing 3.75M o_orderkeys into hash_l_orderkey would require reading ~3.75M sets of positions from the positions array, each potentially scattered — worse memory access pattern than sequential lineitem scan with filter"
+      },
+      {
+        "index": "hash_o_custkey",
+        "file": "indexes/hash_o_custkey.bin",
+        "purpose": "NOT used — scanning orders with zone_map pruning + bitset probe is more cache-friendly than random-access lookups for 300K customer keys into hash_o_custkey (would cause ~300K random position reads scattered across 15M order rows)",
+        "note": "Considered but rejected: iterating 300K BUILDING custkeys through hash_o_custkey yields ~2M scattered order row positions; sequential scan with bitset is more cache-efficient at this scale"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "customer": "full scan (1.5M rows, 15 blocks); fused filter on dictionary c_mktsegment code for 'BUILDING'; write matching c_custkey to bitset",
+      "orders": "zone-map-pruned scan; binary-search blocks using zone_map_o_orderdate to find first block where max >= cutoff, skip all blocks where min > cutoff (sorted data: contiguous range of valid blocks); fused dual-filter: o_orderdate < cutoff AND bitset[o_custkey]",
+      "lineitem": "sorted-data early-start scan: binary search on l_shipdate column to find first row index where l_shipdate > cutoff (days_since_epoch 9204); scan from that offset to end; fused probe into orders hash map"
+    },
+    "memory_pattern": "sequential for all scans; bitset probe = L2-resident random access (187KB); orders hash map probe = L3-resident random access (~3.75M × 8B key+value = ~30-60MB, fits in 44MB L3 with care — partition to ensure each thread's working set fits)",
+    "late_materialization": {
+      "applied": false,
+      "reason": "all needed columns (c_custkey, o_orderkey, o_orderdate, o_shippriority, l_orderkey, l_extendedprice, l_discount, l_shipdate) are integer/decimal types; no string materialization needed at join time (c_mktsegment is decoded to integer code once)"
+    },
+    "date_encoding": {
+      "cutoff": "1995-03-15 = 9204 days since 1970-01-01",
+      "comparison": "direct int32_t comparison: o_orderdate < 9204, l_shipdate > 9204"
+    },
+    "decimal_handling": {
+      "revenue_formula": "l_extendedprice * (100 - l_discount) / 100  [all int64_t, scale_factor=2; multiply then adjust scale]",
+      "note": "l_extendedprice and l_discount both scale_factor=2; (1 - l_discount) in scaled form = (100 - l_discount); revenue = l_extendedprice * (100 - l_discount) in scale_factor=4 intermediate, store as int64_t sum"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_and_probe",
+    "phase_estimates_ms": {
+      "customer_scan_and_bitset_build": 5,
+      "orders_scan_zone_pruned_and_hash_build": 25,
+      "lineitem_scan_filtered_and_probe_aggregate": 60,
+      "merge_and_topk": 5
+    },
+    "estimated_total_ms": 95,
+    "parallelism_factor": 64,
+    "bottleneck": "lineitem scan (~30M rows post-filter) with hash map probes; hash map for orders (~3.75M entries, ~45MB) may exceed L3 cache (44MB) — partitioned approach mitigates by keeping each thread's active partition in cache",
+    "target_vs_umbra": "Umbra achieves 64ms; targeting 80-120ms with 64-thread parallelism, zone-map pruning, bitset semi-join reduction, and single-pass fused scans"
+  }
+}

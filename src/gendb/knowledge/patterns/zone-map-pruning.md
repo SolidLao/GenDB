@@ -1,6 +1,6 @@
 # Zone Map Pruning Patterns
 
-> **Note**: The exact binary format of zone map files varies per run (field types, entry sizes, header format). The struct below is an example only. **Always rely on the per-query storage guide** (`query_guides/<Qi>_storage_guide.md`) for the authoritative binary layout of zone map files in the current run.
+> **Note**: The exact binary format of zone map files varies per run (field types, entry sizes, header format). The struct below is an example only. **Always rely on the per-query guide** (`query_guides/<Qi>_guide.md`) for the authoritative binary layout of zone map files in the current run.
 
 ## Zone Map Structure (Example — actual format may differ)
 ```cpp

@@ -1,0 +1,147 @@
+{
+  "query_id": "Q3",
+  "logical_plan": {
+    "pipeline": [
+      "scan_filter_customer",
+      "build_custkey_bitset",
+      "scan_orders_zonemap_pruned",
+      "probe_custkey_bitset_filter_orderdate",
+      "build_orderkey_hashmap_and_bloom",
+      "scan_lineitem_zonemap_pruned",
+      "bloom_prefilter_shipdate",
+      "probe_orderkey_hashmap",
+      "thread_local_aggregate_revenue",
+      "merge_thread_local_agg_tables",
+      "topk_partial_sort_limit10"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(filtered c_mktsegment=1, ~300K rows) → bitset on c_custkey",
+        "probe": "orders(zone-map pruned o_orderdate < 9204, ~7.3M rows scanned, filter o_orderdate < 9204 + probe custkey bitset)",
+        "intermediate_size": "~1.47M qualifying orders",
+        "rationale": "customer is smallest filtered relation; bitset on custkey fits L2 cache (187KB), making probe O(1) with zero cache miss"
+      },
+      {
+        "step": 2,
+        "build": "qualifying_orders(~1.47M rows) → compact_hash_map on o_orderkey, storing {o_orderdate, o_shippriority}; simultaneously populate bloom_filter on o_orderkey",
+        "probe": "lineitem(zone-map pruned l_shipdate > 9204, ~30.6M rows) → bloom pre-filter → hash map probe → aggregate",
+        "intermediate_size": "~3K distinct groups (l_orderkey, o_orderdate, o_shippriority)",
+        "rationale": "orders hash map ~17MB fits in L3 (88MB); bloom filter (1.47M keys, ~1.8MB) pre-filters ~90% of non-matching lineitem rows before touching hash map"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "hash_group_by",
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment[i] == 1 (BUILDING, dictionary-encoded int8_t)",
+        "selectivity_estimate": 0.20,
+        "qualifying_rows": 300000
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate[i] < 9204",
+        "selectivity_estimate": 0.489,
+        "qualifying_rows_before_join": 7335000,
+        "index": "orders_orderdate_zonemap (skip blocks where block_min >= 9204)"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate[i] > 9204",
+        "selectivity_estimate": 0.511,
+        "qualifying_rows_before_join": 30622000,
+        "index": "lineitem_shipdate_zonemap (skip blocks where block_max <= 9204)"
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "custkey_filter": "bitset(capacity=1500001 bits, ~187KB) — direct bit test on int32_t c_custkey; fits L2 cache, O(1) set/test with no hash overhead",
+      "orders_join": "compact_hash_map(open_addressing, pre_sized capacity=3000000) keyed on int32_t o_orderkey → struct{int32_t o_orderdate; int32_t o_shippriority}; ~36MB total, fits L3 (88MB)",
+      "orders_bloom": "bloom_filter(1.47M keys, 10 bits/key, ~1.84MB) built simultaneously with orders hash map; used to pre-filter lineitem rows; ~1% false positive rate",
+      "aggregation": "compact_hash_map(open_addressing, pre_sized capacity=8192) keyed on int32_t l_orderkey → struct{double revenue; int32_t o_orderdate; int32_t o_shippriority}; one per thread (~3K groups expected)"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 100000,
+      "phases": [
+        {
+          "phase": "customer_scan_build_bitset",
+          "description": "parallel scan of c_mktsegment (1 byte/row) and c_custkey (4 bytes/row); threads collect qualifying custkeys into thread-local vectors; sequential bitset population after barrier",
+          "synchronization": "thread_local_collect_then_sequential_bitset_build",
+          "note": "customer is 1.5MB total — fast even single-threaded; parallelize for consistency"
+        },
+        {
+          "phase": "orders_scan_filter_build_hashmap_and_bloom",
+          "description": "parallel morsel scan of o_orderdate + o_custkey + o_orderkey + o_shippriority; per block skip if block_min >= 9204 (zone map); per row: check o_orderdate < 9204 AND bitset[o_custkey]; collect qualifying rows thread-locally; sequential build of orders compact_hash_map and bloom_filter after barrier",
+          "synchronization": "thread_local_collect_then_sequential_hashmap_bloom_build",
+          "columns_scanned": ["o_orderdate", "o_custkey", "o_orderkey", "o_shippriority"],
+          "zone_map": "orders_orderdate_zonemap — skip ~77 of 150 blocks (51%)"
+        },
+        {
+          "phase": "lineitem_scan_probe_aggregate",
+          "description": "parallel morsel scan of l_shipdate + l_orderkey + l_extendedprice + l_discount; per block skip if block_max <= 9204 (zone map); per row: check l_shipdate > 9204; bloom pre-filter on l_orderkey; probe orders hash map; accumulate revenue into thread-local agg map; merge thread-local maps after barrier",
+          "synchronization": "thread_local_aggregation_maps_merged_sequentially_after_parallel_phase",
+          "columns_scanned": ["l_shipdate", "l_orderkey", "l_extendedprice", "l_discount"],
+          "zone_map": "lineitem_shipdate_zonemap — skip ~294 of 600 blocks (49%)",
+          "bloom_benefit": "~90% of non-matching l_orderkeys eliminated before hash map probe"
+        },
+        {
+          "phase": "topk_finalize",
+          "description": "after merging 64 thread-local agg maps (~3K total groups), run std::partial_sort for top-10 by (revenue DESC, o_orderdate ASC); format o_orderdate as YYYY-MM-DD string for output",
+          "synchronization": "single_threaded_sequential"
+        }
+      ],
+      "partition_count": 64,
+      "synchronization": "thread_local_merge"
+    },
+    "index_usage": [
+      {
+        "index": "orders_orderdate_zonemap",
+        "file": "indexes/orders_orderdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=150] then per block [int32_t min, int32_t max, uint32_t block_nrows]",
+        "skip_condition": "block_min[b] >= 9204",
+        "purpose": "skip rightmost ~77 of 150 blocks; reduces orders scan from 15M to ~7.3M rows (~51% I/O reduction)",
+        "row_offset_note": "row_offset is ROW index into column arrays, not byte offset"
+      },
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600] then per block [int32_t min, int32_t max, uint32_t block_nrows]",
+        "skip_condition": "block_max[b] <= 9204",
+        "purpose": "skip first ~294 of 600 blocks; reduces lineitem scan from 60M to ~30.6M rows (~49% I/O reduction)",
+        "row_offset_note": "row_offset is ROW index into column arrays, not byte offset"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "memory_pattern": "streaming_sequential_with_zone_map_block_skip",
+    "topk": {
+      "strategy": "std_partial_sort",
+      "k": 10,
+      "input_size": "~3000 groups after agg merge",
+      "comparator": "primary: revenue DESC (double), secondary: o_orderdate ASC (int32_t)",
+      "complexity": "O(n log k) where n=3000, k=10 — trivial cost"
+    },
+    "key_optimizations": [
+      "bitset on c_custkey (187KB, L2-resident) replaces hash set — zero hash overhead, branchless test",
+      "bloom filter on qualifying o_orderkeys (~1.84MB, L3-resident) eliminates ~90% of lineitem→orders hash probes",
+      "zone-map pruning halves I/O on both orders (~51%) and lineitem (~49%)",
+      "thread-local aggregation maps avoid all synchronization during hot lineitem scan loop",
+      "3K agg groups fit entirely in L1 cache per thread — near-zero cache miss on agg inserts",
+      "single-pass fused scan: shipdate filter + bloom check + hash probe + revenue accumulate in one loop"
+    ]
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_probe_aggregate",
+    "phase_breakdown": {
+      "customer_scan_build_bitset": "~3ms (1.5M rows × 5 bytes, 64 threads, ~1.5MB total data)",
+      "orders_scan_filter_build_hashmap_bloom": "~15ms (7.3M effective rows, 4 cols × 4 bytes, 64 threads, zone-map skip ~51%)",
+      "lineitem_scan_probe_aggregate": "~55ms (30.6M effective rows, 4 cols avg 6 bytes, 64 threads, zone-map skip ~49%, bloom pre-filter ~90% skip)",
+      "merge_and_topk": "~2ms (64 × 3K agg entries merged, partial_sort on 3K groups)"
+    },
+    "estimated_ms": 75,
+    "bottleneck": "lineitem column I/O and hash map probes (orders HT ~36MB fits L3, minimizing cache misses)"
+  }
+}

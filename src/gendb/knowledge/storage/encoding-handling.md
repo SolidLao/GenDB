@@ -92,28 +92,27 @@ std::string format_date(int32_t days) {
 
 **Pitfall:** ❌ Mixing YYYYMMDD integers with epoch days, or outputting raw epoch days.
 
-## Fixed-Point Decimal Handling
+## Decimal Column Handling
 
-**When:** DECIMAL/NUMERIC columns stored as scaled integers for precision and performance.
+**When:** DECIMAL/NUMERIC columns (prices, quantities, rates, percentages).
 
-**Storage:** Value × scale_factor as `int32_t` or `int64_t` (e.g., 0.04 → 4 with scale=100).
+**Option A: `double` (IEEE 754 float64)** — simpler, no scale tracking.
+- Ingestion: `double val = strtod(ptr, &end);`
+- Query-time: direct comparison and aggregation, values match SQL
+- Tradeoff: 15-16 significant digits. Over millions of rows, SUM may accumulate
+  small floating-point errors (typically < $100 on multi-billion aggregates).
+  Suitable when the workload tolerates approximate results.
 
-**Ingestion parsing:**
-```cpp
-// CORRECT: parse as double, then scale
-double val; std::from_chars(ptr, end, val);
-int32_t stored = static_cast<int32_t>(val * scale_factor);
+**Option B: `int64_t` with `scale_factor`** — exact decimal arithmetic.
+- Ingestion: `int64_t val = llround(strtod(ptr, &end) * scale_factor);`
+- Query-time: compare scaled values, divide by scale_factor for output
+- Tradeoff: Requires careful scale tracking in ALL arithmetic. Common bugs:
+  forgetting to scale thresholds, scale-squared on products, asymmetric scales.
+  See experience base entries C3, C5, C14, C17.
+  Required when results must be cent-exact (financial, regulatory).
 
-// WRONG: std::from_chars<int32_t> on "0.04" → reads 0 (stops at '.')
-```
-
-**Query-time usage:**
-```cpp
-// If stored as scaled int, divide to get actual value
-double actual = static_cast<double>(stored_val) / scale_factor;
-```
-
-**Pitfall:** ❌ Using `std::from_chars<int32_t>` directly on decimal strings — it stops at the decimal point and stores 0. Always parse as `double` first.
+**Choosing:** The Storage Designer selects encoding per workload. Default to `double`
+unless the workload requires exact decimal precision.
 
 ## Checklist
 

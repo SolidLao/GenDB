@@ -1,0 +1,79 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C19",
+      "category": "correctness",
+      "title": "Manual Zone-Map Block Skip on Non-Sorted Column",
+      "detect": "Binary search on per-block last-element (e.g., `lship[bend-1] > THRESHOLD`) to find first qualifying block, then `li_start_row = first_qualifying_block * BLOCK_SIZE` — applied to lineitem l_shipdate which is NOT globally sorted (lineitem is sorted by l_orderkey).",
+      "fix": "Never use manual binary-search block-skip on lineitem l_shipdate or any column that is not guaranteed globally sorted. Instead use `gendb::ZoneMapIndex zm(gendb_dir + \"/indexes/lineitem_l_shipdate.idx\"); zm.qualifying_ranges(lo, hi, ranges);` — the ZoneMapIndex stores actual per-block min/max values and correctly identifies qualifying ranges regardless of global sort order. The bug causes all rows before `li_start_row` to be silently dropped, producing wrong top-K results (completely different orderkeys selected).",
+      "evidence": "Q3 iters 6, 7, 9 — identical failure: 10/10 rows wrong across l_orderkey, revenue, o_orderdate columns. Binary search assumed sorted lineitem; actual orderkeys were ~2x larger than expected (rows skipped were the correct ones)."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C20",
+      "category": "correctness",
+      "title": "ZoneMapIndex Zone-Skip Condition Must Use max, Not min",
+      "detect": "Zone-map pruning loop `for (const auto& z : zone_map.zones) { if (z.min >= THRESHOLD) continue; ... }` — using min to discard zones. This over-prunes: a zone with min=THRESHOLD and max>THRESHOLD contains valid rows but would be wrongly skipped when THRESHOLD is exclusive (< predicate).",
+      "fix": "For predicate `col < THRESHOLD` (e.g., o_orderdate < DATE_1995_03_15), skip zones where `z.min >= THRESHOLD` is CORRECT for exclusive upper bound — all rows in zone are >= THRESHOLD. However, prefer `zm.qualifying_ranges(INT32_MIN, THRESHOLD, ranges)` from mmap_utils.h which handles boundary cases correctly. For `col > THRESHOLD` (l_shipdate > DATE), use `zm.qualifying_ranges(THRESHOLD+1, INT32_MAX, ranges)`. Do not hand-roll zone-map loops.",
+      "evidence": "Q3 iter_6 line 254: `if (z.min >= DATE_1995_03_15) continue;` is logically correct for o_orderdate < DATE but was combined with an incorrect lineitem skip (C19) — masking the real root cause."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P11",
+      "category": "performance",
+      "title": "Q3 build_joins Bottleneck: 64-Thread-Local Map Merge Is O(N*T)",
+      "detect": "Q3 `aggregation_merge` phase taking 40–45 ms: 64 thread-local CompactHashMap instances each with ~22K groups being merged sequentially or in partition-parallel. The merge scans all 64 maps' full slot arrays even for sparse maps.",
+      "fix": "For Q3 GROUP BY l_orderkey (1.44M qualifying unique groups at SF10), use a single `CompactHashMap<int32_t, AggVal>` pre-sized to 2M slots built with CAS-based concurrent insert, OR use `gendb::PartitionedHashMap` which avoids contention by partitioning. The 64-thread merge of 64 × 22K = 1.4M entries takes ~40 ms due to cache-cold slot scanning. A CAS concurrent map (one slot per group) eliminates the merge entirely. Alternatively: reduce thread count for aggregation phase to match L3 footprint.",
+      "evidence": "Q3 iter_10 timing: aggregation_merge=42.87 ms, 12% of total 357 ms. This phase is consistently the third-largest cost across all passing Q3 iterations (range: 35–45 ms)."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P12",
+      "category": "performance",
+      "title": "Q3 build_joins Over 100 ms: Orders Hash Table Construction Bottleneck",
+      "detect": "Q3 `build_joins` taking 95–161 ms across iterations. This phase scans 15M orders rows with o_orderdate zone-map pruning, filters ~1.44M qualifying rows (c_mktsegment=BUILDING ∩ o_orderdate < 1995-03-15), and builds a hash table.",
+      "fix": "Orders hash table for Q3 at SF10 has ~1.44M entries. Use `gendb::CompactHashMap<int32_t, AggVal>` pre-sized to 2M (1.4×). Sequential build is sufficient since 15M × 4 columns × 4B = 240MB — bandwidth-bound, parallelism adds lock overhead. Avoid partition-parallel builds with per-partition HTs (64 separate HTs + bloom filter adds memory overhead and GC cost). The zone-map should correctly prune orders blocks using `zm.qualifying_ranges(INT32_MIN, DATE_1995_03_15, ranges)` — currently effective (dim_filter=10 ms is reasonable).",
+      "evidence": "Q3 build_joins: iter_5=138ms, iter_6=95ms, iter_7=161ms, iter_8=N/A (no timing), iter_10=135ms. High variance indicates complex parallel coordination overhead; simpler sequential or low-thread build may be more stable."
+    },
+    {
+      "type": "fix_proposal",
+      "id": "FIX_DATE_UTILS_WARNING",
+      "category": "code_quality",
+      "title": "Silence Recurring Compiler Warning in date_utils.h epoch_days_to_date_str",
+      "detect": "Every Q3 compilation emits: `warning: '%02d' directive writing between 2 and 4 bytes into a region of size between 0 and 4 [-Wformat-overflow=]` from `date_utils.h:52`. Affects every query that uses `epoch_days_to_date_str`.",
+      "fix": "In `src/gendb/utils/date_utils.h`, change the `buf` parameter of `epoch_days_to_date_str` from `char buf[12]` to `char buf[16]` (or add a static_assert). Alternatively, add `#pragma GCC diagnostic ignored \"-Wformat-overflow\"` around the sprintf call. The warning is a false positive since y/m/d are always in valid ranges, but it pollutes stderr and may trigger false error detection in the pipeline.",
+      "file": "src/gendb/utils/date_utils.h",
+      "line": 52
+    },
+    {
+      "type": "pipeline_proposal",
+      "id": "PIPE_1",
+      "category": "pipeline",
+      "title": "Q9 and Q18 Missing execution_results.json — Pipeline Evaluation Gap",
+      "detect": "Q9 and Q18 iter_0 directories contain compiled binary and results CSV but no `execution_results.json`. `optimization_history.json` is empty (0 iterations). This means the initial generation ran but the evaluator never recorded results.",
+      "fix": "Investigate orchestrator timeout or evaluator crash for Q9 and Q18. Both are complex multi-join queries (5–6 tables). Possible causes: (1) the orchestrator hit a wall-clock budget before evaluation completed; (2) the evaluator process crashed on large result sets; (3) the binary ran too long and was killed before evaluation. Re-run Q9 and Q18 with extended timeout. Also ensure the evaluator writes `execution_results.json` atomically (write to temp file then rename) so partial writes don't leave missing files.",
+      "evidence": "Q9/Q18: results CSV exists, binary compiled successfully, optimization_history has 0 entries."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C21",
+      "category": "correctness",
+      "title": "Optimization Must Not Change Validated Date Constants or Filter Thresholds",
+      "detect": "During optimization iterations, the optimizer introduced a custom zone-map block-skip using binary search (Q3 iters 6/7/9) that implicitly altered which rows were included in the lineitem scan — functionally equivalent to changing the date threshold. Any optimization that changes the set of rows entering the main scan is a semantic change, not a micro-optimization.",
+      "fix": "When a query has passed validation, the optimizer must treat all filter predicates (date thresholds, BETWEEN bounds, HAVING thresholds) as invariants. Only structural optimizations are permitted (e.g., parallelism, hash table choice, memory layout). Any zone-map skip must be validated to return a superset of qualifying rows (no false negatives). Add a comment in generated code marking validated constants: `/* VALIDATED: do not change */`.",
+      "evidence": "Q3 had 3/11 failure iterations. All failures had identical wrong output — the same rows were consistently excluded, pointing to a systematic filter change rather than a race condition."
+    }
+  ],
+  "meta": {
+    "workload": "TPC-H",
+    "scale_factor": 10,
+    "timestamp": "2026-02-18T17-49-49",
+    "queries_total": 5,
+    "queries_success": 2,
+    "queries_slow": 1,
+    "queries_failed": 0,
+    "queries_not_evaluated": 2,
+    "run_directory": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49"
+  }
+}

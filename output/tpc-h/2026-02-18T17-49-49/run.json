@@ -1,0 +1,81 @@
+{
+  "runId": "2026-02-18T17-49-49",
+  "workload": "tpc-h",
+  "startedAt": "2026-02-18T17:49:49.815Z",
+  "status": "completed",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10",
+  "gendbDir": "/home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+  "scaleFactor": 10,
+  "maxIterations": 10,
+  "model": "haiku",
+  "optimizationTarget": "execution_time",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-02-18T17:49:50.794Z",
+        "completedAt": "2026-02-18T17:51:11.218Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-02-18T17:51:11.220Z",
+        "completedAt": "2026-02-18T18:04:39.929Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-02-18T18:04:39.929Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-02-18T18:04:39.929Z"
+      },
+      "dba_stage_a": {
+        "status": "completed",
+        "startedAt": "2026-02-18T18:04:39.931Z",
+        "completedAt": "2026-02-18T18:11:06.569Z"
+      }
+    },
+    "completedAt": "2026-02-18T18:11:06.569Z"
+  },
+  "phase2": {
+    "status": "completed",
+    "queries": [
+      "Q1",
+      "Q3",
+      "Q6",
+      "Q9",
+      "Q18"
+    ],
+    "maxConcurrent": 22,
+    "pipelines": {
+      "Q1": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q1/iter_10/q1.cpp",
+        "iterations": 10
+      },
+      "Q3": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q3/iter_10/q3.cpp",
+        "iterations": 10
+      },
+      "Q6": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q6/iter_5/q6.cpp",
+        "iterations": 10
+      },
+      "Q9": {
+        "status": "failed",
+        "bestCppPath": null,
+        "iterations": 0
+      },
+      "Q18": {
+        "status": "failed",
+        "bestCppPath": null,
+        "iterations": 0
+      }
+    },
+    "completedAt": "2026-02-18T19:19:43.463Z"
+  },
+  "completedAt": "2026-02-18T19:23:19.440Z"
+}

@@ -1,0 +1,86 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune_shipdate", "zone_map_prune_discount_qty", "fused_scan_filter", "partial_sum", "merge_sum"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_sum_no_groupby",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "encoding_note": "days_since_epoch: 1994-01-01=8766, 1995-01-01=9131",
+        "selectivity_estimate": 0.143,
+        "index": "zone_map_l_shipdate",
+        "index_action": "skip blocks where block.max < 8766 OR block.min >= 9131; data sorted by l_shipdate so ~514/600 blocks skipped"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount BETWEEN 5 AND 7",
+        "encoding_note": "DECIMAL scale_factor=2: 0.05->5, 0.07->7",
+        "selectivity_estimate": 0.27,
+        "index": "zone_map_l_discount_qty",
+        "index_action": "secondary prune on surviving shipdate blocks: skip if block.max_discount < 5 OR block.min_discount > 7"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 2400",
+        "encoding_note": "DECIMAL scale_factor=2: 24 -> 2400",
+        "selectivity_estimate": 0.46,
+        "index": "zone_map_l_discount_qty",
+        "index_action": "combined with discount prune above: skip if block.min_quantity >= 2400"
+      }
+    ],
+    "combined_selectivity_estimate": 0.018,
+    "estimated_qualifying_rows": 1079748
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "thread_local_int64_sum_array[nthreads] — scalar partial sums, no hash table needed; merge with simple loop",
+      "zone_maps": "raw mmap of zone map binary files, cast to struct pointers per Storage Guide layout"
+    },
+    "zone_map_usage": [
+      {
+        "index": "zone_map_l_shipdate",
+        "file": "indexes/zone_map_l_shipdate.bin",
+        "layout": "[uint32_t num_blocks=600] then [int32_t min, int32_t max, uint32_t count] x600 (12 bytes/block)",
+        "skip_condition": "block.max < 8766 OR block.min >= 9131",
+        "expected_skip_rate": "~86% blocks skipped (data sorted by l_shipdate)"
+      },
+      {
+        "index": "zone_map_l_discount_qty",
+        "file": "indexes/zone_map_l_discount_qty.bin",
+        "layout": "[uint32_t num_blocks=600] then [int32_t min1(discount), int32_t max1(discount), int32_t min2(qty), int32_t max2(qty), uint32_t count] x600 (20 bytes/block)",
+        "skip_condition": "block.max_discount < 5 OR block.min_discount > 7 OR block.min_qty >= 2400",
+        "applied_after": "zone_map_l_shipdate prune — further eliminates surviving blocks"
+      }
+    ],
+    "scan_columns": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+    "scan_strategy": "zone_map_pruned_parallel — precompute alive block list, then parallel morsel-driven scan over alive blocks only; branchless inner loop with AVX2 auto-vectorization",
+    "inner_loop": "branchless: pass = (d>=5)&(d<=7)&(q<2400)&(s>=8766)&(s<9131); local_sum += pass*(ep*d); enables auto-vectorization",
+    "parallelism": {
+      "strategy": "morsel_driven over alive blocks via atomic fetch_add on alive_blocks index",
+      "thread_count": 64,
+      "morsel_size_rows": 100000,
+      "synchronization": "thread_local_partial_sum — zero contention during hot scan loop",
+      "memory_pattern": "targeted_prefetch — MADV_WILLNEED issued only for alive block pages before scan"
+    },
+    "output_scaling": "revenue = global_sum / 10000 (both extprice and discount scaled by 100)"
+  },
+  "estimated_cost": {
+    "dominant_phase": "fused_scan_of_surviving_blocks",
+    "zone_map_prune_ms": 1,
+    "surviving_blocks_estimate": 86,
+    "surviving_rows_to_scan": 8600000,
+    "qualifying_rows_after_filter": 1079748,
+    "estimated_ms": 14,
+    "notes": [
+      "lineitem sorted by l_shipdate => zone_map_l_shipdate prunes ~514/600 blocks (~86% skip), leaving ~86 blocks (~8.6M rows to scan)",
+      "zone_map_l_discount_qty gives secondary pruning on those 86 blocks",
+      "Branchless inner loop enables AVX2 auto-vectorization by compiler (-O3 -march=native)",
+      "Targeted MADV_WILLNEED prefetch on alive blocks only — avoids polluting page cache with dead blocks",
+      "64 threads process ~86 blocks => ~1-2 blocks per thread, minimal thread overhead",
+      "Target: match Umbra (14ms) / DuckDB (20ms)"
+    ]
+  }
+}

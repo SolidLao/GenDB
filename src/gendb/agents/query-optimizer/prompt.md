@@ -20,25 +20,28 @@ Think step by step: identify the dominant bottleneck, then fix it.
 8. Modify code using Edit tool. Use GenDB utility library.
 9. Compile (do NOT run — Executor handles validation)
 
-## GenDB Utility Library
-Generated code SHOULD use the GenDB utility library as the default choice. The library includes
-CompactHashMap, CompactHashSet, ConcurrentCompactHashMap, PartitionedHashMap, DenseBitmap, and
-TopKHeap for advanced patterns. You MAY implement custom alternatives when the plan specifies
-patterns not covered by the library. When using custom implementations, add a brief comment
-explaining why.
-
-The following headers are MANDATORY — do NOT reimplement their functionality:
+## System Utilities (MANDATORY)
 - `#include "date_utils.h"`: gendb::init_date_tables(), gendb::epoch_days_to_date_str(),
   gendb::extract_year(), gendb::extract_month(). NEVER write custom date conversion.
-- `#include "mmap_utils.h"`: gendb::MmapColumn<T> for zero-copy column access.
-  NEVER copy mmap'd data into std::vector.
 - `#include "timing_utils.h"`: GENDB_PHASE("name") for block-scoped RAII timing.
 
-The following header SHOULD be used (default choice):
-- `#include "hash_utils.h"`: gendb::CompactHashMap<K,V>, gendb::CompactHashSet<K>,
-  gendb::ConcurrentCompactHashMap<K,V>, gendb::PartitionedHashMap<K,V>,
-  gendb::DenseBitmap, gendb::TopKHeap<T,Cmp>.
-  Use instead of std::unordered_map/set for >1000 entries.
+## Data Access
+Load binary column files via mmap. Example pattern:
+  int fd = open(path, O_RDONLY); struct stat st; fstat(fd, &st);
+  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+  size_t n = st.st_size / sizeof(T);
+Do NOT copy mmap'd data into std::vector.
+
+## Data Structures
+Generate all hash tables, bitsets, heaps, and other data structures INLINE, tailored to the
+specific query's key types, cardinalities, and access patterns. Use the Query Guide for exact
+data file formats, column types, and available indexes.
+
+## Indexes
+The Query Guide lists available indexes (zone maps, hash indexes) with their exact binary
+layouts. Use these indexes when they can improve performance — read the binary format description
+from the Query Guide and generate matching loader code inline. Do NOT use library abstractions
+for index loading.
 
 ## Correctness Anchors
 If the user prompt includes a "Correctness Anchors" section, those constants were validated
@@ -48,22 +51,31 @@ around these anchors.
 
 ## Architecture-Level Failures (check BEFORE micro-optimization)
 These cause 10-100x gaps. Fix them first:
-- Hash table build >50% of time -> load pre-built indexes from Storage Guide, or filter before building
+- Hash table build >50% of time -> filter before building, use indexes from Query Guide, or restructure
 - Same large table scanned multiple times -> fuse into single pass
 - EXISTS/NOT EXISTS as per-row operations -> pre-compute into hash sets (see `techniques/semi-join-patterns.md`)
 - Thread-local hash tables merged sequentially -> use partitioned or atomic approaches
-- Pre-built indexes listed in Storage Guide but not loaded -> load via mmap
-- `std::unordered_map` for joins/aggregation with >256 groups -> replace with gendb::CompactHashMap
+- `std::unordered_map` for joins/aggregation with >256 groups -> use custom open-addressing hash table
 - Wrong join build side (larger table as build) -> swap to build on smaller filtered side
 
 ## Optimization Stall Recovery
 If the user prompt says "OPTIMIZATION STALL DETECTED", the current code architecture is fundamentally limited.
-Do NOT make incremental changes. Instead: rewrite the core algorithm. Start from the SQL, re-derive the logical plan, and implement a different physical strategy. Consider updating plan.json with the new strategy.
+Do NOT make incremental changes. Instead:
+1. Read the Query Guide — check for indexes that can eliminate expensive phases
+2. Rewrite the dominant phase completely — don't edit, replace
+3. Consider: switching join build/probe sides, fusing multi-pass into single-pass,
+   switching from runtime to compile-time strategies, using indexes from Query Guide
+4. Start from the SQL, re-derive the logical plan, and implement a different physical strategy
+5. Consider updating plan.json with the new strategy
 
 ## Key Rules
 1. Preserve GENDB_PHASE timing blocks — do not remove them.
 2. Do NOT change encoding logic unless fixing a reported encoding bug.
 3. Standalone hash structs only. NEVER `namespace std { template<> struct hash }`.
-4. Kahan summation for floating-point aggregation.
-5. Comma-delimited CSV output.
+4. Comma-delimited CSV output.
+5. For large floating-point aggregations, consider Kahan summation unless the workload tolerates small errors.
 6. Zone map skip logic: `col <= X` -> skip if `block_min > X`. `col >= X` -> skip if `block_max < X`.
+7. QUERY GUIDE: The user prompt includes a Query Guide with per-column usage contracts showing
+   column types, dictionary patterns, date conversions, and query-specific examples.
+   Follow these contracts exactly — they are the authoritative reference for this run's data
+   encoding. Do NOT read storage_design.json directly.

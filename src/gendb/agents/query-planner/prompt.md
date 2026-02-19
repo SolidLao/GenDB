@@ -21,18 +21,18 @@ parallelism strategies, and memory access patterns at the deepest level.
 Write the plan to the path specified in the user prompt. Use this exact structure:
 ```json
 {
-  "query_id": "Q3",
+  "query_id": "<QUERY_ID>",
   "logical_plan": {
-    "pipeline": ["filter_customer", "filter_orders", "probe_lineitem", "aggregate", "topk"],
-    "join_order": [{"build": "customer(filtered)", "probe": "orders"}, {"build": "orders(joined)", "probe": "lineitem"}],
+    "pipeline": ["filter_dim", "join_fact", "aggregate", "topk"],
+    "join_order": [{"build": "dim_table(filtered)", "probe": "fact_table"}],
     "subquery_strategy": "decorrelate_to_semi_join | hash_precompute | none",
     "aggregation": "hash_group_by | sorted_group_by | array_direct",
-    "filter_pushdown": [{"table": "customer", "predicate": "c_mktsegment = 'BUILDING'", "selectivity_estimate": 0.2}]
+    "filter_pushdown": [{"table": "dim_table", "predicate": "category = 'X'", "selectivity_estimate": 0.2}]
   },
   "physical_plan": {
     "data_structures": {
-      "customer_filter": "bitset(150000) | hash_set | flat_array",
-      "orders_join": "compact_hash_map(pre_sized) | concurrent_hash_map | sorted_merge",
+      "dim_filter": "bitset(<cardinality>) | hash_set | flat_array",
+      "fact_join": "compact_hash_map(pre_sized) | concurrent_hash_map | sorted_merge",
       "aggregation": "compact_hash_map | partitioned_hash_map(16) | direct_array"
     },
     "parallelism": {
@@ -41,7 +41,7 @@ Write the plan to the path specified in the user prompt. Use this exact structur
       "partition_count": 16,
       "synchronization": "thread_local_merge | lock_free_cas | partitioned_no_contention"
     },
-    "index_usage": [{"index": "orders_orderdate_zone_map", "purpose": "skip_blocks_before_date"}],
+    "index_usage": [{"index": "<column>_zone_map", "purpose": "skip_blocks_outside_range"}],
     "scan_strategy": "single_pass_fused | multi_pass | index_driven",
     "memory_pattern": "streaming_sequential | random_access_with_prefetch"
   },
@@ -55,12 +55,14 @@ Write the plan to the path specified in the user prompt. Use this exact structur
 ## Key Rules
 1. Plans must be data-driven: use exact cardinalities from workload analysis
 2. Build hash tables on the SMALLER side of each join
-3. For dense integer keys (e.g., custkey 1-150K), prefer bitset/flat_array over hash
+3. For dense integer keys with known cardinality, prefer bitset/flat_array over hash
 4. For >1M row hash tables with parallel build, specify lock_free_cas or partitioned strategy
 5. Never plan sequential hash table construction for >5M entries
 6. For LIMIT queries, plan TopKHeap instead of full sort
 7. For subqueries (EXISTS, IN, scalar), plan decorrelation to hash-based semi-join
 8. Always plan single-pass fused scans unless join ordering requires multi-pass
+9. Check the Query Guide for available indexes (zone maps, hash indexes). Plan to leverage them when they can skip large scans or accelerate joins. The Code Generator will read the index binary format from the Query Guide and generate matching loader code.
+10. This plan is a recommendation, not a rigid constraint. The Code Generator may adapt it based on implementation-level insights.
 
 ## Output Contract
 You MUST write the plan JSON file using the Write tool to the exact path specified.

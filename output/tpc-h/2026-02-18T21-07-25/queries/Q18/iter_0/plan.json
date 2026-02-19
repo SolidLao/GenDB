@@ -1,0 +1,150 @@
+{
+  "query_id": "Q18",
+  "logical_plan": {
+    "pipeline": [
+      "scan_lineitem_subquery",
+      "build_qualifying_orderkey_set",
+      "scan_orders_semijoin",
+      "lookup_customer",
+      "probe_lineitem_for_qualifying_orders",
+      "aggregate_sum_qty",
+      "topk_100"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "description": "Subquery decorrelation: scan all lineitem, accumulate sum(l_quantity) per l_orderkey into hash map, filter to orderkeys where sum > 300 (scaled: > 30000). Result: compact hash set of ~57 qualifying orderkeys.",
+        "build": "lineitem(full scan, group by l_orderkey, HAVING SUM(l_quantity*100) > 30000)",
+        "probe": "none — produces qualifying_orderkeys set"
+      },
+      {
+        "step": 2,
+        "description": "Scan orders (15M rows), semi-join probe against qualifying_orderkeys set (~57 entries). Collect ~57 matching order rows with o_orderkey, o_custkey, o_orderdate, o_totalprice.",
+        "build": "qualifying_orderkeys (compact_hash_set, ~57 entries)",
+        "probe": "orders (full scan, semi-join)"
+      },
+      {
+        "step": 3,
+        "description": "For each of the ~57 qualifying orders, lookup customer name via prebuilt idx_customer_custkey hash index (o_custkey -> c_name). No scan needed — point lookups on ~57 keys.",
+        "build": "prebuilt_index_load(idx_customer_custkey)",
+        "probe": "qualifying_orders (~57 rows, point lookups)"
+      },
+      {
+        "step": 4,
+        "description": "For each of the ~57 qualifying orderkeys, use prebuilt idx_lineitem_orderkey (hash multi-value) to fetch all lineitem rows for those orderkeys. Sum l_quantity per orderkey. No full lineitem re-scan.",
+        "build": "prebuilt_index_load(idx_lineitem_orderkey)",
+        "probe": "qualifying_orderkeys (~57 point lookups, multi-value fetch)"
+      }
+    ],
+    "subquery_strategy": "decorrelate_to_hash_precompute",
+    "subquery_detail": {
+      "type": "IN (SELECT ... GROUP BY ... HAVING)",
+      "implementation": "Single parallel scan of lineitem (60M rows). Thread-local hash maps accumulate l_orderkey -> sum(l_quantity). Merge thread-local maps. Filter entries where sum > 30000 (300 * scale_factor=100). Result inserted into compact_hash_set<int32_t> of qualifying orderkeys.",
+      "scale_factor_note": "l_quantity stored as int64_t with scale_factor=100. Threshold 300 must be compared as 30000 against raw stored values."
+    },
+    "aggregation": "hash_group_by",
+    "aggregation_detail": {
+      "group_keys": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice"],
+      "agg_function": "SUM(l_quantity)",
+      "estimated_groups": 57,
+      "strategy": "flat_array_or_tiny_hash_map — with only ~57 groups, a simple vector of structs is optimal. Accumulate sum_qty while fetching lineitem rows via index in step 4."
+    },
+    "filter_pushdown": [
+      {
+        "table": "lineitem (subquery pass)",
+        "predicate": "HAVING SUM(l_quantity) > 300 (raw: > 30000)",
+        "selectivity_estimate": 0.000001,
+        "note": "~57 qualifying orderkeys out of ~8M distinct orderkeys in lineitem"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderkey IN qualifying_orderkeys",
+        "selectivity_estimate": 0.0000038,
+        "note": "~57 qualifying orders out of 15M total"
+      }
+    ],
+    "late_materialization": {
+      "enabled": true,
+      "detail": "c_name (STRING) loaded only for the ~57 qualifying orders via idx_customer_custkey point lookup. Avoids scanning 1.5M customer name strings."
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "subquery_lineitem_agg": "thread_local compact_hash_map<int32_t, int64_t>(pre_sized, ~8M capacity) per thread, merge after parallel scan. Then filter to qualifying set.",
+      "qualifying_orderkeys": "compact_hash_set<int32_t>(capacity=128) — ~57 entries, fits in a single cache line region. O(1) probe during orders scan.",
+      "orders_semijoin": "no hash table built — probe qualifying_orderkeys set during orders scan, collect matching rows into result_vector<OrderRow>(~57 entries)",
+      "customer_lookup": "prebuilt_index_load(idx_customer_custkey) — mmap hash index, O(1) point lookup per qualifying order",
+      "lineitem_index_lookup": "prebuilt_index_load(idx_lineitem_orderkey) — mmap hash multi-value index, fetch all line rows for each of ~57 orderkeys",
+      "aggregation": "vector<ResultRow> of ~57 entries — accumulate sum_qty directly during lineitem index fetch; no hash table needed at this cardinality"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "phases": [
+        {
+          "phase": "lineitem_subquery_scan",
+          "parallelism": "parallel_morsel_scan",
+          "morsel_size": 65536,
+          "note": "64 threads scan 60M lineitem rows in morsels of 64K. Each thread maintains local compact_hash_map<int32_t,int64_t> for orderkey->sum_qty. After parallel scan, sequentially merge 64 local maps (merge is fast: ~8M entries total). Filter qualifying entries (sum > 30000) into compact_hash_set."
+        },
+        {
+          "phase": "orders_scan_semijoin",
+          "parallelism": "parallel_morsel_scan",
+          "morsel_size": 65536,
+          "note": "64 threads scan 15M orders rows. Probe qualifying_orderkeys set (read-only, shared, fits in L1 cache). Matching rows (~57) written to thread-local vectors; merge after parallel phase."
+        },
+        {
+          "phase": "customer_lookup_and_lineitem_fetch",
+          "parallelism": "sequential",
+          "note": "Only ~57 qualifying orders. Point lookups into prebuilt customer and lineitem indexes. Sequential is sufficient — negligible time."
+        },
+        {
+          "phase": "topk_sort",
+          "parallelism": "sequential",
+          "note": "~57 result rows. std::partial_sort for top 100 (trivially a full sort at this scale)."
+        }
+      ],
+      "partition_count": 64,
+      "synchronization": "thread_local_merge — each thread owns its local aggregation buffer; no contention during scan phases. Merge is sequential post-scan."
+    },
+    "index_usage": [
+      {
+        "index": "idx_customer_custkey",
+        "file": "indexes/idx_customer_custkey.bin",
+        "purpose": "Point lookup: o_custkey -> c_name for ~57 qualifying orders. Load via mmap. O(1) per lookup.",
+        "load_strategy": "prebuilt_index_load(idx_customer_custkey)"
+      },
+      {
+        "index": "idx_lineitem_orderkey",
+        "file": "indexes/idx_lineitem_orderkey.bin",
+        "purpose": "Multi-value fetch: l_orderkey -> all lineitem rows for the ~57 qualifying orderkeys. Avoids second full 60M-row lineitem scan. O(result_size) per qualifying orderkey.",
+        "load_strategy": "prebuilt_index_load(idx_lineitem_orderkey)"
+      }
+    ],
+    "scan_strategy": "two_pass_fused",
+    "scan_detail": {
+      "pass_1": "Full parallel scan of lineitem (60M rows) — columns: l_orderkey, l_quantity only. Build subquery hash map and qualifying set.",
+      "pass_2": "Full parallel scan of orders (15M rows) — columns: o_orderkey, o_custkey, o_orderdate, o_totalprice. Semi-join probe against qualifying_orderkeys.",
+      "no_scan": "customer and lineitem (second access) — served entirely via prebuilt index point lookups, no column file scan needed."
+    },
+    "memory_pattern": "streaming_sequential_with_index_lookup",
+    "memory_detail": {
+      "lineitem_scan": "Sequential streaming read of l_orderkey.bin and l_quantity.bin (2 columns × 60M rows × ~8 bytes = ~960MB). HDD prefetch benefits from sequential access.",
+      "orders_scan": "Sequential streaming read of o_orderkey.bin, o_custkey.bin, o_orderdate.bin, o_totalprice.bin (4 columns × 15M rows = ~240MB).",
+      "index_lookups": "Random access via mmap into idx_customer_custkey and idx_lineitem_orderkey. Only ~57 lookups — negligible I/O."
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_subquery_scan (60M rows, parallel)",
+    "phase_breakdown": {
+      "lineitem_subquery_scan_ms": 80,
+      "thread_local_map_merge_ms": 10,
+      "orders_scan_semijoin_ms": 30,
+      "customer_index_lookup_ms": 1,
+      "lineitem_index_fetch_qualifying_ms": 1,
+      "aggregation_and_topk_ms": 1
+    },
+    "estimated_ms": 120,
+    "target_comparison": "DuckDB=175ms, Umbra=180ms — target sub-150ms via parallel lineitem scan + prebuilt index elimination of second lineitem full scan"
+  }
+}

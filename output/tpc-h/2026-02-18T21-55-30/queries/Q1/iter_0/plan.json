@@ -1,0 +1,82 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune_shipdate", "scan_filter_lineitem", "partial_aggregate", "merge_aggregate", "sort_output"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "flat_array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "comment": "DATE '1998-09-02' encoded as days_since_epoch = 10471 (1998-12-01 minus 90 days)",
+        "selectivity_estimate": 0.964,
+        "estimated_passing_rows": 57836034
+      }
+    ],
+    "group_by_cardinality": 6,
+    "group_by_comment": "l_returnflag (3 distinct: A,N,R) x l_linestatus (2 distinct: F,O) = 6 groups max — flat array indexed by (returnflag_code * 2 + linestatus_code)",
+    "sort_strategy": "trivial_sort_6_rows",
+    "late_materialization": false,
+    "late_materialization_reason": "All needed columns are numeric (int32/int64) — no expensive string loads in hot path. Dictionary-encoded returnflag/linestatus decoded once to integer keys for grouping."
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array[6] per thread — struct { int64_t sum_qty, sum_base_price, sum_disc_price, sum_charge, sum_discount; int64_t count; } agg[6]",
+      "aggregation_comment": "6 groups fit in a single cache line cluster. No hash table needed. Index = returnflag_dict_id * 2 + linestatus_dict_id. Thread-local arrays merged in O(6*nthreads) = trivial.",
+      "zone_map": "mmap(indexes/zone_map_l_shipdate.bin) — 600 entries of {int32 min, int32 max, uint32 count}. Skip blocks where min > 10471 (tail pruning on ascending-sorted column)."
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size_rows": 100000,
+      "morsel_count": 600,
+      "comment": "Block size matches morsel size (100K rows/block). Each thread pulls morsels via atomic fetch_add on block counter. 600 blocks / 64 threads ≈ 9-10 blocks per thread.",
+      "synchronization": "thread_local_flat_array_merge",
+      "merge_cost": "O(6 * 64) = 384 additions — negligible"
+    },
+    "index_usage": [
+      {
+        "index": "zone_map_l_shipdate",
+        "file": "indexes/zone_map_l_shipdate.bin",
+        "purpose": "skip_tail_blocks_exceeding_shipdate_cutoff",
+        "layout": "uint32_t num_blocks=600, then {int32_t min, int32_t max, uint32_t count} x 600 (12 bytes/entry)",
+        "skip_condition": "block.min > 10471 => skip entire block",
+        "full_pass_condition": "block.max <= 10471 => no per-row check needed, process all rows",
+        "partial_condition": "block.min <= 10471 && block.max > 10471 => per-row check required",
+        "estimated_blocks_skipped": "~3-5 tail blocks out of 600 (data sorted ascending, cutoff near max date)"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_columns": ["l_shipdate", "l_returnflag", "l_linestatus", "l_quantity", "l_extendedprice", "l_discount", "l_tax"],
+    "scan_comment": "All 7 columns loaded per morsel. Fused scan+filter+aggregate in one tight loop. No intermediate row materialization. SIMD AVX2 comparison on l_shipdate for filter.",
+    "memory_pattern": "streaming_sequential",
+    "memory_comment": "All columns are contiguous binary arrays. Sequential access pattern maximizes hardware prefetcher effectiveness. 7 columns * 100K rows * avg 6 bytes = ~4.2MB per morsel, fits in L3 cache (44MB / 64 threads = 687KB per thread — fits in L3 with prefetch overlap).",
+    "simd": {
+      "enabled": true,
+      "target": "AVX2",
+      "usage": "vectorized_comparison_l_shipdate_leq_10471",
+      "comment": "Process 8 int32 shipdates per AVX2 instruction. Produces 256-bit mask of qualifying rows. Branchless accumulation into SIMD partial-sum registers."
+    },
+    "decimal_handling": {
+      "scale_factor": 2,
+      "arithmetic": "integer arithmetic on int64_t throughout — defer division to final output only",
+      "disc_price": "l_extendedprice * (100 - l_discount) where discount stored as scale=2 integer (e.g., 0.07 stored as 7)",
+      "charge": "disc_price * (100 + l_tax) — all integer multiply, divide by scale at output"
+    },
+    "final_sort": {
+      "strategy": "insertion_sort_or_std_sort",
+      "input_size": 6,
+      "comment": "At most 6 result rows. Any sort method is O(1) effectively."
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_scan_fused_aggregate",
+    "bottleneck": "memory_bandwidth_hdd_sequential_read",
+    "lineitem_bytes": "59986052 rows * ~48 bytes (7 cols) = ~2.9 GB",
+    "effective_bytes_after_zone_prune": "~2.8 GB (~99% blocks pass, only tail blocks skipped)",
+    "parallel_scan_threads": 64,
+    "estimated_ms": 85,
+    "rationale": "Current GenDB time is 108ms. With 64 threads on morsel-driven scan, flat-array aggregation (0 hash overhead), AVX2 filter, and zone map pruning, we eliminate hash table build cost entirely and reduce aggregation overhead to near-zero. Target is competitive with Umbra/DuckDB at ~83ms. Dominant cost is memory bandwidth: ~2.8GB / (64 threads * ~3GB/s per thread effective) ≈ 70-90ms wall time."
+  }
+}

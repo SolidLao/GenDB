@@ -3,6 +3,9 @@
 #include <cstddef>
 #include <string>
 #include <stdexcept>
+#include <vector>
+#include <utility>
+#include <climits>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -140,5 +143,77 @@ inline void mmap_prefetch_all(MmapColumn<T>& col, Rest&... rest) {
     col.prefetch();
     mmap_prefetch_all(rest...);
 }
+
+// ---------------------------------------------------------------------------
+// ZoneMapIndex — reads the binary zone-map index file for a sorted column.
+// Index layout (written by build_indexes.cpp):
+//   [uint32_t num_zones]
+//   [num_zones × ZoneEntry]:  int32_t min, int32_t max, uint32_t row_count, uint32_t row_offset
+//   Each ZoneEntry is 16 bytes. row_offset is the *row* index (not byte offset)
+//   of the first row in that zone within the sorted column file.
+//
+// Usage (Q1/Q6 l_shipdate range filter, Q3/Q9 o_orderdate range filter):
+//   ZoneMapIndex zm("lineitem_l_shipdate.idx");
+//   int32_t lo = date_str_to_epoch_days("1994-01-01");
+//   int32_t hi = date_str_to_epoch_days("1995-01-01");
+//   // Iterate qualifying zones
+//   for (auto& z : zm.zones) {
+//       if (z.max < lo || z.min >= hi) continue;  // entire zone out of range
+//       size_t start = z.row_offset;
+//       size_t end   = z.row_offset + z.row_count;
+//       for (size_t i = start; i < end; i++) { /* process row i */ }
+//   }
+//
+// IMPORTANT: row_offset is a ROW index into the binary column file, not bytes.
+// To convert to a byte offset into a column file with element size sizeof(T):
+//   byte_offset = z.row_offset * sizeof(T)
+// ---------------------------------------------------------------------------
+struct ZoneEntry {
+    int32_t  min;         // minimum value in this zone
+    int32_t  max;         // maximum value in this zone
+    uint32_t row_count;   // number of rows in this zone
+    uint32_t row_offset;  // row index of the first row in this zone
+};
+
+struct ZoneMapIndex {
+    std::vector<ZoneEntry> zones;
+
+    ZoneMapIndex() = default;
+
+    explicit ZoneMapIndex(const std::string& path) { open(path); }
+
+    void open(const std::string& path) {
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0) throw std::runtime_error("ZoneMapIndex: cannot open " + path);
+        uint32_t num_zones = 0;
+        if (::read(fd, &num_zones, sizeof(num_zones)) != sizeof(num_zones)) {
+            ::close(fd);
+            throw std::runtime_error("ZoneMapIndex: cannot read num_zones from " + path);
+        }
+        zones.resize(num_zones);
+        size_t bytes = num_zones * sizeof(ZoneEntry);
+        if (bytes > 0) {
+            ssize_t got = ::read(fd, zones.data(), bytes);
+            if (got < 0 || static_cast<size_t>(got) != bytes) {
+                ::close(fd);
+                throw std::runtime_error("ZoneMapIndex: short read on zones from " + path);
+            }
+        }
+        ::close(fd);
+    }
+
+    // Count how many rows are skippable for predicate col >= lo AND col < hi.
+    // Returns the set of (start_row, end_row) pairs for zones that overlap the range.
+    // Zones where max < lo or min >= hi are skipped entirely.
+    // NOTE: For a <= predicate (Q1: l_shipdate <= threshold), pass lo=INT32_MIN, hi=threshold+1.
+    void qualifying_ranges(int32_t lo, int32_t hi,
+                           std::vector<std::pair<uint32_t,uint32_t>>& out) const {
+        out.clear();
+        for (const auto& z : zones) {
+            if (z.max < lo || z.min >= hi) continue;
+            out.push_back({z.row_offset, z.row_offset + z.row_count});
+        }
+    }
+};
 
 } // namespace gendb

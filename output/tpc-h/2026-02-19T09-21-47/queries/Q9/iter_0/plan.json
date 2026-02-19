@@ -1,0 +1,146 @@
+{
+  "query_id": "Q9",
+  "logical_plan": {
+    "pipeline": [
+      "load_nation_direct_array",
+      "load_supplier_direct_array",
+      "scan_part_filter_build_bitset",
+      "mmap_ps_key_hash_index",
+      "mmap_o_orderkey_hash_index",
+      "parallel_scan_lineitem_fused",
+      "aggregate_thread_local",
+      "merge_aggregate",
+      "sort_output"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "description": "nation (25 rows) → direct array[25] by n_nationkey. No join needed.",
+        "build": "nation (25 rows, full scan)",
+        "probe": "n/a — direct array lookup by s_nationkey during lineitem scan"
+      },
+      {
+        "step": 2,
+        "description": "supplier (100K rows) → direct array[100001] of s_nationkey by s_suppkey. Suppkey range 1–100K.",
+        "build": "supplier (100K rows, full scan)",
+        "probe": "n/a — direct array lookup by l_suppkey during lineitem scan"
+      },
+      {
+        "step": 3,
+        "description": "part (2M rows) filtered by p_name LIKE '%green%' → 100K qualifying partkeys → bitset(2M bits=256KB).",
+        "build": "part(filtered ~100K partkeys) → bitset",
+        "probe": "n/a — bitset check on l_partkey during lineitem scan"
+      },
+      {
+        "step": 4,
+        "description": "mmap pre-built ps_key_hash index for (l_partkey, l_suppkey) → ps_supplycost lookup.",
+        "build": "mmap ps_key_hash (8M entries × 16B = 128MB, zero-build-cost)",
+        "probe": "qualifying lineitem rows (~3M) probe via composite key (l_partkey<<32|l_suppkey)"
+      },
+      {
+        "step": 5,
+        "description": "mmap pre-built o_orderkey_hash index for l_orderkey → o_orderdate lookup.",
+        "build": "mmap o_orderkey_hash (15M entries × 8B = 120MB, zero-build-cost)",
+        "probe": "qualifying lineitem rows (~3M) probe by l_orderkey"
+      },
+      {
+        "step": 6,
+        "description": "lineitem (60M rows) is the single probe scan; all dimension lookups happen inline per qualifying row.",
+        "build": "n/a — lineitem is always the probe side",
+        "probe": "lineitem (60M rows scanned, ~3M pass bitset filter)"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "part",
+        "predicate": "p_name LIKE '%green%' (strstr(ptr, \"green\") != nullptr)",
+        "selectivity_estimate": 0.05,
+        "filtered_cardinality": 100000,
+        "action": "build bitset(2000001) of qualifying p_partkey values"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_partkey IN qualifying_partkeys (bitset check)",
+        "selectivity_estimate": 0.05,
+        "filtered_cardinality": 2999303,
+        "action": "skip 95% of lineitem rows early in inner loop before any hash index probe"
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "part_filter": "bitset(2000001) — 256KB, fits in L3; exact filter, no false positives; built by scanning part 2M rows with p_name substring check",
+      "supplier_lookup": "direct_array[100001] of int32_t (s_nationkey) — indexed by s_suppkey (range 1–100K); 400KB, L3-resident; O(1) zero-overhead lookup by l_suppkey",
+      "nation_lookup": "direct_array[25] of string index (int8_t) — indexed by n_nationkey (range 0–24); decode via n_name_dict.txt at output time",
+      "partsupp_lookup": "mmap ps_key_hash (pre-built, 16M slots × 16B = 256MB); composite key int64_t k=(l_partkey<<32|l_suppkey); hash=fibonacci; probed only for ~3M qualifying lineitems",
+      "orders_lookup": "mmap o_orderkey_hash (pre-built, 33.5M slots × 8B = 268MB); key=l_orderkey; hash=fibonacci; probed only for ~3M qualifying lineitems",
+      "aggregation": "thread_local double profit[25][7] — flat 2D array indexed by [nation_code][year-1992]; 175 entries × 8B = 1.4KB per thread; zero contention; 64 threads × 1.4KB = ~90KB total; trivial sequential merge"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 100000,
+      "partition_count": 600,
+      "phase_1_build": "sequential — nation array load (25 rows), supplier array load (100K rows), part bitset build (2M rows scan); all fast, no parallelism needed",
+      "phase_2_index_load": "mmap ps_key_hash + o_orderkey_hash — O(1) OS page faults on demand, no explicit build",
+      "phase_3_lineitem_scan": "OpenMP parallel for over lineitem morsels (100K rows each); each thread: bitset check → ps_key_hash probe → supplier array lookup → nation array lookup → o_orderkey_hash probe → year extract → thread-local profit[n][y] accumulate",
+      "phase_4_merge": "sequential merge of 64 thread-local profit[25][7] arrays — 64×175 additions, negligible",
+      "synchronization": "thread_local_merge — no locks, no atomics during scan phase; merge is sequential post-scan"
+    },
+    "index_usage": [
+      {
+        "index": "ps_key_hash",
+        "file": "partsupp/indexes/ps_key_hash.bin",
+        "purpose": "O(1) lookup of ps_supplycost given (l_partkey, l_suppkey) — avoids full 8M-row partsupp scan",
+        "key_formation": "int64_t k = ((int64_t)l_partkey << 32) | (uint32_t)l_suppkey",
+        "hash_fn": "h = (uint32_t)(((uint64_t)k * 0x9E3779B97F4A7C15ULL) >> 40) & (cap-1)",
+        "slot_format": "HashSlot64 {int64_t key, uint32_t row_pos, uint32_t _pad} = 16B; empty: key==INT64_MIN",
+        "probed_by": "~3M qualifying lineitem rows"
+      },
+      {
+        "index": "o_orderkey_hash",
+        "file": "orders/indexes/o_orderkey_hash.bin",
+        "purpose": "O(1) lookup of o_orderdate given l_orderkey — avoids full 15M-row orders scan",
+        "key_formation": "int32_t key = l_orderkey",
+        "hash_fn": "h = (uint32_t)(((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL) >> (64-25)) & (cap-1)",
+        "slot_format": "HashSlot {int32_t key, uint32_t row_pos} = 8B; empty: key==INT32_MIN",
+        "probed_by": "~3M qualifying lineitem rows"
+      },
+      {
+        "index": "s_suppkey_hash",
+        "purpose": "NOT USED — supplier (100K rows, suppkey 1–100K) loaded as direct array instead; array lookup is 10-50x faster than hash probe"
+      },
+      {
+        "index": "p_partkey_hash",
+        "purpose": "NOT USED — we build a runtime bitset of qualifying partkeys from the part scan; bitset check is cheaper than hash lookup for a 100K-key filter"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_column_access": {
+      "part": ["p_name_offsets", "p_name_data", "p_partkey"],
+      "supplier": ["s_suppkey", "s_nationkey"],
+      "nation": ["n_nationkey", "n_name"],
+      "lineitem": ["l_partkey", "l_suppkey", "l_orderkey", "l_extendedprice", "l_discount", "l_quantity"],
+      "partsupp": "accessed only via ps_key_hash mmap index → ps_supplycost column",
+      "orders": "accessed only via o_orderkey_hash mmap index → o_orderdate column"
+    },
+    "memory_pattern": "streaming_sequential for all column scans; random_access_with_prefetch for ps_key_hash and o_orderkey_hash probes (only ~3M probes each after bitset filter, manageable despite index size exceeding L3)",
+    "year_extraction": "linear scan over 7 years (1992–1998) per o_orderdate value; use YEAR_DAYS[] lookup array from query guide",
+    "late_materialization": "p_name string data read during part scan (required for filter); no other string materialization until final output stage where nation name decoded from n_name_dict.txt"
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_lineitem_scan_with_index_probes",
+    "phase_breakdown": {
+      "part_scan_bitset_build": "~10ms (2M rows, sequential, fast string strstr scan)",
+      "supplier_array_build": "~2ms (100K rows, trivial)",
+      "nation_array_build": "<1ms (25 rows)",
+      "index_mmap_setup": "~5ms (OS mmap calls, pages loaded lazily)",
+      "lineitem_parallel_scan": "~120ms (60M rows / 64 threads = ~937K rows/thread; bitset cuts probes to 3M; two random-access hash index probes per qualifying row)",
+      "aggregate_merge_and_sort": "<1ms (175 groups, trivial)"
+    },
+    "estimated_ms": 140,
+    "target_comparison": "Umbra=196ms, DuckDB=253ms; plan targets sub-200ms via 64-thread morsel scan + mmap index reuse + direct array aggregation (zero contention on 175-group flat array)"
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "query_id": "Q3",
+  "logical_plan": {
+    "pipeline": [
+      "filter_customer",
+      "build_customer_bitset",
+      "zone_map_prune_orders",
+      "filter_orders_by_customer_bitset",
+      "build_orders_hash_map",
+      "zone_map_prune_lineitem",
+      "probe_lineitem_into_orders",
+      "aggregate",
+      "topk_10"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(filtered: c_mktsegment='BUILDING', ~300K rows)",
+        "build_structure": "bitset(1500001) on c_custkey",
+        "probe": "orders(zone_map_pruned: o_orderdate < 1995-03-15, ~7.2M rows scanned)",
+        "output": "orders_joined(~1.44M rows) with o_orderkey, o_orderdate, o_shippriority"
+      },
+      {
+        "step": 2,
+        "build": "orders_joined(~1.44M rows) keyed on o_orderkey",
+        "build_structure": "compact_hash_map(pre_sized ~2.88M slots) on o_orderkey",
+        "probe": "lineitem(zone_map_pruned: l_shipdate > 1995-03-15, ~33M rows scanned)",
+        "output": "lineitem_joined(~4.3M rows) with l_orderkey, l_extendedprice, l_discount, o_orderdate, o_shippriority"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "partitioned_hash_map(64 partitions) on (l_orderkey, o_orderdate, o_shippriority), SUM(l_extendedprice * (1 - l_discount))",
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment = 'BUILDING'",
+        "selectivity_estimate": 0.2,
+        "estimated_output_rows": 300000,
+        "note": "dictionary-encoded int32 comparison; look up 'BUILDING' code from c_mktsegment_dict.txt first"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < days_since_epoch('1995-03-15')",
+        "selectivity_estimate": 0.48,
+        "estimated_output_rows": 7200000,
+        "note": "applied via zone map skip + per-row filter during scan; table is sorted by o_orderdate enabling zone map efficiency"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > days_since_epoch('1995-03-15')",
+        "selectivity_estimate": 0.55,
+        "estimated_output_rows": 32992000,
+        "note": "applied via zone map skip + per-row filter during scan; table is sorted by l_shipdate"
+      }
+    ],
+    "notes": [
+      "Star schema: filter dimension (customer) first, build bitset, probe bridge (orders), build hash map, probe fact (lineitem)",
+      "Dense custkey domain [1,1500000] → bitset is O(1) lookup with perfect cache behavior vs hash probing",
+      "Orders zone map covers ~50% blocks skip on o_orderdate; lineitem zone map covers ~45% blocks skip on l_shipdate",
+      "Join selectivity: ~1/5 of orders match customer filter (c_mktsegment cardinality=5)",
+      "Aggregation groups bounded by distinct qualifying o_orderkey values (~1.44M upper bound)"
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "customer_filter": "bitset(1500001) — dense integer keys c_custkey in [1,1500000]; set bit at position c_custkey for qualifying rows",
+      "orders_join_build": "compact_hash_map(pre_sized, capacity=2^22=4194304) keyed on o_orderkey (int32), value={o_orderdate:int32, o_shippriority:int32}; open-addressing with Robin Hood hashing",
+      "orders_join_bloom": "bloom_filter(~1.44M entries, 18MB, ~1% FP rate) built alongside orders hash map; checked before every lineitem probe to skip non-matching l_orderkey",
+      "aggregation": "partitioned_hash_map(64 partitions by l_orderkey % 64); each partition is a compact_hash_map keyed on (l_orderkey:int32, o_orderdate:int32, o_shippriority:int32), value=int64_t revenue_sum",
+      "topk": "min_heap(size=10) per thread for parallel top-10; merged into global top-10 at end"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size_rows": 65536,
+      "phases": [
+        {
+          "phase": "customer_scan_and_bitset_build",
+          "strategy": "parallel_scan_sequential_bitset_build",
+          "note": "Scan customer in parallel (1.5M rows / 64 threads = ~23K rows/thread). Each thread scans its morsel and writes to a thread-local bitset OR shared bitset with atomic set (bitset writes are idempotent — no CAS needed, only cache-line false sharing risk; use 64-byte aligned bitset blocks)"
+        },
+        {
+          "phase": "orders_scan_and_hash_build",
+          "strategy": "sequential_build_parallel_scan_with_zone_map",
+          "note": "Zone-map prune orders blocks (150 zones, skip zones where max < 1995-03-15 threshold). Scan ~7.2M qualifying rows. Build orders hash map sequentially (1.44M rows at ~150M rows/s ≈ 10ms) OR in parallel with partitioned build (64 partitions, each thread owns partitions). Sequential build preferred since 1.44M rows is small."
+        },
+        {
+          "phase": "lineitem_scan_probe_aggregate",
+          "strategy": "morsel_driven_parallel_64_threads",
+          "note": "Parallel scan of lineitem with zone-map pruning on l_shipdate. Each thread: (1) check bloom filter for l_orderkey, (2) probe orders hash map, (3) compute revenue = l_extendedprice * (1 - l_discount), (4) insert/update into thread-local partitioned aggregation hash map. Morsel size: 65536 rows. This is the dominant phase."
+        },
+        {
+          "phase": "aggregation_merge",
+          "strategy": "partition_parallel_merge",
+          "note": "Merge 64 thread-local partition maps: for partition P, thread P merges all 64 local[t][P] maps into a single result. Fully parallel, no synchronization needed."
+        },
+        {
+          "phase": "topk",
+          "strategy": "parallel_topk_merge",
+          "note": "Each thread maintains a min-heap of 10 entries (sorted by revenue DESC, o_orderdate ASC). After aggregation merge, 64 partition threads each find their local top-10. Final merge: partial_sort on 64*10=640 candidates."
+        }
+      ],
+      "synchronization": "partitioned_no_contention — each thread owns its partition set during aggregation; bloom filter and bitset use idempotent concurrent writes"
+    },
+    "index_usage": [
+      {
+        "index": "idx_orders_orderdate",
+        "file": "indexes/idx_orders_orderdate.bin",
+        "purpose": "zone_map_skip_blocks — skip orders blocks where zone max(o_orderdate) < days_since_epoch(1995-03-15); 150 zones over 15M rows = 100K rows/zone",
+        "expected_blocks_skipped": "~52% of 150 zones (post-1995 data skipped)"
+      },
+      {
+        "index": "idx_lineitem_shipdate",
+        "file": "indexes/idx_lineitem_shipdate.bin",
+        "purpose": "zone_map_skip_blocks — skip lineitem blocks where zone max(l_shipdate) <= days_since_epoch(1995-03-15); 600 zones over 60M rows = 100K rows/zone",
+        "expected_blocks_skipped": "~45% of 600 zones (pre-1995 data skipped)"
+      }
+    ],
+    "indexes_not_used": [
+      {
+        "index": "idx_customer_custkey",
+        "reason": "Customer is fully scanned for mktsegment filter; custkey PK hash index not needed since we iterate all rows and apply predicate"
+      },
+      {
+        "index": "idx_orders_custkey",
+        "reason": "We build a bitset on customer side and probe from orders scan; the multi-value hash index on o_custkey would require random access per customer key and is slower than sequential scan + bitset probe"
+      },
+      {
+        "index": "idx_lineitem_orderkey",
+        "reason": "Lineitem is the probe side; scanning lineitem sequentially with zone map pruning and probing the orders hash map is faster than random-access via the multi-value index (HDD: sequential > random)"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "customer": "sequential columnar scan of c_custkey + c_mktsegment only; fused filter + bitset write",
+      "orders": "zone_map_pruned columnar scan of o_custkey + o_orderkey + o_orderdate + o_shippriority; fused filter (bitset probe + date check) + hash map insert",
+      "lineitem": "zone_map_pruned parallel columnar scan of l_orderkey + l_extendedprice + l_discount; fused bloom check + hash probe + revenue compute + aggregation update"
+    },
+    "memory_pattern": "streaming_sequential with zone_map_skip",
+    "memory_estimates": {
+      "customer_bitset": "1500001 bits ≈ 188KB (L3 resident)",
+      "orders_hash_map": "4194304 slots × 12B (key + o_orderdate + o_shippriority) ≈ 48MB",
+      "bloom_filter": "~18MB for 1.44M entries at 10 bits/entry (L3 resident)",
+      "aggregation_maps": "~1.44M groups × 28B ≈ 40MB total across 64 partitions",
+      "total_peak": "~296MB — well within 376GB memory budget"
+    },
+    "hdd_considerations": [
+      "Sequential columnar scans maximize HDD throughput (avoid random I/O)",
+      "Zone map pruning reduces physical I/O: skip ~52% orders blocks, ~45% lineitem blocks",
+      "Reading only needed columns (4 from orders, 3 from lineitem) minimizes bytes read",
+      "Avoid all random-access index lookups (idx_orders_custkey, idx_lineitem_orderkey) — sequential scan + in-memory hash probe is faster on HDD"
+    ]
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_probe_aggregate",
+    "phase_breakdown": [
+      {"phase": "customer_scan_filter_bitset", "estimated_ms": 5, "note": "1.5M rows, 2 columns, parallel scan"},
+      {"phase": "orders_zone_map_load", "estimated_ms": 1, "note": "150 zone entries, trivial"},
+      {"phase": "orders_scan_filter_hash_build", "estimated_ms": 25, "note": "~7.2M rows scanned after zone skip (~72 zones), 4 columns, 1.44M hash inserts"},
+      {"phase": "lineitem_zone_map_load", "estimated_ms": 1, "note": "600 zone entries, trivial"},
+      {"phase": "lineitem_scan_probe_aggregate", "estimated_ms": 80, "note": "~33M rows scanned after zone skip (~330 zones), 3 columns, 64 threads, bloom filter + hash probe + aggregation"},
+      {"phase": "aggregation_merge", "estimated_ms": 10, "note": "Merge 64 × 64 partition maps, parallel"},
+      {"phase": "topk_10", "estimated_ms": 2, "note": "min-heap operations on ~1.44M aggregated groups, LIMIT 10"}
+    ],
+    "estimated_total_ms": 124,
+    "target_vs_umbra": "Umbra=64ms; target ~120-150ms is realistic given HDD vs NVMe I/O gap and sequential scan approach",
+    "bottleneck": "HDD sequential read bandwidth for lineitem (~33M rows × 3 columns × 4B = ~396MB physical read after zone skipping)"
+  }
+}

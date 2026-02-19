@@ -1,0 +1,59 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C9_strengthen",
+      "category": "correctness",
+      "title": "Strengthen C9: Proactive Hash Table Capacity Check for lineitem-Touching Queries",
+      "evidence": "Q3 had 4 consecutive 300 s timeouts (exit code null) — all from the same root cause (hash table at 100% load) before the optimizer finally resized correctly in iter_5. C9 exists in the experience base but was not applied aggressively enough pre-generation.",
+      "detect": "Any query that joins or scans lineitem (6M rows at SF=1). Count ALL open-addressing hash tables in the generated code — build side cardinality × 2 must be ≤ table capacity. Flag if capacity is not a power-of-2 OR if (expected_entries / capacity) > 0.5.",
+      "fix": "Before emitting any open-addressing hash table for a lineitem-touching query, set capacity = next_power_of_2(2 * estimated_max_entries). For build-side joins on lineitem: size for up to 6,000,000 entries. For order-level aggregation (e.g., Q18 subquery): size for up to 1,500,000 order keys."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P11",
+      "category": "performance",
+      "title": "P11: Runtime Timeout (exit code null / 300 s) as Hash Table Infinite-Loop Diagnostic",
+      "evidence": "Q3 iter_0 – iter_3 all exited with 'Process exited with code null' after exactly 300 s. The query compiled cleanly and produced no stderr, ruling out segfault or assertion. The only code path that can spin indefinitely without output is an open-addressing probe loop at 100% load.",
+      "detect": "Execution result shows run.status == 'fail', duration_ms ≈ timeout limit (e.g., 300000), and stderr is empty or only contains OS-level kill signals. Compile status is 'pass'.",
+      "fix": "When this pattern appears: (1) locate every open-addressing hash table in the generated code, (2) check whether any table's capacity equals or is less than the number of rows expected to be inserted, (3) resize to next_power_of_2(2 * expected_rows). Do NOT attempt other optimizations until the infinite-loop is resolved — they will all timeout too."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P12",
+      "category": "performance",
+      "title": "P12: output Phase > 50 ms on LIMIT Query — Full Sort Instead of Partial Sort",
+      "evidence": "Q3 final iteration: output phase took 108 ms (43% of total) for a query returning only 10 rows (LIMIT 10). All other phases (dim_filter 13 ms, main_scan 120 ms) were reasonable. The disproportionate output cost indicates std::sort over the full intermediate result before truncating to LIMIT N.",
+      "detect": "[TIMING] output > 50 ms AND the SQL has ORDER BY ... LIMIT N with N ≤ 100. Equivalently: output timing is more than 30% of main_scan timing for a small-result query.",
+      "fix": "Replace std::sort(results.begin(), results.end(), cmp) + results.resize(N) with std::partial_sort(results.begin(), results.begin() + N, results.end(), cmp) + results.resize(N). This reduces complexity from O(R log R) to O(R log N) where R is the number of pre-LIMIT rows. For N ≤ 100 and R > 100,000, speedup is typically 10–100×."
+    },
+    {
+      "type": "utility_fix",
+      "id": "U1",
+      "category": "correctness",
+      "title": "Fix date_utils.h sprintf Buffer Overflow Warning",
+      "evidence": "Compile stderr for Q3 and Q18 (all iterations) contains 'date_utils.h sprintf overflow warning'. This warning appeared in every compilation involving date output, indicating a fixed-size buffer in sprintf that is too small for the date format string. While not a correctness failure in this run, it is a latent buffer-overflow risk.",
+      "detect": "Compile output (stderr) contains 'sprintf' and 'overflow' referencing date_utils.h.",
+      "fix": "In date_utils.h, locate all sprintf(buf, ...) calls used for date formatting. Replace with snprintf(buf, sizeof(buf), ...) to bound the write. Ensure buf is at least 11 bytes for 'YYYY-MM-DD\\0'. After the change, recompile at least one query that previously showed the warning to confirm it is gone."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P13",
+      "category": "performance",
+      "title": "P13: dim_filter Regression Guard for Subquery Aggregation (Q18-style)",
+      "evidence": "Q18 iter_1 showed dim_filter regressing from 1054 ms to 1406 ms before eventual recovery to 222 ms. The optimizer changed the subquery aggregation strategy in a direction that made it slower. The regression was not caught before the next iteration was launched.",
+      "detect": "Optimization history shows iteration N+1 has dim_filter timing > iteration N for a query whose SQL contains a correlated or uncorrelated IN-subquery over lineitem. Specifically: the optimizer introduced or changed a hash map used in the subquery GROUP BY aggregation.",
+      "fix": "For Q18-style subqueries (GROUP BY + HAVING on lineitem): use a single open-addressing hash table sized for 1.5M order keys. The key is int32_t o_orderkey, the value is int64_t running sum of l_quantity. After one full scan of lineitem, emit qualifying keys into a dense bitset or sorted vector for O(1) probe during the outer join. Never use std::unordered_map for this aggregation — it reliably causes P1 (2–5× slower than custom open-addressing)."
+    }
+  ],
+  "meta": {
+    "workload": "tpc-h",
+    "scale_factor": 1,
+    "timestamp": "2026-02-19T09-21-47",
+    "queries_total": 5,
+    "queries_success": 5,
+    "queries_slow": 0,
+    "queries_failed": 0,
+    "notable": "Q3 had 4 consecutive timeout failures (est. ~20 min wasted) before succeeding on iter_5. All final iterations produced correct results."
+  }
+}

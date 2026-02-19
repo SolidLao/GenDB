@@ -24,5 +24,5 @@ export function getDataDir(benchmark, scaleFactor) {
 
 /** Resolve the GenDB persistent storage directory for a given benchmark and scale factor. */
 export function getGendbDir(benchmark, scaleFactor) {
-  return resolve(BENCHMARKS_DIR, benchmark, "gendb", `tpch_sf${scaleFactor}.gendb`);
+  return resolve(BENCHMARKS_DIR, benchmark, "gendb", `sf${scaleFactor}.gendb`);
 }

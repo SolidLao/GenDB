@@ -4,7 +4,7 @@
  */
 
 export const defaults = {
-  maxOptimizationIterations: 10,
+  maxOptimizationIterations: 5,
   stallThreshold: 5,  // consecutive non-improving iterations before adaptive stop
   scaleFactor: 10,
   targetBenchmark: "tpc-h",
@@ -13,7 +13,7 @@ export const defaults = {
   maxConcurrentQueries: 22,
   agentModels: {
     workload_analyzer: "haiku",
-    storage_designer: "haiku",
+    storage_designer: "sonnet",
     dba: "sonnet",
     query_planner: "sonnet",
     code_generator: "sonnet",

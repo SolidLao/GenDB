@@ -1,0 +1,93 @@
+{
+  "proposals": [
+    {
+      "type": "experience_update",
+      "id": "UPDATE-C8-C10-C12-C16-C17",
+      "category": "correctness",
+      "title": "Remove Hardcoded l_quantity scale=1 Assertions from C8/C10/C12/C16/C17",
+      "problem": "Experience entries C8, C10, C12, C16, C17 all contain the statement 'l_quantity scale_factor=1 (confirmed storage_design.json)'. In this run, storage_design.json defines l_quantity with scale_factor=100. The experience base overrode the actual storage spec, causing the optimizer to apply wrong filters (Q6 QTY_MAX=24 instead of 2400) and wrong output formulas (Q1 avg_qty missing /100), and then to regress a partially-correct baseline by removing correct /100 divisions.",
+      "detect": "Any experience entry that asserts a specific scale_factor value for l_quantity (or any column) as an unconditional fact rather than as a value to be read from storage_design.json",
+      "fix": "In entries C8/C10/C12/C16/C17, replace all occurrences of 'scale_factor=1' and 'scale=1' for l_quantity with 'scale_factor = read from storage_design.json for column l_quantity'. Remove any instruction to use a specific numeric threshold without reading scale first. Specifically: in C12, remove 'l_quantity: scale=**1** → l_quantity < 24 (raw value IS the actual quantity — do NOT use 2400)' and replace with 'l_quantity threshold = 24 * scale_factor; read scale_factor from storage_design.json'. In C8, replace 'threshold = 300LL. Do NOT multiply by 100' with 'threshold = 300 * scale_factor (if scale=1, threshold=300; if scale=100, threshold=30000)'. In C10, replace avg_qty rule with 'avg_qty = (double)sum_qty_raw / count / scale_factor for whatever scale_factor l_quantity has in storage_design.json'.",
+      "affected_entries": ["C8", "C10", "C12", "C16", "C17"],
+      "evidence": "storage_design.json line 13: {\"name\": \"l_quantity\", \"scale_factor\": 100}. Q6 revenue=0 in all 4 iterations due to QTY_MAX=24. Q1 avg_qty 100x wrong in all 4 iterations."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C20",
+      "category": "correctness",
+      "title": "Scale-Factor Read-First: Never Hardcode DECIMAL Column Scale in Code or Experience",
+      "detect": "Any code that uses a numeric threshold, output divisor, or filter constant for a DECIMAL column without reading scale_factor from storage_design.json for that specific column AND that specific run. Also detects: any experience entry that asserts 'column X has scale_factor=N' without citing that this was read from storage_design.json.",
+      "fix": "Before writing ANY formula involving a DECIMAL column — filter, aggregation, output divisor, HAVING threshold — look up the column's scale_factor in storage_design.json. The storage design agent may assign different scale_factors to the same column across runs (e.g., l_quantity can be 1 or 100). The code generator must read scale_factor programmatically from storage_design.json at code-generation time, not from experience entries. Concretely: (1) Read storage_design.json. (2) Find the table.columns entry for the column. (3) Use scale_factor field. (4) Derive all thresholds and divisors from that value. Example: if l_quantity scale_factor=100, then l_quantity < 24 filter → `l_quantity_raw < 24 * 100 = 2400`; AVG(l_quantity) output → `(double)sum_raw / count / 100.0`; SUM(l_quantity) > 300 HAVING → `sum_raw > 300 * 100 = 30000`. If scale_factor=1 (different run), all multiplications/divisions by scale collapse to no-ops.",
+      "example_columns": ["l_quantity", "l_extendedprice", "l_discount", "l_tax", "ps_supplycost", "o_totalprice", "c_acctbal", "s_acctbal"],
+      "evidence": "This run: l_quantity scale_factor=100 (storage_design.json). Experience C16 said scale=1. Two queries failed because code followed experience instead of storage_design.json."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C21",
+      "category": "correctness",
+      "title": "AVG Output Formula for Scaled DECIMAL Columns — Always Divide by scale_factor",
+      "detect": "AVG(col) output expression `(double)sum_raw / count` where col has scale_factor > 1. Missing the final `/ scale_factor` step. Common in Q1 avg_qty, avg_price, avg_disc.",
+      "fix": "For any column with scale_factor S: `avg_output = (double)sum_raw / count / S`. Both the /count (for averaging) and the /S (for descaling) are required. The order does not matter for the final double value. Canonical form: `(double)sum_raw / ((double)count * S)`. Do not omit /S even if you believe scale=1 — verify S from storage_design.json first.\n\nQ1-specific correct formulas (after reading scale_factor from storage_design.json):\n- avg_qty   (scale_factor=S_qty):   `(double)sum_qty_raw / count / S_qty`\n- avg_price (scale_factor=S_ep):    `(double)sum_ep_raw  / count / S_ep`\n- avg_disc  (scale_factor=S_disc):  `(double)sum_disc_raw / count / S_disc`\n- sum_qty   output:                 `(double)sum_qty_raw / S_qty`\n\nThis run's bug: iter_0 used `avg_qty = sum_qty_raw / count` with S_qty=100 → output 100x too large (2550.10 vs expected 25.50). The fix `avg_qty = sum_qty_raw / count / 100.0` was never applied in any of the 4 iterations.",
+      "evidence": "Q1/iter_0: avg_qty expected 25.50, actual 2550.10 (100x too large). sum_qty was correct in iter_0 (`/100.0`) but avg_qty was not. Optimizer subsequently broke sum_qty too by removing the /100.0."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C22",
+      "category": "correctness",
+      "title": "Optimizer Must Not Remove Correct Scale Divisions When Validation Fails on Other Columns",
+      "detect": "Optimizer iteration that removes a `/scale_factor` division from a column output that was CORRECT in a previous iteration, while trying to fix a different wrong column. Symptom: a column that was correct in iter_N becomes wrong in iter_N+1, and a previously wrong column remains wrong.",
+      "fix": "When validation fails on column X (e.g., avg_qty), do NOT modify formulas for columns that are already correct (e.g., sum_qty). Isolate the failing column. Before changing any division factor, reread scale_factor from storage_design.json rather than inferring it from experience or comments. If avg_qty=2550 but expected=25.50 (100x too large), the fix is to ADD a division by scale_factor in the avg_qty formula, not to REMOVE a division from sum_qty.",
+      "evidence": "Q1: iter_0 had correct sum_qty (`/100.0`) but wrong avg_qty (missing `/100.0`). Iter_3 optimizer, following C16 which says scale=1, removed the `/100.0` from sum_qty output (comment changed from `// scale 100` to `// scale 1`). Result: both sum_qty and avg_qty became 100x too large. The optimizer regressed a correct formula by following a wrong experience entry."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C23",
+      "category": "correctness",
+      "title": "Q18 HAVING Threshold Must Also Be Scaled — Verify Against storage_design.json",
+      "detect": "Q18 HAVING SUM(l_quantity) > 300 implemented as `sum_raw > 300` when l_quantity scale_factor=100 (stored values are qty*100). The correct threshold is `sum_raw > 30000` (= 300 * scale_factor).",
+      "fix": "Read l_quantity scale_factor S from storage_design.json. Apply: `threshold = 300LL * S`. If S=1: threshold=300. If S=100: threshold=30000. The HAVING clause compares against raw stored values. Never hardcode 300 without verifying S.\n\nNOTE: Q18 passed validation in this run with scale_factor=100. Verify that the generated code used threshold=30000 (correctly scaled) rather than 300. If it used 300 and still passed, the validation reference data may be lenient or the query result happens to match for dataset-specific reasons.",
+      "evidence": "This run: l_quantity scale_factor=100, Q18 validated 100/100 rows. Prior experience entry C8 said 'threshold=300LL, do NOT multiply by 100'. This may have been accidentally correct (if Q18 code used 30000) or may indicate a gap in validation coverage."
+    },
+    {
+      "type": "system_proposal",
+      "id": "S1",
+      "category": "orchestration",
+      "title": "Q3 Received Zero Optimizer Iterations Despite Validation Failure",
+      "detect": "optimization_history.json contains `\"iterations\": []` for a query with validation=fail. run.json shows `\"status\": \"failed\", \"iterations\": 0` for the same query.",
+      "problem": "Q3 failed validation in iter_0 but received no optimizer iterations (optimization_history is empty). The Q3 iter_1 directory exists but has no execution_results.json or compiled binary, indicating a compile or early runtime failure that the framework did not retry from. A failed query with 0 optimizer iterations is guaranteed to ship with wrong results.",
+      "fix": "The orchestrator should ensure that for any failed baseline (validation=fail), at least one optimizer iteration is attempted and its compile/run errors are captured in execution_results.json. If compilation fails in iter_N, record the compiler error and generate a repaired iter_N+1 rather than silently dropping further attempts. Also: if the repair iteration fails to compile, the error message (stderr) should be included in execution_results.json to enable post-hoc diagnosis.",
+      "evidence": "Q3/optimization_history.json: `\"iterations\": []`. Q3/iter_1 directory exists but is missing execution_results.json. run.json: Q3 status=failed, iterations=0."
+    },
+    {
+      "type": "system_proposal",
+      "id": "S2",
+      "category": "orchestration",
+      "title": "run.json Pipeline Status Contradicts execution_results.json for Q9",
+      "detect": "run.json shows `\"status\": \"failed\", \"bestCppPath\": null, \"iterations\": 0` for Q9, but Q9/iter_0/execution_results.json and Q9/iter_1/execution_results.json both show validation=pass. optimization_history.json shows 1 successful optimization iteration.",
+      "problem": "The run.json pipeline tracking is out of sync with actual execution results. This causes the framework to report Q9 as failed when it actually succeeded, potentially discarding valid output or misleading downstream consumers of run.json.",
+      "fix": "After each query pipeline completes, re-read execution_results.json for all iterations and update run.json status/bestCppPath accordingly. If any iteration has validation=pass, status should be 'completed' and bestCppPath should point to the fastest passing iteration's .cpp file.",
+      "evidence": "Q9/iter_0: validation=pass, 551ms. Q9/iter_1: validation=pass, 303ms. run.json Q9: status=failed, bestCppPath=null."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P11",
+      "category": "performance",
+      "title": "Q9 main_scan Still Dominant at 145ms — Lineitem Partkey Bitset Probe Bottleneck",
+      "detect": "Q9 [TIMING] shows main_scan >= 100ms after all other phases have been optimized. main_scan performs a full 60M-row lineitem scan, probing a parts bitset and a partsupp hash table per row.",
+      "problem": "Q9/iter_1 main_scan=144ms is the largest single phase after optimization. It scans all 60M lineitem rows (480MB of l_partkey alone) to probe a 2M-entry partkey bitset. On HDD with MADV_SEQUENTIAL, this is near the sequential read bandwidth limit.",
+      "fix": "The most impactful remaining optimization is to avoid loading partkeys for non-qualifying rows. Since lineitem is sorted by l_shipdate (not l_partkey), bitset probing requires a full scan. Potential improvements: (1) Use a partsupp hash index (lineitem_l_orderkey hash index already exists — use it in reverse: probe by l_partkey via the partsupp hash). (2) Use SIMD popcount over the partkey bitset to batch multiple rows. (3) Consider a secondary sort or composite index on partkey+shipdate if the storage design permits. Current 145ms is close to the ~120ms minimum for sequentially reading 4.3GB of lineitem on this HDD.",
+      "evidence": "Q9/iter_0: part_filter=256ms, main_scan=145ms. Q9/iter_1: part_filter=47ms (5.4x), main_scan=144ms (unchanged). main_scan is now the dominant phase."
+    }
+  ],
+  "meta": {
+    "workload": "tpc-h",
+    "scale_factor": 10,
+    "timestamp": "2026-02-18T23-26-27",
+    "queries_total": 5,
+    "queries_success": 2,
+    "queries_slow": 0,
+    "queries_failed": 3,
+    "run_model": "haiku",
+    "critical_finding": "l_quantity scale_factor=100 in storage_design.json contradicts experience entries C8/C10/C12/C16/C17 which all assert scale_factor=1. This single discrepancy caused Q6 revenue=0 and Q1 avg_qty/sum_qty wrong across all iterations. The experience base must never hardcode storage parameters that the storage design agent may set differently per run."
+  }
+}

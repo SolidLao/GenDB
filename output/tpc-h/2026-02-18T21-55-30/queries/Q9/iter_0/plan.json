@@ -1,0 +1,170 @@
+{
+  "query_id": "Q9",
+  "logical_plan": {
+    "pipeline": [
+      "scan_filter_part",
+      "join_partsupp",
+      "probe_lineitem",
+      "join_orders",
+      "join_supplier",
+      "join_nation",
+      "aggregate",
+      "sort_output"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "part(p_name LIKE '%green%') → bitset of p_partkey",
+        "probe": "partsupp via prebuilt hash_ps_partkey index",
+        "output_cols": ["ps_partkey", "ps_suppkey", "ps_supplycost"],
+        "estimated_rows": 430000,
+        "note": "Load prebuilt hash_ps_partkey, iterate green part keys, collect matching partsupp rows; filter ps_suppkey into a hash_set for lineitem probe"
+      },
+      {
+        "step": 2,
+        "build": "partsupp_result: compact_hash_map keyed by (l_partkey, l_suppkey) → ps_supplycost",
+        "probe": "lineitem (full scan, 59.9M rows)",
+        "output_cols": ["l_orderkey", "l_extendedprice", "l_discount", "l_quantity", "ps_supplycost", "l_suppkey"],
+        "estimated_rows": 178000,
+        "note": "Scan lineitem sequentially; probe (l_partkey, l_suppkey) composite key into partsupp_map. Emit matched rows."
+      },
+      {
+        "step": 3,
+        "build": "lineitem_result: compact_hash_map keyed by l_orderkey → (amount_numerator, l_suppkey)",
+        "probe": "orders (full scan, 15M rows)",
+        "output_cols": ["o_orderdate", "l_suppkey", "amount"],
+        "estimated_rows": 177100,
+        "note": "Scan orders sequentially; probe l_orderkey → extract year from o_orderdate via O(1) lookup table"
+      },
+      {
+        "step": 4,
+        "build": "supplier flat_array[s_suppkey] → s_nationkey (dense 1–100K)",
+        "probe": "lineitem_orders_result rows (lookup s_suppkey → s_nationkey)",
+        "output_cols": ["s_nationkey", "o_year", "amount"],
+        "estimated_rows": 177100,
+        "note": "supplier is 100K rows with dense suppkey 1–100K; use flat array for O(1) zero-miss lookup"
+      },
+      {
+        "step": 5,
+        "build": "nation flat_array[n_nationkey] → n_name (25 rows, trivial)",
+        "probe": "result rows (lookup s_nationkey → n_name)",
+        "output_cols": ["n_name", "o_year", "amount"],
+        "estimated_rows": 177100,
+        "note": "25-entry flat array; O(1) lookup with near-zero cost"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "flat_2d_array",
+    "aggregation_note": "GROUP BY (nation, o_year): 25 nations × 7 years (1992–1998) = 175 groups max. Use flat array[25][7] indexed by (nation_idx, year-1992) for O(1) updates with no hash overhead.",
+    "filter_pushdown": [
+      {
+        "table": "part",
+        "predicate": "p_name LIKE '%green%'",
+        "selectivity_estimate": 0.054,
+        "output": "bitset or flat vector of matching p_partkey values (~108K keys)",
+        "note": "p_name is raw string (not dictionary encoded); scan all 2M rows, check strstr(name, 'green') != nullptr. Late-materialize: only load p_name for filtering, output only p_partkey."
+      }
+    ],
+    "late_materialization": {
+      "part": "Load p_partkey and p_name only; p_name used for filter, p_partkey for downstream joins. No other part columns needed.",
+      "nation": "n_name loaded upfront into flat array (25 entries, negligible cost)",
+      "lineitem": "Load only l_partkey, l_suppkey, l_orderkey, l_extendedprice, l_discount, l_quantity — skip l_shipdate, l_tax, l_returnflag, l_linestatus (not needed by Q9)"
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "part_filter": "flat_vector<int32_t> of green p_partkey values (~108K entries); also build bitset(2097152) for O(1) membership test during partsupp probe",
+      "partsupp_join": "prebuilt_index_load(hash_ps_partkey) — load indexes/hash_ps_partkey.bin via mmap; iterate green part keys, collect (ps_partkey, ps_suppkey, ps_supplycost) rows into compact_vector; then build compact_hash_map<uint64_t,(ps_supplycost)> keyed by composite key (ps_partkey<<32|ps_suppkey) for lineitem probe",
+      "lineitem_join_map": "compact_hash_map<uint64_t, ps_supplycost_int64> keyed by (l_partkey<<32|l_suppkey), pre-sized to ~430K entries at 75% load factor (power-of-2 bucket count = 524288+)",
+      "orders_join_map": "compact_hash_map<int32_t, tuple(l_suppkey,amount_partial)> keyed by l_orderkey, pre-sized to ~178K entries (power-of-2 = 262144)",
+      "supplier_lookup": "flat_array<int8_t>[100001] indexed by s_suppkey → s_nationkey; O(1) cache-friendly lookup, ~100KB fits in L2 cache",
+      "nation_lookup": "flat_array<string>[25] indexed by n_nationkey → n_name; 25 entries, trivially cache-resident",
+      "aggregation": "flat_array<int64_t>[25][10] indexed by [nation_idx][o_year - 1992] → sum_profit (scaled int64); ~250 entries, fits in single cache line region"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "phases": [
+        {
+          "phase": "part_scan_filter",
+          "parallel": true,
+          "note": "Parallel scan of part/p_name.bin and part/p_partkey.bin across 64 threads, morsel size ~32K rows. Thread-local vectors of green p_partkeys, merged after. Then build shared bitset (atomic bit-set ops or merge at end)."
+        },
+        {
+          "phase": "partsupp_index_lookup",
+          "parallel": true,
+          "note": "Partition green p_partkey vector across 64 threads; each thread looks up its partition in prebuilt hash_ps_partkey index. Thread-local result vectors merged into shared compact_hash_map (ps_partkey,ps_suppkey)->ps_supplycost."
+        },
+        {
+          "phase": "lineitem_scan_probe",
+          "parallel": true,
+          "note": "Parallel scan of lineitem (59.9M rows) across 64 threads, morsel size ~64K rows. Each thread probes shared read-only (ps_partkey,ps_suppkey) map. Thread-local result vectors for matched rows."
+        },
+        {
+          "phase": "orders_scan_probe",
+          "parallel": true,
+          "note": "Parallel scan of orders (15M rows) across 64 threads. Each thread probes shared read-only l_orderkey map. Compute YEAR from o_orderdate via O(1) YEAR_TABLE lookup."
+        },
+        {
+          "phase": "supplier_nation_lookup_and_aggregate",
+          "parallel": true,
+          "synchronization": "thread_local_agg_arrays_then_merge",
+          "note": "Each thread maintains a local flat_array[25][10] for aggregation. After supplier/nation lookups (O(1) array accesses), accumulate sum_profit into thread-local array. Final merge: sum 64 local arrays into global result — trivial (64×250 additions)."
+        }
+      ],
+      "partition_count": 64,
+      "synchronization": "thread_local_merge"
+    },
+    "index_usage": [
+      {
+        "index": "hash_ps_partkey",
+        "file": "indexes/hash_ps_partkey.bin",
+        "purpose": "Load prebuilt multi-value hash index on ps_partkey to find all partsupp rows for each green p_partkey. Avoids building hash table on 8M partsupp rows at runtime.",
+        "cost": "O(mmap) ≈ 0ms build; ~108K probes into 4M-slot table"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "part": "Single pass over p_partkey + p_name columns only; fused scan+filter; collect green partkeys into vector+bitset",
+      "partsupp": "Index-driven via hash_ps_partkey — no sequential scan needed; access only ps_suppkey and ps_supplycost columns for matching rows",
+      "lineitem": "Single sequential pass over l_partkey, l_suppkey, l_orderkey, l_extendedprice, l_discount, l_quantity (6 columns, skip others); fused probe into (pk,sk) hash map",
+      "orders": "Single sequential pass over o_orderkey, o_orderdate only; fused probe into l_orderkey hash map + O(1) year extraction",
+      "supplier": "Single sequential load into flat_array at startup (100K rows, ~400KB, fits in L2)",
+      "nation": "Single sequential load into flat_array at startup (25 rows, trivial)"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_details": {
+      "part_scan": "Sequential mmap reads of p_partkey.bin + p_name.bin — hardware prefetcher friendly",
+      "lineitem_probe": "Sequential scan of 6 lineitem columns; random access into ~430K-entry hash map (fits in ~7MB, within L3 cache of 44MB) — high hit rate after cold warm-up",
+      "orders_probe": "Sequential scan; random access into ~178K-entry hash map (~3MB, well within L3)",
+      "supplier_nation": "Flat arrays ~100KB + negligible — permanently L2/L3 resident after first access"
+    },
+    "amount_computation": {
+      "formula": "l_extendedprice * (100 - l_discount) / 100 - ps_supplycost * l_quantity / 100",
+      "note": "All values are scaled int64 (scale_factor=2). Compute in integer arithmetic: amount = l_extendedprice*(100-l_discount) - ps_supplycost*l_quantity. Divide by 10000 only at output. Avoids floating point entirely."
+    },
+    "date_extraction": {
+      "method": "O(1) YEAR_TABLE lookup array indexed by epoch_day",
+      "range": "o_orderdate covers 1992–1998 (epoch days ~8036–10592); YEAR_TABLE[30000] covers this range",
+      "use": "gendb::extract_year(o_orderdate) → int (1992..1998) → index = year - 1992"
+    },
+    "output_sort": {
+      "method": "std::sort on ~175-entry result vector",
+      "order": "ORDER BY nation ASC, o_year DESC",
+      "cost": "negligible — 175 entries"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_probe",
+    "phase_breakdown": {
+      "part_scan_filter": "~15ms (2M rows × 2 cols, parallel, string scan with strstr)",
+      "partsupp_index_lookup": "~5ms (mmap load + 108K index probes, parallel)",
+      "lineitem_scan_probe": "~80ms (60M rows × 6 cols, parallel scan + hash probe into L3-resident 430K map)",
+      "orders_scan_probe": "~25ms (15M rows × 2 cols, parallel scan + hash probe into L3-resident 178K map)",
+      "supplier_nation_lookup_aggregate": "~5ms (178K rows, O(1) flat array lookups + thread-local agg merge)",
+      "sort_output": "<1ms (175 entries)"
+    },
+    "estimated_ms": 135,
+    "target_comparison": "Umbra: 196ms — plan targets sub-Umbra via: (1) prebuilt partsupp index avoids 8M-row HT build, (2) flat 2D array aggregation for 175 groups vs hash agg, (3) 64-thread parallelism on HDD sequential scans, (4) integer-only amount computation, (5) supplier/nation as permanent L2-resident flat arrays"
+  }
+}

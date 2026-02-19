@@ -1,0 +1,122 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune_shipdate", "zone_map_prune_discount_qty", "filter_shipdate", "filter_discount", "filter_quantity", "accumulate_revenue"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_accumulator",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8035 AND l_shipdate < 10592",
+        "selectivity_estimate": 0.14,
+        "note": "days_since_epoch: 1994-01-01=8035, 1995-01-01=10592. Table is sorted by l_shipdate — zone map skip rate is very high (most of 600 zones fall entirely before 8035 or after 10592)."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount BETWEEN 500 AND 700",
+        "selectivity_estimate": 0.27,
+        "note": "Scaled by 100. Applied as secondary zone map prune on idx_lineitem_discount_qty."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 2400",
+        "selectivity_estimate": 0.47,
+        "note": "Scaled by 100. Tertiary zone map prune: skip zones where min_quantity >= 2400."
+      }
+    ],
+    "predicate_order": [
+      "l_shipdate (most selective, sorted column, zone-map kills ~86% zones)",
+      "l_discount (secondary, eliminates ~73% of survivors)",
+      "l_quantity (tertiary, eliminates ~53% of survivors)"
+    ],
+    "estimated_qualifying_rows": 700000,
+    "output": "SUM(l_extendedprice * l_discount) as int64_t, divide by scale_factor^2 (10000) at output"
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "thread_local_int64_scalar",
+      "note": "No GROUP BY — each thread holds a single int64_t partial_sum. Final reduce is 64 additions. No hash table needed."
+    },
+    "zone_map_usage": [
+      {
+        "index": "idx_lineitem_shipdate",
+        "file": "indexes/idx_lineitem_shipdate.bin",
+        "layout": "uint32_t num_zones, then per zone: [min:int32_t(4B), max:int32_t(4B), count:uint32_t(4B)] = 12B/zone, 600 zones",
+        "skip_condition": "skip zone if zone.max < 8035 OR zone.min >= 10592",
+        "purpose": "Primary block pruning — since lineitem is sorted by l_shipdate, expected ~85-90% of 600 zones skipped",
+        "phase": "phase_1_coarse_prune"
+      },
+      {
+        "index": "idx_lineitem_discount_qty",
+        "file": "indexes/idx_lineitem_discount_qty.bin",
+        "layout": "uint32_t num_zones, then per zone: [min:int64_t(8B), max:int64_t(8B), count:uint32_t(4B)] = 20B/zone, 600 zones",
+        "skip_condition_discount": "skip zone if zone.max_discount < 500 OR zone.min_discount > 700",
+        "skip_condition_quantity": "skip zone if zone.min_quantity >= 2400",
+        "purpose": "Secondary block pruning on surviving shipdate zones — further reduces scan work",
+        "phase": "phase_2_fine_prune"
+      }
+    ],
+    "scan_strategy": "two_phase_zone_map_then_fused_filter_accumulate",
+    "scan_detail": {
+      "phase_1": "Load idx_lineitem_shipdate zone map. Mark each of 600 zones as alive/dead based on shipdate range [8035, 10592). Expected ~60-90 survivor zones covering ~6M-9M rows.",
+      "phase_2": "For each alive shipdate zone, cross-check idx_lineitem_discount_qty zone map. Skip zones where discount or quantity zones are fully out of predicate range. Further prunes survivor set.",
+      "phase_3": "Parallel morsel scan over surviving zones only. Each thread: read l_shipdate, l_discount, l_quantity, l_extendedprice for its morsels. Apply per-row predicates, accumulate revenue.",
+      "fused_loop": "Single pass: read 4 columns together per row. Evaluate l_shipdate first (short-circuit), then l_discount, then l_quantity. If all pass: partial_sum += l_extendedprice * l_discount.",
+      "column_access_order": ["l_shipdate (filter first)", "l_discount (filter second)", "l_quantity (filter third)", "l_extendedprice (accumulate only if pass)"]
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size": 65536,
+      "note": "64 cores available. Morsel size ~65K rows targets L3 cache (44MB / 64 threads ≈ 687KB/thread; 65K rows × 4 columns × 8B = ~2MB — fits well given sequential access). Threads pull surviving zone ranges from a shared atomic counter.",
+      "synchronization": "thread_local_scalar_merge",
+      "merge_cost": "O(64) additions at end — negligible",
+      "work_distribution": "Each thread claims a zone-block range via atomic fetch_add. Threads processing boundary zones do per-row predicate checks; interior zones (if entire zone is in shipdate range) still do per-row discount/quantity checks.",
+      "load_balance": "Natural — surviving zones are concentrated in ~1994 data band; all threads share this range uniformly."
+    },
+    "simd_opportunity": {
+      "applicable": true,
+      "approach": "AVX2 vectorized predicate evaluation",
+      "detail": "Process 8×int32 shipdate values per instruction (_mm256_cmpgt_epi32). Process 4×int64 discount/quantity values per instruction. Use branchless mask accumulation. Compiler auto-vectorization with #pragma omp simd + __restrict__ is acceptable fallback.",
+      "benefit": "8x throughput on shipdate filter, 4x on discount/quantity int64 comparisons"
+    },
+    "index_usage": [
+      {
+        "index": "idx_lineitem_shipdate_zone_map",
+        "file": "indexes/idx_lineitem_shipdate.bin",
+        "purpose": "skip_zones_outside_shipdate_range_[8035,10592)"
+      },
+      {
+        "index": "idx_lineitem_discount_qty_zone_map",
+        "file": "indexes/idx_lineitem_discount_qty.bin",
+        "purpose": "skip_zones_with_discount_outside_[500,700]_or_quantity_all_>=2400"
+      }
+    ],
+    "memory_pattern": "streaming_sequential",
+    "memory_detail": "mmap all four column files (l_shipdate, l_discount, l_quantity, l_extendedprice). Access is sequential within surviving zones. OS prefetcher handles readahead effectively. No random access.",
+    "output_encoding": {
+      "revenue_internal": "int64_t sum of (l_extendedprice * l_discount), both already scaled by 100",
+      "revenue_final": "divide by 10000 (scale_factor^2) to get decimal result, or emit as scaled int64 per output spec"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_scan_of_surviving_zones",
+    "zone_map_prune_ms": 1,
+    "scan_bytes_without_pruning": "60M rows × 4 columns × avg 6B = ~1.4 GB",
+    "scan_bytes_after_pruning": "~6M-9M survivor rows × 4 columns × avg 6B = ~140-215 MB",
+    "parallel_scan_ms_estimate": 10,
+    "thread_merge_ms": 0,
+    "total_estimated_ms": 11,
+    "target_comparison": "Umbra=14ms, DuckDB=20ms, GenDB_current=93ms",
+    "bottleneck": "HDD sequential read bandwidth for surviving zone column data. With 64 threads and mmap, effective bandwidth should be near memory bandwidth (~50 GB/s), not HDD limit, since data is likely cached after first access.",
+    "notes": [
+      "Q6 is pure scan+filter+scalar-agg — no joins, no hash tables, no GROUP BY. Complexity is entirely I/O + predicate evaluation.",
+      "Zone map pruning on sorted l_shipdate is the critical optimization: skips ~85%+ of blocks before any data is read.",
+      "Secondary zone map on discount/qty provides additional 20-40% prune on survivors.",
+      "64-thread parallelism with thread-local accumulators eliminates all synchronization during hot loop.",
+      "AVX2 SIMD on predicate columns gives ~4-8x instruction throughput improvement.",
+      "Result: with pruning + parallelism + SIMD, target <15ms to match Umbra."
+    ]
+  }
+}

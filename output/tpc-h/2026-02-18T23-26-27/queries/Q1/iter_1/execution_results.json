@@ -1,0 +1,98 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] load_columns: 0.12 ms\n[TIMING] load_zonemap: 0.03 ms\n[TIMING] main_scan: 65.21 ms\n[TIMING] aggregation_merge: 0.01 ms\n[TIMING] output: 0.14 ms\n[TIMING] total: 65.70 ms\n",
+    "stderr": "",
+    "duration_ms": 161
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": false,\n      \"error\": \"4 row(s) differ across 2 column(s)\",\n      \"column_failures\": {\n        \"sum_qty\": {\n          \"category\": \"exact_sum_qty\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"377518399.00\",\n              \"actual\": \"37751839900.00\",\n              \"abs_diff\": 37374321501.0,\n              \"rel_diff_pct\": 9900.0,\n              \"row\": 0\n            },\n            {\n              \"expected\": \"9851614.00\",\n              \"actual\": \"985161400.00\",\n              \"abs_diff\": 975309786.0,\n              \"rel_diff_pct\": 9900.0,\n              \"row\": 1\n            },\n            {\n              \"expected\": \"743124873.00\",\n              \"actual\": \"74312487300.00\",\n              \"abs_diff\": 73569362427.0,\n              \"rel_diff_pct\": 9900.0,\n              \"row\": 2\n            }\n          ]\n        },\n        \"avg_qty\": {\n          \"category\": \"avg\",\n          \"failure_count\": 4,\n          \"samples\": [\n            {\n              \"expected\": \"25.50\",\n              \"actual\": \"2550.10\",\n              \"abs_diff\": 2524.6,\n              \"rel_diff_pct\": 9900.3922,\n              \"tolerance\": \"1%\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"25.52\",\n              \"actual\": \"2552.24\",\n              \"abs_diff\": 2526.72,\n              \"rel_diff_pct\": 9900.9404,\n              \"tolerance\": \"1%\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"25.50\",\n              \"actual\": \"2549.81\",\n              \"abs_diff\": 2524.31,\n              \"rel_diff_pct\": 9899.2549,\n              \"tolerance\": \"1%\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 4,
+          "rows_actual": 4,
+          "match": false,
+          "error": "4 row(s) differ across 2 column(s)",
+          "column_failures": {
+            "sum_qty": {
+              "category": "exact_sum_qty",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "377518399.00",
+                  "actual": "37751839900.00",
+                  "abs_diff": 37374321501,
+                  "rel_diff_pct": 9900,
+                  "row": 0
+                },
+                {
+                  "expected": "9851614.00",
+                  "actual": "985161400.00",
+                  "abs_diff": 975309786,
+                  "rel_diff_pct": 9900,
+                  "row": 1
+                },
+                {
+                  "expected": "743124873.00",
+                  "actual": "74312487300.00",
+                  "abs_diff": 73569362427,
+                  "rel_diff_pct": 9900,
+                  "row": 2
+                }
+              ]
+            },
+            "avg_qty": {
+              "category": "avg",
+              "failure_count": 4,
+              "samples": [
+                {
+                  "expected": "25.50",
+                  "actual": "2550.10",
+                  "abs_diff": 2524.6,
+                  "rel_diff_pct": 9900.3922,
+                  "tolerance": "1%",
+                  "row": 0
+                },
+                {
+                  "expected": "25.52",
+                  "actual": "2552.24",
+                  "abs_diff": 2526.72,
+                  "rel_diff_pct": 9900.9404,
+                  "tolerance": "1%",
+                  "row": 1
+                },
+                {
+                  "expected": "25.50",
+                  "actual": "2549.81",
+                  "abs_diff": 2524.31,
+                  "rel_diff_pct": 9899.2549,
+                  "tolerance": "1%",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "load_columns": 0.12,
+    "load_zonemap": 0.03,
+    "main_scan": 65.21,
+    "aggregation_merge": 0.01,
+    "output": 0.14,
+    "total": 65.7
+  },
+  "timing_ms": 65.56
+}

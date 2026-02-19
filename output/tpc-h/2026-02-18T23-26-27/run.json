@@ -1,0 +1,76 @@
+{
+  "runId": "2026-02-18T23-26-27",
+  "workload": "tpc-h",
+  "startedAt": "2026-02-18T23:26:27.851Z",
+  "status": "completed",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10",
+  "gendbDir": "/home/jl4492/GenDB/benchmarks/tpc-h/gendb/tpch_sf10.gendb",
+  "scaleFactor": 10,
+  "maxIterations": 5,
+  "model": "haiku",
+  "optimizationTarget": "execution_time",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-02-18T23:26:28.774Z",
+        "completedAt": "2026-02-18T23:28:17.978Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-02-18T23:28:17.979Z",
+        "completedAt": "2026-02-18T23:36:05.681Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-02-18T23:36:05.681Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-02-18T23:36:05.681Z"
+      }
+    },
+    "completedAt": "2026-02-18T23:36:05.682Z"
+  },
+  "phase2": {
+    "status": "completed",
+    "queries": [
+      "Q1",
+      "Q3",
+      "Q6",
+      "Q9",
+      "Q18"
+    ],
+    "maxConcurrent": 22,
+    "pipelines": {
+      "Q1": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/queries/Q1/iter_0/q1.cpp",
+        "iterations": 3
+      },
+      "Q3": {
+        "status": "failed",
+        "bestCppPath": null,
+        "iterations": 0
+      },
+      "Q6": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/queries/Q6/iter_3/q6.cpp",
+        "iterations": 3
+      },
+      "Q9": {
+        "status": "failed",
+        "bestCppPath": null,
+        "iterations": 0
+      },
+      "Q18": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T23-26-27/queries/Q18/iter_0/q18.cpp",
+        "iterations": 0
+      }
+    },
+    "completedAt": "2026-02-19T00:29:58.316Z"
+  },
+  "completedAt": "2026-02-19T00:44:10.116Z"
+}

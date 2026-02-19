@@ -1,0 +1,84 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": [
+      "zone_map_prune_shipdate",
+      "fused_scan_filter_aggregate",
+      "thread_local_merge",
+      "finalize_avg",
+      "emit_ordered_output"
+    ],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "selectivity_estimate": 0.988,
+        "note": "epoch 10471 = 1998-09-02; ~59.3M of 59.99M rows qualify"
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array(6_slots)",
+      "per_thread_accumulator": "thread_local_flat_array[64_threads][6_groups][7_fields: count+sum_qty+sum_base_price+sum_disc_price+sum_charge+sum_disc+implicit_avg_deferred]",
+      "group_key_encoding": "group_idx = returnflag_code * 2 + linestatus_code, range [0,5], no hash table needed"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "partition_count": 64,
+      "morsel_size": 100000,
+      "synchronization": "thread_local_merge",
+      "merge_cost": "trivial: 6_groups * 64_threads = 384 scalar additions"
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "uint32_t num_blocks=600, then per block: int32_t min, int32_t max, uint32_t block_nrows (12 bytes each)",
+        "purpose": "skip_blocks_where_block_min_gt_10471",
+        "blocks_total": 600,
+        "blocks_skipped_estimate": 7,
+        "benefit": "low (selectivity=0.988), but index fits in L1 cache (7204 bytes) so overhead is zero"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "column_load_order": [
+      "lineitem/l_shipdate.bin    (int32, 4B/row, predicate filter: <= 10471)",
+      "lineitem/l_returnflag.bin  (int8,  1B/row, group key dim0: 0=A,1=N,2=R)",
+      "lineitem/l_linestatus.bin  (int8,  1B/row, group key dim1: 0=F,1=O)",
+      "lineitem/l_quantity.bin    (double, 8B/row, SUM + deferred AVG)",
+      "lineitem/l_extendedprice.bin (double, 8B/row, SUM + deferred AVG)",
+      "lineitem/l_discount.bin    (double, 8B/row, SUM(disc_price) + SUM(charge) + deferred AVG)",
+      "lineitem/l_tax.bin         (double, 8B/row, SUM(charge) only)"
+    ],
+    "inner_loop": {
+      "predicate_check": "branch_free: mask = (l_shipdate[i] <= 10471)",
+      "group_key": "group_idx = returnflag[i] * 2 + linestatus[i]",
+      "accumulate_if_qualifying": [
+        "acc[group_idx].count       += 1",
+        "acc[group_idx].sum_qty     += l_quantity[i]",
+        "acc[group_idx].sum_price   += l_extendedprice[i]",
+        "acc[group_idx].sum_disc_price += l_extendedprice[i] * (1.0 - l_discount[i])",
+        "acc[group_idx].sum_charge  += l_extendedprice[i] * (1.0 - l_discount[i]) * (1.0 + l_tax[i])",
+        "acc[group_idx].sum_disc    += l_discount[i]"
+      ]
+    },
+    "post_scan_finalize": [
+      "avg_qty[g]   = sum_qty[g]   / count[g]",
+      "avg_price[g] = sum_price[g] / count[g]",
+      "avg_disc[g]  = sum_disc[g]  / count[g]"
+    ],
+    "output_ordering": "natural: group indices 0..5 map to (A,F),(A,O),(N,F),(N,O),(R,F),(R,O) which is correct ASCII ORDER BY l_returnflag, l_linestatus — no sort step needed",
+    "memory_pattern": "streaming_sequential",
+    "access_notes": "mmap all 7 column files; OS prefetch handles sequential reads; no random access; ~2.4 GB total working set (60M * ~40 bytes)"
+  },
+  "estimated_cost": {
+    "dominant_phase": "main_scan",
+    "estimated_ms": 85,
+    "basis": "60M rows * ~40 bytes = ~2.4 GB; 64-thread parallel scan at ~3-4 GB/s effective bandwidth; thread-local accumulators eliminate contention; merge is O(1); zone map check is free (7204 byte index fits in L1)"
+  }
+}

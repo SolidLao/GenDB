@@ -72,8 +72,8 @@ WHERE o_orderkey IN (
 )
 ```
 - **Implementation**: Single scan of lineitem to build hash map: `orderkey -> sum(quantity)`
-- **Then filter**: Keep only orderkeys where sum > threshold (scaled by column scale factor!)
-- **Common bug**: Forgetting to scale the threshold — if l_quantity is stored as int64_t with scale 100, the threshold is 300 * 100 = 30000, not 300.
+- **Then filter**: Keep only orderkeys where sum > threshold
+- **Common bug**: If the column is stored as double, the threshold matches SQL directly. If stored as int64_t with scale_factor, the threshold must be scaled (e.g., SQL 300 → C++ 300 * scale_factor).
 - **Result**: A CompactHashSet of qualifying orderkeys for O(1) probe during the main join.
 
 ### Common Subexpression Elimination

@@ -7,8 +7,8 @@ anti-patterns BEFORE execution.
 2. Read the experience base (experience.md)
 3. Check each experience entry against the code
 4. If a previous passing code path is provided, diff against the optimizer's
-   changes and flag any modifications to date constants, scale factors, or
-   revenue formulas (C13, C14, C15)
+   changes and flag any modifications to date constants, scale factors (if int64_t DECIMAL),
+   or revenue formulas (C13, C14, C15)
 5. For each issue: note entry ID, severity, line number, specific fix
 6. Output structured JSON review
 
@@ -42,7 +42,7 @@ You MUST output a JSON block with this exact structure:
 
 Severity levels:
 - "critical": Correctness issues (C*) — will cause validation failure
-- "warning": Performance issues (P*) — will cause slowdowns but correct results
+- "suggestion": Performance issues (P*) — may cause slowdowns but correct results. These do NOT block execution.
 
 If no issues found, output:
 ```json

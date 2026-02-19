@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q6/iter_0/q6.cpp: In lambda function:\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q6/iter_0/q6.cpp:94:28: warning: suggest parentheses around comparison in operand of ‘|’ [-Wparentheses]\n   94 |                     if (sd < DATE_LO | sd >= DATE_HI) continue;\n      |                         ~~~^~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-18T17-49-49/queries/Q6/iter_0/q6.cpp:96:30: warning: suggest parentheses around comparison in operand of ‘|’ [-Wparentheses]\n   96 |                     if (disc < DISC_LO | disc > DISC_HI) continue;\n      |                         ~~~~~^~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] zone_map_prune: 0.02 ms\n[TIMING] main_scan: 36.37 ms\n[TIMING] aggregation_merge: 0.00 ms\n[TIMING] output: 0.18 ms\n[TIMING] total: 84.62 ms\n",
+    "stderr": "",
+    "duration_ms": 90
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "zone_map_prune": 0.02,
+    "main_scan": 36.37,
+    "aggregation_merge": 0,
+    "output": 0.18,
+    "total": 84.62
+  },
+  "timing_ms": 84.44
+}

@@ -1,0 +1,70 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 80.57 ms\n[TIMING] build_joins: 357.04 ms\n[TIMING] main_scan: 36.42 ms\nWrote 175 rows to /home/jl4492/GenDB/output/tpc-h/2026-02-19T03-28-25/queries/Q9/iter_0/results/Q9.csv\n[TIMING] output: 0.44 ms\n[TIMING] total: 624.69 ms\n",
+    "stderr": "",
+    "duration_ms": 726
+  },
+  "validation": {
+    "status": "fail",
+    "output": "{\n  \"match\": false,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": false,\n      \"error\": \"175 row(s) differ across 1 column(s)\",\n      \"column_failures\": {\n        \"sum_profit\": {\n          \"category\": \"sum_money\",\n          \"failure_count\": 175,\n          \"samples\": [\n            {\n              \"expected\": \"459548354.7680\",\n              \"actual\": \"459548569.71\",\n              \"abs_diff\": 214.94,\n              \"rel_diff_pct\": 0.0,\n              \"tolerance\": \"$100\",\n              \"row\": 0\n            },\n            {\n              \"expected\": \"456449926.4138\",\n              \"actual\": \"456450131.99\",\n              \"abs_diff\": 205.58,\n              \"rel_diff_pct\": 0.0,\n              \"tolerance\": \"$100\",\n              \"row\": 1\n            },\n            {\n              \"expected\": \"456444975.7127\",\n              \"actual\": \"456445177.89\",\n              \"abs_diff\": 202.18,\n              \"rel_diff_pct\": 0.0,\n              \"tolerance\": \"$100\",\n              \"row\": 2\n            }\n          ]\n        }\n      }\n    }\n  }\n}\n",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q9": {
+          "rows_expected": 175,
+          "rows_actual": 175,
+          "match": false,
+          "error": "175 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "sum_profit": {
+              "category": "sum_money",
+              "failure_count": 175,
+              "samples": [
+                {
+                  "expected": "459548354.7680",
+                  "actual": "459548569.71",
+                  "abs_diff": 214.94,
+                  "rel_diff_pct": 0,
+                  "tolerance": "$100",
+                  "row": 0
+                },
+                {
+                  "expected": "456449926.4138",
+                  "actual": "456450131.99",
+                  "abs_diff": 205.58,
+                  "rel_diff_pct": 0,
+                  "tolerance": "$100",
+                  "row": 1
+                },
+                {
+                  "expected": "456444975.7127",
+                  "actual": "456445177.89",
+                  "abs_diff": 202.18,
+                  "rel_diff_pct": 0,
+                  "tolerance": "$100",
+                  "row": 2
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "operation_timings": {
+    "dim_filter": 80.57,
+    "build_joins": 357.04,
+    "main_scan": 36.42,
+    "output": 0.44,
+    "total": 624.69
+  },
+  "timing_ms": 624.25
+}

@@ -7,48 +7,49 @@ your code has zero runtime overhead — no query parser, no buffer pool, no type
 raw computation on raw data. The C++ compiler sees your entire query as one compilation unit.
 
 ## Workflow
-1. Read the execution plan (plan.json) provided in the user prompt — this is your blueprint
+1. Read the execution plan (plan.json) provided in the user prompt — this is your recommended strategy
 2. Read `INDEX.md`, then relevant technique files for the plan's data structures and strategies
 3. Implement the plan in C++ following the output contract below
-4. The plan specifies data structures, join strategy, parallelism approach, and index usage — follow the plan exactly
-5. Compile -> Run -> Validate (up to 2 fix attempts)
-6. If validation fails: analyze root cause, fix, retry
+4. The plan provides the recommended strategy. You may deviate if you identify a clearly superior approach (e.g., pre-built index available but plan specifies runtime hash table). Document deviations with a brief comment.
+5. Write the .cpp file using the Write tool
+6. Compile → Run → Validate (up to 2 fix attempts if validation fails)
+7. If validation fails: analyze root cause, fix, retry
 
 ## Critical Output Requirement
 You MUST produce a .cpp file using the Write tool. Do NOT output only analysis, planning text, or
 explanations. If you are unsure about implementation details, still write the .cpp file with your
 best approach — the validation loop will catch errors and you get 2 fix attempts.
 
-## GenDB Utility Library
-Generated code SHOULD use the GenDB utility library as the default choice. The library includes
-CompactHashMap, CompactHashSet, ConcurrentCompactHashMap, PartitionedHashMap, DenseBitmap, and
-TopKHeap for advanced patterns. You MAY implement custom alternatives when the plan specifies
-patterns not covered by the library. When using custom implementations, add a brief comment
-explaining why.
-
-The following headers are MANDATORY — do NOT reimplement their functionality:
+## System Utilities (MANDATORY)
 - `#include "date_utils.h"`: gendb::init_date_tables(), gendb::epoch_days_to_date_str(),
   gendb::date_str_to_epoch_days(), gendb::extract_year(), gendb::extract_month().
   NEVER write custom date conversion functions.
-- `#include "mmap_utils.h"`: gendb::MmapColumn<T> for zero-copy column access.
-  NEVER copy mmap'd data into std::vector.
 - `#include "timing_utils.h"`: GENDB_PHASE("name") for block-scoped RAII timing.
-  Use instead of manual #ifdef GENDB_PROFILE blocks.
 
-The following header SHOULD be used (default choice for hash-based data structures):
-- `#include "hash_utils.h"`: gendb::CompactHashMap<K,V>, gendb::CompactHashSet<K>,
-  gendb::ConcurrentCompactHashMap<K,V>, gendb::PartitionedHashMap<K,V>,
-  gendb::DenseBitmap, gendb::TopKHeap<T,Cmp>, gendb::hash_int(), gendb::hash_combine().
-  Use instead of std::unordered_map/set for >1000 entries.
+## Data Access
+Load binary column files via mmap. Example pattern:
+  int fd = open(path, O_RDONLY); struct stat st; fstat(fd, &st);
+  auto* col = reinterpret_cast<const T*>(mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0));
+  size_t n = st.st_size / sizeof(T);
+Do NOT copy mmap'd data into std::vector.
+
+## Data Structures
+Generate all hash tables, bitsets, heaps, and other data structures INLINE, tailored to the
+specific query's key types, cardinalities, and access patterns. Use the Query Guide for exact
+data file formats, column types, and available indexes.
+
+## Indexes
+The Query Guide lists available indexes (zone maps, hash indexes) with their exact binary
+layouts. Use these indexes when they can improve performance — read the binary format description
+from the Query Guide and generate matching loader code inline. Do NOT use library abstractions
+for index loading.
 
 ## Output Contract
 
 ### File Structure
 ```cpp
 #include <...>           // Standard includes
-#include "date_utils.h"  // GenDB utilities (as needed)
-#include "hash_utils.h"
-#include "mmap_utils.h"
+#include "date_utils.h"  // GenDB system utilities (as needed)
 #include "timing_utils.h"
 
 // Helper structs, constants, functions
@@ -111,10 +112,13 @@ Use RAII phase timing instead of manual #ifdef blocks:
 
 ## Key Rules
 1. DATE columns = `int32_t` epoch days (>3000). Compare as integers. Use date_utils.h for all conversions.
-2. DECIMAL columns = `int64_t` x scale_factor. Compute thresholds accordingly. NEVER use `double`.
+2. DECIMAL columns: follow the Query Guide's Column Reference for each column's encoding. If `double`: values match SQL directly. If `int64_t` with `scale_factor`: compute thresholds and output scaling accordingly.
 3. Dictionary strings: load `_dict.txt` at runtime. NEVER hardcode dictionary codes.
 4. Standalone hash structs only. NEVER write `namespace std { template<> struct hash<...> }`.
 5. Delta-encoded columns: apply cumulative sum before use.
-6. Scaled integer arithmetic: accumulate at full precision, scale down once for output.
-7. Use Kahan summation for floating-point aggregation.
-8. NEVER read .tbl files. Only `.gendb/` binary columns via mmap.
+6. For large floating-point aggregations (SUM over millions of rows), consider Kahan summation to avoid precision loss. May be skipped if the workload tolerates small floating-point errors and SIMD vectorization is prioritized.
+7. NEVER read .tbl files. Only `.gendb/` binary columns via mmap.
+8. QUERY GUIDE: The user prompt includes a Query Guide with per-column usage contracts showing
+   column types, dictionary patterns, date conversions, and query-specific examples.
+   Follow these contracts exactly — they are the authoritative reference for this run's data
+   encoding. Do NOT read storage_design.json directly.
