@@ -1,0 +1,162 @@
+{
+  "query_id": "Q3",
+  "sampling_notes": {
+    "method": "stride-100 unbiased sample (every 100th row); full customer table loaded",
+    "customer_qualifying": 300276,
+    "orders_qualifying_empirical": 1472400,
+    "orders_selectivity": "9.82% (both date<9204 AND custkey-in-BUILDING)",
+    "orders_date_selectivity_empirical": "~49% (days 8035-9203 out of 8035-10441)",
+    "lineitem_qualifying_corrected": 340000,
+    "correction_method": "34 sample hits / (0.01 orders_sample × 0.01 lineitem_sample) = 340000",
+    "distinct_groups_estimated": 120000,
+    "note_guide_correction": "Guide estimate of 900K qualifying orders and 30% date selectivity are both low; empirical data shows ~1.47M qualifying orders and ~49% date selectivity"
+  },
+  "logical_plan": {
+    "pipeline": [
+      "scan_customer_filter_mktsegment",
+      "build_custkey_bitset",
+      "scan_orders_zonemap_skip",
+      "filter_orders_date_and_custkey",
+      "build_orderkey_hashmap",
+      "scan_lineitem_zonemap_skip",
+      "filter_lineitem_shipdate_and_orderkey",
+      "hash_aggregate_by_orderkey",
+      "topk_10_heap"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(filtered, 300K custkeys)",
+        "probe": "orders(15M → ~7.3M after zone map skip)",
+        "join_key": "o_custkey = c_custkey",
+        "build_cardinality": 300276,
+        "probe_input_cardinality": 7300000,
+        "output_cardinality": 1472400,
+        "rationale": "Build bitset on tiny 300K customer set; probe 7.3M qualifying orders rows. Bitset indexed by custkey (1..1500000) = 187KB — fits entirely in L2 cache, O(1) probe with zero hash overhead."
+      },
+      {
+        "step": 2,
+        "build": "orders(filtered, ~1.47M orderkeys + attributes)",
+        "probe": "lineitem(60M → ~30M after zone map skip)",
+        "join_key": "l_orderkey = o_orderkey",
+        "build_cardinality": 1472400,
+        "probe_input_cardinality": 30000000,
+        "output_cardinality": 340000,
+        "rationale": "Build compact hash map on 1.47M qualifying orders; probe 30M lineitem rows passing shipdate zone map. Hash map built sequentially in single pass; lineitem probe is parallelized."
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "hash_group_by",
+    "aggregation_key": "l_orderkey (1:1 with o_orderdate and o_shippriority via orders hash map lookup — no compound key needed)",
+    "estimated_groups": 120000,
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment = 'BUILDING' (dictionary code lookup)",
+        "selectivity_estimate": 0.200,
+        "output_cardinality": 300276,
+        "applied_at": "scan time, before any join"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < 9204",
+        "selectivity_estimate": 0.487,
+        "output_cardinality": 7300000,
+        "applied_at": "zone map block skip before scan + row-level filter during scan"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_custkey IN qualifying_custkeys",
+        "selectivity_estimate": 0.201,
+        "output_cardinality": 1472400,
+        "applied_at": "during orders scan, after date filter (bitset probe)"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > 9204",
+        "selectivity_estimate": 0.500,
+        "output_cardinality": 30000000,
+        "applied_at": "zone map block skip before scan + row-level filter during scan"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_orderkey IN qualifying_orderkeys",
+        "selectivity_estimate": 0.011,
+        "output_cardinality": 340000,
+        "applied_at": "during lineitem scan, after shipdate filter (hash map probe)"
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "customer_filter": "bitset(1500001 bits = 187KB) indexed by c_custkey value directly — zero hash cost, single bit-test per probe, entire structure fits in L2 cache",
+      "orders_join_build": "compact_hash_map(pre_sized, capacity=next_pow2(1472400/0.75)=2097152) mapping int32 orderkey → struct{int32 orderdate, int32 shippriority}; open addressing with linear probing; built sequentially before parallel lineitem scan",
+      "aggregation": "compact_hash_map(pre_sized, capacity=next_pow2(120000/0.75)=262144) per thread-local map, key=int32 l_orderkey, value=struct{double revenue_sum, int32 orderdate, int32 shippriority}; thread-local maps merged after parallel phase; keying by l_orderkey only (orderdate and shippriority follow 1:1 from orders hash map lookup)",
+      "topk": "std::priority_queue max-heap of size 10, comparator: primary=revenue DESC, secondary=orderdate ASC; O(n log 10) = O(n) final pass over ~120K aggregated groups"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "phase_1_customer_scan": "single_threaded — 9MB total data (mktsegment 3MB + custkey 6MB), sequential single-pass, bitset build, ~10ms",
+      "phase_2_orders_scan": "single_threaded — sequential scan of first ~49% of orders file (zone map skip), reads o_orderdate + o_custkey + o_orderkey + o_shippriority; ~7.3M qualifying rows scanned, builds 1.47M-entry hash map; single-threaded to avoid concurrent hash map overhead for build phase",
+      "phase_3_lineitem_scan": "parallel morsel-driven — 64 threads, each thread processes morsels of 100K rows from the qualifying lineitem block range (zone map reveals first ~50% of 600 blocks are skippable); each thread maintains thread-local aggregation hash map (pre-sized 262144); threads operate independently with no synchronization during scan",
+      "phase_4_merge": "sequential merge of 64 thread-local aggregation maps into single global map; for each local entry, probe global map and accumulate revenue_sum",
+      "phase_5_topk": "single_threaded — iterate global map (~120K entries), maintain size-10 max-heap; O(120K × log 10) ≈ trivial",
+      "partition_count": 64,
+      "morsel_size_rows": 100000,
+      "synchronization": "thread_local_merge — no locks during hot lineitem scan loop; merge is sequential post-scan"
+    },
+    "index_usage": [
+      {
+        "index": "orders_orderdate_zonemap",
+        "file": "indexes/orders_orderdate_zonemap.bin",
+        "predicate": "o_orderdate < 9204",
+        "skip_condition": "block_min >= 9204",
+        "purpose": "skip_blocks_outside_range — orders is sorted ascending so blocks with block_min >= 9204 (all dates in block ≥ 1995-03-15) are entirely skipped; empirically ~51% of 150 blocks skipped, reducing orders I/O from 240MB to ~118MB per column",
+        "estimated_blocks_skipped": "~77 of 150 blocks (51%)",
+        "access": "mmap, read-once at query start"
+      },
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "predicate": "l_shipdate > 9204",
+        "skip_condition": "block_max <= 9204",
+        "purpose": "skip_blocks_outside_range — lineitem is sorted ascending by l_shipdate; early blocks with block_max <= 9204 (all rows shipped before 1995-03-15) are skipped; ~50% of 600 blocks (300 blocks = 30M rows) skipped, reducing lineitem I/O from 960MB to ~480MB across needed columns",
+        "estimated_blocks_skipped": "~300 of 600 blocks (50%)",
+        "access": "mmap, read-once at query start"
+      },
+      {
+        "index": "lineitem_orderkey_hash",
+        "file": "indexes/lineitem_orderkey_hash.bin",
+        "purpose": "NOT_USED — sequential zone-map-pruned scan outperforms random index lookups on HDD; index would trade ~480MB sequential I/O for random access over 60M × 12-byte slot table (~720MB) + scattered position lookups; net I/O would be higher with worse access patterns on HDD"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "customer": "single_pass: read c_mktsegment (dict lookup for BUILDING code) + c_custkey; set bit in bitset for each qualifying custkey; fused filter+project",
+      "orders": "zone_map_then_sequential: load zonemap, identify qualifying block range (first ~49% of file), single sequential pass reading o_orderdate + o_custkey + o_orderkey + o_shippriority; fused predicate (date<9204 AND custkey bitset probe) + hash map insert for qualifying rows",
+      "lineitem": "zone_map_then_parallel_sequential: load zonemap, identify qualifying block range (last ~50% of file by shipdate), parallel 64-thread morsel scan reading l_shipdate + l_orderkey + l_extendedprice + l_discount; fused predicate (shipdate>9204 AND orderkey hash map probe) + thread-local aggregation update"
+    },
+    "memory_pattern": "streaming_sequential — all scans are forward sequential reads within qualifying block ranges; hash map probes exhibit temporal locality (1.47M entries = ~24MB for orders map, fits in L3 cache of 44MB); thread-local agg maps are 262144 × ~24 bytes = ~6MB each, one per thread but accessed locally",
+    "memory_budget": {
+      "customer_bitset": "0.2 MB",
+      "orders_hash_map": "~35 MB (2097152 slots × 12 bytes key+value pair)",
+      "thread_local_agg_maps": "64 × 6 MB = 384 MB",
+      "zone_maps": "< 1 MB",
+      "total_peak": "~420 MB (well within 376 GB)"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_and_aggregate",
+    "phase_breakdown": {
+      "customer_scan_and_bitset_build": "~5 ms (9 MB sequential, single-threaded)",
+      "orders_zonemap_skip_and_scan": "~30 ms (4 cols × ~118 MB = 472 MB sequential, single-threaded, HDD may be bottleneck; if page-cached ~10ms)",
+      "lineitem_zonemap_skip_and_parallel_scan": "~60 ms (4 cols × ~240 MB = 960 MB total, parallelized over 64 threads; CPU-bound with hash probes if data is page-cached)",
+      "thread_local_agg_merge": "~5 ms (64 maps × 120K entries each)",
+      "topk_heap": "< 1 ms (120K entries, trivial)"
+    },
+    "estimated_ms": 100,
+    "bottleneck": "lineitem scan I/O and hash map probing; if data is warm in OS page cache, CPU is bottleneck (hash probe of 1.47M-entry map × 30M lineitem rows after zone skip)",
+    "target_comparison": "Umbra=46ms, DuckDB=78ms; target <120ms with correct zone map usage and parallel lineitem scan"
+  }
+}

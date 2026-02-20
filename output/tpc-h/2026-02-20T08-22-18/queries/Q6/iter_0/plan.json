@@ -1,0 +1,109 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "fused_filter_scan", "scalar_aggregate"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_sum",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "selectivity_estimate": 0.143,
+        "note": "Applied at block level via zone map (skips 515/600 blocks) AND per-row within edge blocks. int32 range check — cheapest predicate."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount BETWEEN 0.05 AND 0.07",
+        "selectivity_estimate": 0.27,
+        "note": "Applied second within zone-map-selected rows. ~3 of 11 distinct discount values qualify. double range check."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 24.0",
+        "selectivity_estimate": 0.48,
+        "note": "Applied last — least selective of the three. double comparison."
+      }
+    ],
+    "predicate_evaluation_order": [
+      "l_shipdate (int32 range, cheapest + zone-map aligned)",
+      "l_discount (double BETWEEN, ~27% pass — most selective among remaining)",
+      "l_quantity (double <, ~48% pass — least selective)"
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "zone_map": "mmap(indexes/lineitem_shipdate_zonemap.bin) — zero build cost, block-level skip",
+      "aggregation": "thread_local_scalar_double — no hash table; 64 thread-local doubles merged via sequential sum at end"
+    },
+    "columns_accessed": [
+      {"file": "lineitem/l_shipdate.bin",      "type": "int32",  "rows": 59986052, "size_mb": 240, "role": "filter + zone_map_key"},
+      {"file": "lineitem/l_discount.bin",       "type": "double", "rows": 59986052, "size_mb": 480, "role": "filter + accumulate_value"},
+      {"file": "lineitem/l_quantity.bin",       "type": "double", "rows": 59986052, "size_mb": 480, "role": "filter"},
+      {"file": "lineitem/l_extendedprice.bin",  "type": "double", "rows": 59986052, "size_mb": 480, "role": "accumulate_value"}
+    ],
+    "zone_map_pruning": {
+      "index_file": "indexes/lineitem_shipdate_zonemap.bin",
+      "total_blocks": 600,
+      "qualifying_blocks_estimate": 85,
+      "skipped_blocks_estimate": 515,
+      "skip_condition": "block_max < 8766 OR block_min >= 9131",
+      "early_break": "Since l_shipdate is sorted ascending, once block_min >= 9131, break out of block loop entirely",
+      "qualifying_rows_estimate": 8500000,
+      "data_read_after_pruning_mb": 238
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_unit": "block (100000 rows per block)",
+      "morsel_count": 85,
+      "block_distribution": "atomic_counter over qualifying block list — threads pull next unprocessed block via fetch_add",
+      "synchronization": "thread_local_scalar_merge — each thread accumulates into a local double; final sum is sequential reduction over 64 values (trivial cost)",
+      "false_sharing_prevention": "align thread-local buffers to 64-byte cache lines"
+    },
+    "simd_strategy": {
+      "instruction_set": "AVX-512 preferred (8 doubles/instruction), fallback to AVX2 (4 doubles)",
+      "filter_fusion": "Load 8 doubles of l_discount + 8 doubles of l_quantity simultaneously; generate combined bitmask; scatter-gather l_extendedprice for qualifying indices",
+      "accumulation": "FMA (fused multiply-add) on qualifying l_extendedprice * l_discount in SIMD registers; horizontal reduce once per block",
+      "int32_shipdate_filter": "AVX-512: _mm512_cmpge_epi32 + _mm512_cmplt_epi32 on 16 int32 values per instruction for per-row date range within blocks",
+      "compiler_hints": "__restrict__ on all column pointers, #pragma omp simd, -O3 -march=native -ffast-math"
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "purpose": "skip_blocks_outside_date_range [8766, 9131) — primary optimization, eliminates ~86% of data reads",
+        "access": "mmap, zero build cost",
+        "layout": "uint32_t num_blocks | per_block: int32_t min, int32_t max, uint32_t num_rows"
+      }
+    ],
+    "scan_strategy": "zone_map_driven_single_pass_fused",
+    "scan_details": {
+      "phase_1_block_selection": "Sequential scan of zone map (600 × 12 bytes = 7200 bytes, fits in L1 cache); collect list of qualifying block row-ranges",
+      "phase_2_column_scan": "For each qualifying block, load l_shipdate[row_start..row_end], l_discount[...], l_quantity[...], l_extendedprice[...] in parallel across 64 threads; apply fused filter+accumulate in a single pass",
+      "late_materialization": "Load l_extendedprice only for rows passing l_shipdate AND l_discount AND l_quantity filters — reduces memory reads by ~87% of qualifying block rows"
+    },
+    "memory_pattern": "streaming_sequential_within_blocks — column arrays accessed contiguously within each block; excellent hardware prefetcher utilization; no random access"
+  },
+  "cardinality_estimates": {
+    "lineitem_total_rows": 59986052,
+    "blocks_total": 600,
+    "blocks_after_zone_map": 85,
+    "rows_after_zone_map": 8500000,
+    "rows_after_shipdate_filter": 8500000,
+    "rows_after_discount_filter": 2295000,
+    "rows_after_quantity_filter": 1101600,
+    "contributing_rows": 1101600,
+    "data_read_mb_without_optimization": 1680,
+    "data_read_mb_with_zone_map": 238
+  },
+  "estimated_cost": {
+    "dominant_phase": "zone_map_driven_column_scan_over_85_blocks",
+    "bottleneck": "memory_bandwidth for ~238 MB of column data across qualifying blocks",
+    "zone_map_lookup_ms": 0.1,
+    "parallel_scan_ms_estimate": 8,
+    "thread_merge_ms": 0.01,
+    "estimated_ms": 10,
+    "notes": "64-thread parallel morsel scan over ~85 qualifying blocks (~238 MB total data). Zone map prunes 86% of data before any column is read. SIMD FMA for multiply-accumulate. Thread-local scalar accumulators avoid all synchronization during hot loop. Target: beat DuckDB (19 ms)."
+  }
+}

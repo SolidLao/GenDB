@@ -76,6 +76,11 @@ Write the plan to the path specified in the user prompt. Use this exact structur
    Only plan runtime hash table construction when no pre-built index covers the needed key,
    or you have clear evidence that using the index would cause correctness or efficiency issues.
 10. This plan is a recommendation, not a rigid constraint. The Code Generator may adapt it based on implementation-level insights.
+11. Aggregate group count upper bound: for GROUP BY on a join key from a 1:N relationship
+    (e.g., GROUP BY orderkey where orders:lineitem is 1:N), the number of groups is bounded
+    by the qualifying rows on the "1" side. The sampling program must count distinct aggregation
+    keys in the joined sample and scale by 1/sample_rate. Never estimate fewer groups than
+    the qualifying "1"-side cardinality.
 
 ## Output Contract
 You MUST write the plan JSON file using the Write tool to the exact path specified.

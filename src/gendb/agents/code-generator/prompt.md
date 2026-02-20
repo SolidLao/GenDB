@@ -135,3 +135,6 @@ Use RAII phase timing instead of manual #ifdef blocks:
 9. Hash table initialization: NEVER use memset() to set sentinel values on multi-byte types.
    memset(buf, 0x80, n) sets each BYTE to 0x80, producing 0x80808080 per int32_t — NOT INT32_MIN (0x80000000).
    Use std::fill(keys, keys + CAP, EMPTY_KEY) or a for-loop.
+10. All open-addressing hash tables MUST use bounded probing (for-loop with probe < cap, not
+    unbounded while). See compact-hash-tables.md. For thread-local aggregation, size each
+    thread's map for the full aggregate group count from plan.json, not groups/nthreads.

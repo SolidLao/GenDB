@@ -19,6 +19,7 @@ GenDB takes a different approach to query execution: instead of routing queries 
 - **Unified Query Guide** — Storage Designer generates comprehensive per-query guides (`Qi_guide.md`) with column usage contracts, SQL→C++ conversion examples, table stats, query analysis, and index layouts — the sole reference for all Phase 2 agents
 - **Deterministic failure diagnosis** — orchestrator detects common validation failure patterns (ratio errors, zero-output filters, row count mismatches) and provides actionable hints to the optimizer
 - **Index-aware** — agents read pre-built index binary formats from the Query Guide and generate matching loader code inline
+- **Safe hash table patterns** — all canonical hash table patterns use bounded probing (for-loop with probe < cap guard) to prevent infinite loops from cardinality misestimates; thread-local tables sized for full key cardinality
 - **Experience base** — evolving knowledge of correctness bugs and performance anti-patterns, checked by Code Inspector before execution
 - **Correctness anchors** — validated constants (date thresholds, revenue formulas) are extracted from passing code and made immutable during optimization
 - **Adaptive iteration budget** — stall detection triggers after 2 consecutive non-improving iterations with 3x gap from baseline

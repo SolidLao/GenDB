@@ -72,6 +72,9 @@ These cause 10-100x gaps. Fix them first:
 - Thread-local hash tables merged sequentially -> use partitioned or atomic approaches
 - `std::unordered_map` for joins/aggregation with >256 groups -> use custom open-addressing hash table
 - Wrong join build side (larger table as build) -> swap to build on smaller filtered side
+- Repeated timeout with no [TIMING] output -> suspect hash table overflow. Check every
+  open-addressing hash table: is capacity > 2x the actual distinct key count? Are thread-local
+  maps sized for full cardinality? Replace unbounded while probes with bounded for-loops.
 
 ## Aggressive Optimization Checklist (code-only, most impactful first)
 When performance gap is large (>3x vs baseline) or stall is detected, apply these IN CODE via Edit tool:

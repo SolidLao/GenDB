@@ -46,3 +46,5 @@ for (int64_t i = 0; i < num_rows; i++) {
 - Forgetting to pre-size with `reserve()` causes expensive rehashing mid-aggregation
 - Sequential merge of thread-local tables can bottleneck for many groups (>10K) — use partitioned approach
 - Kahan summation required for floating-point aggregates to avoid precision loss over millions of rows
+- Thread-local aggregation tables: each thread may see up to the full distinct key count (not total/nthreads), especially with dynamic/work-stealing scheduling. Size each thread's map for worst case.
+- Use bounded probing (see compact-hash-tables.md) — never unbounded `while` loops in open-addressing tables.

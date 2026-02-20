@@ -1436,6 +1436,10 @@ async function runQueryFullPipeline(
         "   memset(buf, 0x80, n) sets each BYTE to 0x80, producing 0x80808080 ≠ INT32_MIN. Use std::fill() instead.",
         "2. Algorithmic complexity explosion — nested loops with O(n²) or worse over large tables.",
         "3. Hash table at 100% load factor — ensure power-of-2 sizing with ≤50% load factor.",
+        "4. Thread-local aggregation hash table too small — each thread may see ALL distinct groups,",
+        "   not just total/nthreads. Check that per-thread capacity >= estimated aggregate groups.",
+        "   If plan.json group estimate seems too low (e.g., <10K for a multi-table join),",
+        "   re-derive from qualifying row counts.",
         "Check the code for these patterns and fix the root cause.",
         "",
       ].join("\n");

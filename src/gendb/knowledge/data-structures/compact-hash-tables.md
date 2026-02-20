@@ -30,20 +30,25 @@ struct CompactHashTable {
 
     void insert(K key, V value) {
         size_t pos = hash_key(key) & mask;
+        size_t cap = mask + 1;
         Entry entry{key, value, 0, true};
-        while (table[pos].occupied) {
+        for (size_t probe = 0; probe < cap; ++probe) {
+            if (!table[pos].occupied) { table[pos] = entry; return; }
             if (table[pos].key == key) { table[pos].value = value; return; }
             if (entry.dist > table[pos].dist) std::swap(entry, table[pos]);
             pos = (pos + 1) & mask;
             entry.dist++;
         }
-        table[pos] = entry;
+        fprintf(stderr, "FATAL: hash table full (cap=%zu, probe=%zu)\n", cap, cap);
+        abort();
     }
 
     V* find(K key) {
         size_t pos = hash_key(key) & mask;
-        uint8_t dist = 0;
-        while (table[pos].occupied) {
+        size_t cap = mask + 1;
+        uint16_t dist = 0;
+        for (size_t probe = 0; probe < cap; ++probe) {
+            if (!table[pos].occupied) return nullptr;
             if (table[pos].key == key) return &table[pos].value;
             if (dist > table[pos].dist) return nullptr;
             pos = (pos + 1) & mask;
@@ -54,30 +59,10 @@ struct CompactHashTable {
 };
 ```
 
-## GenDB Utility Library
-The `hash_utils.h` header provides ready-to-use implementations:
-```cpp
-#include "hash_utils.h"
-
-// Hash map (replaces std::unordered_map)
-gendb::CompactHashMap<int32_t, int64_t> map(expected_size);
-map.insert(key, value);
-auto* ptr = map.find(key);  // returns nullptr if not found
-map[key] += delta;          // operator[] with default construction
-
-// Hash set (replaces std::unordered_set)
-gendb::CompactHashSet<int32_t> set(expected_size);
-set.insert(key);
-if (set.contains(key)) { ... }
-
-// Hash utilities
-uint64_t h = gendb::hash_int(key);
-uint64_t combined = gendb::hash_combine(h1, h2);  // for composite keys
-```
-**Always use hash_utils.h instead of std::unordered_map/set for >1000 entries.**
-
 ## Pitfalls
 - Never use `std::hash<int32_t>` — it is often the identity function, causing severe clustering
 - Forgetting to pre-size leads to excessive resizing and rehashing
 - Load factor >90% causes exponential probe chain growth
-- Auto-resize: `hash_utils.h` now auto-rehashes at 75% load, so maps won't infinite-loop if undersized. Still pre-size accurately to avoid rehash overhead. When merging thread-local maps, size the target for total distinct keys across all threads.
+- **NEVER use unbounded `while` for probing** — if cardinality estimates are wrong, the table fills up and probing loops forever. Always use a bounded `for` loop with `probe < cap` guard, or Robin Hood distance tracking with the same bound.
+- When merging thread-local maps, size the global target for the union of all keys (not avg per thread).
+- For thread-local maps with dynamic/morsel scheduling, each thread may encounter ALL distinct keys. Size per-thread maps for the full estimated key cardinality, not cardinality/nthreads.

@@ -21,7 +21,7 @@
 ### C9: Open-Addressing Hash Table Capacity Overflow
 - Detect: Open-addressing hash table without resize or max-probe limit
 - Impact: Infinite loop at 100% load factor
-- Fix: Power-of-2 sizing with ≤50% load factor and max probe count. Size for union cardinality when merging.
+- Fix: Power-of-2 sizing with ≤50% load factor and max probe count. Size for union cardinality when merging. For thread-local hash tables: size each thread's map for the FULL estimated key cardinality (not cardinality/nthreads). With dynamic scheduling, any thread may encounter all groups.
 
 ### C11: init_date_tables() Must Be Called Before extract_year/extract_month/extract_day
 - Detect: extract_year() etc. called without preceding init_date_tables()
@@ -101,6 +101,11 @@
 - Detect: Query crashes (signal kill) or times out in ≥2 consecutive iterations with zero [TIMING] lines in stdout
 - Impact: Infinite loop before any timed phase completes; optimizer receives no diagnostic signal and cannot self-correct
 - Fix: Suspect C9 or C20. Audit every open-addressing hash table: (1) capacity = next_power_of_2(2 * max_expected_entries) for ≤50% load; (2) EMPTY_KEY set with std::fill — never memset for non-zero sentinels on multi-byte types. At SF10: ORDERS ~15M rows, LINEITEM ~60M rows.
+
+### C24: Unbounded Hash Table Probing Loop
+- Detect: `while (keys[h] != EMPTY && keys[h] != k) h = (h+1) & mask;` without probe count limit
+- Impact: Infinite loop if table reaches 100% load due to wrong cardinality estimate
+- Fix: Replace with bounded for-loop: `for (uint32_t p = 0; p < cap; ++p) { ... h = (h+1) & mask; }` with abort() on exhaustion. Or use Robin Hood distance tracking.
 
 ## Performance Issues
 

@@ -1,0 +1,86 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "filter_scan", "fused_accumulate", "thread_merge", "sort_output"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "selectivity_estimate": 0.75,
+        "qualified_rows": 45000000,
+        "note": "lineitem sorted ASC by l_shipdate; zone map enables early-termination break once block_min > 10471"
+      }
+    ],
+    "group_key_encoding": {
+      "key": "(rf_code * 2 + ls_code)",
+      "rf_cardinality": 3,
+      "ls_cardinality": 2,
+      "max_slots": 6,
+      "actual_groups": 4,
+      "note": "Load dicts at runtime; use int16_t codes directly as array indices; decode only at output"
+    },
+    "columns_accessed": [
+      "l_shipdate (filter)",
+      "l_returnflag (group key, int16_t dict-encoded)",
+      "l_linestatus (group key, int16_t dict-encoded)",
+      "l_quantity (SUM, AVG)",
+      "l_extendedprice (SUM, AVG)",
+      "l_discount (SUM expr, AVG)",
+      "l_tax (SUM expr)"
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array[6] of struct{sum_qty, sum_price, sum_disc_price, sum_charge, sum_disc, count, cnt} — one per thread (thread-local), merged after parallel phase; indexed by (rf_code * 2 + ls_code)",
+      "dim_filter": "none (single-table query)",
+      "fact_join": "none"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 16384,
+      "morsel_size_rationale": "L3=44MB / 64 threads / 7 cols × ~40 bytes/row ≈ 16K rows fits per-thread working set in L3 slice",
+      "partition_count": 64,
+      "synchronization": "thread_local_flat_array_then_merge",
+      "merge_cost": "trivial — 6 slots × 64 threads = 384 scalar additions",
+      "note": "Each thread owns a private flat array[6] of accumulators — zero contention during hot scan loop. Merge is sequential after all threads complete."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "purpose": "skip_trailing_blocks_outside_range",
+        "access": "mmap (zero build cost)",
+        "detail": "Iterate blocks; break immediately when blocks[b].mn > 10471 (sorted ASC guarantees all remaining blocks also fail). Skips ~150 of 600 blocks = ~15M rows, ~25% I/O reduction."
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_detail": {
+      "pass_description": "One fused loop per morsel: load l_shipdate, check <= 10471 via SIMD AVX-512 comparison (16 int32 per instruction), for passing rows load (rf, ls, qty, price, disc, tax) and accumulate directly into thread-local flat array[6]",
+      "simd": "AVX-512 on l_shipdate filter; compiler auto-vectorized accumulation with #pragma omp simd on the accumulation loop",
+      "branch_avoidance": "branchless mask-based accumulation after SIMD filter step"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_detail": {
+      "total_effective_io": "~1.8 GB (75% of 2.4 GB across 7 columns after zone map pruning)",
+      "mmap_strategy": "mmap all 7 column files + zone map at startup; OS prefetcher handles sequential access",
+      "accumulator_footprint": "6 slots × 7 doubles × 64 threads = ~21 KB — fits in L1 cache per thread"
+    },
+    "output": {
+      "post_aggregation": "sort 4 result rows by (decoded l_returnflag string, decoded l_linestatus string) — trivial sort on 4 elements",
+      "avg_finalization": "compute AVG(x) = sum_x / count at output stage; no intermediate AVG state needed"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_column_scan",
+    "zone_map_prune_ms": 1,
+    "parallel_scan_and_accumulate_ms": 40,
+    "thread_merge_and_output_ms": 1,
+    "estimated_ms": 42,
+    "bottleneck": "memory bandwidth across 7 column files (~1.8 GB effective read shared across 64 threads)",
+    "note": "Estimate consistent with observed GenDB 41ms. Flat-array aggregation with 6 slots eliminates all hash overhead. Early-termination zone map reduces I/O ~25%."
+  }
+}
