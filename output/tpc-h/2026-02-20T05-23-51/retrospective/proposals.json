@@ -1,0 +1,37 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C22",
+      "category": "correctness",
+      "title": "Hardcoded Database Path Constructed from Scale Factor",
+      "detect": "Generated code opens binary files from a path constructed by concatenating 'sf' + scale_factor + '.gendb' (e.g., sf10.gendb, sf1.gendb). If the actual database directory uses a different naming convention, all fopen/mmap calls fail with 'No such file or directory'.",
+      "fix": "Use the exact database root path provided in the Query Guide's Data Layout section. Never derive the path by concatenating the scale factor string. If the guide path is ambiguous, read it from an environment variable or a top-level config constant — never hardcode a scale-factor-derived string."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C23",
+      "category": "correctness",
+      "title": "Repeated Crash or Timeout With No Timing Output — Escalate to Hash Table Audit",
+      "detect": "Query crashes (killed by signal) or times out in ≥2 consecutive iterations with no [TIMING] lines in stdout. This means an infinite loop is running before any timed phase completes.",
+      "fix": "Immediately suspect C9 (open-addressing hash table at 100% load factor) or C20 (memset sentinel mismatch). Audit EVERY open-addressing hash table in the code: (1) capacity must be next_power_of_2(2 * max_expected_entries) to keep load ≤50%; (2) EMPTY_KEY sentinel must be set with std::fill(keys, keys+CAP, EMPTY_KEY) — never memset for non-zero/non-0xFF sentinels on multi-byte types. For Q3-type queries at SF10: ORDERS has ~15M rows, LINEITEM has ~60M rows — size hash tables accordingly."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P12",
+      "category": "performance",
+      "title": "Optimizer Oscillation — New Iteration Regresses from Previous Best",
+      "detect": "An optimization iteration produces a timing that is >20% worse than the best validated timing so far (observed: Q6 iter_3 = 152 ms vs best 69 ms; Q9 iter_4 = 220 ms vs best 168 ms). The optimizer then must spend an extra iteration to recover, wasting one full generate-compile-run cycle.",
+      "fix": "Track the best validated (timing_ms, source code) pair across all iterations. Before finalizing the next iteration's code, check if its timing regresses by >20%. If so, revert to the best-known source and choose a different optimization direction rather than emitting the regressed version."
+    }
+  ],
+  "meta": {
+    "workload": "tpc-h",
+    "scale_factor": 10,
+    "timestamp": "2026-02-20T05-23-51",
+    "queries_total": 5,
+    "queries_success": 4,
+    "queries_slow": 0,
+    "queries_failed": 1
+  }
+}

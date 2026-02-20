@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q18/iter_2/q18.cpp:29:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q18(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:38: warning: ‘__builtin___sprintf_chk’ may write a terminating nul past the end of the destination [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                      ^\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q18/iter_2/q18.cpp:17:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 16\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] phase1_subquery: 85.87 ms\n[TIMING] phase2_main: 42.16 ms\n[TIMING] sort_topk: 0.05 ms\n[TIMING] output: 1.05 ms\n[TIMING] total: 129.50 ms\n",
+    "stderr": "",
+    "duration_ms": 136
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "phase1_subquery": 85.87,
+    "phase2_main": 42.16,
+    "sort_topk": 0.05,
+    "output": 1.05,
+    "total": 129.5
+  },
+  "timing_ms": 128.45
+}

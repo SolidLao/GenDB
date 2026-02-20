@@ -1,0 +1,81 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "scan_filter", "aggregate", "sort_output"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "selectivity_estimate": 0.988,
+        "note": "zone map skips blocks where zm[b].min > 10471; ~1-2% of 600 blocks skipped due to non-date-sorted storage order"
+      }
+    ],
+    "group_by": {
+      "keys": ["l_returnflag", "l_linestatus"],
+      "distinct_groups": 6,
+      "key_encoding": "idx = (rflag=='R'?2 : rflag=='N'?1 : 0)*2 + (lstatus=='O'?1 : 0)",
+      "structure": "flat_array[6] of accumulators (sum_qty, sum_price, sum_disc_price, sum_charge, sum_disc, count)"
+    },
+    "order_by": {
+      "keys": ["l_returnflag ASC", "l_linestatus ASC"],
+      "strategy": "trivial_sort_6_groups"
+    }
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array[6] per thread (direct index, no hash table — 6 groups fits in registers)",
+      "merge": "sequential reduce of 64 thread-local flat_array[6] into global flat_array[6] — 384 ops total"
+    },
+    "scan_order": [
+      "l_shipdate  (filter predicate — 4B/row, drives row selection)",
+      "l_returnflag (1B/row, group key)",
+      "l_linestatus (1B/row, group key)",
+      "l_quantity   (8B/row, SUM + AVG)",
+      "l_extendedprice (8B/row, SUM + AVG + disc_price + charge)",
+      "l_discount   (8B/row, SUM disc_price + SUM charge + AVG)",
+      "l_tax        (8B/row, SUM charge only)"
+    ],
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size_rows": 100000,
+      "total_morsels": 600,
+      "synchronization": "thread_local_flat_array_merge — no locks during scan; single sequential merge pass after all threads finish",
+      "note": "Zone map block boundaries align with morsel boundaries (block_size=100000). Each thread processes assigned blocks independently."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600][{int32_t min, int32_t max, uint32_t block_size} x 600]",
+        "purpose": "skip_blocks_where_all_dates_exceed_cutoff",
+        "skip_condition": "zm[b].min > 10471",
+        "expected_blocks_skipped": "~6-12 of 600 (~1-2%)",
+        "build_cost": "zero (mmap, pre-built)"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "simd_strategy": {
+      "instruction_set": "AVX-512",
+      "filter_vectorization": "load 16x int32 l_shipdate values, compare <= 10471 with _mm512_cmplt_epi32_mask, produce 16-bit mask",
+      "accumulation": "masked double accumulation via _mm512_mask_add_pd for sum_qty, sum_price, sum_disc_price, sum_charge, sum_disc",
+      "note": "returnflag+linestatus group index computation done scalar after mask scatter; 6 groups fit in L1 cache"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_footprint": {
+      "per_thread_state": "6 slots x 7 doubles = 336 bytes (fits in L1 cache)",
+      "total_column_data_scanned": "~2.3 GB (all 7 columns x 60M rows)",
+      "zone_map_file": "600 x 12 bytes = 7.2 KB (fits in L1)"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "main_scan — streaming 2.3 GB across 64 threads",
+    "zone_map_phase_ms": 1,
+    "scan_and_aggregate_ms": 40,
+    "merge_and_sort_ms": 1,
+    "estimated_total_ms": 42
+  }
+}

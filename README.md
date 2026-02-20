@@ -12,7 +12,9 @@ GenDB takes a different approach to query execution: instead of routing queries 
 - **7-agent architecture** — Workload Analyzer, Storage Designer, DBA, Query Planner, Code Generator, Code Inspector, Query Optimizer
 - **Plan-first pipeline** — Query Planner designs structured JSON execution plans (join order, data structures, parallelism), Code Generator implements them, Optimizer can modify both plan and code
 - **Timeout-resilient code generation** — Code Generator does full compile→run→validate internally (catching logical bugs early), but the orchestrator always calls `executeQuery()` as a safety net — surviving agent timeouts on complex queries. Fallback execution runs on agent crash/timeout to prevent iteration gaps.
-- **Known issue: `max_output_token_limit` hangs** — when an agent's response exceeds the output token limit, the Claude CLI process can hang silently until the agent timeout (15 min). The Claude CLI does not expose a clean exit code or signal for this condition. Current mitigation: v28 prompt engineering (removing redundant knowledge base reads, adding output discipline for the Optimizer) reduces the likelihood of hitting token limits. A per-agent inactivity detection or `--max-turns` cap may be added in a future version
+- **Process group lifecycle management** — all spawned processes (agents and binaries) run in detached process groups; on timeout or completion, the entire group is killed via `process.kill(-pid)`, preventing orphaned zombie processes. Pre-run cleanup kills any leftover processes from previous runs.
+- **Configurable query execution timeout** — `queryExecutionTimeoutSec` (default 300s) controls binary execution timeout across all execution sites: orchestrator `executeQuery()`, Code Generator's internal `timeout` command, and final assembly validation. Eliminates hardcoded timeout values.
+- **Per-agent thinking budget control** — `MAX_THINKING_TOKENS` env var limits extended thinking per agent (configured via `agentThinkingBudgets` in `gendb.config.mjs`). Prevents thinking from consuming the entire 64K output token budget, which previously caused 30+ minute wasted cycles of think→exceed→restart. All agent prompts include Thinking Discipline guidance.
 - **Fully adaptive code generation** — agents generate all data structures (hash tables, mmap loading, bitsets) inline, tailored to each query's specific types, cardinalities, and access patterns. Only date_utils.h and timing_utils.h are system infrastructure.
 - **Unified Query Guide** — Storage Designer generates comprehensive per-query guides (`Qi_guide.md`) with column usage contracts, SQL→C++ conversion examples, table stats, query analysis, and index layouts — the sole reference for all Phase 2 agents
 - **Deterministic failure diagnosis** — orchestrator detects common validation failure patterns (ratio errors, zero-output filters, row count mismatches) and provides actionable hints to the optimizer
@@ -22,7 +24,7 @@ GenDB takes a different approach to query execution: instead of routing queries 
 - **Adaptive iteration budget** — stall detection triggers after 2 consecutive non-improving iterations with 3x gap from baseline
 - **Gap-tolerant iteration reporting** — summary tables and benchmarks scan all `iter_*` directories instead of breaking on the first missing one, so late-succeeding iterations are always visible
 - **DBA agent** — optional pre-generation risk analysis (Stage A, `--dba-stage-a`), retrospective post-run (Stage B)
-- **Code Inspector** — cheap Haiku-based review agent catches correctness issues (critical) and performance suggestions (non-blocking), now receives Query Guide for encoding verification
+- **Code Inspector** — Sonnet-based review agent catches correctness issues (critical) and performance suggestions (non-blocking), receives Query Guide for encoding verification
 - **True per-query pipelining** — each query flows independently through Planner→Coder→Inspector→Execute→[fix]→[Optimizer→Inspector→Execute]* with no batch boundaries
 - **Knowledge-driven autonomy** — Query Planner reads the knowledge base (40+ technique files) and encodes strategy into plan.json; downstream agents receive only the plan + Query Guide, avoiding redundant knowledge reads and input bloat
 - **Programmatic optimization control** — continue/stop decisions and improvement checks are deterministic JavaScript functions, not LLM calls
@@ -105,7 +107,7 @@ DBA Stage B → Review all results, identify patterns, write retrospective/
 ║                 │                                                               ║
 ║                 ▼                                                               ║
 ║  ┌─────────────────────────────┐                                               ║
-║  │  Code Inspector (Haiku)     │  Inputs: .cpp file, experience.md,            ║
+║  │  Code Inspector (Sonnet)    │  Inputs: .cpp file, experience.md,            ║
 ║  │                             │          Qi_guide.md                           ║
 ║  │  1. Read C++ source         │                                               ║
 ║  │  2. Check experience base   │  Cheap pre-execution review.                  ║
@@ -119,7 +121,7 @@ DBA Stage B → Review all results, identify patterns, write retrospective/
 ║  │  Executor (non-LLM)        │  Orchestrator safety net — runs even           ║
 ║  │                             │  if Code Generator timed out.                  ║
 ║  │  1. Compile with -O3 -flto  │                                               ║
-║  │  2. Run binary (300s limit) │                                               ║
+║  │  2. Run binary (config limit)│                                               ║
 ║  │  3. Validate vs ground truth│                                               ║
 ║  │  4. Parse [TIMING] phases   │                                               ║
 ║  │  5. Extract correctness     │                                               ║
@@ -171,7 +173,7 @@ DBA Stage B → Review all results, identify patterns, write retrospective/
 | **DBA** | Sonnet | 1 + 3 | Optional pre-gen risk analysis (Stage A), post-run retrospective (Stage B) |
 | **Query Planner** | Sonnet | 2 | Iter 0: design structured JSON execution plan; sole knowledge base consumer |
 | **Code Generator** | Sonnet | 2 | Iter 0: implement plan.json in C++, compile + run + validate (no knowledge base) |
-| **Code Inspector** | Haiku | 2 | Review code against experience base + Query Guide, detect optimizer regressions |
+| **Code Inspector** | Sonnet | 2 | Review code against experience base + Query Guide, detect optimizer regressions |
 | **Query Optimizer** | Sonnet | 2 | Iter 1+: targeted edits to plan/code, output-disciplined (no knowledge base) |
 
 ## System Utilities

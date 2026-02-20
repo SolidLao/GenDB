@@ -6,6 +6,12 @@ C++ code that outperforms the fastest OLAP engines (DuckDB, ClickHouse, Umbra, M
 your code has zero runtime overhead — no query parser, no buffer pool, no type dispatch — just
 raw computation on raw data. The C++ compiler sees your entire query as one compilation unit.
 
+## Thinking Discipline
+Your thinking budget is limited. Think concisely and structurally:
+- Plan the implementation structure (phases, data structures, join order) in thinking.
+- NEVER draft full C++ code in your thinking. Use the Write tool to write the .cpp file.
+- Structure: (1) read plan, (2) note key decisions, (3) start writing code via tools.
+
 ## Workflow
 1. Read the execution plan (plan.json) provided in the user prompt — this is your recommended strategy
 2. Implement the plan in C++ following the output contract below
@@ -126,3 +132,6 @@ Use RAII phase timing instead of manual #ifdef blocks:
    column types, dictionary patterns, date conversions, and query-specific examples.
    Follow these contracts exactly — they are the authoritative reference for this run's data
    encoding. Do NOT read storage_design.json directly.
+9. Hash table initialization: NEVER use memset() to set sentinel values on multi-byte types.
+   memset(buf, 0x80, n) sets each BYTE to 0x80, producing 0x80808080 per int32_t — NOT INT32_MIN (0x80000000).
+   Use std::fill(keys, keys + CAP, EMPTY_KEY) or a for-loop.

@@ -1,0 +1,27 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp: In function ‘void run_Q9(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:317:11: warning: ‘sz_qty’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  317 |     munmap((void*)l_quantity,     sz_qty);     close(fd_qty);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:316:11: warning: ‘sz_disc’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  316 |     munmap((void*)l_discount,     sz_disc);    close(fd_disc);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:315:11: warning: ‘sz_ep’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  315 |     munmap((void*)l_extendedprice,sz_ep);      close(fd_ep);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:314:11: warning: ‘sz_lok’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  314 |     munmap((void*)l_orderkey,     sz_lok);     close(fd_lok);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:313:11: warning: ‘sz_lsk’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  313 |     munmap((void*)l_suppkey,      sz_lsk);     close(fd_lsk);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:175:12: warning: ‘sz_lpk’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  175 |     size_t n_lineitem = sz_lpk / 4u;\n      |            ^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:311:11: warning: ‘sz_odate’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  311 |     munmap((void*)o_orderdate,    sz_odate);   close(fd_odate);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:310:11: warning: ‘sz_ord_idx’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  310 |     munmap((void*)ord_idx,        sz_ord_idx); close(fd_ord_idx);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:309:11: warning: ‘sz_psc’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  309 |     munmap((void*)ps_supplycost,  sz_psc);     close(fd_psc);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:308:11: warning: ‘sz_ps_idx’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  308 |     munmap((void*)ps_idx,         sz_ps_idx);  close(fd_ps_idx);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:136:15: warning: ‘sz_pk’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  136 |         munmap((void*)p_partkey, sz_pk);  close(fd_pk);\n      |         ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:127:16: warning: ‘sz_name’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  127 |         size_t n_parts = sz_name / 56u;\n      |                ^~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:107:19: warning: ‘sz_nk’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  107 |             munmap((void*)s_nationkey, sz_nk); close(fd_nk);\n      |             ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:102:20: warning: ‘sz_sk’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  102 |             size_t n_sup = sz_sk / 4;\n      |                    ^~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-20T05-23-51/queries/Q9/iter_0/q9.cpp:91:19: warning: ‘sz’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n   91 |             munmap((void*)data, sz); close(fd);\n      |             ~~~~~~^~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] dim_filter: 0.54 ms\n[TIMING] build_joins: 53.11 ms\n[TIMING] main_scan: 50.21 ms\n[TIMING] output: 1.45 ms\n[TIMING] total: 335.47 ms\n",
+    "stderr": "",
+    "duration_ms": 342
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "dim_filter": 0.54,
+    "build_joins": 53.11,
+    "main_scan": 50.21,
+    "output": 1.45,
+    "total": 335.47
+  },
+  "timing_ms": 334.02000000000004
+}

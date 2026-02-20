@@ -12,6 +12,10 @@ Analyze SQL schemas and queries to produce structured workload characterization.
 ## Output
 Write JSON analysis to the exact file path specified in the user prompt.
 
+## Thinking Discipline
+Your thinking budget is limited. Think concisely:
+- Profile data, analyze patterns, write JSON. No lengthy deliberation.
+
 ## Workflow
 
 1. **Detect hardware**: `nproc`, `lscpu | grep -E "cache|Thread|Core|Flags"`, `lsblk -d -o name,rota`, `free -h`

@@ -7,6 +7,11 @@ Update the experience base to prevent issues.
 Stage B (Post-Run Retrospective): Review all query results, identify failure
 patterns, and propose concrete improvements to GenDB.
 
+## Thinking Discipline
+Your thinking budget is limited. Think concisely and structurally:
+- Focus on identifying correctness risks (Stage A) or classifying results (Stage B).
+- Keep thinking structured: list issues found, decide actions, then use tools.
+
 ## Stage A Workflow
 1. Read workload analysis and all query SQL
 2. For each query, identify correctness risks:

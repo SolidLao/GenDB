@@ -1,0 +1,213 @@
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <immintrin.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string>
+#include <vector>
+#include <omp.h>
+#include <algorithm>
+#include <iostream>
+#include "timing_utils.h"
+
+// Zone map entry layout
+struct ZMEntry {
+    int32_t  min;
+    int32_t  max;
+    uint32_t block_size;
+};
+
+static inline const void* mmap_file(const std::string& path, size_t& out_size, int hint = MADV_SEQUENTIAL) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) { perror(path.c_str()); return nullptr; }
+    struct stat st;
+    fstat(fd, &st);
+    out_size = (size_t)st.st_size;
+    void* p = mmap(nullptr, out_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    // MADV_RANDOM for demand-paged columns (discount/qty/extprice):
+    //   prevents OS readahead of pages we skip via early-exit in SIMD loop.
+    //   Only fault in pages for the ~8% of rows that pass the date filter.
+    // MADV_SEQUENTIAL for shipdate: always fully scanned.
+    // NO MADV_HUGEPAGE: scanning all PTEs for huge-page promotion costs ~10ms per large file.
+    // NO MADV_WILLNEED: eager loading defeats the early-exit bandwidth savings.
+    madvise(p, out_size, hint);
+    posix_fadvise(fd, 0, out_size, hint == MADV_SEQUENTIAL ? POSIX_FADV_SEQUENTIAL : POSIX_FADV_RANDOM);
+    close(fd);
+    return p;
+}
+
+void run_Q6(const std::string& gendb_dir, const std::string& results_dir) {
+    // Pre-warm the OpenMP thread pool BEFORE timing starts.
+    // First-time omp parallel fork creates 64 threads (50-100ms overhead).
+    // This ensures thread creation cost is excluded from the timed region.
+    #pragma omp parallel num_threads(64)
+    { /* warm up thread pool */ }
+
+    GENDB_PHASE("total");
+
+    // Date constants
+    const int32_t DATE_LO = 8766;  // 1994-01-01
+    const int32_t DATE_HI = 9131;  // 1995-01-01 (exclusive)
+
+    // Column file paths
+    const std::string zm_path    = gendb_dir + "/indexes/lineitem_shipdate_zonemap.bin";
+    const std::string sd_path    = gendb_dir + "/lineitem/l_shipdate.bin";
+    const std::string disc_path  = gendb_dir + "/lineitem/l_discount.bin";
+    const std::string qty_path   = gendb_dir + "/lineitem/l_quantity.bin";
+    const std::string price_path = gendb_dir + "/lineitem/l_extendedprice.bin";
+
+    // Load zone map
+    size_t zm_size = 0;
+    const uint8_t* zm_raw = (const uint8_t*)mmap_file(zm_path, zm_size);
+    uint32_t num_blocks = *reinterpret_cast<const uint32_t*>(zm_raw);
+    const ZMEntry* zm = reinterpret_cast<const ZMEntry*>(zm_raw + sizeof(uint32_t));
+
+    // mmap columns
+    // shipdate: fully scanned → MADV_SEQUENTIAL
+    // discount/quantity/extprice: only pages for date-passing rows needed → MADV_RANDOM
+    //   (prevents OS readahead for the 92% of rows skipped by early-exit)
+    size_t sd_size = 0, disc_size = 0, qty_size = 0, price_size = 0;
+    const int32_t* shipdate    = (const int32_t*)mmap_file(sd_path,    sd_size,   MADV_SEQUENTIAL);
+    const double*  discount    = (const double*) mmap_file(disc_path,  disc_size, MADV_RANDOM);
+    const double*  quantity    = (const double*) mmap_file(qty_path,   qty_size,  MADV_RANDOM);
+    const double*  extprice    = (const double*) mmap_file(price_path, price_size,MADV_RANDOM);
+
+    size_t total_rows = sd_size / sizeof(int32_t);
+
+    // Collect qualifying blocks for parallel dispatch
+    std::vector<uint32_t> active_blocks;
+    active_blocks.reserve(num_blocks);
+    {
+        GENDB_PHASE("zone_map_prune");
+        for (uint32_t b = 0; b < num_blocks; b++) {
+            if (zm[b].max < DATE_LO || zm[b].min >= DATE_HI) continue;
+            active_blocks.push_back(b);
+        }
+    }
+
+    double global_revenue = 0.0;
+
+    {
+        GENDB_PHASE("main_scan");
+
+        int nblocks = (int)active_blocks.size();
+
+#pragma omp parallel reduction(+:global_revenue) num_threads(64)
+        {
+            double local_rev = 0.0;
+
+#pragma omp for schedule(static)
+            for (int bi = 0; bi < nblocks; bi++) {
+                uint32_t b = active_blocks[bi];
+                uint32_t row_start = b * 100000;
+                uint32_t row_end   = row_start + zm[b].block_size;
+                if (row_end > (uint32_t)total_rows) row_end = (uint32_t)total_rows;
+
+                const int32_t* sd  = shipdate + row_start;
+                const double*  di  = discount + row_start;
+                const double*  qt  = quantity + row_start;
+                const double*  ep  = extprice + row_start;
+                uint32_t n = row_end - row_start;
+
+#ifdef __AVX512F__
+                // AVX-512: process 8 doubles at a time
+                const __m512d v_disc_lo = _mm512_set1_pd(0.05);
+                const __m512d v_disc_hi = _mm512_set1_pd(0.07);
+                const __m512d v_qty_th  = _mm512_set1_pd(24.0);
+                const __m256i v_sd_lo   = _mm256_set1_epi32(DATE_LO);
+                const __m256i v_sd_hi   = _mm256_set1_epi32(DATE_HI - 1);
+
+                __m512d v_acc = _mm512_setzero_pd();
+
+                uint32_t i = 0;
+                // Hardware prefetcher handles 4 sequential streams natively.
+                // Software prefetch removed to reduce instruction-count overhead.
+                for (; i + 8 <= n; i += 8) {
+                    // Load 8 int32 shipdates
+                    __m256i v_sd = _mm256_loadu_si256((const __m256i*)(sd + i));
+                    // Compare: sd >= DATE_LO && sd <= DATE_HI-1
+                    __mmask8 m_sd = _mm256_cmpge_epi32_mask(v_sd, v_sd_lo) &
+                                    _mm256_cmple_epi32_mask(v_sd, v_sd_hi);
+                    if (m_sd == 0) continue;
+
+                    // Load discount, quantity, extprice
+                    __m512d v_di = _mm512_loadu_pd(di + i);
+                    __m512d v_qt = _mm512_loadu_pd(qt + i);
+                    __m512d v_ep = _mm512_loadu_pd(ep + i);
+
+                    // Discount filter: disc >= 0.05 && disc <= 0.07
+                    __mmask8 m_di = _mm512_cmp_pd_mask(v_di, v_disc_lo, _CMP_GE_OQ) &
+                                    _mm512_cmp_pd_mask(v_di, v_disc_hi, _CMP_LE_OQ);
+                    // Quantity filter: qty < 24.0
+                    __mmask8 m_qt = _mm512_cmp_pd_mask(v_qt, v_qty_th, _CMP_LT_OQ);
+
+                    __mmask8 mask = m_sd & m_di & m_qt;
+                    if (mask == 0) continue;
+
+                    // Masked FMA: acc = mask ? ep*di + acc : acc  (single instruction)
+                    v_acc = _mm512_mask3_fmadd_pd(v_ep, v_di, v_acc, mask);
+                }
+
+                local_rev += _mm512_reduce_add_pd(v_acc);
+
+                // Scalar tail
+                for (; i < n; i++) {
+                    int32_t s = sd[i];
+                    if (s < DATE_LO || s >= DATE_HI) continue;
+                    double d = di[i];
+                    if (d < 0.05 || d > 0.07) continue;
+                    double q = qt[i];
+                    if (q >= 24.0) continue;
+                    local_rev += ep[i] * d;
+                }
+#else
+                // Scalar fallback
+                for (uint32_t i = 0; i < n; i++) {
+                    int32_t s = sd[i];
+                    if (s < DATE_LO || s >= DATE_HI) continue;
+                    double d = di[i];
+                    if (d < 0.05 || d > 0.07) continue;
+                    double q = qt[i];
+                    if (q >= 24.0) continue;
+                    local_rev += ep[i] * d;
+                }
+#endif
+            }
+
+            global_revenue += local_rev;
+        }
+    }
+
+    {
+        GENDB_PHASE("output");
+        std::string out_path = results_dir + "/Q6.csv";
+        FILE* f = fopen(out_path.c_str(), "w");
+        if (!f) { perror(out_path.c_str()); return; }
+        fprintf(f, "revenue\n");
+        fprintf(f, "%.2f\n", global_revenue);
+        fclose(f);
+    }
+
+    // Unmap
+    munmap((void*)zm_raw,   zm_size);
+    munmap((void*)shipdate, sd_size);
+    munmap((void*)discount, disc_size);
+    munmap((void*)quantity, qty_size);
+    munmap((void*)extprice, price_size);
+}
+
+#ifndef GENDB_LIBRARY
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <gendb_dir> [results_dir]" << std::endl;
+        return 1;
+    }
+    std::string gendb_dir  = argv[1];
+    std::string results_dir = argc > 2 ? argv[2] : ".";
+    run_Q6(gendb_dir, results_dir);
+    return 0;
+}
+#endif

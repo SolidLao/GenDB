@@ -1,0 +1,29 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] zone_map_load: 0.05 ms\n[TIMING] zone_map_prune: 0.03 ms\n[TIMING] mmap_columns: 0.10 ms\n[TIMING] main_scan: 50.42 ms\n[TIMING] merge: 0.01 ms\n[TIMING] output: 0.21 ms\n[TIMING] total: 50.88 ms\n",
+    "stderr": "",
+    "duration_ms": 110
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "zone_map_load": 0.05,
+    "zone_map_prune": 0.03,
+    "mmap_columns": 0.1,
+    "main_scan": 50.42,
+    "merge": 0.01,
+    "output": 0.21,
+    "total": 50.88
+  },
+  "timing_ms": 50.67
+}

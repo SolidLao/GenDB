@@ -1,0 +1,216 @@
+{
+  "query_id": "Q3",
+  "empirical_sampling": {
+    "sample_rate": 0.01,
+    "customer_building_selectivity": 0.201,
+    "orders_date_selectivity": 0.487,
+    "lineitem_shipdate_selectivity": 0.538,
+    "combined_orders_selectivity": 0.001,
+    "qualified_customers": 301500,
+    "qualified_orders_estimate": 1470000,
+    "qualified_lineitem_rows_estimate": 5880000,
+    "aggregate_groups_estimate": 3000,
+    "join_order_chosen": "customer(filtered) -> orders(date+custkey) -> lineitem(index+shipdate)"
+  },
+  "logical_plan": {
+    "pipeline": [
+      "scan_customer_filter_mktsegment",
+      "build_custkey_hashset",
+      "scan_orders_zonemap_filter_date_probe_custkey",
+      "collect_qualifying_orders_vector",
+      "parallel_index_lookup_lineitem_per_order",
+      "filter_shipdate_compute_revenue",
+      "thread_local_hash_aggregate",
+      "merge_aggregate",
+      "topk_heap_10"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer(c_mktsegment='BUILDING') -> 301500 custkeys",
+        "probe": "orders(o_orderdate<9204) -> ~1470000 qualifying orders",
+        "join_type": "hash_semi_join",
+        "join_key": "c_custkey = o_custkey",
+        "build_cardinality": 301500,
+        "probe_cardinality": 15000000,
+        "output_cardinality": 1470000
+      },
+      {
+        "step": 2,
+        "build": "qualifying_orders_hashmap(~1470000 orderkeys)",
+        "probe": "lineitem_orderkey_hash_index (per qualifying order, index-driven)",
+        "join_type": "hash_join_index_driven",
+        "join_key": "l_orderkey = o_orderkey",
+        "build_cardinality": 1470000,
+        "probe_cardinality": 5880000,
+        "output_cardinality": 3164040,
+        "note": "index lookup avoids full 60M lineitem scan; only ~5.88M rows accessed randomly"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "hash_group_by",
+    "aggregation_keys": ["l_orderkey", "o_orderdate", "o_shippriority"],
+    "aggregation_note": "o_orderdate and o_shippriority are functionally determined by l_orderkey via the join; key on l_orderkey alone with stored payload {orderdate, shippriority, revenue_sum}; ~3000 groups expected",
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment == 1 (dictionary code for 'BUILDING')",
+        "selectivity_estimate": 0.201,
+        "applied": "during_scan_phase1"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < 9204",
+        "selectivity_estimate": 0.487,
+        "applied": "during_scan_phase2_with_zonemap"
+      },
+      {
+        "table": "orders",
+        "predicate": "o_custkey IN custkey_hashset",
+        "selectivity_estimate": 0.201,
+        "applied": "during_scan_phase2_probe"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > 9204",
+        "selectivity_estimate": 0.538,
+        "applied": "during_index_lookup_phase3"
+      }
+    ]
+  },
+  "physical_plan": {
+    "phases": [
+      {
+        "phase": 1,
+        "name": "customer_scan_and_custkey_set_build",
+        "description": "Sequential scan of customer (1.5M × 5 bytes = 7.5 MB). Filter c_mktsegment == 1. Collect qualifying c_custkey into hash set.",
+        "parallelism": "sequential",
+        "rationale": "7.5 MB fits in L3 cache (44 MB); parallel overhead exceeds benefit at this scale"
+      },
+      {
+        "phase": 2,
+        "name": "orders_scan_zonemap_filter_collect",
+        "description": "Parallel scan of orders (15M rows). Zone-map on o_orderdate skips blocks where zm.min >= 9204 (~50% block skip). Per surviving row: probe custkey_hashset AND check o_orderdate < 9204. Qualifying rows collect (o_orderkey, o_orderdate, o_shippriority) into thread-local vectors. After parallel scan: merge thread-local vectors into global qualifying_orders flat_array and orderkey_meta compact_hashmap.",
+        "parallelism": "morsel_driven",
+        "morsel_size": 100000
+      },
+      {
+        "phase": 3,
+        "name": "lineitem_index_driven_aggregate",
+        "description": "Distribute qualifying_orders_array across 64 threads (each thread processes ~23K orders). Per qualifying order: lookup lineitem_orderkey_hash to get row-index range, iterate those lineitem rows, check l_shipdate > 9204, compute l_extendedprice * (1 - l_discount), accumulate into thread-local agg_map keyed by l_orderkey. ~3000 groups per thread-local map fits in L1 cache (24 KB).",
+        "parallelism": "partition_parallel",
+        "partition_count": 64
+      },
+      {
+        "phase": 4,
+        "name": "merge_and_topk",
+        "description": "Sequential merge of 64 thread-local agg_maps into global agg_map (~3000 entries). Then single-pass top-10 heap scan over ~3000 entries with comparator (revenue DESC, o_orderdate ASC).",
+        "parallelism": "sequential"
+      }
+    ],
+    "data_structures": {
+      "custkey_set": {
+        "type": "flat_hash_set<int32_t>",
+        "capacity": 524288,
+        "description": "Open-addressing, power-of-2 capacity (2^19=524288 >= 301500/0.75=402000). ~2 MB. Probed during orders scan.",
+        "load_factor": 0.575
+      },
+      "qualifying_orders_array": {
+        "type": "flat_array<struct{int32_t orderkey, int32_t orderdate, int32_t shippriority}>",
+        "expected_size": 1470000,
+        "memory_mb": 17.6,
+        "description": "Merged from 64 thread-local vectors after Phase 2. Used to drive parallel Phase 3 index lookups."
+      },
+      "orderkey_meta_map": {
+        "type": "compact_hash_map<int32_t, struct{int32_t orderdate, int32_t shippriority}>",
+        "capacity": 2097152,
+        "description": "2^21=2097152 >= 1470000/0.75=1960000. Maps qualifying o_orderkey to its (o_orderdate, o_shippriority) for aggregation result materialization. Probed in Phase 3.",
+        "note": "Can be embedded directly in qualifying_orders_array if sorted and binary-searched, but hashmap is O(1)"
+      },
+      "thread_local_agg_maps": {
+        "type": "compact_hash_map<int32_t, struct{double revenue_sum, int32_t orderdate, int32_t shippriority}>[64]",
+        "capacity_per_thread": 8192,
+        "description": "~3000 groups, pre-sized to 8192 (next power of 2). 8192 entries × 20 bytes = ~160 KB per thread — fits in L2 cache. 64 threads × 160 KB = 10 MB total.",
+        "load_factor_expected": 0.37
+      },
+      "lineitem_orderkey_hash_index": {
+        "type": "mmap_hash_index",
+        "file": "indexes/lineitem_orderkey_hash.bin",
+        "description": "Pre-built multi-value hash index. Zero build cost via mmap. Capacity=33554432. positions[60M] + HEntry32[33.5M]. Total ~642 MB."
+      },
+      "topk_heap": {
+        "type": "std::priority_queue<ResultRow, 10>",
+        "description": "Min-heap of size 10 with comparator: (revenue DESC, o_orderdate ASC). Single pass over ~3000 groups."
+      }
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 100000,
+      "phase2_partition_count": 64,
+      "phase3_partition_count": 64,
+      "synchronization": "thread_local_merge",
+      "phase2_sync": "thread_local_vectors merged after barrier",
+      "phase3_sync": "thread_local_agg_maps merged sequentially after barrier (trivial: ~3000 groups)"
+    },
+    "index_usage": [
+      {
+        "index": "orders_orderdate_zonemap",
+        "file": "indexes/orders_orderdate_zonemap.bin",
+        "purpose": "skip_blocks_where_min_ge_9204",
+        "skip_condition": "zm[b].min >= 9204",
+        "expected_skip_rate": 0.5,
+        "layout": "num_blocks=150, each block: {int32_t min, int32_t max, uint32_t block_size}"
+      },
+      {
+        "index": "lineitem_orderkey_hash",
+        "file": "indexes/lineitem_orderkey_hash.bin",
+        "purpose": "direct_row_lookup_for_qualifying_orders",
+        "access_pattern": "mmap_zero_build_cost",
+        "hash_function": "uint32_t h = (uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (cap-1)",
+        "empty_slot_sentinel": -2147483648,
+        "benefit": "avoids full scan of 60M lineitem rows; accesses only ~5.88M rows for qualifying orders"
+      }
+    ],
+    "columns_loaded": {
+      "customer": ["c_mktsegment.bin (int8_t)", "c_custkey.bin (int32_t)"],
+      "orders": ["o_custkey.bin (int32_t)", "o_orderdate.bin (int32_t)", "o_orderkey.bin (int32_t)", "o_shippriority.bin (int32_t)"],
+      "lineitem": ["l_orderkey.bin (int32_t)", "l_shipdate.bin (int32_t)", "l_extendedprice.bin (double)", "l_discount.bin (double)"],
+      "indexes": ["indexes/orders_orderdate_zonemap.bin", "indexes/lineitem_orderkey_hash.bin"],
+      "not_loaded": ["o_totalprice", "l_quantity", "l_returnflag", "l_linestatus", "c_name", "c_address", "c_phone", "c_acctbal", "c_comment"]
+    },
+    "scan_strategy": "phase1_sequential_scan | phase2_zonemap_pruned_parallel_scan | phase3_index_driven_random_access",
+    "memory_pattern": {
+      "phase1": "streaming_sequential (7.5 MB)",
+      "phase2": "streaming_sequential_with_block_skip (240 MB, ~50% pruned → ~120 MB effective)",
+      "phase3": "random_access_with_prefetch (index: 642 MB mmap; lineitem data: ~1.44 GB mmap, ~118 MB touched)"
+    },
+    "revenue_computation": {
+      "expression": "l_extendedprice * (1.0 - l_discount)",
+      "accumulation": "double addition per qualifying lineitem row into thread-local agg_map slot",
+      "precision_note": "Use Kahan summation if revenue precision is critical; standard double otherwise"
+    },
+    "date_encoding": {
+      "cutoff": 9204,
+      "o_orderdate_predicate": "o_orderdate[row] < 9204",
+      "l_shipdate_predicate": "l_shipdate[row] > 9204",
+      "mktsegment_predicate": "c_mktsegment[row] == 1 (dictionary code for 'BUILDING')"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "phase3_lineitem_index_access",
+    "phase_breakdown": {
+      "phase1_customer_scan_ms": 5,
+      "phase2_orders_parallel_scan_ms": 20,
+      "phase3_lineitem_index_driven_ms": 60,
+      "phase4_merge_topk_ms": 2
+    },
+    "estimated_total_ms": 87,
+    "comparison_targets_ms": {
+      "DuckDB": 82,
+      "Umbra": 88,
+      "GenDB_current": 154
+    },
+    "bottleneck": "Phase 3 random access to lineitem data via index (~5.88M rows × 20B = ~118 MB random, parallelized across 64 threads)"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "parallel_scan_filter", "scalar_aggregate"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_sum",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "selectivity_estimate": 0.143,
+        "acceleration": "zone_map_block_skip — binary search on lineitem_shipdate_zonemap.bin to find contiguous block range [first_block, last_block]; skip 514/600 blocks (~86% skip rate)"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount >= 0.05 - 1e-10 AND l_discount <= 0.07 + 1e-10",
+        "selectivity_estimate": 0.273,
+        "note": "Applied per-row on qualifying block range; branch-free FP comparison"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 24.0",
+        "selectivity_estimate": 0.55,
+        "note": "Applied per-row on qualifying block range; branch-free FP comparison"
+      }
+    ],
+    "combined_selectivity_estimate": 0.022,
+    "qualifying_rows_estimate": 1320000
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "thread_local_double_accumulator — scalar SUM, no GROUP BY, no hash table; each thread holds one double; final reduce via sequential addition of 64 values"
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600] then 600 x [int32_t min_val, int32_t max_val, uint32_t row_count]",
+        "purpose": "skip_blocks_outside_date_range",
+        "skip_logic": "skip block b if zone.max_val < 8766 OR zone.min_val >= 9131; binary search for first block where max_val >= 8766 and last block where min_val < 9131; qualifying blocks form a contiguous run",
+        "expected_skip": "514 of 600 blocks skipped; 86 blocks (~8.6M rows) remain for column scan",
+        "file_size_bytes": 7204,
+        "fits_in": "L1_cache"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "columns_loaded": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+      "row_range": "row_offset = first_block * 100000 to (last_block * 100000 + last_block_row_count)",
+      "access_method": "mmap — reinterpret_cast column binary files as typed pointer arrays; zero-copy sequential access",
+      "per_row_kernel": "if (sd >= 8766 && sd < 9131 && disc >= 0.05 - 1e-10 && disc <= 0.07 + 1e-10 && qty < 24.0) local_revenue += price * disc",
+      "vectorization": "branch-free mask-based conditional accumulation; compiler auto-vectorizes with AVX2 (4 doubles per 256-bit register); shipdate re-check inside block handles partial boundary blocks"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_size_rows": 131072,
+      "note": "morsel size ~131K rows targets L3 cache reuse (44MB / 64 threads / 4 columns x 8 bytes ≈ 22K rows minimum; use 131K for amortized overhead); qualifying range ~8.6M rows → ~66 morsels across 64 threads",
+      "synchronization": "thread_local_merge — each thread accumulates into a private double; after parallel region, main thread sums 64 accumulators; zero contention during scan",
+      "partition_count": 64
+    },
+    "memory_pattern": "streaming_sequential — all four column files accessed left-to-right within the qualifying block range; hardware prefetcher fully effective; no random access"
+  },
+  "estimated_cost": {
+    "dominant_phase": "parallel_column_scan_of_qualifying_blocks",
+    "breakdown": {
+      "zone_map_load_and_binary_search": "< 0.1ms — 7KB file, L1-resident, O(log 600) search",
+      "column_data_read": "86 blocks x 100000 rows x 4 columns x 8 bytes = ~275MB; with mmap and 64-thread parallel streaming on HDD ~10-15ms",
+      "filter_and_accumulate": "~8.6M rows x 4 FP comparisons + conditional multiply-add; AVX2 processes 4 doubles/cycle; ~2-5ms at 64 threads",
+      "final_reduce": "< 0.01ms — sum 64 doubles"
+    },
+    "estimated_ms": 18
+  }
+}

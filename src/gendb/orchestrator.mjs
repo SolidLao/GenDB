@@ -1,5 +1,5 @@
 /**
- * GenDB Orchestrator v23
+ * GenDB Orchestrator v31
  *
  * Three-phase agentic system with 7 agents:
  *   Phase 1 (Offline Data Storage Optimization):
@@ -26,7 +26,7 @@
  *        [--max-concurrent <N>]
  */
 
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { readFile, writeFile, mkdir, cp } from "fs/promises";
 import { resolve, dirname } from "path";
 import { existsSync, readFileSync, rmSync, readdirSync } from "fs";
@@ -196,7 +196,7 @@ function formatDuration(ms) {
  * Invoke a Claude Code subprocess with the given system prompt and user prompt.
  * Returns { result, durationMs, tokens, costUsd }.
  */
-function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs }) {
+function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName }) {
   const timeout = timeoutMs || defaults.agentTimeoutMs;
   return new Promise((resolveP, rejectP) => {
     const args = [
@@ -209,8 +209,9 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
     if (model) args.push("--model", model);
     args.push(userPrompt);
 
+    const thinkingBudget = configName && defaults.agentThinkingBudgets[configName];
     console.log(`\n[${"=".repeat(60)}]`);
-    console.log(`[Orchestrator] Spawning agent: ${name} (timeout: ${formatDuration(timeout)})`);
+    console.log(`[Orchestrator] Spawning agent: ${name} (timeout: ${formatDuration(timeout)}${thinkingBudget ? `, thinking: ${thinkingBudget} tokens` : ''})`);
     console.log(`[${"=".repeat(60)}]\n`);
 
     const startTime = Date.now();
@@ -219,8 +220,15 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
 
     const child = spawn("claude", args, {
       cwd,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000" },
+      env: {
+        ...process.env,
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000",
+        ...(configName && defaults.agentThinkingBudgets[configName] != null
+          ? { MAX_THINKING_TOKENS: String(defaults.agentThinkingBudgets[configName]) }
+          : {}),
+      },
     });
 
     const killAgent = (reason) => {
@@ -228,9 +236,9 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
       killed = true;
       killReason = reason;
       console.error(`\n[Orchestrator] ${reason}`);
-      child.kill("SIGTERM");
+      try { process.kill(-child.pid, "SIGTERM"); } catch {}
       setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch {}
+        try { process.kill(-child.pid, "SIGKILL"); } catch {}
       }, 5000);
     };
 
@@ -246,6 +254,8 @@ function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, ti
 
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      // Defense-in-depth: ensure entire process group is dead
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
       const durationMs = Date.now() - startTime;
       if (killed) {
         rejectP(new Error(killReason));
@@ -692,6 +702,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     userPrompt: analyzerUserPrompt,
     allowedTools: workloadAnalyzerConfig.allowedTools,
     model: getAgentModel("workload_analyzer", args),
+    configName: "workload_analyzer",
     cwd: runDir,
   });
   recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
@@ -780,6 +791,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     userPrompt: designerUserPrompt,
     allowedTools: storageDesignerConfig.allowedTools,
     model: getAgentModel("storage_designer", args),
+    configName: "storage_designer",
     cwd: runDir,
     timeoutMs: getAgentTimeout("storage_designer"),
   });
@@ -845,6 +857,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
         userPrompt: dbaStageAPrompt,
         allowedTools: dbaConfig.allowedTools,
         model: getAgentModel("dba", args),
+        configName: "dba",
         cwd: runDir,
       });
       recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
@@ -1046,6 +1059,7 @@ async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPas
     userPrompt: inspectorUserPrompt,
     allowedTools: codeInspectorConfig.allowedTools,
     model: getAgentModel("code_inspector", args),
+    configName: "code_inspector",
     cwd: dirname(cppPath),
   });
   recordAgentTelemetry(queryPhase, "code_inspector", result.durationMs, result.tokens, result.costUsd);
@@ -1154,6 +1168,7 @@ async function runQueryFullPipeline(
       userPrompt: qpUserPrompt,
       allowedTools: queryPlannerConfig.allowedTools,
       model: getAgentModel("query_planner", args),
+      configName: "query_planner",
       cwd: iterDir,
     });
     recordAgentTelemetry(queryPhase, "query_planner", qpResult.durationMs, qpResult.tokens, qpResult.costUsd);
@@ -1218,7 +1233,7 @@ async function runQueryFullPipeline(
       ``,
       `## Validation Loop`,
       `Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I${UTILS_PATH} -o ${queryId.toLowerCase()} ${cppName}`,
-      `Run: ./${queryId.toLowerCase()} ${args.gendbDir} ${iterResultsDir}`,
+      `Run: timeout ${defaults.queryExecutionTimeoutSec}s ./${queryId.toLowerCase()} ${args.gendbDir} ${iterResultsDir}`,
       hasGroundTruth ? `Validate: python3 ${COMPARE_TOOL_PATH} ${groundTruthDir} ${iterResultsDir}` : `No ground truth available - just compile and run`,
       `If validation fails: analyze root cause, fix, retry (up to 2 fix attempts)`,
     ].join("\n");
@@ -1231,6 +1246,7 @@ async function runQueryFullPipeline(
         userPrompt: cgUserPrompt,
         allowedTools: codeGeneratorConfig.allowedTools,
         model: getAgentModel("code_generator", args),
+        configName: "code_generator",
         cwd: iterDir,
       });
       recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
@@ -1273,6 +1289,7 @@ async function runQueryFullPipeline(
         userPrompt: fixPrompt,
         allowedTools: codeGeneratorConfig.allowedTools,
         model: getAgentModel("code_generator", args),
+        configName: "code_generator",
         cwd: iterDir,
       });
       recordAgentTelemetry(queryPhase, "code_generator_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
@@ -1293,11 +1310,16 @@ async function runQueryFullPipeline(
 
   // === ITERATIONS 1+: OPTIMIZE → EXECUTE loop ===
   let bestIterDir = iterDir;
-  let bestCppPath = iterCppPath;
   let bestExecResultsPath = resolve(iterDir, "execution_results.json");
 
-  // Track best result for fault tolerance — return even if later iterations throw
-  let bestResult = { queryId, status: "completed", bestCppPath: iterCppPath, iterations: 0 };
+  // Track best result for fault tolerance — return even if later iterations throw.
+  // Start as "failed"; upgrade to "completed" when any iteration produces a valid run.
+  const iter0ExecResults = await readJSON(bestExecResultsPath);
+  const iter0Passed = iter0ExecResults?.run?.status === "pass";
+  let bestCppPath = iter0Passed ? iterCppPath : null;
+  let bestResult = iter0Passed
+    ? { queryId, status: "completed", bestCppPath: iterCppPath, iterations: 0 }
+    : { queryId, status: "failed", bestCppPath: null, iterations: 0 };
 
   const maxIter = args.maxIterations;
   let previousIterationOutcome = null;
@@ -1404,6 +1426,19 @@ async function runQueryFullPipeline(
         "Common causes: wrong filter predicate, encoding/decoding bug, wrong join logic, incorrect aggregation.",
         "",
       ].join("\n");
+    } else if (bestExecResults?.run?.status === 'fail' && (bestExecResults?.run?.stderr || "").includes("timed out")) {
+      correctnessSection = [
+        "",
+        "## EXECUTION TIMEOUT — FIX THIS FIRST",
+        `The previous run timed out (${defaults.queryExecutionTimeoutSec}s limit). The binary did not produce results.`,
+        "Timeout likely caused by:",
+        "1. Infinite loop in hash table — check memset sentinel initialization (see C20 in experience base).",
+        "   memset(buf, 0x80, n) sets each BYTE to 0x80, producing 0x80808080 ≠ INT32_MIN. Use std::fill() instead.",
+        "2. Algorithmic complexity explosion — nested loops with O(n²) or worse over large tables.",
+        "3. Hash table at 100% load factor — ensure power-of-2 sizing with ≤50% load factor.",
+        "Check the code for these patterns and fix the root cause.",
+        "",
+      ].join("\n");
     }
 
     // Read query guide
@@ -1492,6 +1527,7 @@ async function runQueryFullPipeline(
         userPrompt: qoUserPrompt,
         allowedTools: queryOptimizerConfig.allowedTools,
         model: getAgentModel("query_optimizer", args),
+        configName: "query_optimizer",
         cwd: optIterDir,
       });
       recordAgentTelemetry(queryPhase, "query_optimizer", qoResult.durationMs, qoResult.tokens, qoResult.costUsd);
@@ -1523,6 +1559,7 @@ async function runQueryFullPipeline(
           userPrompt: fixPrompt,
           allowedTools: queryOptimizerConfig.allowedTools,
           model: getAgentModel("query_optimizer", args),
+          configName: "query_optimizer",
           cwd: optIterDir,
         });
         recordAgentTelemetry(queryPhase, "optimizer_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
@@ -1639,7 +1676,7 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
   const runStart = Date.now();
   try {
     const runOutput = await runProcess(binaryPath, [gendbDir, resultsDir], {
-      cwd: iterDir, timeout: 300000,
+      cwd: iterDir, timeout: defaults.queryExecutionTimeoutSec * 1000,
     });
     results.run = {
       status: "pass",
@@ -1721,22 +1758,32 @@ function runProcess(cmd, cmdArgs, opts = {}) {
   const timeoutVal = opts.timeout || 120000;
   return new Promise((resolveP, rejectP) => {
     const startTime = Date.now();
+    let timedOut = false;
     const child = spawn(cmd, cmdArgs, {
       cwd: opts.cwd,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutVal,
     });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
     child.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    }, timeoutVal);
+
     child.on("close", (code) => {
-      if (code === 0) {
+      clearTimeout(timer);
+      // Defense-in-depth: ensure entire process group is dead
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+      if (code === 0 && !timedOut) {
         resolveP({ stdout, stderr });
       } else {
         const durationMs = Date.now() - startTime;
         let msg;
-        if (code === null && durationMs >= timeoutVal * 0.9) {
+        if (timedOut) {
           msg = `Process timed out after ${Math.round(timeoutVal / 1000)}s`;
         } else if (code === null) {
           msg = `Process killed by signal (duration: ${Math.round(durationMs / 1000)}s)`;
@@ -1746,11 +1793,14 @@ function runProcess(cmd, cmdArgs, opts = {}) {
         const err = new Error(stderr || msg);
         err.stdout = stdout;
         err.stderr = stderr;
-        err.timedOut = code === null && durationMs >= timeoutVal * 0.9;
+        err.timedOut = timedOut;
         rejectP(err);
       }
     });
-    child.on("error", (err) => rejectP(err));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      rejectP(err);
+    });
   });
 }
 
@@ -1924,15 +1974,10 @@ async function assembleFinalBuild(results, runDir, args) {
     const finalResultsDir = resolve(runDir, "final_results");
     await mkdir(finalResultsDir, { recursive: true });
     try {
-      await new Promise((res, rej) => {
-        const child = spawnSync(resolve(finalDir, "main"), [args.gendbDir, finalResultsDir], {
-          cwd: finalDir, stdio: "pipe", timeout: 300000,
-        });
-        let out = "";
-        child.stdout.on("data", d => { out += d; process.stdout.write(d); });
-        child.stderr.on("data", d => process.stderr.write(d));
-        child.on("close", code => code === 0 ? res(out) : rej(new Error(`Exit code ${code}`)));
+      const finalRun = await runProcess(resolve(finalDir, "main"), [args.gendbDir, finalResultsDir], {
+        cwd: finalDir, timeout: defaults.queryExecutionTimeoutSec * 1000,
       });
+      if (finalRun.stdout) process.stdout.write(finalRun.stdout);
       console.log("[Orchestrator] Final validation run completed.");
     } catch (err) {
       console.error(`[Orchestrator] Final validation run failed: ${err.message}`);
@@ -2038,10 +2083,32 @@ async function printPerQuerySummary(runDir, parsedQueries) {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-Run Cleanup
+// ---------------------------------------------------------------------------
+
+function cleanupOrphanedProcesses() {
+  try {
+    const result = execSync("pgrep -f '\\.gendb.*/(q|Q)[0-9]' 2>/dev/null || true", { encoding: "utf-8" }).trim();
+    if (result) {
+      const pids = result.split("\n").filter(Boolean);
+      console.log(`[Orchestrator] Found ${pids.length} orphaned query process(es): ${pids.join(", ")}`);
+      try {
+        execSync(`pkill -9 -f '\\.gendb.*/(q|Q)[0-9]' 2>/dev/null || true`);
+        console.log("[Orchestrator] Orphaned processes killed.");
+      } catch {}
+    }
+  } catch {
+    // pgrep/pkill not available or no matches — safe to ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
+  cleanupOrphanedProcesses();
+
   const args = parseArgs(process.argv);
 
   const schema = await readFile(args.schema, "utf-8");
@@ -2080,6 +2147,7 @@ async function main() {
   console.log(`[Orchestrator] Default Model:       ${args.model}`);
   console.log(`[Orchestrator] Model Override:      ${args.modelOverride || "(none)"}`);
   console.log(`[Orchestrator] Agent Models:        ${JSON.stringify(defaults.agentModels)}`);
+  console.log(`[Orchestrator] Thinking Budgets:    ${JSON.stringify(defaults.agentThinkingBudgets)}`);
   console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
   console.log(`[Orchestrator] Knowledge Base:      ${KNOWLEDGE_BASE_PATH}`);
   console.log(`[Orchestrator] Workload:            ${workload}`);
@@ -2127,6 +2195,7 @@ async function main() {
       userPrompt: dbaStageBPrompt,
       allowedTools: dbaConfig.allowedTools,
       model: getAgentModel("dba", args),
+      configName: "dba",
       cwd: runDir,
     });
     recordAgentTelemetry("phase3", "dba_stage_b", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);

@@ -6,6 +6,7 @@ const __dirname = dirname(__filename);
 
 export const config = {
   name: "DBA",
+  configKey: "dba",
   promptPath: resolve(__dirname, "prompt.md"),
   allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
   model: "sonnet",
