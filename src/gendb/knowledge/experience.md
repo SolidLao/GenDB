@@ -162,3 +162,35 @@
 - Detect: An optimization iteration produces timing >20% worse than the current best (e.g., Q6 iter_3: 152 ms vs best 69 ms; Q9 iter_4: 220 ms vs best 168 ms)
 - Impact: One wasted generate-compile-run cycle per oscillation event
 - Fix: Track best validated (timing_ms, source) pair. If next iteration regresses >20% from best, revert to best-known source and apply a different optimization direction instead of emitting the regressed version.
+
+### P13: Full Column madvise(WILLNEED) When Zone Maps Show <50% Blocks Qualify
+- Detect: `madvise(MADV_WILLNEED)` on entire column file when zone maps exist and filter selectivity is low
+- Impact: 2-5x unnecessary I/O on cold start — reads non-qualifying blocks from disk
+- Fix: Load zone maps first, compute qualifying block ranges, issue `madvise(MADV_WILLNEED)` only on qualifying byte ranges
+
+### P14: No Explicit data_loading Phase — I/O Mixed With Computation
+- Detect: No `GENDB_PHASE("data_loading")` in generated code; mmap/madvise calls scattered across dim_filter, build_joins, main_scan
+- Impact: Optimizer cannot identify I/O as the bottleneck; cold-start regressions invisible in timing breakdown
+- Fix: Add `GENDB_PHASE("data_loading")` as Phase 0 before dim_filter. Consolidate all mmap + madvise prefetch calls there.
+
+### P15: Thread-Local Aggregation Merge Using std::unordered_map — O(n·t) Sequential Merge
+- Detect: aggregation_merge phase consumes >500 ms in a multi-threaded GROUP BY query; each thread holds a separate std::unordered_map of partial aggregates that are merged sequentially
+- Impact: Q3 iter_0: aggregation_merge 3,263 ms (38% of total). After fix: 22 ms (99% reduction).
+- Fix: Use a single shared open-addressing hash table with per-slot spinlocks or CAS updates, OR pre-allocate one global hash table and have all threads probe-and-update with atomic operations. Never merge t separate unordered_maps sequentially.
+
+### P16: data_loading Dominates Unoptimized Queries — Missed madvise Opportunity
+- Detect: Query exits after iter_0 with no optimization attempted AND data_loading phase > 40% of hot runtime (e.g., Q1: 55%, Q9: 65%)
+- Impact: Leaves 30-50% runtime on the table for I/O-bound queries; zone-map-guided prefetch not applied
+- Fix: Always attempt at least one optimization targeting I/O when data_loading > 40% of hot runtime: (1) add zone-map-guided selective `madvise(MADV_WILLNEED)` on qualifying byte ranges only; (2) verify GENDB_PHASE("data_loading") is Phase 0 (P14).
+
+## Correctness Issues — Optimizer Behavioral
+
+### C25: Filter Stage Elimination Causing Zero-Row Output
+- Detect: rows_actual == 0 with rows_expected > 0, AND dim_filter phase timing collapses to ~0 ms from a non-zero value in a prior passing iteration
+- Impact: All output silently lost; optimizer may misinterpret as a "fast" result
+- Fix: Treat rows_actual == 0 with rows_expected > 0 as a definitive correctness failure. When dim_filter time collapses to 0 ms, the filter predicate was eliminated or inverted — revert to the previous passing iteration's filter logic. Never accept a zero-row result as a performance win.
+
+### C26: Join Restructuring Regression — Correct Row Count, Wrong Row Values
+- Detect: rows_actual == rows_expected but column_failures exist across join key, aggregated value, and date columns simultaneously. main_scan timing is 5-20x higher than best passing iteration; build_joins also regresses.
+- Impact: Q3 iter_5: wrong l_orderkey, revenue, o_orderdate despite correct row count (10/10). Caused by incorrect join key mapping after restructure.
+- Fix: When an optimization modifies join build/probe structure and produces correct count but wrong values, suspect missing composite join key column (C15 variant) or probe-side predicate changed. Revert build_joins and main_scan logic to the last passing iteration. A simultaneous regression in both build_joins AND main_scan timing is a strong signal of join logic breakage.

@@ -43,6 +43,13 @@ Example pattern:
   size_t n = st.st_size / sizeof(T);
 Do NOT copy mmap'd data into std::vector.
 
+## Cold-Start I/O Optimization
+For cold-start performance (OS cache empty), minimize data loading time:
+- Zone-map-guided madvise: load zone maps first, then selectively prefetch only qualifying block ranges
+- Priority-ordered column loading: zone maps → filter columns → join keys → payload columns
+- Parallel madvise across columns: `#pragma omp parallel for` over column prefetch calls
+- Read `storage/data-loading-optimization.md` for techniques and code patterns.
+
 ## Data Structures
 Generate all hash tables, bitsets, heaps, and other data structures INLINE, tailored to the
 specific query's key types, cardinalities, and access patterns. Use the Query Guide for exact
@@ -67,6 +74,14 @@ for index loading.
 void run_<query_id>(const std::string& gendb_dir, const std::string& results_dir) {
     GENDB_PHASE("total");
     gendb::init_date_tables();  // if date operations needed
+
+    // Phase 0: Data loading (I/O prefetch — separates I/O from computation)
+    {
+        GENDB_PHASE("data_loading");
+        // mmap all column files, issue madvise(MADV_WILLNEED) for prefetch
+        // If zone maps exist on filter columns: load zone maps first, then
+        // selectively prefetch only qualifying block byte ranges
+    }
 
     // Phase 1: Load and filter dimension tables
     {
@@ -107,6 +122,7 @@ int main(int argc, char* argv[]) {
 ### Timing with GENDB_PHASE (REQUIRED)
 Use RAII phase timing instead of manual #ifdef blocks:
 - `GENDB_PHASE("total")` — outermost scope, measures entire query
+- `GENDB_PHASE("data_loading")` — I/O-bound data loading: mmap + madvise prefetch (Phase 0, before dim_filter)
 - `GENDB_PHASE("dim_filter")` — dimension table loading + filtering
 - `GENDB_PHASE("build_joins")` — hash table construction
 - `GENDB_PHASE("main_scan")` — primary fact table scan (with fused operations)

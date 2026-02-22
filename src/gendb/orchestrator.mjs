@@ -343,39 +343,46 @@ function extractQueryContext(query, storageDesign, workloadAnalysis) {
   return { filteredStorage, filteredWorkload };
 }
 
-/** Format benchmark comparison for a single query — extracts only relevant data. */
-function formatPerQueryBenchmarkContext(benchmarkResults, queryId, currentTimeMs) {
+/** Format benchmark comparison for a single query — shows cold + hot columns. */
+function formatPerQueryBenchmarkContext(benchmarkResults, queryId, coldMs, hotMs) {
   if (!benchmarkResults) return "";
   const rows = [];
-  let bestTime = Infinity;
-  let bestSystem = "";
+  let bestCold = Infinity, bestHot = Infinity;
+  let bestColdSystem = "", bestHotSystem = "";
   for (const [system, data] of Object.entries(benchmarkResults)) {
     const qData = data?.[queryId] || data?.queries?.[queryId];
-    const time = qData?.min_ms || qData?.average_ms || qData?.time_ms;
-    if (time != null) {
-      rows.push({ system, time });
-      if (time < bestTime) { bestTime = time; bestSystem = system; }
+    if (!qData) continue;
+    const allMs = qData.all_ms;
+    let cold, hot;
+    if (allMs && allMs.length >= 2) {
+      cold = allMs[0];
+      hot = Math.min(...allMs.slice(1));
+    } else {
+      // Fallback: single value for both
+      const t = qData.min_ms || qData.average_ms || qData.time_ms;
+      if (t == null) continue;
+      cold = t;
+      hot = t;
     }
+    rows.push({ system, cold, hot });
+    if (cold < bestCold) { bestCold = cold; bestColdSystem = system; }
+    if (hot < bestHot) { bestHot = hot; bestHotSystem = system; }
   }
   if (rows.length === 0) return "";
-  rows.sort((a, b) => a.time - b.time);
+  rows.sort((a, b) => (a.cold + a.hot) - (b.cold + b.hot));
   const lines = [
     "",
     `## Performance Comparison for ${queryId}`,
-    "| System | Time (ms) |",
-    "|--------|-----------|",
-    ...rows.map(r => `| ${r.system} | ${Math.round(r.time)} |`),
+    "| System | Cold (ms) | Hot (ms) |",
+    "|--------|-----------|----------|",
+    ...rows.map(r => `| ${r.system} | ${Math.round(r.cold)} | ${Math.round(r.hot)} |`),
   ];
-  if (currentTimeMs != null) {
-    lines.push(`| Current GenDB | ${Math.round(currentTimeMs)} |`);
-    const gap = (currentTimeMs / bestTime).toFixed(1);
-    if (currentTimeMs > bestTime * 5) {
-      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). Gap: ${gap}x. Fundamental restructuring needed.`);
-    } else if (currentTimeMs > bestTime * 1.2) {
-      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). Gap: ${gap}x. Further optimization needed.`);
-    } else {
-      lines.push("", `Best engine: ${Math.round(bestTime)}ms (${bestSystem}). GenDB is competitive.`);
-    }
+  if (coldMs != null && hotMs != null) {
+    lines.push(`| Current GenDB | ${Math.round(coldMs)} | ${Math.round(hotMs)} |`);
+    lines.push("", `Target: Beat all systems in BOTH cold and hot runs.`);
+    lines.push(`Best cold: ${bestColdSystem} ${Math.round(bestCold)}ms. Best hot: ${bestHotSystem} ${Math.round(bestHot)}ms.`);
+  } else if (coldMs != null) {
+    lines.push(`| Current GenDB | ${Math.round(coldMs)} | N/A |`);
   }
   return lines.join("\n");
 }
@@ -482,7 +489,17 @@ function getBestBaselineTime(benchmarkResults, queryId) {
   let best = Infinity;
   for (const [system, data] of Object.entries(benchmarkResults)) {
     const qData = data?.queries?.[queryId] || data?.[queryId];
-    const time = qData?.min_ms || qData?.average_ms || qData?.time_ms || qData?.median_ms;
+    if (!qData) continue;
+    // Compute cold+avg(hot) from all_ms when available (matches combined metric)
+    const allMs = qData.all_ms;
+    let time;
+    if (allMs && allMs.length >= 2) {
+      const cold = allMs[0];
+      const hotAvg = allMs.slice(1).reduce((a, b) => a + b, 0) / (allMs.length - 1);
+      time = cold + hotAvg;
+    } else {
+      time = qData.min_ms || qData.average_ms || qData.time_ms || qData.median_ms;
+    }
     if (time && time < best) best = time;
   }
   return best === Infinity ? null : best;
@@ -1302,7 +1319,7 @@ async function runQueryFullPipeline(
   progressTracker.update(queryId, "exec-0");
   console.log(`[Orchestrator] [${queryId}] Iteration 0: Executor (compile + run + validate)`);
   await executionQueue.requestExecution(queryId, async () => {
-    return await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir);
+    return await executeQuery(query, iterDir, iterCppPath, args.gendbDir, groundTruthDir, iterResultsDir, defaults.optimizationRuns);
   });
 
   // Report to Iter0 barrier (for storage checkpoint coordination)
@@ -1458,9 +1475,13 @@ async function runQueryFullPipeline(
     }
 
     // --- Build optimization history summary (lean, one-line per iteration) ---
-    const historySummary = optimizationHistory.iterations.map(it =>
-      `Iter ${it.iteration}: ${it.timing_ms ? Math.round(it.timing_ms) + 'ms' : 'N/A'} ${(it.validation || 'unknown').toUpperCase()} (${it.improved ? 'improved' : 'no improvement'})`
-    ).join("\n");
+    const historySummary = optimizationHistory.iterations.map(it => {
+      const timingStr = it.timing_ms ? `${Math.round(it.timing_ms)}ms` : 'N/A';
+      const coldHot = (it.cold_timing_ms != null && it.hot_timing_ms != null)
+        ? ` (${Math.round(it.cold_timing_ms)}ms cold + ${Math.round(it.hot_timing_ms)}ms hot)`
+        : '';
+      return `Iter ${it.iteration}: ${timingStr}${coldHot} ${(it.validation || 'unknown').toUpperCase()} (${it.improved ? 'improved' : 'no improvement'})`;
+    }).join("\n");
 
     // --- Query Optimizer (gated by semaphore) ---
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Query Optimizer`);
@@ -1480,24 +1501,58 @@ async function runQueryFullPipeline(
           qoQueryGuide,
         ].join("\n") : "",
         "",
-        // Pre-computed timing summary (lean — no raw workload analysis JSON)
+        // Pre-computed timing summary — side-by-side cold vs hot when available
         (() => {
-          const ot = bestExecResults?.operation_timings || {};
-          const total = parseFloat(ot.total || bestExecResults?.timing_ms || 0);
-          if (total <= 0) return "";
+          const coldOt = bestExecResults?.operation_timings || {};
+          const hotOt = bestExecResults?.hot_operation_timings || {};
+          const coldTotal = parseFloat(coldOt.total || bestExecResults?.cold_timing_ms || bestExecResults?.timing_ms || 0);
+          const hotTotal = parseFloat(hotOt.total || bestExecResults?.hot_timing_ms || 0);
+          if (coldTotal <= 0) return "";
+
+          // Side-by-side format when cold > 1.5x hot (meaningful difference)
+          if (hotTotal > 0 && coldTotal > hotTotal * 1.5) {
+            const lines = [
+              "## Current Performance Profile (Cold vs Hot)",
+              "| Phase | Cold (ms) | Hot (ms) | Cold % | Hot % |",
+              "|-------|-----------|----------|--------|-------|",
+            ];
+            const allOps = new Set([...Object.keys(coldOt), ...Object.keys(hotOt)]);
+            let dominantColdOp = "", dominantColdMs = 0;
+            for (const op of allOps) {
+              if (op === "total" || op === "output") continue;
+              const cMs = parseFloat(coldOt[op] || 0);
+              const hMs = parseFloat(hotOt[op] || 0);
+              const cPct = coldTotal > 0 ? ((cMs / coldTotal) * 100).toFixed(0) : "0";
+              const hPct = hotTotal > 0 ? ((hMs / hotTotal) * 100).toFixed(0) : "0";
+              lines.push(`| ${op} | ${Math.round(cMs)} | ${Math.round(hMs)} | ${cPct}% | ${hPct}% |`);
+              if (cMs > dominantColdMs) { dominantColdMs = cMs; dominantColdOp = op; }
+            }
+            lines.push(`| total | ${Math.round(coldTotal)} | ${Math.round(hotTotal)} | | |`);
+            // Diagnostic hint
+            if (dominantColdOp) {
+              const coldPct = ((dominantColdMs / coldTotal) * 100).toFixed(0);
+              const hotMs = parseFloat(hotOt[dominantColdOp] || 0);
+              const hotPct = hotTotal > 0 ? ((hotMs / hotTotal) * 100).toFixed(0) : "0";
+              lines.push(`\n${dominantColdOp} is ${coldPct}% of cold time but ${hotPct}% of hot time — ${parseFloat(coldPct) > 50 && parseFloat(hotPct) < 20 ? 'I/O-bound' : 'compute-bound'}.`);
+            }
+            lines.push(`Combined metric (cold+hot): ${Math.round(coldTotal + hotTotal)}ms`);
+            return lines.join("\n");
+          }
+
+          // Single-profile fallback (cold ≈ hot or no hot data)
           const lines = ["## Current Performance Profile"];
           let dominantOp = "", dominantPct = 0;
-          for (const [op, ms] of Object.entries(ot)) {
+          for (const [op, ms] of Object.entries(coldOt)) {
             if (op === "total" || op === "output") continue;
-            const pct = ((parseFloat(ms) / total) * 100).toFixed(0);
+            const pct = ((parseFloat(ms) / coldTotal) * 100).toFixed(0);
             lines.push(`- ${op}: ${Math.round(parseFloat(ms))}ms (${pct}%)`);
             if (parseFloat(ms) > dominantPct) { dominantPct = parseFloat(ms); dominantOp = op; }
           }
-          lines.push(`- total: ${Math.round(total)}ms`);
-          if (dominantOp) lines.push(`Dominant: ${dominantOp} (${((dominantPct / total) * 100).toFixed(0)}%)`);
+          lines.push(`- total: ${Math.round(coldTotal)}ms`);
+          if (dominantOp) lines.push(`Dominant: ${dominantOp} (${((dominantPct / coldTotal) * 100).toFixed(0)}%)`);
           return lines.join("\n");
         })(),
-        formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, bestExecResults?.timing_ms),
+        formatPerQueryBenchmarkContext(args.benchmarkResults, queryId, bestExecResults?.cold_timing_ms, bestExecResults?.hot_timing_ms),
         "",
         // Optimization history summary (lean)
         historySummary ? `## Optimization History\n${historySummary}\n` : "",
@@ -1576,7 +1631,7 @@ async function runQueryFullPipeline(
     progressTracker.update(queryId, `exec-${iteration}`);
     console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Executor (compile + run + validate)`);
     await executionQueue.requestExecution(queryId, async () => {
-      return await executeQuery(query, optIterDir, optIterCppPath, args.gendbDir, groundTruthDir, optIterResultsDir);
+      return await executeQuery(query, optIterDir, optIterCppPath, args.gendbDir, groundTruthDir, optIterResultsDir, defaults.optimizationRuns);
     });
 
     // --- Improvement check ---
@@ -1594,6 +1649,8 @@ async function runQueryFullPipeline(
       improved,
       categories,
       timing_ms: newExecResults?.timing_ms || null,
+      cold_timing_ms: newExecResults?.cold_timing_ms || null,
+      hot_timing_ms: newExecResults?.hot_timing_ms || null,
       validation: newExecResults?.validation?.status || null,
     });
     await writeFile(historyPath, JSON.stringify(optimizationHistory, null, 2));
@@ -1623,7 +1680,7 @@ async function runQueryFullPipeline(
         console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: running fallback execution on existing .cpp`);
         await mkdir(failedResultsDir, { recursive: true });
         await executionQueue.requestExecution(queryId, async () => {
-          return await executeQuery(query, failedIterDir, failedCppPath, args.gendbDir, groundTruthDir, failedResultsDir);
+          return await executeQuery(query, failedIterDir, failedCppPath, args.gendbDir, groundTruthDir, failedResultsDir, defaults.optimizationRuns);
         });
       }
     } catch (fallbackErr) {
@@ -1638,14 +1695,44 @@ async function runQueryFullPipeline(
 }
 
 // ---------------------------------------------------------------------------
+// OS Cache Management
+// ---------------------------------------------------------------------------
+
+let _cacheClearAvailable = null; // null = untested, true/false = tested
+
+/** Clear OS page cache via sudo. Returns true on success. */
+function clearOsCache() {
+  try {
+    execSync('sudo -n sh -c "sync && echo 3 > /proc/sys/vm/drop_caches"', { stdio: 'pipe', timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Test cache clearing capability once at startup. */
+function checkCacheClearCapability() {
+  if (_cacheClearAvailable !== null) return _cacheClearAvailable;
+  _cacheClearAvailable = clearOsCache();
+  if (_cacheClearAvailable) {
+    console.log("[Executor] OS cache clearing available (sudo -n drop_caches works).");
+  } else {
+    console.warn("[Executor] WARNING: OS cache clearing unavailable (sudo -n failed). Cold-start optimization disabled.");
+    console.warn("[Executor] To enable: add 'echo 3 > /proc/sys/vm/drop_caches' to sudoers NOPASSWD.");
+  }
+  return _cacheClearAvailable;
+}
+
+// ---------------------------------------------------------------------------
 // Executor (non-LLM): compile, run, validate, parse timing
 // ---------------------------------------------------------------------------
 
 /**
- * Execute a query: compile → run → validate → parse timing.
+ * Execute a query: compile → run (multiple times) → validate → parse timing.
  * Returns execution results JSON and writes execution_results.json to iterDir.
+ * @param {number} numRuns - Number of runs. Run 1 = cold (cache cleared), runs 2+ = hot.
  */
-async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, resultsDir) {
+async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, resultsDir, numRuns = 1) {
   const binaryPath = resolve(iterDir, query.id.toLowerCase());
   const execResultsPath = resolve(iterDir, "execution_results.json");
   const results = {
@@ -1654,6 +1741,10 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
     validation: { status: "skipped", output: "" },
     operation_timings: {},
     timing_ms: null,
+    cold_timing_ms: null,
+    hot_timing_ms: null,
+    hot_operation_timings: {},
+    all_runs: [],
   };
 
   await mkdir(resultsDir, { recursive: true });
@@ -1675,53 +1766,109 @@ async function executeQuery(query, iterDir, cppPath, gendbDir, groundTruthDir, r
     return results;
   }
 
-  // Step 2: Run binary
-  console.log(`[Executor] [${query.id}] Running binary...`);
-  const runStart = Date.now();
-  try {
-    const runOutput = await runProcess(binaryPath, [gendbDir, resultsDir], {
-      cwd: iterDir, timeout: defaults.queryExecutionTimeoutSec * 1000,
-    });
-    results.run = {
-      status: "pass",
-      output: runOutput.stdout || runOutput,
-      stderr: runOutput.stderr || "",
-      duration_ms: Date.now() - runStart,
-    };
-    console.log(`[Executor] [${query.id}] Run completed in ${Date.now() - runStart}ms.`);
-  } catch (err) {
-    results.run = {
-      status: "fail",
-      output: err.stdout || "",
-      stderr: err.message,
-      duration_ms: Date.now() - runStart,
-    };
-    console.error(`[Executor] [${query.id}] Run failed: ${err.message.slice(0, 200)}`);
-    await writeFile(execResultsPath, JSON.stringify(results, null, 2));
-    return results;
-  }
+  // Step 2: Multi-run execution (run 1 = cold, runs 2+ = hot)
+  const effectiveRuns = Math.max(1, numRuns);
+  for (let runIdx = 0; runIdx < effectiveRuns; runIdx++) {
+    // Clear OS cache before run 1 (always, for cold-start measurement)
+    if (runIdx === 0 && _cacheClearAvailable === null) checkCacheClearCapability();
+    if (runIdx === 0 && _cacheClearAvailable) {
+      const cleared = clearOsCache();
+      if (cleared) {
+        console.log(`[Executor] [${query.id}] OS cache cleared before cold run.`);
+      } else {
+        console.warn(`[Executor] [${query.id}] WARNING: OS cache clear FAILED before cold run.`);
+      }
+    } else if (runIdx === 0 && !_cacheClearAvailable) {
+      console.warn(`[Executor] [${query.id}] WARNING: OS cache clearing unavailable (_cacheClearAvailable=${_cacheClearAvailable}). Cold run will NOT be truly cold.`);
+    }
 
-  // Step 3: Parse [TIMING] lines from stdout
-  const stdout = typeof results.run.output === "string" ? results.run.output : "";
-  const timingRegex = /\[TIMING\]\s+(\w+):\s+([\d.]+)\s*ms/g;
-  let match;
-  while ((match = timingRegex.exec(stdout)) !== null) {
-    results.operation_timings[match[1]] = parseFloat(match[2]);
-  }
+    console.log(`[Executor] [${query.id}] Run ${runIdx + 1}/${effectiveRuns}...`);
+    const runStart = Date.now();
+    try {
+      const runOutput = await runProcess(binaryPath, [gendbDir, resultsDir], {
+        cwd: iterDir, timeout: defaults.queryExecutionTimeoutSec * 1000,
+      });
+      const runDurationMs = Date.now() - runStart;
+      const runStdout = typeof (runOutput.stdout || runOutput) === "string" ? (runOutput.stdout || runOutput) : "";
 
-  // Extract timing_ms: use total minus output (excludes file I/O)
-  if (results.operation_timings.total != null && results.operation_timings.output != null) {
-    results.timing_ms = results.operation_timings.total - results.operation_timings.output;
-  } else if (results.operation_timings.total != null) {
-    results.timing_ms = results.operation_timings.total;
-  } else {
-    const totalMatch = stdout.match(/Execution time:\s*([\d.]+)\s*ms/);
-    if (totalMatch) {
-      results.timing_ms = parseFloat(totalMatch[1]);
+      // Parse [TIMING] lines from this run's stdout
+      const runTimings = {};
+      const timingRegex = /\[TIMING\]\s+(\w+):\s+([\d.]+)\s*ms/g;
+      let match;
+      while ((match = timingRegex.exec(runStdout)) !== null) {
+        runTimings[match[1]] = parseFloat(match[2]);
+      }
+
+      // Extract timing_ms for this run
+      let runTimingMs = null;
+      if (runTimings.total != null && runTimings.output != null) {
+        runTimingMs = runTimings.total - runTimings.output;
+      } else if (runTimings.total != null) {
+        runTimingMs = runTimings.total;
+      } else {
+        const totalMatch = runStdout.match(/Execution time:\s*([\d.]+)\s*ms/);
+        if (totalMatch) runTimingMs = parseFloat(totalMatch[1]);
+      }
+
+      results.all_runs.push({ timing_ms: runTimingMs, operation_timings: runTimings });
+
+      // Keep last run's stdout/stderr for validation and status
+      results.run = {
+        status: "pass",
+        output: runStdout,
+        stderr: runOutput.stderr || "",
+        duration_ms: runDurationMs,
+      };
+
+      console.log(`[Executor] [${query.id}] Run ${runIdx + 1}/${effectiveRuns} completed in ${runDurationMs}ms (timing: ${runTimingMs ? Math.round(runTimingMs) + 'ms' : 'N/A'}).`);
+    } catch (err) {
+      results.run = {
+        status: "fail",
+        output: err.stdout || "",
+        stderr: err.message,
+        duration_ms: Date.now() - runStart,
+      };
+      console.error(`[Executor] [${query.id}] Run ${runIdx + 1}/${effectiveRuns} failed: ${err.message.slice(0, 200)}`);
+      await writeFile(execResultsPath, JSON.stringify(results, null, 2));
+      return results;
     }
   }
 
-  // Step 4: Validate against ground truth
+  // Step 3: Derive cold/hot/combined timing from all_runs
+  if (results.all_runs.length > 0) {
+    const coldRun = results.all_runs[0];
+    results.cold_timing_ms = coldRun.timing_ms;
+    results.operation_timings = coldRun.operation_timings; // cold run operation timings
+
+    if (results.all_runs.length >= 2) {
+      const hotRuns = results.all_runs.slice(1);
+      const hotTimings = hotRuns.map(r => r.timing_ms).filter(t => t != null);
+      results.hot_timing_ms = hotTimings.length > 0 ? hotTimings.reduce((a, b) => a + b, 0) / hotTimings.length : null;
+
+      // Pick best hot run for hot_operation_timings
+      let bestHotIdx = 0;
+      let bestHotTime = Infinity;
+      for (let i = 0; i < hotRuns.length; i++) {
+        if (hotRuns[i].timing_ms != null && hotRuns[i].timing_ms < bestHotTime) {
+          bestHotTime = hotRuns[i].timing_ms;
+          bestHotIdx = i;
+        }
+      }
+      results.hot_operation_timings = hotRuns[bestHotIdx].operation_timings;
+
+      // Combined primary metric: cold + avg(hot) — matches benchmark.py stacked chart
+      if (results.cold_timing_ms != null && results.hot_timing_ms != null) {
+        results.timing_ms = results.cold_timing_ms + results.hot_timing_ms;
+      } else {
+        results.timing_ms = results.cold_timing_ms;
+      }
+    } else {
+      // Single run — timing_ms is just the cold run
+      results.timing_ms = results.cold_timing_ms;
+    }
+  }
+
+  // Step 4: Validate against ground truth (from last run)
   if (groundTruthDir && existsSync(groundTruthDir)) {
     console.log(`[Executor] [${query.id}] Validating results...`);
     try {
@@ -2154,9 +2301,13 @@ async function main() {
   console.log(`[Orchestrator] Thinking Budgets:    ${JSON.stringify(defaults.agentThinkingBudgets)}`);
   console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
   console.log(`[Orchestrator] Knowledge Base:      ${KNOWLEDGE_BASE_PATH}`);
+  console.log(`[Orchestrator] Optimization Runs:   ${defaults.optimizationRuns} (1 cold + ${defaults.optimizationRuns - 1} hot)`);
   console.log(`[Orchestrator] Workload:            ${workload}`);
   console.log(`[Orchestrator] Run ID:              ${runId}`);
   console.log(`[Orchestrator] Run Dir:             ${runDir}`);
+
+  // Test cache clearing capability at startup (always — needed for cold-start measurement)
+  checkCacheClearCapability();
 
   // Phase 1: Offline Data Storage Optimization
   const { workloadAnalysisPath, storageDesignPath } = await runOfflineStorageOptimization(args, runDir, schema, queries);

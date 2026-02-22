@@ -1,0 +1,78 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:22:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q18(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:38: warning: ‘__builtin___sprintf_chk’ may write a terminating nul past the end of the destination [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                      ^\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:9:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 16\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:297:11: warning: ‘sz_cname’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  297 |     munmap((void*)c_name_c, sz_cname);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:296:11: warning: ‘sz_cch’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  296 |     munmap((void*)cch_raw,  sz_cch);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:255:11: warning: ‘sz_otp’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  255 |     munmap((void*)o_totalprice_c,sz_otp);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:254:11: warning: ‘sz_ood’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  254 |     munmap((void*)o_orderdate_c, sz_ood);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:253:11: warning: ‘sz_ock’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  253 |     munmap((void*)o_custkey_c,   sz_ock);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:252:11: warning: ‘sz_ook’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  252 |     munmap((void*)o_orderkey_c,  sz_ook);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q18/iter_4/q18.cpp:251:11: warning: ‘sz_ooh’ may be used uninitialized in this function [-Wmaybe-uninitialized]\n  251 |     munmap((void*)ooh_raw,       sz_ooh);\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 3.95 ms\n[TIMING] subquery_scan: 1041.19 ms\n[TIMING] orders_probe: 0.15 ms\n[TIMING] customer_probe: 0.37 ms\n[TIMING] sort_topk: 0.04 ms\n[TIMING] output: 0.25 ms\n[TIMING] total: 1172.71 ms\n",
+    "stderr": "",
+    "duration_ms": 1213
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q18\": {\n      \"rows_expected\": 100,\n      \"rows_actual\": 100,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 52.79,
+    "subquery_scan": 864.63,
+    "orders_probe": 0.17,
+    "customer_probe": 0.32,
+    "sort_topk": 0.05,
+    "output": 15.48,
+    "total": 1641.86
+  },
+  "timing_ms": 2787.6449999999995,
+  "cold_timing_ms": 1626.3799999999999,
+  "hot_timing_ms": 1161.2649999999999,
+  "hot_operation_timings": {
+    "data_loading": 7.83,
+    "subquery_scan": 1023.1,
+    "orders_probe": 0.09,
+    "customer_probe": 0.23,
+    "sort_topk": 0.04,
+    "output": 6.19,
+    "total": 1156.26
+  },
+  "all_runs": [
+    {
+      "timing_ms": 1626.3799999999999,
+      "operation_timings": {
+        "data_loading": 52.79,
+        "subquery_scan": 864.63,
+        "orders_probe": 0.17,
+        "customer_probe": 0.32,
+        "sort_topk": 0.05,
+        "output": 15.48,
+        "total": 1641.86
+      }
+    },
+    {
+      "timing_ms": 1150.07,
+      "operation_timings": {
+        "data_loading": 7.83,
+        "subquery_scan": 1023.1,
+        "orders_probe": 0.09,
+        "customer_probe": 0.23,
+        "sort_topk": 0.04,
+        "output": 6.19,
+        "total": 1156.26
+      }
+    },
+    {
+      "timing_ms": 1172.46,
+      "operation_timings": {
+        "data_loading": 3.95,
+        "subquery_scan": 1041.19,
+        "orders_probe": 0.15,
+        "customer_probe": 0.37,
+        "sort_topk": 0.04,
+        "output": 0.25,
+        "total": 1172.71
+      }
+    }
+  ]
+}

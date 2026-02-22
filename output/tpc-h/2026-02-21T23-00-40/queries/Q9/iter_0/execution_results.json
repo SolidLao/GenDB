@@ -1,0 +1,73 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 122.48 ms\n[TIMING] dim_filter: 31.69 ms\n[TIMING] main_scan: 35.77 ms\n[TIMING] aggregation_merge: 0.02 ms\n[TIMING] output: 1.05 ms\n[TIMING] total: 191.28 ms\n",
+    "stderr": "",
+    "duration_ms": 267
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q9\": {\n      \"rows_expected\": 175,\n      \"rows_actual\": 175,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 118.97,
+    "dim_filter": 30.43,
+    "main_scan": 35.84,
+    "aggregation_merge": 0.02,
+    "output": 0.57,
+    "total": 186.09
+  },
+  "timing_ms": 372.49,
+  "cold_timing_ms": 185.52,
+  "hot_timing_ms": 186.97,
+  "hot_operation_timings": {
+    "data_loading": 116.45,
+    "dim_filter": 31.35,
+    "main_scan": 35.61,
+    "aggregation_merge": 0.02,
+    "output": 2.06,
+    "total": 185.77
+  },
+  "all_runs": [
+    {
+      "timing_ms": 185.52,
+      "operation_timings": {
+        "data_loading": 118.97,
+        "dim_filter": 30.43,
+        "main_scan": 35.84,
+        "aggregation_merge": 0.02,
+        "output": 0.57,
+        "total": 186.09
+      }
+    },
+    {
+      "timing_ms": 183.71,
+      "operation_timings": {
+        "data_loading": 116.45,
+        "dim_filter": 31.35,
+        "main_scan": 35.61,
+        "aggregation_merge": 0.02,
+        "output": 2.06,
+        "total": 185.77
+      }
+    },
+    {
+      "timing_ms": 190.23,
+      "operation_timings": {
+        "data_loading": 122.48,
+        "dim_filter": 31.69,
+        "main_scan": 35.77,
+        "aggregation_merge": 0.02,
+        "output": 1.05,
+        "total": 191.28
+      }
+    }
+  ]
+}

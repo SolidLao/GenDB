@@ -47,6 +47,18 @@ Example pattern:
   size_t n = st.st_size / sizeof(T);
 Do NOT copy mmap'd data into std::vector.
 
+## Cold vs Hot Optimization
+You receive BOTH cold-start and hot (cached) performance profiles. The combined metric
+(cold + avg hot) is the optimization target — you must optimize BOTH to beat other systems.
+- Cold profile reveals I/O bottlenecks (data_loading, mmap faults)
+- Hot profile reveals compute bottlenecks (hash table probes, scans, aggregation)
+- When data_loading > 50% cold but < 10% hot → I/O-bound. Apply: zone-map-guided selective
+  madvise, column-ordered loading (filter cols first), parallel prefetch across columns, byte-packing.
+  Read `storage/data-loading-optimization.md`.
+- When a phase is high in BOTH cold and hot → compute-bound. Apply standard optimization
+  (better data structures, parallelism, fused passes).
+- NEVER regress hot performance to improve cold. Both must improve or stay neutral.
+
 ## Data Structures
 Generate all hash tables, bitsets, heaps, and other data structures INLINE, tailored to the
 specific query's key types, cardinalities, and access patterns. Use the Query Guide for exact
@@ -75,6 +87,7 @@ These cause 10-100x gaps. Fix them first:
 - Repeated timeout with no [TIMING] output -> suspect hash table overflow. Check every
   open-addressing hash table: is capacity > 2x the actual distinct key count? Are thread-local
   maps sized for full cardinality? Replace unbounded while probes with bounded for-loops.
+- data_loading > 50% of cold time but < 10% of hot time -> I/O-bound: zone-map-guided selective madvise, column-ordered loading, parallel prefetch, byte-packing. Read `storage/data-loading-optimization.md`.
 
 ## Aggressive Optimization Checklist (code-only, most impactful first)
 When performance gap is large (>3x vs baseline) or stall is detected, apply these IN CODE via Edit tool:

@@ -56,6 +56,7 @@ Modern CPUs have 8+ cores. Single-threaded execution wastes 87.5%+ of resources 
 | `storage/memory-layout.md` | Memory Layout Optimization | Hot loops, scans, joins — align to cache lines (64B), use SOA pattern. |
 | `storage/string-optimization.md` | String Optimization | Low-cardinality strings (e.g., flags, segments), join keys, GROUP BY keys. Interning/dictionary encoding. |
 | `storage/persistent-storage.md` | Persistent Binary Storage | Repeated query execution over large datasets. Binary column files + mmap for zero-copy access. Eliminates text parsing. |
+| `storage/data-loading-optimization.md` | Data Loading Optimization | Cold-start I/O: data_loading >30% of total, zone maps for selective loading, compression to reduce I/O volume. |
 
 ## Indexing
 

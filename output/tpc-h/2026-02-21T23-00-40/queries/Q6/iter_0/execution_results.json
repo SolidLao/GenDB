@@ -1,0 +1,63 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q6/iter_0/q6.cpp: In function ‘void run_Q6(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q6/iter_0/q6.cpp:164:27: warning: suggest parentheses around comparison in operand of ‘&’ [-Wparentheses]\n  164 |                     if (s >= SHIP_LO & s < SHIP_HI & d >= DISC_LO & d <= DISC_HI & q < QTY_MAX) {\n      |                         ~~^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q6/iter_0/q6.cpp:164:56: warning: suggest parentheses around comparison in operand of ‘&’ [-Wparentheses]\n  164 |                     if (s >= SHIP_LO & s < SHIP_HI & d >= DISC_LO & d <= DISC_HI & q < QTY_MAX) {\n      |                                                      ~~^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q6/iter_0/q6.cpp:164:71: warning: suggest parentheses around comparison in operand of ‘&’ [-Wparentheses]\n  164 |                     if (s >= SHIP_LO & s < SHIP_HI & d >= DISC_LO & d <= DISC_HI & q < QTY_MAX) {\n      |                                                                     ~~^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q6/iter_0/q6.cpp:164:86: warning: suggest parentheses around comparison in operand of ‘&’ [-Wparentheses]\n  164 |                     if (s >= SHIP_LO & s < SHIP_HI & d >= DISC_LO & d <= DISC_HI & q < QTY_MAX) {\n      |                                                                                    ~~^~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 47.20 ms\n[TIMING] main_scan: 14.33 ms\n[TIMING] output: 0.49 ms\n[TIMING] total: 62.07 ms\n",
+    "stderr": "",
+    "duration_ms": 98
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q6\": {\n      \"rows_expected\": 1,\n      \"rows_actual\": 1,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 52.8,
+    "main_scan": 5.1,
+    "output": 0.48,
+    "total": 58.41
+  },
+  "timing_ms": 117.28,
+  "cold_timing_ms": 57.93,
+  "hot_timing_ms": 59.349999999999994,
+  "hot_operation_timings": {
+    "data_loading": 47.38,
+    "main_scan": 9.7,
+    "output": 0.2,
+    "total": 57.32
+  },
+  "all_runs": [
+    {
+      "timing_ms": 57.93,
+      "operation_timings": {
+        "data_loading": 52.8,
+        "main_scan": 5.1,
+        "output": 0.48,
+        "total": 58.41
+      }
+    },
+    {
+      "timing_ms": 57.12,
+      "operation_timings": {
+        "data_loading": 47.38,
+        "main_scan": 9.7,
+        "output": 0.2,
+        "total": 57.32
+      }
+    },
+    {
+      "timing_ms": 61.58,
+      "operation_timings": {
+        "data_loading": 47.2,
+        "main_scan": 14.33,
+        "output": 0.49,
+        "total": 62.07
+      }
+    }
+  ]
+}

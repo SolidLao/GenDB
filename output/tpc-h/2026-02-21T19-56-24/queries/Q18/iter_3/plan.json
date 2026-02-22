@@ -1,0 +1,147 @@
+{
+  "query_id": "Q18",
+  "sampling_notes": {
+    "method": "1% orderkey sample (l_orderkey % 100 == 0), full row scan for sampled keys",
+    "sampled_orderkeys": 150000,
+    "qualifying_in_sample": 7,
+    "estimated_qualifying_total": 700,
+    "estimated_qualifying_orders": 700,
+    "estimated_qualifying_custkeys": 700,
+    "subquery_selectivity": 0.0000467
+  },
+  "logical_plan": {
+    "pipeline": [
+      "subquery_parallel_scan_aggregate",
+      "filter_qualifying_orderkeys",
+      "orders_index_lookup",
+      "customer_index_lookup",
+      "lineitem_outer_index_lookup_sum",
+      "group_by_aggregate",
+      "sort_topk"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "operation": "subquery_hash_aggregate",
+        "description": "Full parallel scan of lineitem (l_orderkey + l_quantity). Accumulate SUM(l_quantity) per l_orderkey in partitioned thread-local hash maps. Filter: keep orderkeys where SUM > 300. Result: compact hash set of ~700 qualifying orderkeys.",
+        "input_rows": 59986052,
+        "output_rows": 700
+      },
+      {
+        "step": 2,
+        "operation": "orders_index_point_lookup",
+        "description": "For each of the ~700 qualifying orderkeys, probe orders_orderkey_hash (pre-built mmap SV hash index) to retrieve row_idx → load o_custkey, o_orderdate, o_totalprice. Zero build cost.",
+        "build": "orders_orderkey_hash.bin (mmap, pre-built)",
+        "probe": "qualifying_orderkey_set (~700 keys)",
+        "output_rows": 700
+      },
+      {
+        "step": 3,
+        "operation": "customer_index_point_lookup",
+        "description": "For each of the ~700 qualifying orders, probe customer_custkey_hash (pre-built mmap SV hash index) on o_custkey → retrieve c_name, c_custkey. Zero build cost.",
+        "build": "customer_custkey_hash.bin (mmap, pre-built)",
+        "probe": "qualifying_order_custkeys (~700 keys)",
+        "output_rows": 700
+      },
+      {
+        "step": 4,
+        "operation": "lineitem_outer_index_mv_lookup",
+        "description": "For each of the ~700 qualifying orderkeys, probe lineitem_orderkey_hash (pre-built mmap MV hash index) → retrieve all row positions → load l_quantity, accumulate SUM per orderkey. Avg 4 lineitems per order → ~2800 rows touched.",
+        "build": "lineitem_orderkey_hash.bin (mmap, pre-built)",
+        "probe": "qualifying_orderkey_set (~700 keys)",
+        "output_rows": 700
+      }
+    ],
+    "subquery_strategy": "decorrelate_to_hash_precompute",
+    "aggregation": "hash_group_by",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "SUM(l_quantity) > 300 per l_orderkey (HAVING)",
+        "selectivity_estimate": 0.0000467,
+        "note": "Applied post-aggregation. Produces ~700 qualifying orderkeys from 15M unique."
+      }
+    ]
+  },
+  "physical_plan": {
+    "data_structures": {
+      "subquery_agg": "partitioned_hash_map(64 partitions, thread-local) for 15M key domain → reduces to compact_hash_set(~700) after HAVING filter",
+      "qualifying_orderkey_set": "compact_hash_set(pre_sized=1024, open_addressing) for O(1) probe in outer query",
+      "orders_lookup": "pre_built_sv_hash_index via mmap — orders_orderkey_hash.bin (SvEntry: key+row_idx, capacity=33554432). Zero build cost. Linear probe: slot = (key * 2654435761ULL >> 32) & mask.",
+      "customer_lookup": "pre_built_sv_hash_index via mmap — customer_custkey_hash.bin (SvEntry: key+row_idx, capacity=4194304). Zero build cost.",
+      "lineitem_outer_lookup": "pre_built_mv_hash_index via mmap — lineitem_orderkey_hash.bin (MvEntry: key+offset+count, positions[59986052]). Zero build cost. ~2800 l_quantity reads for ~700 qualifying orders.",
+      "outer_aggregation": "compact_hash_map(pre_sized=1024) keyed by o_orderkey — ~700 groups, accumulates sum_qty (double). Trivially small.",
+      "topk_structure": "std::partial_sort or fixed_array_sort — only ~700 rows, output top 100"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven for subquery scan; single_threaded for outer index lookups",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size": 65536,
+      "partition_count": 64,
+      "synchronization": "thread_local_hash_maps_merge_after_scan",
+      "subquery_parallelism": {
+        "description": "64 threads each scan a morsel of lineitem. Each thread maintains a local unordered_map<int32_t,double> for its portion. After scan, parallel merge: divide 15M key space into 64 ranges, each thread merges its range from all local maps. Final single-threaded HAVING filter.",
+        "parallel_scan": true,
+        "parallel_merge": true,
+        "merge_partitions": 64
+      },
+      "outer_query_parallelism": {
+        "description": "Single-threaded: only ~700 index lookups across 3 pre-built indexes. Parallelism overhead would exceed benefit.",
+        "parallel": false
+      }
+    },
+    "index_usage": [
+      {
+        "index": "orders_orderkey_hash",
+        "file": "indexes/orders_orderkey_hash.bin",
+        "type": "single_value_hash",
+        "purpose": "Point lookup of ~700 qualifying orderkeys → row_idx → o_custkey, o_orderdate, o_totalprice. Eliminates full orders scan (15M rows).",
+        "build_cost": "zero (mmap pre-built)"
+      },
+      {
+        "index": "customer_custkey_hash",
+        "file": "indexes/customer_custkey_hash.bin",
+        "type": "single_value_hash",
+        "purpose": "Point lookup of ~700 o_custkeys → row_idx → c_name, c_custkey. Eliminates full customer scan (1.5M rows).",
+        "build_cost": "zero (mmap pre-built)"
+      },
+      {
+        "index": "lineitem_orderkey_hash",
+        "file": "indexes/lineitem_orderkey_hash.bin",
+        "type": "multi_value_hash",
+        "purpose": "For each of ~700 qualifying orderkeys, retrieve all lineitem row positions → load l_quantity, accumulate SUM. ~2800 total rows touched instead of scanning 60M.",
+        "build_cost": "zero (mmap pre-built)"
+      }
+    ],
+    "scan_strategy": "single_pass_fused for subquery (l_orderkey + l_quantity co-scanned in one pass); index_driven for outer query",
+    "memory_pattern": "streaming_sequential for subquery lineitem scan; random_access_with_prefetch for index-driven outer lookups",
+    "io_strategy": {
+      "approach": "full_column_mmap for subquery lineitem scan (no zone-map predicate applicable); index_mmap_on_demand for outer query",
+      "column_load_order": [
+        "lineitem/l_orderkey.bin (240MB) — subquery group-by key",
+        "lineitem/l_quantity.bin (480MB) — subquery aggregate value",
+        "indexes/orders_orderkey_hash.bin — post-subquery, on-demand",
+        "indexes/customer_custkey_hash.bin — post-subquery, on-demand",
+        "indexes/lineitem_orderkey_hash.bin — post-subquery, on-demand",
+        "orders payload columns (o_custkey, o_orderdate, o_totalprice) — late materialization for ~700 rows",
+        "customer/c_name.bin, c_custkey.bin — late materialization for ~700 rows"
+      ],
+      "parallel_column_prefetch": true,
+      "prefetch_note": "Issue madvise(MADV_WILLNEED) on l_orderkey.bin and l_quantity.bin concurrently before parallel scan begins. Total subquery I/O: ~720MB sequential."
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "subquery_parallel_hash_aggregate (60M rows, 720MB lineitem scan)",
+    "phase_breakdown": {
+      "subquery_scan_agg_ms": 55,
+      "having_filter_ms": 1,
+      "orders_index_lookup_ms": 1,
+      "customer_index_lookup_ms": 1,
+      "lineitem_outer_index_lookup_ms": 1,
+      "outer_aggregate_ms": 1,
+      "sort_topk_ms": 1
+    },
+    "estimated_ms": 60,
+    "bottleneck": "Hash aggregation of 60M lineitem rows into 15M groups, parallelized across 64 threads with thread-local maps and parallel merge. Warm-cache memory bandwidth: ~720MB / (100 GB/s effective) ≈ 7ms I/O; hash map ops dominate at ~50ms."
+  }
+}

@@ -13,6 +13,7 @@ GenDB takes a different approach to query execution: instead of routing queries 
 - **Plan-first pipeline** — Query Planner designs structured JSON execution plans (join order, data structures, parallelism), Code Generator implements them, Optimizer can modify both plan and code
 - **Timeout-resilient code generation** — Code Generator does full compile→run→validate internally (catching logical bugs early), but the orchestrator always calls `executeQuery()` as a safety net — surviving agent timeouts on complex queries. Fallback execution runs on agent crash/timeout to prevent iteration gaps.
 - **Process group lifecycle management** — all spawned processes (agents and binaries) run in detached process groups; on timeout or completion, the entire group is killed via `process.kill(-pid)`, preventing orphaned zombie processes. Pre-run cleanup kills any leftover processes from previous runs.
+- **Multi-run cold+hot execution** — each query runs 3 times per optimization iteration: 1 cold (OS cache cleared) + 2 hot (cached). Combined metric (cold + avg hot) matches benchmark.py's scoring. Agents receive side-by-side cold vs hot performance profiles, enabling targeted optimization of both I/O bottlenecks (cold) and compute bottlenecks (hot).
 - **Configurable query execution timeout** — `queryExecutionTimeoutSec` (default 300s) controls binary execution timeout across all execution sites: orchestrator `executeQuery()`, Code Generator's internal `timeout` command, and final assembly validation. Eliminates hardcoded timeout values.
 - **Per-agent thinking budget control** — `MAX_THINKING_TOKENS` env var limits extended thinking per agent (configured via `agentThinkingBudgets` in `gendb.config.mjs`). Prevents thinking from consuming the entire 64K output token budget, which previously caused 30+ minute wasted cycles of think→exceed→restart. All agent prompts include Thinking Discipline guidance.
 - **Fully adaptive code generation** — agents generate all data structures (hash tables, mmap loading, bitsets) inline, tailored to each query's specific types, cardinalities, and access patterns. Only date_utils.h and timing_utils.h are system infrastructure.
@@ -122,10 +123,11 @@ DBA Stage B → Review all results, identify patterns, write retrospective/
 ║  │  Executor (non-LLM)        │  Orchestrator safety net — runs even           ║
 ║  │                             │  if Code Generator timed out.                  ║
 ║  │  1. Compile with -O3 -flto  │                                               ║
-║  │  2. Run binary (config limit)│                                               ║
-║  │  3. Validate vs ground truth│                                               ║
-║  │  4. Parse [TIMING] phases   │                                               ║
-║  │  5. Extract correctness     │                                               ║
+║  │  2. Clear OS cache          │  Multi-run: 1 cold + 2 hot.                   ║
+║  │  3. Run binary 3× (cold+hot)│  Combined metric: cold + avg(hot).            ║
+║  │  4. Validate vs ground truth│                                               ║
+║  │  5. Parse [TIMING] phases   │  Stores cold + hot operation timings.          ║
+║  │  6. Extract correctness     │                                               ║
 ║  │     anchors from passing run│                                               ║
 ║  └──────────────┬──────────────┘                                               ║
 ║                 │                                                               ║

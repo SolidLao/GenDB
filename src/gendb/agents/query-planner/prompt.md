@@ -49,7 +49,12 @@ Write the plan to the path specified in the user prompt. Use this exact structur
     },
     "index_usage": [{"index": "<column>_zone_map", "purpose": "skip_blocks_outside_range"}],
     "scan_strategy": "single_pass_fused | multi_pass | index_driven",
-    "memory_pattern": "streaming_sequential | random_access_with_prefetch"
+    "memory_pattern": "streaming_sequential | random_access_with_prefetch",
+    "io_strategy": {
+      "approach": "zone_map_guided_selective | full_column_mmap",
+      "column_load_order": ["zone_maps", "filter_columns", "join_key_columns", "payload_columns"],
+      "parallel_column_prefetch": true
+    }
   },
   "estimated_cost": {
     "dominant_phase": "main_scan",
@@ -76,6 +81,7 @@ Write the plan to the path specified in the user prompt. Use this exact structur
    Only plan runtime hash table construction when no pre-built index covers the needed key,
    or you have clear evidence that using the index would cause correctness or efficiency issues.
 10. This plan is a recommendation, not a rigid constraint. The Code Generator may adapt it based on implementation-level insights.
+12. For cold-start I/O: if zone maps exist on filter columns and selectivity < 50%, plan `zone_map_guided_selective` approach. Always plan `column_load_order` with filter columns first. For tables with >5 columns, plan `parallel_column_prefetch: true` to issue concurrent madvise calls. Read `storage/data-loading-optimization.md`.
 11. Aggregate group count upper bound: for GROUP BY on a join key from a 1:N relationship
     (e.g., GROUP BY orderkey where orders:lineitem is 1:N), the number of groups is bounded
     by the qualifying rows on the "1" side. The sampling program must count distinct aggregation

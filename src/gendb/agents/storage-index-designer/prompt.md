@@ -50,6 +50,7 @@ Your thinking budget is limited. Think concisely and structurally:
 7. **Index construction**: mmap binary columns (not ifstream), OpenMP for parallel construction. Read `indexing/hash-indexes.md` for multi-value hash design, `indexing/sorted-indexes.md` for B+ trees.
 8. **Compilation**: ingest.cpp: `g++ -O2 -std=c++17 -Wall -lpthread`. build_indexes.cpp: `g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp`.
 9. **Index efficiency**: Skip hash indexes on tables with <10K rows (linear scan is faster). For hash index construction, use sort-based grouping (sort positions by key, scan for boundaries) — NEVER `std::unordered_map<K, std::vector<uint32_t>>`. Use multiply-shift hash, not `std::hash`. Build indexes in parallel when independent.
+10. **Compression for I/O reduction**: For large tables (>1M rows), analyze column statistics. If a numeric column has <256 distinct values, byte-pack it (store as uint8_t + lookup table in a sidecar file). Document compression scheme and lookup table path in storage_design.json and query guides. Read `storage/data-loading-optimization.md` for patterns.
 
 ## storage_design.json Contract
 
@@ -93,8 +94,9 @@ Generate guides of ~100-150 lines with the following sections. Include query-spe
 
 ## Column Reference
 
-### <column_name> (DECIMAL, <cpp_type>[, scale_factor=<N>])
+### <column_name> (DECIMAL, <cpp_type>[, scale_factor=<N>][, compression=<scheme>])
 - File: <table>/<column>.bin (<row_count> rows)
+- Compression (if any): <scheme> (e.g., byte_pack with lookup table at <table>/<column>_lookup.bin)
 - If double: stored as native double — values match SQL directly. No scaling needed.
 - If int64_t with scale_factor: stored values = SQL_value × <scale_factor>. Show scaled comparison and output formulas.
 - This query: `<SQL_predicate>` → C++ `<comparison>` (show encoding-appropriate threshold)

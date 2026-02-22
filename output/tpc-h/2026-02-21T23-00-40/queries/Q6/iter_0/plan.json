@@ -1,0 +1,139 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune", "scan_filter_fused", "aggregate_scalar"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_sum_thread_local_merge",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 && l_shipdate < 9131",
+        "selectivity_estimate": 0.157,
+        "note": "zone_map prunes ~84% of 600 blocks at block level; row-level int32 check applied inside qualifying blocks"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "discount_code >= 5 && discount_code <= 7",
+        "selectivity_estimate": 0.30,
+        "note": "uint8_t byte-packed — pure integer range, no float needed"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "quantity_code < 24",
+        "selectivity_estimate": 0.46,
+        "note": "uint8_t byte-packed — quantity_code IS the integer quantity (1-50)"
+      }
+    ],
+    "combined_selectivity": 0.019,
+    "qualifying_rows_estimate": 1139735
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "scalar_double_accumulator_thread_local",
+      "note": "no GROUP BY — each of 64 threads holds one double partial_sum; merged via simple summation after parallel phase"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc)",
+      "morsel_size": 100000,
+      "morsel_unit": "zone_map_block",
+      "qualifying_blocks_estimate": 96,
+      "work_distribution": "atomic_block_counter — threads pull next qualifying block index via fetch_add; ~1-2 blocks/thread at 64 threads",
+      "synchronization": "thread_local_merge",
+      "merge_cost": "O(64) scalar additions — negligible"
+    },
+    "index_usage": [
+      {
+        "index": "shipdate_zonemap",
+        "file": "lineitem/indexes/shipdate_zonemap.bin",
+        "purpose": "skip_blocks_outside_range_8766_to_9131",
+        "format": "uint32_t num_blocks=600, then {int32_t min, int32_t max, uint32_t start_row} x 600",
+        "skip_logic": "skip if block_max < 8766 (pre-1994) OR block_min >= 9131 (post-1994, break — sorted); scan [start_row, start_row+100000)",
+        "block_skip_rate": 0.84,
+        "qualifying_blocks_estimate": 96,
+        "qualifying_rows_estimate": 9477495,
+        "access": "mmap — zero build cost, single pass over 600 x 12-byte entries"
+      }
+    ],
+    "column_access": {
+      "l_discount_lookup": {
+        "file": "lineitem/l_discount_lookup.bin",
+        "encoding": "double[256]",
+        "load": "mmap once before parallel phase; 2 KB fits in L1 cache — broadcast to all threads"
+      },
+      "l_shipdate": {
+        "file": "lineitem/l_shipdate.bin",
+        "encoding": "int32_t",
+        "role": "filter",
+        "filter": "raw >= 8766 && raw < 9131",
+        "simd": "AVX-512: _mm512_cmpge_epi32 + _mm512_cmplt_epi32, 16 int32 values/cycle"
+      },
+      "l_discount": {
+        "file": "lineitem/l_discount.bin",
+        "encoding": "uint8_t byte_pack",
+        "role": "filter_and_payload",
+        "filter": "code >= 5 && code <= 7",
+        "payload_use": "disc_lut[code] used in revenue formula for passing rows",
+        "simd": "AVX-512: _mm512_cmpge_epu8 + _mm512_cmple_epu8, 64 uint8 values/cycle"
+      },
+      "l_quantity": {
+        "file": "lineitem/l_quantity.bin",
+        "encoding": "uint8_t byte_pack",
+        "role": "filter",
+        "filter": "code < 24",
+        "simd": "AVX-512: _mm512_cmplt_epu8, 64 uint8 values/cycle"
+      },
+      "l_extendedprice": {
+        "file": "lineitem/l_extendedprice.bin",
+        "encoding": "double",
+        "role": "payload",
+        "late_materialization": true,
+        "note": "prefetched at block granularity alongside other columns; at row level, accessed only after all three integer filters pass — avoids random double loads for non-qualifying rows"
+      }
+    },
+    "filter_execution_order": [
+      "1. shipdate row-level check: int32 range [8766, 9131) — SIMD AVX-512 bitmask over 16 values/cycle",
+      "2. discount_code range: uint8 [5, 7] — SIMD AVX-512 bitmask over 64 values/cycle",
+      "3. quantity_code threshold: uint8 < 24 — SIMD AVX-512 bitmask over 64 values/cycle",
+      "4. combined bitmask AND — iterate set bits, accumulate: partial_sum += l_extendedprice[i] * disc_lut[disc_code[i]]"
+    ],
+    "scan_strategy": "zone_map_guided_selective",
+    "memory_pattern": "streaming_sequential",
+    "io_strategy": {
+      "approach": "zone_map_guided_selective",
+      "column_load_order": [
+        "zone_maps (shipdate_zonemap.bin — 7.2 KB, always fits in one disk block)",
+        "l_shipdate (qualifying blocks only — ~38 MB vs 240 MB full)",
+        "l_discount (qualifying blocks only — ~9.4 MB vs 60 MB full)",
+        "l_quantity (qualifying blocks only — ~9.4 MB vs 60 MB full)",
+        "l_extendedprice (qualifying blocks only — ~75 MB vs 480 MB full)"
+      ],
+      "parallel_column_prefetch": true,
+      "prefetch_strategy": "for each qualifying block b: issue madvise(MADV_WILLNEED) for [start_row*sizeof(T), block_size*sizeof(T)] on all 4 data columns concurrently via OpenMP parallel for over columns",
+      "total_io_qualifying_blocks": "~132 MB",
+      "total_io_full_scan_avoided": "~840 MB",
+      "io_reduction_factor": "6.4x"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "data_loading_io_cold",
+    "lineitem_total_rows": 59986052,
+    "zone_map_total_blocks": 600,
+    "qualifying_blocks": 96,
+    "rows_scanned": 9477495,
+    "qualifying_rows": 1139735,
+    "io_breakdown": {
+      "l_shipdate_qualifying": "~38 MB (9.4M x 4 bytes)",
+      "l_discount_qualifying": "~9.4 MB (9.4M x 1 byte)",
+      "l_quantity_qualifying": "~9.4 MB (9.4M x 1 byte)",
+      "l_extendedprice_qualifying": "~75 MB (9.4M x 8 bytes)",
+      "total_read": "~132 MB",
+      "full_scan_would_read": "~840 MB"
+    },
+    "estimated_ms": 30,
+    "hot_estimated_ms": 25,
+    "bottleneck_cold": "HDD I/O — zone-map-guided selective loading reduces reads 6.4x; parallel madvise reduces latency",
+    "bottleneck_hot": "CPU scan throughput — 64-thread morsel-driven scan over ~9.4M rows with AVX-512 SIMD filtering"
+  }
+}

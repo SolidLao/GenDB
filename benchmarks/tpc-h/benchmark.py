@@ -50,6 +50,33 @@ RESET = "\033[0m"
 # Number of threads for all systems (set to core count for fair comparison)
 BENCHMARK_THREADS = os.cpu_count() or 64
 
+
+def drop_os_caches():
+    """Clear OS page cache so the first query run starts cold."""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "sh", "-c", "sync && echo 3 > /proc/sys/vm/drop_caches"],
+            check=True, capture_output=True, timeout=10,
+        )
+        print("  OS page cache cleared.")
+    except Exception:
+        print("  Warning: could not clear OS page cache (need passwordless sudo).")
+        print("  Run: sudo bash benchmarks/setup_drop_caches.sh")
+
+
+def restart_postgresql():
+    """Restart PostgreSQL to clear shared_buffers (internal buffer pool)."""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "pg_ctlcluster", "18", "tpch", "restart"],
+            check=True, capture_output=True, timeout=30,
+        )
+        time.sleep(2)
+        print("  PostgreSQL restarted (buffer pool cleared).")
+    except Exception:
+        print("  Warning: could not restart PostgreSQL (need passwordless sudo).")
+
+
 # ---------------------------------------------------------------------------
 # TPC-H queries (standard SQL, cross-system compatible)
 # ---------------------------------------------------------------------------
@@ -928,7 +955,8 @@ def clickhouse_benchmark(scale_factor: int, num_runs: int, query_ids: list,
 
     client = Client(host="localhost", port=9000,
                     settings={"max_execution_time": timeout,
-                              "max_threads": BENCHMARK_THREADS})
+                              "max_threads": BENCHMARK_THREADS,
+                              "use_query_cache": 0})
     results = {}
     for qname in query_ids:
         if qname not in queries:
@@ -1696,12 +1724,12 @@ def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
 
 QUERY_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0", "#00BCD4", "#FF5722", "#795548"]
 SYSTEM_COLORS = {
-    "GenDB": "#2196F3",
-    "PostgreSQL": "#4CAF50",
-    "DuckDB": "#FF9800",
-    "ClickHouse": "#E91E63",
-    "Umbra": "#9C27B0",
-    "MonetDB": "#00BCD4",
+    "GenDB": "#E41A1C",
+    "PostgreSQL": "#377EB8",
+    "DuckDB": "#FF7F00",
+    "ClickHouse": "#4DAF4A",
+    "Umbra": "#984EA3",
+    "MonetDB": "#A65628",
 }
 
 
@@ -1840,111 +1868,289 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
 
 
 def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
-                 timeout_ms: float = 300000, all_query_ids: list = None):
-    """Create per-query and total execution time comparison plots.
+                 timeout_ms: float = 300000, all_query_ids: list = None,
+                 gendb_history: dict = None):
+    """Create a single 4-panel figure (figure* for SIGMOD two-column layout).
 
-    Args:
-        all_results: {system: {qid: [times_ms]}}
-        output_path: Path to save per-query plot
-        scale_factor: Scale factor label
-        timeout_ms: Timeout in milliseconds; missing queries are shown at this value
-        all_query_ids: Full list of query IDs (e.g. Q1-Q22); if provided, missing
-                       queries are plotted at timeout_ms with a red cross marker
+    Panels: (a) per-query time, (b) total time, (c) GenDB iteration total,
+            (d) GenDB iteration per-query.
     """
+    import matplotlib
+    import matplotlib.colors as mcolors
+    import matplotlib.ticker as ticker
+    import numpy as np
+    matplotlib.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 11,
+        "axes.titlepad": 4,
+        "axes.labelpad": 1,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "xtick.major.pad": 2,
+        "ytick.major.pad": 2,
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "grid.linewidth": 0.3,
+        "xtick.major.size": 2.5,
+        "ytick.major.size": 2.5,
+        "xtick.minor.size": 1.2,
+        "ytick.minor.size": 1.2,
+    })
+
+    sci_fmt = ticker.LogFormatterSciNotation(base=10, labelOnlyBase=True)
+
+    # Determine common queries (supported by all systems)
     if all_query_ids:
-        queries = sorted(all_query_ids, key=lambda q: int(q[1:]))
+        all_qs = sorted(all_query_ids, key=lambda q: int(q[1:]))
     else:
-        queries = sorted(set(q for results in all_results.values() for q in results),
-                         key=lambda q: int(q[1:]))
+        all_qs = sorted(set(q for results in all_results.values() for q in results),
+                        key=lambda q: int(q[1:]))
     systems = list(all_results.keys())
 
-    data = {}
-    is_timeout = {}  # (system, query_index) -> True if timed out
+    # Build data for all queries, then filter to common
+    # Split into cold run (1st run) and hot run (avg of 2nd & 3rd runs)
+    data_all = {}
+    cold_all = {}
+    hot_all = {}
+    is_timeout_all = {}
     for system in systems:
-        data[system] = []
-        is_timeout[system] = []
-        for q in queries:
+        data_all[system] = []
+        cold_all[system] = []
+        hot_all[system] = []
+        is_timeout_all[system] = []
+        for q in all_qs:
             times = all_results[system].get(q, [])
             if times:
-                data[system].append(sum(times) / len(times))
-                is_timeout[system].append(False)
+                cold = times[0]
+                hot = sum(times[1:]) / len(times[1:]) if len(times) > 1 else 0
+                data_all[system].append(cold + hot)
+                cold_all[system].append(cold)
+                hot_all[system].append(hot)
+                is_timeout_all[system].append(False)
             else:
-                data[system].append(timeout_ms)
-                is_timeout[system].append(True)
+                data_all[system].append(timeout_ms)
+                cold_all[system].append(timeout_ms)
+                hot_all[system].append(0)
+                is_timeout_all[system].append(True)
 
-    # Per-query grouped bar chart (wider for 22 queries)
-    fig_width = max(20, len(queries) * 0.9)
-    fig, ax = plt.subplots(figsize=(fig_width, 7))
-    x = range(len(queries))
-    width = 0.8 / max(len(systems), 1)
+    common_idx = [j for j, q in enumerate(all_qs)
+                  if all(not is_timeout_all[s][j] for s in systems)]
+    queries = [all_qs[j] for j in common_idx]
+    data = {s: [data_all[s][j] for j in common_idx] for s in systems}
+    cold_data = {s: [cold_all[s][j] for j in common_idx] for s in systems}
+    hot_data = {s: [hot_all[s][j] for j in common_idx] for s in systems}
+    n_common = len(queries)
+    totals = {s: sum(data[s]) for s in systems}
+    cold_totals = {s: sum(cold_data[s]) for s in systems}
+    hot_totals = {s: sum(hot_data[s]) for s in systems}
+
+    # --- Figure layout ---
+    has_iter = gendb_history and gendb_history["num_iters"] > 0
+
+    def _style_log(a, axis="y"):
+        if axis == "y":
+            a.set_yscale("log")
+            a.yaxis.set_major_formatter(sci_fmt)
+            a.yaxis.set_minor_formatter(ticker.NullFormatter())
+            a.grid(axis="y", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        else:
+            a.set_xscale("log")
+            a.xaxis.set_major_formatter(sci_fmt)
+            a.xaxis.set_minor_formatter(ticker.NullFormatter())
+            a.grid(axis="x", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        a.set_axisbelow(True)
+
+    if has_iter:
+        fig = plt.figure(figsize=(13, 3.0))
+        import matplotlib.gridspec as gridspec
+        # Tighter layout: reduce gaps between panels
+        sq = 0.17  # square panel width
+        ax  = fig.add_axes([0.05, 0.15, 0.27, 0.68])    # (a) wide
+        ax2 = fig.add_axes([0.34, 0.15, sq,   0.68])    # (b) square
+        ax3 = fig.add_axes([0.53, 0.15, sq,   0.68])    # (c) square
+        ax4 = fig.add_axes([0.73, 0.15, sq,   0.68])    # (d) square
+    else:
+        fig, (ax, ax2) = plt.subplots(
+            1, 2, figsize=(8, 2.8),
+            gridspec_kw={"width_ratios": [1.6, 1], "wspace": 0.32})
+
+    # ===== (a) Per-query grouped bar chart (stacked: hot bottom, cold top) =====
+    x = np.arange(len(queries))
+    width = 0.92 / max(len(systems), 1)
     offsets = [(i - len(systems) / 2 + 0.5) * width for i in range(len(systems))]
-
-    timeout_marker_added = False
     for i, system in enumerate(systems):
-        bars = ax.bar(
-            [xi + offsets[i] for xi in x], data[system], width,
-            label=system, color=SYSTEM_COLORS.get(system, "#999999"),
-        )
-        for j, (bar, val, timedout) in enumerate(zip(bars, data[system], is_timeout[system])):
-            if timedout:
-                # Red cross marker for timed-out queries
-                cx = bar.get_x() + bar.get_width() / 2
-                cy = bar.get_height()
-                if not timeout_marker_added:
-                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
-                               color="red", zorder=5, label="Timeout")
-                    timeout_marker_added = True
-                else:
-                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
-                               color="red", zorder=5)
-            elif val > 0:
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                        f"{val:.1f}", ha="center", va="bottom", fontsize=7,
-                        rotation=45)
+        base_color = SYSTEM_COLORS.get(system, "#999999")
+        rgb = mcolors.to_rgb(base_color)
+        light_rgb = tuple(min(1.0, c * 0.75 + 0.25) for c in rgb)
+        # Hot run (bottom, full color)
+        ax.bar(x + offsets[i], hot_data[system], width,
+               label=system, color=base_color,
+               edgecolor="white", linewidth=0.2, zorder=3)
+        # Cold run (top, lighter shade)
+        ax.bar(x + offsets[i], cold_data[system], width,
+               bottom=hot_data[system],
+               color=light_rgb,
+               edgecolor="white", linewidth=0.2, zorder=3)
+    ax.set_ylabel("Time (ms)", fontsize=13)
+    ax.set_title(f"(a) Per-Query Time (SF={scale_factor})", fontweight="bold", fontsize=13)
+    ax.set_xticks(x)
+    ax.set_xticklabels(queries, fontsize=12)
+    ax.set_xlim(x[0] - 0.5, x[-1] + 0.5)
+    ax.tick_params(axis="x", length=0)
+    ax.tick_params(axis="y", labelsize=12)
+    _style_log(ax, "y")
 
-    ax.set_xlabel("TPC-H Query", fontsize=12)
-    ax.set_ylabel("Execution Time (ms, log scale)", fontsize=12)
-    ax.set_title(f"TPC-H Per-Query Execution Time (SF={scale_factor})", fontsize=14)
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(queries, fontsize=10, rotation=45, ha="right")
-    ax.legend(fontsize=10)
-    ax.set_yscale("log")
-    ax.grid(axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-    print(f"  Per-query plot saved to: {output_path}")
-
-    # Total execution time bar chart — only queries successful across ALL systems
-    common_queries = [j for j, q in enumerate(queries)
-                      if all(not is_timeout[s][j] for s in systems)]
-    common_query_names = [queries[j] for j in common_queries]
-    fig2, ax2 = plt.subplots(figsize=(max(8, len(systems) * 1.5), 6))
-    totals = {s: sum(data[s][j] for j in common_queries) for s in systems}
-    x_pos = range(len(systems))
-    bars = ax2.bar(x_pos, [totals[s] for s in systems],
-                   color=[SYSTEM_COLORS.get(s, "#999999") for s in systems])
-    for bar, system in zip(bars, systems):
+    # ===== (b) Total time horizontal bar chart (stacked: hot left, cold right) =====
+    y_pos = np.arange(len(systems))
+    bar_vals = [totals[s] for s in systems]
+    max_val = max(bar_vals)
+    for i, system in enumerate(systems):
+        base_color = SYSTEM_COLORS.get(system, "#999999")
+        rgb = mcolors.to_rgb(base_color)
+        light_rgb = tuple(min(1.0, c * 0.75 + 0.25) for c in rgb)
+        # Hot run (left, full color)
+        ax2.barh(y_pos[i], hot_totals[system], height=0.6,
+                 color=base_color,
+                 edgecolor="white", linewidth=0.2, zorder=3)
+        # Cold run (right, lighter shade)
+        ax2.barh(y_pos[i], cold_totals[system], height=0.6,
+                 left=hot_totals[system],
+                 color=light_rgb,
+                 edgecolor="white", linewidth=0.2, zorder=3)
+        # Label
         val = totals[system]
-        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 1.02,
-                 f"{val:.1f} ms", ha="center", va="bottom", fontsize=10, fontweight="bold")
+        bw = val
+        cy = y_pos[i]
+        if bw > max_val * 0.15:
+            ax2.text(bw * 0.85, cy, f"{val:,.0f}",
+                     ha="right", va="center", fontsize=12,
+                     fontweight="bold", color="white", zorder=4)
+        else:
+            ax2.text(bw * 1.15, cy, f"{val:,.0f}",
+                     ha="left", va="center", fontsize=12,
+                     fontweight="bold", color="black", zorder=4)
+    ax2.set_xlabel("(ms)", labelpad=6, fontsize=13)
+    ax2.xaxis.set_label_coords(1.0, -0.12)
+    ax2.xaxis.label.set_ha("right")
+    ax2.set_title(f"(b) Total Time (SF={scale_factor})", fontweight="bold", fontsize=13)
+    ax2.tick_params(axis="x", labelsize=12)
+    ax2.set_yticks([])
+    ax2.set_ylim(-0.5, len(systems) - 0.5)
+    ax2.set_xlim(left=100, right=max_val * 1.1)
+    ax2.invert_yaxis()
+    _style_log(ax2, "x")
 
-    ax2.set_xlabel("System", fontsize=12)
-    ax2.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
-    n_common = len(common_queries)
-    ax2.set_title(f"TPC-H Total Execution Time (SF={scale_factor}, {n_common} common queries)", fontsize=14)
-    ax2.set_xticks(list(x_pos))
-    ax2.set_xticklabels(systems, fontsize=11)
-    ax2.set_yscale("log")
-    ax2.grid(axis="y", alpha=0.3)
+    # ===== (c) & (d) GenDB iteration panels =====
+    if has_iter:
+        query_ids = gendb_history["query_ids"]
+        iter_data = gendb_history["data"]
+        num_iters = gendb_history["num_iters"]
+        best_so_far = _compute_best_so_far(iter_data, query_ids, num_iters)
+        cmap = matplotlib.colormaps.get_cmap("tab10")
+        q_colors = {q: cmap(i) for i, q in enumerate(query_ids)}
+        x_iters = list(range(num_iters))
 
-    plt.tight_layout()
-    base_name = output_path.stem.replace("_per_query", "")
-    total_path = output_path.with_name(base_name + "_total" + output_path.suffix)
-    plt.savefig(total_path, dpi=150)
+        # --- (c) Total execution time across iterations ---
+        valid_qids = [qid for qid in query_ids
+                      if any(s == "valid" for _, _, s in best_so_far.get(qid, []))]
+        total_x, total_y = [], []
+        for i in range(num_iters):
+            total, n_q = 0, 0
+            for qid in valid_qids:
+                for (si, st, _) in best_so_far.get(qid, []):
+                    if si == i:
+                        total += st
+                        n_q += 1
+                        break
+            if n_q > 0:
+                total_x.append(i)
+                total_y.append(total)
+
+        if total_y:
+            ax3.plot(total_x, total_y, marker="o", linewidth=2.5, markersize=6,
+                     color="#9C27B0")
+
+        ax3.set_xlabel("Iteration", fontsize=13)
+        ax3.set_title("(c) GenDB Total / Iter.", fontweight="bold", fontsize=13)
+        ax3.set_xticks(x_iters)
+        ax3.set_xticklabels([str(i) for i in x_iters], fontsize=12)
+        ax3.set_xlim(-0.3, num_iters - 0.7)
+        ax3.set_yscale("log")
+        ax3.yaxis.set_major_formatter(ticker.NullFormatter())
+        ax3.yaxis.set_minor_formatter(ticker.NullFormatter())
+        ax3.grid(axis="y", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        ax3.set_axisbelow(True)
+        ax3.text(0.04, 0.04, "(ms)", transform=ax3.transAxes, fontsize=12,
+                 va="bottom", ha="left")
+
+        # --- (d) Per-query execution time across iterations ---
+        sorted_qids = sorted(query_ids, key=lambda q: int(q[1:]))
+        for qid in sorted_qids:
+            series = best_so_far.get(qid, [])
+            if not series:
+                continue
+            color = q_colors[qid]
+            attempted = [(xi, yi) for xi, yi, s in series if s in ("valid", "fail")]
+            if attempted:
+                ax4.plot([p[0] for p in attempted], [p[1] for p in attempted],
+                         marker="o", linewidth=2.5, markersize=6, label=qid, color=color)
+            skipped = [(xi, yi) for xi, yi, s in series if s == "skipped"]
+            if skipped and attempted:
+                dash_x = [attempted[-1][0]] + [p[0] for p in skipped]
+                dash_y = [attempted[-1][1]] + [p[1] for p in skipped]
+                ax4.plot(dash_x, dash_y, linestyle="--", linewidth=1.5, markersize=0,
+                         color=color, alpha=0.4)
+            fail_x = [xi for xi, yi, s in series if s == "fail"]
+            fail_y = [yi for xi, yi, s in series if s == "fail"]
+            if fail_x:
+                ax4.scatter(fail_x, fail_y, marker="x", s=50, linewidths=1.5,
+                            color="red", zorder=5)
+
+        ax4.set_xlabel("Iteration", fontsize=13)
+        ax4.set_title("(d) GenDB Per-Query / Iter.", fontweight="bold", fontsize=13)
+        ax4.set_xticks(x_iters)
+        ax4.set_xticklabels([str(i) for i in x_iters], fontsize=12)
+        ax4.set_xlim(-0.3, num_iters - 0.7)
+        ax4.yaxis.set_major_formatter(sci_fmt)
+        ax4.yaxis.set_minor_formatter(ticker.NullFormatter())
+        ax4.tick_params(axis="y", direction="out", pad=2, labelsize=12)
+        ax4.text(-0.09, 0.96, "(ms)", transform=ax4.transAxes, fontsize=11,
+                 va="top", ha="center")
+        ax4.legend(fontsize=10, loc="upper right", framealpha=0.9,
+                   handlelength=1.0, handletextpad=0.3, borderpad=0.15,
+                   labelspacing=0.15, bbox_to_anchor=(1.02, 1.02))
+        _style_log(ax4, "y")
+
+    # Two legends in one row at top center: systems (left) | hot/cold (right)
+    from matplotlib.patches import Patch
+    sys_handles, sys_labels = ax.get_legend_handles_labels()
+    n_sys = len(sys_labels)
+    # System legend (left-of-center)
+    leg1 = fig.legend(sys_handles, sys_labels, loc="upper center", ncol=n_sys,
+                      bbox_to_anchor=(0.38, 1.08), frameon=True, fontsize=13,
+                      columnspacing=1.0, handletextpad=0.4, handlelength=1.0,
+                      edgecolor="#CCCCCC", fancybox=False, framealpha=1.0)
+    # Hot/Cold legend (right-of-center)
+    hc_handles = [Patch(facecolor="#666666"), Patch(facecolor="#B3B3B3")]
+    hc_labels = ["Hot run", "Cold run"]
+    leg2 = fig.legend(hc_handles, hc_labels, loc="upper center", ncol=2,
+                      bbox_to_anchor=(0.78, 1.08), frameon=True, fontsize=13,
+                      columnspacing=1.0, handletextpad=0.4, handlelength=1.0,
+                      edgecolor="#CCCCCC", fancybox=False, framealpha=1.0)
+    fig.add_artist(leg1)  # keep both legends visible
+
+    # Save combined figure
+    combined_path = output_path.with_name(
+        output_path.stem.replace("_per_query", "") + "_combined" + output_path.suffix)
+    fig.savefig(combined_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    pdf_path = combined_path.with_suffix(".pdf")
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
     plt.close()
-    print(f"  Total plot saved to: {total_path}")
+    print(f"  Combined plot saved to: {combined_path}")
+    print(f"  Combined plot (PDF) saved to: {pdf_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -2093,6 +2299,10 @@ def main():
                            "num_iters": gendb_history["num_iters"]}, f, indent=2)
             print(f"  Iteration history saved to: {iter_json_path}")
 
+        # --- Clear OS page cache before benchmarking ---
+        print("\n=== Clearing OS Page Cache ===")
+        drop_os_caches()
+
         # --- GenDB: benchmark best binaries (re-execute) ---
         print(f"\n=== GenDB Benchmark (best per-query, {args.runs} runs) ===")
         best_results = gendb_benchmark_best(args.gendb_run, gendb_dir, args.runs)
@@ -2100,12 +2310,17 @@ def main():
             all_results["GenDB"] = best_results
     elif not args.plot_only:
         print("=== GenDB: SKIPPED (run directory not found) ===")
+        # Clear OS page cache before baseline benchmarks
+        print("\n=== Clearing OS Page Cache ===")
+        drop_os_caches()
 
     if not args.plot_only and not args.gendb_only:
         # --- PostgreSQL ---
         print("\n=== PostgreSQL Setup ===")
         try:
             pg_setup(data_dir, args.sf, args.setup)
+            restart_postgresql()
+            drop_os_caches()
             print("\n=== PostgreSQL Benchmark ===")
             all_results["PostgreSQL"] = pg_benchmark(
                 args.sf, args.runs, gendb_query_ids, queries, args.timeout)
@@ -2116,6 +2331,7 @@ def main():
         print("\n=== DuckDB Setup ===")
         try:
             duckdb_setup(data_dir, args.sf, args.setup)
+            drop_os_caches()
             print("\n=== DuckDB Benchmark ===")
             all_results["DuckDB"] = duckdb_benchmark(
                 args.sf, args.runs, gendb_query_ids, queries, args.timeout)
@@ -2132,6 +2348,15 @@ def main():
                 if clickhouse_available():
                     ch_proc = clickhouse_server_start(args.sf)
                     clickhouse_setup(data_dir, args.sf, args.setup)
+                    # Clear ClickHouse internal caches
+                    ch_dir = Path(__file__).parent / "clickhouse"
+                    subprocess.run(
+                        [str(ch_dir / "clickhouse"), "client", "--port", "9000",
+                         "-q", "SYSTEM DROP CACHE"],
+                        capture_output=True, timeout=10,
+                    )
+                    print("  ClickHouse internal caches cleared.")
+                    drop_os_caches()
                     print("\n=== ClickHouse Benchmark ===")
                     all_results["ClickHouse"] = clickhouse_benchmark(
                         args.sf, args.runs, gendb_query_ids, queries, args.timeout)
@@ -2153,6 +2378,23 @@ def main():
                 if umbra_available():
                     umbra_container = umbra_start(data_dir, args.sf)
                     umbra_setup(data_dir, args.sf, args.setup)
+                    # Restart Umbra to clear internal buffer pool
+                    subprocess.run(
+                        ["docker", "restart", umbra_container],
+                        capture_output=True, timeout=30,
+                    )
+                    for _ in range(60):
+                        time.sleep(1)
+                        try:
+                            c = psycopg2.connect(
+                                host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                                password="postgres", dbname="postgres", connect_timeout=3)
+                            c.close()
+                            break
+                        except Exception:
+                            pass
+                    print("  Umbra container restarted (buffer pool cleared).")
+                    drop_os_caches()
                     print("\n=== Umbra Benchmark ===")
                     all_results["Umbra"] = umbra_benchmark(
                         args.sf, args.runs, gendb_query_ids, queries, args.timeout)
@@ -2174,6 +2416,12 @@ def main():
                 if monetdb_available():
                     monetdb_farm = monetdb_server_start(args.sf)
                     monetdb_setup(data_dir, args.sf, args.setup)
+                    # Restart MonetDB to clear internal caches
+                    monetdb_server_stop(monetdb_farm)
+                    time.sleep(2)
+                    monetdb_farm = monetdb_server_start(args.sf)
+                    print("  MonetDB restarted (internal caches cleared).")
+                    drop_os_caches()
                     print("\n=== MonetDB Benchmark ===")
                     all_results["MonetDB"] = monetdb_benchmark(
                         args.sf, args.runs, gendb_query_ids, queries, args.timeout)
@@ -2245,12 +2493,8 @@ def main():
     if len(all_results) >= min_systems:
         print()
         plot_results(all_results, args.output, scale_factor=str(args.sf),
-                     timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids)
-
-    if gendb_history and gendb_history["num_iters"] > 0:
-        base_name = args.output.stem.replace("_per_query", "")
-        iter_plot_path = args.output.with_name(base_name + "_gendb_iterations" + args.output.suffix)
-        plot_gendb_iterations(gendb_history, iter_plot_path, scale_factor=str(args.sf))
+                     timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids,
+                     gendb_history=gendb_history)
 
 
 if __name__ == "__main__":
