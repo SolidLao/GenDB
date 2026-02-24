@@ -1,0 +1,83 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q3/iter_3/q3.cpp:18:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q3(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:38: warning: ‘__builtin___sprintf_chk’ may write a terminating nul past the end of the destination [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                      ^\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /usr/include/c++/11/ext/string_conversions.h:43,\n                 from /usr/include/c++/11/bits/basic_string.h:6608,\n                 from /usr/include/c++/11/string:55,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q3/iter_3/q3.cpp:9:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 16\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 0.75 ms\n[TIMING] dim_filter: 16.75 ms\n[TIMING] build_joins: 23.76 ms\n[TIMING] main_scan: 66.94 ms\n[TIMING] aggregation_merge: 21.77 ms\n[TIMING] sort_topk: 3.63 ms\n[TIMING] output: 0.20 ms\n[TIMING] total: 151.89 ms\n",
+    "stderr": "",
+    "duration_ms": 172
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 0.81,
+    "dim_filter": 15.19,
+    "build_joins": 23.87,
+    "main_scan": 67.12,
+    "aggregation_merge": 22.16,
+    "sort_topk": 3.48,
+    "output": 0.12,
+    "total": 150.84
+  },
+  "timing_ms": 300.15,
+  "cold_timing_ms": 150.72,
+  "hot_timing_ms": 149.43,
+  "hot_operation_timings": {
+    "data_loading": 0.72,
+    "dim_filter": 13.27,
+    "build_joins": 23.49,
+    "main_scan": 66,
+    "aggregation_merge": 22.01,
+    "sort_topk": 3.55,
+    "output": 0.45,
+    "total": 147.62
+  },
+  "all_runs": [
+    {
+      "timing_ms": 150.72,
+      "operation_timings": {
+        "data_loading": 0.81,
+        "dim_filter": 15.19,
+        "build_joins": 23.87,
+        "main_scan": 67.12,
+        "aggregation_merge": 22.16,
+        "sort_topk": 3.48,
+        "output": 0.12,
+        "total": 150.84
+      }
+    },
+    {
+      "timing_ms": 147.17000000000002,
+      "operation_timings": {
+        "data_loading": 0.72,
+        "dim_filter": 13.27,
+        "build_joins": 23.49,
+        "main_scan": 66,
+        "aggregation_merge": 22.01,
+        "sort_topk": 3.55,
+        "output": 0.45,
+        "total": 147.62
+      }
+    },
+    {
+      "timing_ms": 151.69,
+      "operation_timings": {
+        "data_loading": 0.75,
+        "dim_filter": 16.75,
+        "build_joins": 23.76,
+        "main_scan": 66.94,
+        "aggregation_merge": 21.77,
+        "sort_topk": 3.63,
+        "output": 0.2,
+        "total": 151.89
+      }
+    }
+  ]
+}

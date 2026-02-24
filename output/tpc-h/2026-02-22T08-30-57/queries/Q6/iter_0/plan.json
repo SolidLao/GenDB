@@ -1,0 +1,142 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "scan_filter_fused", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "type": "range",
+      "raw_lo": 8766,
+      "raw_hi": 9131,
+      "selectivity": 0.156,
+      "zone_map": "indexes/lineitem_shipdate_zonemap.bin",
+      "zone_map_layout": "[uint32_t num_blocks=600][int32_t min, int32_t max per block]",
+      "zone_map_strategy": "binary_search_sorted",
+      "zone_map_skip": "skip if block_max < 8766 OR block_min >= 9131",
+      "interior_block_optimization": "blocks where block_min >= 8766 AND block_max < 9131 skip per-row date check",
+      "expected_qualifying_blocks": 94
+    },
+    {
+      "table": "lineitem",
+      "column": "l_discount",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "type": "range",
+      "raw_lo": 0.05,
+      "raw_hi": 0.07,
+      "selectivity": 0.282,
+      "zone_map": "indexes/lineitem_discount_zonemap.bin",
+      "zone_map_layout": "[uint32_t num_blocks=600][double min, double max per block]",
+      "zone_map_skip": "skip if block_max < 0.05 OR block_min > 0.07",
+      "note": "applied only to date-qualifying candidate blocks; limited pruning power (discount not sorted)"
+    },
+    {
+      "table": "lineitem",
+      "column": "l_quantity",
+      "predicate": "l_quantity < 24.0",
+      "type": "upper_bound",
+      "raw_hi": 24.0,
+      "selectivity": 0.469,
+      "zone_map": "indexes/lineitem_quantity_zonemap.bin",
+      "zone_map_layout": "[uint32_t num_blocks=600][double min, double max per block]",
+      "zone_map_skip": "skip if block_min >= 24.0"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "sort_column": "l_shipdate",
+    "phase1_block_selection": {
+      "method": "binary_search_on_shipdate_zonemap",
+      "first_block": "binary search for first b where block_max[b] >= 8766",
+      "last_block": "binary search for last b where block_min[b] < 9131",
+      "expected_candidate_blocks": 94
+    },
+    "phase2_secondary_zone_map_prune": {
+      "apply_discount_zonemap": true,
+      "apply_quantity_zonemap": true,
+      "order": "discount_zonemap then quantity_zonemap per candidate block"
+    },
+    "phase3_per_row_fused_filter": {
+      "columns_loaded": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+      "column_types": {
+        "l_shipdate": "int32_t",
+        "l_discount": "double",
+        "l_quantity": "double",
+        "l_extendedprice": "double"
+      },
+      "inner_loop_strategy": "AVX512_masked_fma",
+      "avx512_width": 8,
+      "predicate_mask": "(shipdate_in_range OR interior_block) AND discount_in_range AND quantity_lt_24",
+      "interior_block_skip_date_check": true,
+      "accumulate": "local_sum += ep[i] * disc[i] where mask[i]"
+    }
+  },
+  "data_structures": {
+    "zone_map_shipdate": "mmap int32_t zone map, binary search for block range",
+    "zone_map_discount": "mmap double zone map, block-level skip for candidate blocks",
+    "zone_map_quantity": "mmap double zone map, block-level skip for candidate blocks",
+    "aggregation": "thread_local_double_accumulator"
+  },
+  "aggregation": {
+    "type": "scalar_sum",
+    "expression": "SUM(l_extendedprice * l_discount)",
+    "decimal_encoding": "native_double",
+    "scale_division_needed": false,
+    "thread_local": "double local_sum = 0.0",
+    "reduction": "final_sum = sum of all thread-local sums (64 values)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven_block_range",
+    "unit": "block",
+    "qualifying_blocks": 94,
+    "threads": 64,
+    "thread_local_state": "double local_revenue_sum",
+    "sync": "OpenMP reduction(+:revenue) or manual thread-local array reduce",
+    "load_balance": "dynamic block dispatch over ~94 candidate blocks"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "binary_search_for_block_range",
+      "layout": "uint32_t num_blocks, then int32_t[num_blocks] min, int32_t[num_blocks] max"
+    },
+    {
+      "index": "lineitem_discount_zonemap",
+      "file": "indexes/lineitem_discount_zonemap.bin",
+      "purpose": "skip_blocks_outside_discount_range",
+      "layout": "uint32_t num_blocks, then double[num_blocks] min, double[num_blocks] max"
+    },
+    {
+      "index": "lineitem_quantity_zonemap",
+      "file": "indexes/lineitem_quantity_zonemap.bin",
+      "purpose": "skip_blocks_where_all_quantity_ge_24",
+      "layout": "uint32_t num_blocks, then double[num_blocks] min, double[num_blocks] max"
+    }
+  ],
+  "column_files": {
+    "l_shipdate":      "lineitem/l_shipdate.bin",
+    "l_discount":      "lineitem/l_discount.bin",
+    "l_quantity":      "lineitem/l_quantity.bin",
+    "l_extendedprice": "lineitem/l_extendedprice.bin"
+  },
+  "mmap_strategy": {
+    "zone_maps": "mmap all three zone map files upfront (tiny, <50KB each)",
+    "column_data": "mmap all four columns; use zone-map-guided madvise WILLNEED only on qualifying block byte ranges (P13)",
+    "madvise_sequential": true,
+    "prefetch_order": "shipdate → discount → quantity → extendedprice"
+  },
+  "output": {
+    "columns": ["revenue"],
+    "format": "single scalar double",
+    "order_by": [],
+    "limit": null
+  },
+  "estimated_output_rows": 1,
+  "estimated_qualifying_rows": 1260000,
+  "execution_target": "cpp"
+}

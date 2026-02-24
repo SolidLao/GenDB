@@ -10,25 +10,20 @@ GenDB takes a different approach to query execution: instead of routing queries 
 
 - **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
 - **7-agent architecture** — Workload Analyzer, Storage Designer, DBA, Query Planner, Code Generator, Code Inspector, Query Optimizer
-- **Plan-first pipeline** — Query Planner designs structured JSON execution plans (join order, data structures, parallelism), Code Generator implements them, Optimizer can modify both plan and code
-- **Timeout-resilient code generation** — Code Generator does full compile→run→validate internally (catching logical bugs early), but the orchestrator always calls `executeQuery()` as a safety net — surviving agent timeouts on complex queries. Fallback execution runs on agent crash/timeout to prevent iteration gaps.
-- **Process group lifecycle management** — all spawned processes (agents and binaries) run in detached process groups; on timeout or completion, the entire group is killed via `process.kill(-pid)`, preventing orphaned zombie processes. Pre-run cleanup kills any leftover processes from previous runs.
-- **Configurable query execution timeout** — `queryExecutionTimeoutSec` (default 300s) controls binary execution timeout across all execution sites: orchestrator `executeQuery()`, Code Generator's internal `timeout` command, and final assembly validation. Eliminates hardcoded timeout values.
-- **Per-agent thinking budget control** — `MAX_THINKING_TOKENS` env var limits extended thinking per agent (configured via `agentThinkingBudgets` in `gendb.config.mjs`). Prevents thinking from consuming the entire 64K output token budget, which previously caused 30+ minute wasted cycles of think→exceed→restart. All agent prompts include Thinking Discipline guidance.
-- **Fully adaptive code generation** — agents generate all data structures (hash tables, mmap loading, bitsets) inline, tailored to each query's specific types, cardinalities, and access patterns. Only date_utils.h and timing_utils.h are system infrastructure.
-- **Unified Query Guide** — Storage Designer generates comprehensive per-query guides (`Qi_guide.md`) with column usage contracts, SQL→C++ conversion examples, table stats, query analysis, and index layouts — the sole reference for all Phase 2 agents
-- **Deterministic failure diagnosis** — orchestrator detects common validation failure patterns (ratio errors, zero-output filters, row count mismatches) and provides actionable hints to the optimizer
-- **Index-aware** — agents read pre-built index binary formats from the Query Guide and generate matching loader code inline
-- **Safe hash table patterns** — all canonical hash table patterns use bounded probing (for-loop with probe < cap guard) to prevent infinite loops from cardinality misestimates; thread-local tables sized for full key cardinality
-- **Experience base** — evolving knowledge of correctness bugs and performance anti-patterns, checked by Code Inspector before execution
-- **Correctness anchors** — validated constants (date thresholds, revenue formulas) are extracted from passing code and made immutable during optimization
-- **Adaptive iteration budget** — stall detection triggers after 2 consecutive non-improving iterations with 3x gap from baseline
-- **Gap-tolerant iteration reporting** — summary tables and benchmarks scan all `iter_*` directories instead of breaking on the first missing one, so late-succeeding iterations are always visible
-- **DBA agent** — optional pre-generation risk analysis (Stage A, `--dba-stage-a`), retrospective post-run (Stage B)
-- **Code Inspector** — Sonnet-based review agent catches correctness issues (critical) and performance suggestions (non-blocking), receives Query Guide for encoding verification
-- **True per-query pipelining** — each query flows independently through Planner→Coder→Inspector→Execute→[fix]→[Optimizer→Inspector→Execute]* with no batch boundaries
-- **Knowledge-driven autonomy** — Query Planner reads the knowledge base (40+ technique files) and encodes strategy into plan.json; downstream agents receive only the plan + Query Guide, avoiding redundant knowledge reads and input bloat
-- **Programmatic optimization control** — continue/stop decisions and improvement checks are deterministic JavaScript functions, not LLM calls
+- **4-layer prompt architecture** — each agent has: (1) identity prompt, (2) experience skill (always loaded), (3) domain skills (loaded on demand), (4) user prompt (task context via templates)
+- **Skill system** — 12 concise domain skills replace 44 knowledge files. Skills are loaded selectively based on query characteristics and agent role, reducing token consumption ~40-50%.
+- **Plan-first pipeline** — Query Planner designs lean JSON execution plans, Code Generator implements them, Optimizer can modify both plan and code
+- **Configurable hot/cold optimization** — `optimizationTarget: "hot"` (default) optimizes avg(hot runs) only; `"cold"` optimizes cold run. Eliminates joint optimization bias.
+- **Timeout-resilient code generation** — orchestrator always calls `executeQuery()` as safety net, surviving agent timeouts
+- **Process group lifecycle management** — all spawned processes run in detached process groups; killed via `process.kill(-pid)` on timeout
+- **Multi-run cold+hot execution** — each query runs 3 times: 1 cold (OS cache cleared) + 2 hot (cached)
+- **User prompt templates** — externalized as `agents/*/user-prompt.md` with `{{placeholder}}` syntax, replacing inline string construction
+- **Lean I/O contracts** — plan.json ~35 lines (vs ~150), execution_results.json trimmed of duplicated fields
+- **Experience evolution** — DBA Stage B updates experience skill with frequency/severity metadata, capped at top-50 entries
+- **Correctness anchors** — validated constants extracted from passing code, made immutable during optimization
+- **Adaptive iteration budget** — stall detection after 2 consecutive non-improving iterations with 3x gap
+- **Code Inspector** — pre-execution review against experience skill + Query Guide
+- **True per-query pipelining** — each query flows independently through Planner→Coder→Inspector→Execute→[Optimizer→Inspector→Execute]*
 
 ## System Architecture
 
@@ -40,163 +35,50 @@ Workload Analyzer → Storage/Index Designer → Per-Query Guides (Qi_guide.md) 
 **Phase 2: Online Per-Query Pipeline-Parallel Optimization**
 ```
 Each query runs independently (true pipelining):
-  Iter 0: Query Planner → Code Generator (compile+run+validate) → Inspector → Execute (safety net)
-  Iter 1+: [shouldContinue() → Optimizer → Inspector → [fix] → Execute]* (adaptive budget)
-  → done
+  Iter 0: Query Planner → Code Generator (compile+run+validate) → Inspector → Execute
+  Iter 1+: [shouldContinue() → Optimizer → Inspector → Execute]* (adaptive budget)
 ```
 
 **Phase 3: Post-Run Retrospective**
 ```
-DBA Stage B → Review all results, identify patterns, write retrospective/
+DBA Stage B → Review results, evolve experience skill, write retrospective
 ```
 
-## Agent Workflow Diagram
-
-```
-╔══════════════════════════════════════════════════════════════════════════════════╗
-║                         PHASE 1: OFFLINE DATA STORAGE                          ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                ║
-║  ┌─────────────────────────┐     ┌──────────────────────────────────────────┐   ║
-║  │   Workload Analyzer     │     │       Storage/Index Designer             │   ║
-║  │   (Haiku)               │     │       (Haiku)                            │   ║
-║  │                         │     │                                          │   ║
-║  │  1. Detect hardware     │────>│  1. Read workload_analysis.json          │   ║
-║  │  2. Profile data files  │     │  2. Design column encodings + indexes    │   ║
-║  │  3. Analyze SQL queries │     │  3. Generate + run ingest.cpp            │   ║
-║  │  4. Sample cardinalities│     │  4. Generate + run build_indexes.cpp     │   ║
-║  │                         │     │  5. Write Qi_guide.md per query          │   ║
-║  │  Out: workload_analysis │     │                                          │   ║
-║  │       .json             │     │  Out: storage_design.json, .gendb/ data, │   ║
-║  └─────────────────────────┘     │       query_guides/Qi_guide.md           │   ║
-║                                  └──────────────┬───────────────────────────┘   ║
-║                                                 │                               ║
-║                                  ┌──────────────▼───────────────────────────┐   ║
-║                                  │  DBA Stage A (optional, --dba-stage-a)   │   ║
-║                                  │  (Sonnet)                                │   ║
-║                                  │                                          │   ║
-║                                  │  1. Predict correctness risks per query  │   ║
-║                                  │  2. Update experience.md with warnings   │   ║
-║                                  └──────────────────────────────────────────┘   ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
-║                 PHASE 2: PER-QUERY PIPELINE-PARALLEL OPTIMIZATION              ║
-║                    (Each query Qi runs independently)                           ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                ║
-║  ┌─────────────────────────────┐                                               ║
-║  │    Query Planner (Sonnet)   │  Inputs: Qi_guide.md, Knowledge Base          ║
-║  │                             │                                               ║
-║  │  1. Read INDEX.md + query   │  The ONLY agent that reads the full           ║
-║  │     technique files         │  knowledge base (40+ technique files).         ║
-║  │  2. Analyze cardinalities,  │  Designs strategy; downstream agents          ║
-║  │     join graph, predicates  │  implement it.                                ║
-║  │  3. Design logical plan     │                                               ║
-║  │  4. Design physical plan    │                                               ║
-║  │  5. Write plan.json         │                                               ║
-║  └──────────────┬──────────────┘                                               ║
-║                 │                                                               ║
-║                 ▼  Iter 0                                                       ║
-║  ┌─────────────────────────────┐                                               ║
-║  │  Code Generator (Sonnet)    │  Inputs: plan.json, Qi_guide.md               ║
-║  │                             │                                               ║
-║  │  1. Read plan.json          │  Does NOT read knowledge base —               ║
-║  │  2. Implement plan in C++   │  relies on plan.json for strategy             ║
-║  │  3. Write .cpp file         │  and Qi_guide.md for data formats.            ║
-║  │  4. Compile → Run → Validate│                                               ║
-║  │  5. Fix if needed (2 tries) │                                               ║
-║  └──────────────┬──────────────┘                                               ║
-║                 │                                                               ║
-║                 ▼                                                               ║
-║  ┌─────────────────────────────┐                                               ║
-║  │  Code Inspector (Sonnet)    │  Inputs: .cpp file, experience.md,            ║
-║  │                             │          Qi_guide.md                           ║
-║  │  1. Read C++ source         │                                               ║
-║  │  2. Check experience base   │  Cheap pre-execution review.                  ║
-║  │  3. Detect correctness bugs │  Critical issues (C*) → fix before run.       ║
-║  │  4. Flag perf anti-patterns │  Suggestions (P*) → non-blocking.             ║
-║  │  5. Detect optimizer regress│                                               ║
-║  └──────────────┬──────────────┘                                               ║
-║                 │                                                               ║
-║                 ▼                                                               ║
-║  ┌─────────────────────────────┐                                               ║
-║  │  Executor (non-LLM)        │  Orchestrator safety net — runs even           ║
-║  │                             │  if Code Generator timed out.                  ║
-║  │  1. Compile with -O3 -flto  │                                               ║
-║  │  2. Run binary (config limit)│                                               ║
-║  │  3. Validate vs ground truth│                                               ║
-║  │  4. Parse [TIMING] phases   │                                               ║
-║  │  5. Extract correctness     │                                               ║
-║  │     anchors from passing run│                                               ║
-║  └──────────────┬──────────────┘                                               ║
-║                 │                                                               ║
-║                 ▼  Iter 1+ (adaptive budget, shouldContinue())                  ║
-║  ┌─────────────────────────────┐                                               ║
-║  │  Query Optimizer (Sonnet)   │  Inputs: .cpp, Qi_guide.md,                   ║
-║  │                             │    execution_results, anchors, diagnosis       ║
-║  │  1. Parse [TIMING] breakdown│                                               ║
-║  │  2. Read plan.json          │  Does NOT read knowledge base —               ║
-║  │  3. Read optimization hist  │  uses Sonnet's internal knowledge             ║
-║  │  4. Check arch-level issues │  + Qi_guide.md + timing data.                 ║
-║  │  5. Edit code (targeted)    │                                               ║
-║  │  6. Compile (no run)        │  Output Discipline: Edit-only,                ║
-║  │                             │  concise reasoning, no full-file output.       ║
-║  └──────────────┬──────────────┘                                               ║
-║                 │                                                               ║
-║                 ▼                                                               ║
-║          Inspector → Executor → [loop if shouldContinue()]                      ║
-║                                                                                ║
-║  Stall detection: 2 consecutive non-improving + 3x gap → stall recovery        ║
-║  Correctness cap: 3 failures → stop                                            ║
-║  Best result tracked across all iterations                                      ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
-║                       PHASE 3: POST-RUN RETROSPECTIVE                          ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                ║
-║  ┌─────────────────────────────┐                                               ║
-║  │  DBA Stage B (Sonnet)       │                                               ║
-║  │                             │                                               ║
-║  │  1. Read all exec results   │                                               ║
-║  │  2. Classify: SUCCESS/SLOW/ │                                               ║
-║  │     FAILED per query        │                                               ║
-║  │  3. Root-cause failures     │                                               ║
-║  │  4. Identify bottlenecks    │                                               ║
-║  │  5. Write retrospective     │                                               ║
-║  └─────────────────────────────┘                                               ║
-╚══════════════════════════════════════════════════════════════════════════════════╝
-```
-
-**Agents:**
+## Agents
 
 | Agent | Model | Phase | Role |
 |-------|-------|-------|------|
-| **Workload Analyzer** | Haiku | 1 | Parse SQL workload, detect hardware, sample data |
-| **Storage Designer** | Haiku | 1 | Design storage, generate + run ingestion, comprehensive per-query guides |
-| **DBA** | Sonnet | 1 + 3 | Optional pre-gen risk analysis (Stage A), post-run retrospective (Stage B) |
-| **Query Planner** | Sonnet | 2 | Iter 0: design structured JSON execution plan; sole knowledge base consumer |
-| **Code Generator** | Sonnet | 2 | Iter 0: implement plan.json in C++, compile + run + validate (no knowledge base) |
-| **Code Inspector** | Sonnet | 2 | Review code against experience base + Query Guide, detect optimizer regressions |
-| **Query Optimizer** | Sonnet | 2 | Iter 1+: targeted edits to plan/code, output-disciplined (no knowledge base) |
+| **Workload Analyzer** | Sonnet | 1 | Parse SQL workload, detect hardware, sample data |
+| **Storage Designer** | Sonnet | 1 | Design storage, generate + run ingestion, per-query guides |
+| **DBA** | Sonnet | 1 + 3 | Pre-gen risk analysis (Stage A), post-run retrospective + experience evolution (Stage B) |
+| **Query Planner** | Sonnet | 2 | Iter 0: design lean JSON execution plan with domain skills |
+| **Code Generator** | Sonnet | 2 | Iter 0: implement plan in C++, compile + run + validate |
+| **Code Inspector** | Sonnet | 2 | Review code against experience skill + Query Guide |
+| **Query Optimizer** | Sonnet | 2 | Iter 1+: targeted edits to plan/code with domain skills |
+
+## Skills
+
+Domain skills (`src/gendb/skills/`) replace the old knowledge base. Loaded selectively per query and agent:
+
+| Skill | Purpose |
+|-------|---------|
+| `experience.md` | Always loaded. Correctness + performance rules with frequency/severity. |
+| `join-optimization.md` | Join strategies, pre-built index usage, sampling |
+| `scan-optimization.md` | Predicate pushdown, late materialization, zone maps |
+| `aggregation-optimization.md` | Hash/sorted/parallel aggregation patterns |
+| `hash-tables.md` | Open-addressing, Robin Hood, bounded probing templates |
+| `data-loading.md` | mmap, madvise, cold/hot I/O tradeoffs |
+| `indexing.md` | Zone maps, hash indexes, construction guidelines |
+| `parallelism.md` | Morsel-driven, OpenMP, SIMD, thread-local patterns |
+| `gendb-storage-format.md` | Binary column format, type mappings, encodings |
+| `gendb-code-patterns.md` | File structure, GENDB_PHASE, mmap pattern, compilation |
+| `research-papers.md` | 30+ seminal paper references by topic |
 
 ## System Utilities
 
-Shared C++ headers in `src/gendb/utils/`, compiled via `-I` flag:
+Shared C++ headers in `src/gendb/utils/`:
 
 | Header | Purpose |
 |--------|---------|
 | `date_utils.h` | O(1) date extraction, epoch<->string conversion |
 | `timing_utils.h` | GENDB_PHASE("name") RAII scoped timer macro |
-
-All other data structures (hash tables, mmap loading, bitsets, heaps) are generated inline by agents, tailored to each query's specific types and access patterns.
-
-## Knowledge Base
-
-The Query Planner agent has access to a structured knowledge base (`src/gendb/knowledge/`) with 40+ technique files across 9 domains. It is the sole strategy hub — downstream agents (Code Generator, Optimizer) receive the plan and Query Guide instead, reducing input bloat. The Code Inspector reads only the experience base (`experience.md`) of correctness and performance entries.
-
-## Benchmarks (TPC-H SF10)
-
-| System | Total Time | vs DuckDB |
-|--------|-----------|-----------|
-| DuckDB | 2,231ms | 1.0x |
-| GenDB | 37,817ms | 17x |
-
-GenDB beats DuckDB on Q6 and Q14. All queries produce correct results validated against DuckDB ground truth.

@@ -1,0 +1,76 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 804
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q6": {
+          "rows_expected": 200,
+          "rows_actual": 200,
+          "match": false,
+          "error": "98 row(s) differ across 5 column(s)",
+          "column_failures": {
+            "name": {
+              "category": "exact",
+              "failure_count": 98,
+              "samples": [
+                {
+                  "expected": "BUENAVENTURA MINING CO INC",
+                  "actual": "EXXON MOBIL CORP",
+                  "row": 18,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "EXXON MOBIL CORP",
+                  "actual": "UNITEDHEALTH GROUP INC",
+                  "row": 19,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            },
+            "tag": {
+              "category": "exact",
+              "failure_count": 79,
+              "samples": [
+                {
+                  "expected": "ProfitLoss",
+                  "actual": "Revenues",
+                  "row": 18,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "Revenues",
+                  "actual": "PremiumsEarnedNet",
+                  "row": 19,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            }
+          },
+          "mismatch_patterns": {
+            "string_mismatch": 9,
+            "value_mismatch": 6
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 657.34,
+  "hot_timing_ms": 657.34,
+  "operation_timings": {
+    "data_loading": 47.57,
+    "dim_filter": 0.29,
+    "main_scan": 31.15,
+    "aggregation_merge": 300.96,
+    "output": 4.35,
+    "total": 658.93
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "build_sub_hash",
+    "build_pre_is_hash",
+    "scan_num_fused",
+    "aggregate_thread_local",
+    "merge_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023)",
+      "probe": "num.adsh",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8600,
+      "hash_cap": 16384,
+      "slot": "{ int32_t adsh_code; int32_t name_code; }",
+      "slot_sentinel": "adsh_code == INT32_MIN",
+      "notes": "scan sub with sub_fy_zone_map; filter fy==2023; build adsh_code->name_code map; cap=next_pow2(8600*2)=16384; fits L2 cache (128KB)"
+    },
+    {
+      "build": "pre(stmt='IS')",
+      "probe": "num.(adsh,tag,version)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1728144,
+      "hash_cap": 4194304,
+      "slot": "{ int32_t adsh_code; int32_t tag_code; int32_t version_code; int32_t plabel_code; }",
+      "slot_sentinel": "adsh_code == INT32_MIN",
+      "hash_fn": "h = (uint64_t)adsh*2654435761ULL ^ (uint64_t)tag*40503ULL ^ (uint64_t)version*48271ULL",
+      "notes": "scan only IS blocks via pre_stmt_zone_map (~18 of 97 blocks); build runtime hash (adsh,tag,version)->plabel_code; cap=next_pow2(1728144*2)=4194304; 67MB runtime hash preferred over 536MB pre_atv_hash (P23); sequential build"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.10,
+      "technique": "zone_map_guided_scan",
+      "index": "sub_fy_zone_map"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.18,
+      "technique": "zone_map_block_skip",
+      "index": "pre_stmt_zone_map",
+      "notes": "pre sorted by stmt asc; IS=code0 occupies first ~18 blocks; stop scanning when block_min > is_code"
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.872,
+      "technique": "zone_map_segment_scan",
+      "index": "num_uom_zone_map",
+      "notes": "high selectivity (>80%) -> fused single-pass; no selection vector needed"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99,
+      "technique": "isnan_check_inline",
+      "notes": "NULL encoded as NaN; check std::isnan(v) inline in fused scan loop"
+    }
+  ],
+  "dictionary_lookups": [
+    {
+      "column": "num.uom",
+      "dict_file": "num/uom_dict.txt",
+      "find": "USD",
+      "var": "usd_code",
+      "rule": "C2"
+    },
+    {
+      "column": "pre.stmt",
+      "dict_file": "pre/stmt_dict.txt",
+      "find": "IS",
+      "var": "is_code",
+      "rule": "C2"
+    }
+  ],
+  "data_structures": {
+    "sub_join_map": "open_addressing_hash(cap=16384, slot={int32_t adsh_code, int32_t name_code}, sentinel=INT32_MIN, bounded_probing=true)",
+    "pre_is_join_map": "open_addressing_hash(cap=4194304, slot={int32_t adsh,int32_t tag,int32_t version,int32_t plabel_code}, sentinel=INT32_MIN, bounded_probing=true)",
+    "aggregation": "thread_local open_addressing_hash(cap=131072, key={int32_t name_code, int16_t stmt_code, int32_t tag_code, int32_t plabel_code}, value={int64_t sum_cents, int64_t cnt}, sentinel=name_code==INT32_MIN)"
+  },
+  "group_key": {
+    "struct": "struct GroupKey { int32_t name_code; int16_t stmt_code; int32_t tag_code; int32_t plabel_code; }",
+    "estimated_groups": 50000,
+    "hash_cap_per_thread": 131072,
+    "hash_fn": "(uint64_t)name_code*0x9E3779B97F4A7C15ULL ^ (uint64_t)(uint16_t)stmt_code*0x517CC1B727220A95ULL ^ (uint64_t)tag_code*0x6C62272E07BB0142ULL ^ (uint64_t)plabel_code*0xD2A98B26625EEE7BULL",
+    "notes": "stmt_code is constant (always IS) but included for C15 correctness"
+  },
+  "precision": {
+    "rule": "C29",
+    "column": "num.value",
+    "max_value": "1e14",
+    "accumulator": "int64_t sum_cents",
+    "accumulate": "int64_t iv = llround(v * 100.0); sum_cents += iv;",
+    "output": "printf(\"%lld.%02lld\", sum_cents/100, llabs(sum_cents%100))"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phases": {
+      "build_sub_hash": "sequential (86K rows, trivial with zone map)",
+      "build_pre_is_hash": "sequential single-pass over IS blocks (~1.73M rows, ~67MB hash, fast)",
+      "scan_num": "parallel morsel-driven over USD segment (~34M rows / 64 threads)",
+      "aggregation": "thread_local hash maps per thread (cap=131072 each), sized for FULL group cardinality not groups/nthreads (C9)",
+      "merge": "single merge pass after barrier, shared hash with atomic CAS or per-slot spin (P17, P20)"
+    }
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zone_map",
+      "file": "indexes/sub_fy_zone_map.bin",
+      "purpose": "skip non-fy=2023 blocks during sub scan"
+    },
+    {
+      "index": "pre_stmt_zone_map",
+      "file": "indexes/pre_stmt_zone_map.bin",
+      "purpose": "scan only stmt=IS contiguous blocks in pre; stop when block_min > is_code"
+    },
+    {
+      "index": "num_uom_zone_map",
+      "file": "indexes/num_uom_zone_map.bin",
+      "purpose": "identify USD segment in num for targeted scan"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "algorithm": "partial_sort or min_heap (O(n log k), k=200)",
+    "decode": {
+      "name": "sub/name_dict.txt[name_code]",
+      "stmt": "pre/stmt_dict.txt[stmt_code]",
+      "tag": "num/tag_dict.txt[tag_code]",
+      "plabel": "pre/plabel_dict.txt[plabel_code]"
+    }
+  },
+  "execution_target": "cpp",
+  "correctness_checklist": ["C2", "C9", "C15", "C18", "C19", "C20", "C24", "C29", "P6", "P17", "P20", "P23"]
+}

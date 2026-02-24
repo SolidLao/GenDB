@@ -9,7 +9,9 @@ Options:
     --sf <N>              Scale factor (required, e.g., 1, 10)
     --gendb-run <path>    Path to GenDB run directory (default: output/tpc-h/latest/)
     --data-dir <path>     Path to TPC-H data directory (default: benchmarks/tpc-h/data/sf{N})
-    --runs <N>            Number of runs per query (default: 3)
+    --mode <hot|cold>     Benchmark mode (default: hot)
+                          hot:  4 runs per query, discard first (warmup), avg last 3
+                          cold: clear OS cache before each query, 1 run only
     --setup               Force database setup/reload (default: skip if DB exists)
     --output <path>       Output plot path (default: results/sf{N}/figures/benchmark_results_per_query.png)
     --gendb-only          Skip all baseline benchmarks
@@ -18,7 +20,6 @@ Options:
     --skip-monetdb        Skip MonetDB benchmark
     --timeout <N>         Per-query timeout in seconds (default: 300)
     --plot-only           Skip all benchmarks; read existing metrics and re-plot figures
-    --first-run           Use only the first run's timing (avoids cache benefits)
 """
 
 import argparse
@@ -49,6 +50,33 @@ RESET = "\033[0m"
 
 # Number of threads for all systems (set to core count for fair comparison)
 BENCHMARK_THREADS = os.cpu_count() or 64
+
+
+def drop_os_caches():
+    """Clear OS page cache so the first query run starts cold."""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "sh", "-c", "sync && echo 3 > /proc/sys/vm/drop_caches"],
+            check=True, capture_output=True, timeout=10,
+        )
+        print("  OS page cache cleared.")
+    except Exception:
+        print("  Warning: could not clear OS page cache (need passwordless sudo).")
+        print("  Run: sudo bash benchmarks/setup_drop_caches.sh")
+
+
+def restart_postgresql():
+    """Restart PostgreSQL to clear shared_buffers (internal buffer pool)."""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "pg_ctlcluster", "18", "tpch", "restart"],
+            check=True, capture_output=True, timeout=30,
+        )
+        time.sleep(2)
+        print("  PostgreSQL restarted (buffer pool cleared).")
+    except Exception:
+        print("  Warning: could not restart PostgreSQL (need passwordless sudo).")
+
 
 # ---------------------------------------------------------------------------
 # TPC-H queries (standard SQL, cross-system compatible)
@@ -594,20 +622,23 @@ def pg_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def pg_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+def pg_benchmark(scale_factor: int, mode: str, query_ids: list,
                  queries: dict, timeout: int = 300) -> dict:
     conn = psycopg2.connect(**get_pg_conn_params(scale_factor))
     cur = conn.cursor()
     cur.execute(f"SET statement_timeout = '{timeout * 1000}'")
     cur.execute(f"SET max_parallel_workers_per_gather = {BENCHMARK_THREADS}")
     cur.execute(f"SET max_parallel_workers = {BENCHMARK_THREADS}")
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     for qname in query_ids:
         if qname not in queries:
             continue
+        if mode == "cold":
+            drop_os_caches()
         times = []
         timed_out = False
-        for _ in range(num_runs):
+        for _ in range(total_runs):
             try:
                 start = time.perf_counter()
                 cur.execute(queries[qname])
@@ -627,9 +658,11 @@ def pg_benchmark(scale_factor: int, num_runs: int, query_ids: list,
                 timed_out = True
                 break
         if not timed_out and times:
-            results[qname] = times
-            avg_time = sum(times) / len(times)
-            print(f"  PostgreSQL {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            measured = times[1:] if mode == "hot" and len(times) > 1 else times
+            results[qname] = measured
+            avg_time = sum(measured) / len(measured)
+            label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+            print(f"  PostgreSQL {qname}: {avg_time:.1f} ms ({label})")
     cur.close()
     conn.close()
     return results
@@ -690,7 +723,7 @@ def duckdb_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def duckdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+def duckdb_benchmark(scale_factor: int, mode: str, query_ids: list,
                      queries: dict, timeout: int = 300) -> dict:
     duckdb_dir = Path(__file__).parent / "duckdb"
     db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
@@ -699,13 +732,16 @@ def duckdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
         return {}
     conn = duckdb.connect(str(db_path), read_only=True)
     conn.execute(f"SET threads = {BENCHMARK_THREADS}")
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     for qname in query_ids:
         if qname not in queries:
             continue
+        if mode == "cold":
+            drop_os_caches()
         times = []
         timed_out = False
-        for _ in range(num_runs):
+        for _ in range(total_runs):
             try:
                 start = time.perf_counter()
                 conn.execute(queries[qname]).fetchall()
@@ -720,9 +756,11 @@ def duckdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
                 timed_out = True
                 break
         if not timed_out and times:
-            results[qname] = times
-            avg_time = sum(times) / len(times)
-            print(f"  DuckDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            measured = times[1:] if mode == "hot" and len(times) > 1 else times
+            results[qname] = measured
+            avg_time = sum(measured) / len(measured)
+            label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+            print(f"  DuckDB {qname}: {avg_time:.1f} ms ({label})")
     conn.close()
     return results
 
@@ -917,7 +955,7 @@ def adapt_query_for_clickhouse(sql: str) -> str:
     return sql
 
 
-def clickhouse_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+def clickhouse_benchmark(scale_factor: int, mode: str, query_ids: list,
                          queries: dict, timeout: int = 300) -> dict:
     """Run benchmark queries on ClickHouse using clickhouse-driver."""
     try:
@@ -928,15 +966,19 @@ def clickhouse_benchmark(scale_factor: int, num_runs: int, query_ids: list,
 
     client = Client(host="localhost", port=9000,
                     settings={"max_execution_time": timeout,
-                              "max_threads": BENCHMARK_THREADS})
+                              "max_threads": BENCHMARK_THREADS,
+                              "use_query_cache": 0})
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     for qname in query_ids:
         if qname not in queries:
             continue
+        if mode == "cold":
+            drop_os_caches()
         sql = adapt_query_for_clickhouse(queries[qname])
         times = []
         timed_out = False
-        for _ in range(num_runs):
+        for _ in range(total_runs):
             try:
                 start = time.perf_counter()
                 client.execute(sql)
@@ -951,9 +993,11 @@ def clickhouse_benchmark(scale_factor: int, num_runs: int, query_ids: list,
                 timed_out = True
                 break
         if not timed_out and times:
-            results[qname] = times
-            avg_time = sum(times) / len(times)
-            print(f"  ClickHouse {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            measured = times[1:] if mode == "hot" and len(times) > 1 else times
+            results[qname] = measured
+            avg_time = sum(measured) / len(measured)
+            label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+            print(f"  ClickHouse {qname}: {avg_time:.1f} ms ({label})")
     return results
 
 
@@ -1153,7 +1197,7 @@ def umbra_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def umbra_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+def umbra_benchmark(scale_factor: int, mode: str, query_ids: list,
                     queries: dict, timeout: int = 300) -> dict:
     """Run benchmark queries on Umbra (PostgreSQL-compatible wire protocol)."""
     conn = psycopg2.connect(
@@ -1166,13 +1210,16 @@ def umbra_benchmark(scale_factor: int, num_runs: int, query_ids: list,
     except Exception:
         conn.rollback()
 
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     for qname in query_ids:
         if qname not in queries:
             continue
+        if mode == "cold":
+            drop_os_caches()
         times = []
         timed_out = False
-        for _ in range(num_runs):
+        for _ in range(total_runs):
             try:
                 start = time.perf_counter()
                 cur.execute(queries[qname])
@@ -1193,9 +1240,11 @@ def umbra_benchmark(scale_factor: int, num_runs: int, query_ids: list,
                 timed_out = True
                 break
         if not timed_out and times:
-            results[qname] = times
-            avg_time = sum(times) / len(times)
-            print(f"  Umbra {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            measured = times[1:] if mode == "hot" and len(times) > 1 else times
+            results[qname] = measured
+            avg_time = sum(measured) / len(measured)
+            label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+            print(f"  Umbra {qname}: {avg_time:.1f} ms ({label})")
     cur.close()
     conn.close()
     return results
@@ -1403,7 +1452,7 @@ def monetdb_setup(data_dir: Path, scale_factor: int, force_setup: bool = False):
     conn.close()
 
 
-def monetdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
+def monetdb_benchmark(scale_factor: int, mode: str, query_ids: list,
                       queries: dict, timeout: int = 300) -> dict:
     """Run benchmark queries on MonetDB."""
     try:
@@ -1421,13 +1470,16 @@ def monetdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
     except Exception:
         conn.rollback()  # MonetDB aborts transaction on failed SET
 
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     for qname in query_ids:
         if qname not in queries:
             continue
+        if mode == "cold":
+            drop_os_caches()
         times = []
         timed_out = False
-        for _ in range(num_runs):
+        for _ in range(total_runs):
             try:
                 start = time.perf_counter()
                 cur.execute(queries[qname])
@@ -1443,9 +1495,11 @@ def monetdb_benchmark(scale_factor: int, num_runs: int, query_ids: list,
                 timed_out = True
                 break
         if not timed_out and times:
-            results[qname] = times
-            avg_time = sum(times) / len(times)
-            print(f"  MonetDB {qname}: {avg_time:.1f} ms (avg of {num_runs} runs)")
+            measured = times[1:] if mode == "hot" and len(times) > 1 else times
+            results[qname] = measured
+            avg_time = sum(measured) / len(measured)
+            label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+            print(f"  MonetDB {qname}: {avg_time:.1f} ms ({label})")
     cur.close()
     conn.close()
     return results
@@ -1646,7 +1700,7 @@ def find_best_binaries(run_dir: Path) -> dict:
     return binaries
 
 
-def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
+def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, mode: str) -> dict:
     """Execute the best per-query GenDB binaries and return timing results.
     Returns {"Q1": [times], "Q3": [times], ...}
     """
@@ -1655,15 +1709,18 @@ def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
         print("  No best binaries found in run.json")
         return {}
 
+    total_runs = 4 if mode == "hot" else 1
     results = {}
     with tempfile.TemporaryDirectory() as tmpdir:
         for qid in sorted(best_binaries):
             binary = best_binaries[qid]
             print(f"  Running {qid} ({binary.parent.name}/{binary.name})...", end="", flush=True)
 
+            if mode == "cold":
+                drop_os_caches()
             times = []
             ok = True
-            for _ in range(num_runs):
+            for _ in range(total_runs):
                 proc = subprocess.run(
                     [str(binary), str(gendb_dir), tmpdir],
                     capture_output=True, text=True, timeout=600,
@@ -1681,9 +1738,11 @@ def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
                     break
 
             if ok and times:
-                results[qid] = times
-                avg = sum(times) / len(times)
-                print(f" {avg:.2f} ms (avg of {num_runs} runs)")
+                measured = times[1:] if mode == "hot" and len(times) > 1 else times
+                results[qid] = measured
+                avg = sum(measured) / len(measured)
+                label = f"avg of {len(measured)} hot runs" if mode == "hot" else "cold run"
+                print(f" {avg:.2f} ms ({label})")
             elif not ok:
                 pass  # error already printed
 
@@ -1696,12 +1755,12 @@ def gendb_benchmark_best(run_dir: Path, gendb_dir: Path, num_runs: int) -> dict:
 
 QUERY_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0", "#00BCD4", "#FF5722", "#795548"]
 SYSTEM_COLORS = {
-    "GenDB": "#2196F3",
-    "PostgreSQL": "#4CAF50",
-    "DuckDB": "#FF9800",
-    "ClickHouse": "#E91E63",
-    "Umbra": "#9C27B0",
-    "MonetDB": "#00BCD4",
+    "GenDB": "#E41A1C",
+    "PostgreSQL": "#377EB8",
+    "DuckDB": "#FF7F00",
+    "ClickHouse": "#4DAF4A",
+    "Umbra": "#984EA3",
+    "MonetDB": "#A65628",
 }
 
 
@@ -1840,111 +1899,270 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
 
 
 def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
-                 timeout_ms: float = 300000, all_query_ids: list = None):
-    """Create per-query and total execution time comparison plots.
+                 timeout_ms: float = 300000, all_query_ids: list = None,
+                 gendb_history: dict = None):
+    """Create a single 4-panel figure (figure* for SIGMOD two-column layout).
 
-    Args:
-        all_results: {system: {qid: [times_ms]}}
-        output_path: Path to save per-query plot
-        scale_factor: Scale factor label
-        timeout_ms: Timeout in milliseconds; missing queries are shown at this value
-        all_query_ids: Full list of query IDs (e.g. Q1-Q22); if provided, missing
-                       queries are plotted at timeout_ms with a red cross marker
+    Panels: (a) per-query time, (b) total time, (c) GenDB iteration total,
+            (d) GenDB iteration per-query.
     """
+    import matplotlib
+    import matplotlib.ticker as ticker
+    import numpy as np
+    matplotlib.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "axes.titlesize": 11,
+        "axes.titlepad": 4,
+        "axes.labelpad": 1,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "xtick.major.pad": 2,
+        "ytick.major.pad": 2,
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "grid.linewidth": 0.3,
+        "xtick.major.size": 2.5,
+        "ytick.major.size": 2.5,
+        "xtick.minor.size": 1.2,
+        "ytick.minor.size": 1.2,
+    })
+
+    sci_fmt = ticker.LogFormatterSciNotation(base=10, labelOnlyBase=True)
+
+    # Determine common queries (supported by all systems)
     if all_query_ids:
-        queries = sorted(all_query_ids, key=lambda q: int(q[1:]))
+        all_qs = sorted(all_query_ids, key=lambda q: int(q[1:]))
     else:
-        queries = sorted(set(q for results in all_results.values() for q in results),
-                         key=lambda q: int(q[1:]))
+        all_qs = sorted(set(q for results in all_results.values() for q in results),
+                        key=lambda q: int(q[1:]))
     systems = list(all_results.keys())
 
-    data = {}
-    is_timeout = {}  # (system, query_index) -> True if timed out
+    # Build data for all queries, then filter to common
+    data_all = {}
+    is_timeout_all = {}
     for system in systems:
-        data[system] = []
-        is_timeout[system] = []
-        for q in queries:
+        data_all[system] = []
+        is_timeout_all[system] = []
+        for q in all_qs:
             times = all_results[system].get(q, [])
             if times:
-                data[system].append(sum(times) / len(times))
-                is_timeout[system].append(False)
+                data_all[system].append(sum(times) / len(times))
+                is_timeout_all[system].append(False)
             else:
-                data[system].append(timeout_ms)
-                is_timeout[system].append(True)
+                data_all[system].append(timeout_ms)
+                is_timeout_all[system].append(True)
 
-    # Per-query grouped bar chart (wider for 22 queries)
-    fig_width = max(20, len(queries) * 0.9)
-    fig, ax = plt.subplots(figsize=(fig_width, 7))
-    x = range(len(queries))
-    width = 0.8 / max(len(systems), 1)
+    common_idx = [j for j, q in enumerate(all_qs)
+                  if all(not is_timeout_all[s][j] for s in systems)]
+    queries = [all_qs[j] for j in common_idx]
+    data = {s: [data_all[s][j] for j in common_idx] for s in systems}
+    totals = {s: sum(data[s]) for s in systems}
+
+    # --- Figure layout ---
+    has_iter = gendb_history and gendb_history["num_iters"] > 0
+
+    def _style_log(a, axis="y"):
+        if axis == "y":
+            a.set_yscale("log")
+            a.yaxis.set_major_formatter(sci_fmt)
+            a.yaxis.set_minor_formatter(ticker.NullFormatter())
+            a.grid(axis="y", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        else:
+            a.set_xscale("log")
+            a.xaxis.set_major_formatter(sci_fmt)
+            a.xaxis.set_minor_formatter(ticker.NullFormatter())
+            a.grid(axis="x", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        a.set_axisbelow(True)
+
+    if has_iter:
+        fig = plt.figure(figsize=(13, 3.0))
+        import matplotlib.gridspec as gridspec
+        # Tighter layout: reduce gaps between panels
+        sq = 0.17  # square panel width
+        ax  = fig.add_axes([0.05, 0.15, 0.27, 0.68])    # (a) wide
+        ax2 = fig.add_axes([0.34, 0.15, sq,   0.68])    # (b) square
+        ax3 = fig.add_axes([0.53, 0.15, sq,   0.68])    # (c) square
+        ax4 = fig.add_axes([0.73, 0.15, sq,   0.68])    # (d) square
+    else:
+        fig, (ax, ax2) = plt.subplots(
+            1, 2, figsize=(8, 2.8),
+            gridspec_kw={"width_ratios": [1.6, 1], "wspace": 0.32})
+
+    # ===== (a) Per-query grouped bar chart =====
+    x = np.arange(len(queries))
+    width = 0.92 / max(len(systems), 1)
     offsets = [(i - len(systems) / 2 + 0.5) * width for i in range(len(systems))]
-
-    timeout_marker_added = False
     for i, system in enumerate(systems):
-        bars = ax.bar(
-            [xi + offsets[i] for xi in x], data[system], width,
-            label=system, color=SYSTEM_COLORS.get(system, "#999999"),
-        )
-        for j, (bar, val, timedout) in enumerate(zip(bars, data[system], is_timeout[system])):
-            if timedout:
-                # Red cross marker for timed-out queries
-                cx = bar.get_x() + bar.get_width() / 2
-                cy = bar.get_height()
-                if not timeout_marker_added:
-                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
-                               color="red", zorder=5, label="Timeout")
-                    timeout_marker_added = True
-                else:
-                    ax.scatter([cx], [cy], marker="x", s=100, linewidths=2.5,
-                               color="red", zorder=5)
-            elif val > 0:
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                        f"{val:.1f}", ha="center", va="bottom", fontsize=7,
-                        rotation=45)
+        ax.bar(x + offsets[i], data[system], width,
+               label=system, color=SYSTEM_COLORS.get(system, "#999999"),
+               edgecolor="white", linewidth=0.2, zorder=3)
+    ax.set_ylabel("Time (ms)", fontsize=13)
+    ax.set_title(f"(a) Per-Query Time (SF={scale_factor})", fontweight="bold", fontsize=13)
+    ax.set_xticks(x)
+    ax.set_xticklabels(queries, fontsize=12)
+    ax.set_xlim(x[0] - 0.5, x[-1] + 0.5)
+    ax.tick_params(axis="x", length=0)
+    ax.tick_params(axis="y", labelsize=12)
+    _style_log(ax, "y")
 
-    ax.set_xlabel("TPC-H Query", fontsize=12)
-    ax.set_ylabel("Execution Time (ms, log scale)", fontsize=12)
-    ax.set_title(f"TPC-H Per-Query Execution Time (SF={scale_factor})", fontsize=14)
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(queries, fontsize=10, rotation=45, ha="right")
-    ax.legend(fontsize=10)
-    ax.set_yscale("log")
-    ax.grid(axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-    print(f"  Per-query plot saved to: {output_path}")
-
-    # Total execution time bar chart — only queries successful across ALL systems
-    common_queries = [j for j, q in enumerate(queries)
-                      if all(not is_timeout[s][j] for s in systems)]
-    common_query_names = [queries[j] for j in common_queries]
-    fig2, ax2 = plt.subplots(figsize=(max(8, len(systems) * 1.5), 6))
-    totals = {s: sum(data[s][j] for j in common_queries) for s in systems}
-    x_pos = range(len(systems))
-    bars = ax2.bar(x_pos, [totals[s] for s in systems],
-                   color=[SYSTEM_COLORS.get(s, "#999999") for s in systems])
-    for bar, system in zip(bars, systems):
+    # ===== (b) Total time horizontal bar chart =====
+    y_pos = np.arange(len(systems))
+    bar_vals = [totals[s] for s in systems]
+    max_val = max(bar_vals)
+    hbars = ax2.barh(y_pos, bar_vals, height=0.6,
+                     color=[SYSTEM_COLORS.get(s, "#999999") for s in systems],
+                     edgecolor="white", linewidth=0.2, zorder=3)
+    for bar, system in zip(hbars, systems):
         val = totals[system]
-        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 1.02,
-                 f"{val:.1f} ms", ha="center", va="bottom", fontsize=10, fontweight="bold")
+        bw = bar.get_width()
+        cy = bar.get_y() + bar.get_height() / 2
+        if bw > max_val * 0.15:
+            ax2.text(bw * 0.85, cy, f"{val:,.0f}",
+                     ha="right", va="center", fontsize=12,
+                     fontweight="bold", color="white", zorder=4)
+        else:
+            ax2.text(bw * 1.15, cy, f"{val:,.0f}",
+                     ha="left", va="center", fontsize=12,
+                     fontweight="bold", color="black", zorder=4)
+    ax2.set_xlabel("(ms)", labelpad=6, fontsize=13)
+    ax2.xaxis.set_label_coords(1.0, -0.12)
+    ax2.xaxis.label.set_ha("right")
+    ax2.set_title(f"(b) Total Time (SF={scale_factor})", fontweight="bold", fontsize=13)
+    ax2.tick_params(axis="x", labelsize=12)
+    ax2.set_yticks([])
+    ax2.set_ylim(-0.5, len(systems) - 0.5)
+    ax2.set_xlim(left=100, right=max_val * 1.1)
+    ax2.invert_yaxis()
+    _style_log(ax2, "x")
 
-    ax2.set_xlabel("System", fontsize=12)
-    ax2.set_ylabel("Total Execution Time (ms, log scale)", fontsize=12)
-    n_common = len(common_queries)
-    ax2.set_title(f"TPC-H Total Execution Time (SF={scale_factor}, {n_common} common queries)", fontsize=14)
-    ax2.set_xticks(list(x_pos))
-    ax2.set_xticklabels(systems, fontsize=11)
-    ax2.set_yscale("log")
-    ax2.grid(axis="y", alpha=0.3)
+    # ===== (c) & (d) GenDB iteration panels =====
+    if has_iter:
+        query_ids = gendb_history["query_ids"]
+        iter_data = gendb_history["data"]
+        num_iters = gendb_history["num_iters"]
+        best_so_far = _compute_best_so_far(iter_data, query_ids, num_iters)
+        cmap = matplotlib.colormaps.get_cmap("tab10")
+        q_colors = {q: cmap(i) for i, q in enumerate(query_ids)}
+        x_iters = list(range(num_iters))
 
-    plt.tight_layout()
-    base_name = output_path.stem.replace("_per_query", "")
-    total_path = output_path.with_name(base_name + "_total" + output_path.suffix)
-    plt.savefig(total_path, dpi=150)
+        # --- (c) Total execution time across iterations ---
+        valid_qids = [qid for qid in query_ids
+                      if any(s == "valid" for _, _, s in best_so_far.get(qid, []))]
+        total_x, total_y = [], []
+        for i in range(num_iters):
+            total, n_q = 0, 0
+            for qid in valid_qids:
+                for (si, st, _) in best_so_far.get(qid, []):
+                    if si == i:
+                        total += st
+                        n_q += 1
+                        break
+            if n_q > 0:
+                total_x.append(i)
+                total_y.append(total)
+
+        if total_y:
+            ax3.plot(total_x, total_y, marker="o", linewidth=2.5, markersize=6,
+                     color="#9C27B0")
+
+        # Horizontal lines with markers for other systems' total time
+        hline_markers = ["+", "x", "*", "s", "D"]
+        non_gendb = [s for s in systems if s != "GenDB"]
+        n_pts = 8
+        for idx, sys_name in enumerate(non_gendb):
+            sys_total = totals.get(sys_name, 0)
+            if sys_total > 0:
+                # Offset marker positions per system to avoid overlap
+                offset = (idx - len(non_gendb) / 2) * 0.15
+                hline_x = np.linspace(-0.3 + offset, num_iters - 0.7 + offset, n_pts)
+                ax3.plot(hline_x, [sys_total] * n_pts, linestyle=":",
+                         linewidth=2.0, marker=hline_markers[idx % len(hline_markers)],
+                         markersize=7,
+                         color=SYSTEM_COLORS.get(sys_name, "#999999"), alpha=0.7, zorder=2)
+
+        ax3.set_xlabel("Iteration", fontsize=13)
+        ax3.set_title("(c) GenDB Total / Iter.", fontweight="bold", fontsize=13)
+        ax3.set_xticks(x_iters)
+        ax3.set_xticklabels([str(i) for i in x_iters], fontsize=12)
+        ax3.set_xlim(-0.3, num_iters - 0.7)
+        ax3.set_yscale("log")
+        ax3.yaxis.set_major_formatter(ticker.NullFormatter())
+        ax3.yaxis.set_minor_formatter(ticker.NullFormatter())
+        ax3.grid(axis="y", alpha=0.25, linestyle="-", linewidth=0.3, zorder=0)
+        ax3.set_axisbelow(True)
+        ax3.text(0.04, 0.04, "(ms)", transform=ax3.transAxes, fontsize=12,
+                 va="bottom", ha="left")
+
+        # --- (d) Per-query execution time across iterations ---
+        sorted_qids = sorted(query_ids, key=lambda q: int(q[1:]))
+        for qid in sorted_qids:
+            series = best_so_far.get(qid, [])
+            if not series:
+                continue
+            color = q_colors[qid]
+            attempted = [(xi, yi) for xi, yi, s in series if s in ("valid", "fail")]
+            if attempted:
+                ax4.plot([p[0] for p in attempted], [p[1] for p in attempted],
+                         marker="o", linewidth=2.5, markersize=6, label=qid, color=color)
+            skipped = [(xi, yi) for xi, yi, s in series if s == "skipped"]
+            if skipped and attempted:
+                dash_x = [attempted[-1][0]] + [p[0] for p in skipped]
+                dash_y = [attempted[-1][1]] + [p[1] for p in skipped]
+                ax4.plot(dash_x, dash_y, linestyle="--", linewidth=1.5, markersize=0,
+                         color=color, alpha=0.4)
+            fail_x = [xi for xi, yi, s in series if s == "fail"]
+            fail_y = [yi for xi, yi, s in series if s == "fail"]
+            if fail_x:
+                ax4.scatter(fail_x, fail_y, marker="x", s=50, linewidths=1.5,
+                            color="red", zorder=5)
+
+        ax4.set_xlabel("Iteration", fontsize=13)
+        ax4.set_title("(d) GenDB Per-Query / Iter.", fontweight="bold", fontsize=13)
+        ax4.set_xticks(x_iters)
+        ax4.set_xticklabels([str(i) for i in x_iters], fontsize=12)
+        ax4.set_xlim(-0.3, num_iters - 0.7)
+        ax4.tick_params(axis="y", direction="out", pad=2, labelsize=12)
+        ax4.text(-0.09, 0.96, "(ms)", transform=ax4.transAxes, fontsize=11,
+                 va="top", ha="center")
+        # Expand y-axis top to make room for legend above data (log scale)
+        all_vals = []
+        for qid in sorted_qids:
+            series = best_so_far.get(qid, [])
+            all_vals.extend([yi for _, yi, _ in series if yi > 0])
+        _style_log(ax4, "y")
+        if all_vals:
+            y_bottom = min(all_vals) * 0.5
+            y_top = max(all_vals) * 5
+            ax4.set_ylim(bottom=y_bottom, top=y_top)
+            ax4.set_autoscale_on(False)
+            # Only show powers of 10 within the data range
+            import math
+            low_pow = math.ceil(math.log10(min(all_vals)))
+            high_pow = math.floor(math.log10(max(all_vals)))
+            ax4.set_yticks([10**p for p in range(low_pow, high_pow + 1)])
+        ax4.legend(fontsize=10, loc="upper center", framealpha=0.9,
+                   handlelength=1.2, handletextpad=0.3, borderpad=0.15,
+                   labelspacing=0.15, ncol=3)
+
+    # System legend
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=len(systems),
+               bbox_to_anchor=(0.5, 1.08), frameon=True, fontsize=13,
+               columnspacing=1.0, handletextpad=0.4, handlelength=1.0,
+               edgecolor="#CCCCCC", fancybox=False, framealpha=1.0)
+
+    # Save combined figure
+    combined_path = output_path.with_name(
+        output_path.stem.replace("_per_query", "") + "_combined" + output_path.suffix)
+    fig.savefig(combined_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    pdf_path = combined_path.with_suffix(".pdf")
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
     plt.close()
-    print(f"  Total plot saved to: {total_path}")
+    print(f"  Combined plot saved to: {combined_path}")
+    print(f"  Combined plot (PDF) saved to: {pdf_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1959,7 +2177,8 @@ def main():
                         help="Path to GenDB run directory (default: output/tpc-h/latest/)")
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Path to TPC-H .tbl data files (default: benchmarks/tpc-h/data/sf{N})")
-    parser.add_argument("--runs", type=int, default=3, help="Number of runs per query (default: 3)")
+    parser.add_argument("--mode", type=str, default="hot", choices=["hot", "cold"],
+                        help="Benchmark mode: hot (4 runs, avg last 3) or cold (cache clear, 1 run) (default: hot)")
     parser.add_argument("--setup", action="store_true", help="Force database setup/reload")
     parser.add_argument("--output", type=Path, default=None, help="Output plot path")
     parser.add_argument("--gendb-only", action="store_true",
@@ -1974,8 +2193,6 @@ def main():
                         help="Per-query timeout in seconds (default: 300)")
     parser.add_argument("--plot-only", action="store_true",
                         help="Skip all benchmarks; read existing metrics JSON and re-plot figures")
-    parser.add_argument("--first-run", action="store_true",
-                        help="Use only the first run's timing (avoids cache benefits from repeated runs)")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent.parent
@@ -2018,7 +2235,7 @@ def main():
     queries = get_queries(args.sf)
 
     print(f"Scale factor:   {args.sf}")
-    print(f"Runs per query: {args.runs}")
+    print(f"Benchmark mode: {args.mode} ({'4 runs, avg last 3' if args.mode == 'hot' else '1 cold run per query'})")
     print(f"Query timeout:  {args.timeout}s")
     print(f"Queries:        {len(queries)} (Q1-Q22)")
     if args.gendb_run:
@@ -2044,11 +2261,7 @@ def main():
         for system, system_data in saved_data.items():
             all_results[system] = {}
             for qid, qdata in system_data.items():
-                if args.first_run:
-                    # Use only the first run to avoid cache benefits
-                    all_results[system][qid] = [qdata["all_ms"][0]]
-                else:
-                    all_results[system][qid] = qdata["all_ms"]
+                all_results[system][qid] = qdata["all_ms"]
 
         # Load GenDB iteration history if available
         iter_json_path = metrics_dir / "gendb_iteration_history.json"
@@ -2094,8 +2307,8 @@ def main():
             print(f"  Iteration history saved to: {iter_json_path}")
 
         # --- GenDB: benchmark best binaries (re-execute) ---
-        print(f"\n=== GenDB Benchmark (best per-query, {args.runs} runs) ===")
-        best_results = gendb_benchmark_best(args.gendb_run, gendb_dir, args.runs)
+        print(f"\n=== GenDB Benchmark (best per-query, {args.mode} mode) ===")
+        best_results = gendb_benchmark_best(args.gendb_run, gendb_dir, args.mode)
         if best_results:
             all_results["GenDB"] = best_results
     elif not args.plot_only:
@@ -2106,9 +2319,10 @@ def main():
         print("\n=== PostgreSQL Setup ===")
         try:
             pg_setup(data_dir, args.sf, args.setup)
-            print("\n=== PostgreSQL Benchmark ===")
+            restart_postgresql()
+            print(f"\n=== PostgreSQL Benchmark ({args.mode} mode) ===")
             all_results["PostgreSQL"] = pg_benchmark(
-                args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                args.sf, args.mode, gendb_query_ids, queries, args.timeout)
         except Exception as e:
             print(f"  PostgreSQL error: {e}")
 
@@ -2116,9 +2330,9 @@ def main():
         print("\n=== DuckDB Setup ===")
         try:
             duckdb_setup(data_dir, args.sf, args.setup)
-            print("\n=== DuckDB Benchmark ===")
+            print(f"\n=== DuckDB Benchmark ({args.mode} mode) ===")
             all_results["DuckDB"] = duckdb_benchmark(
-                args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                args.sf, args.mode, gendb_query_ids, queries, args.timeout)
         except Exception as e:
             print(f"  DuckDB error: {e}")
 
@@ -2132,9 +2346,17 @@ def main():
                 if clickhouse_available():
                     ch_proc = clickhouse_server_start(args.sf)
                     clickhouse_setup(data_dir, args.sf, args.setup)
-                    print("\n=== ClickHouse Benchmark ===")
+                    # Clear ClickHouse internal caches (fresh start)
+                    ch_dir = Path(__file__).parent / "clickhouse"
+                    subprocess.run(
+                        [str(ch_dir / "clickhouse"), "client", "--port", "9000",
+                         "-q", "SYSTEM DROP CACHE"],
+                        capture_output=True, timeout=10,
+                    )
+                    print("  ClickHouse internal caches cleared.")
+                    print(f"\n=== ClickHouse Benchmark ({args.mode} mode) ===")
                     all_results["ClickHouse"] = clickhouse_benchmark(
-                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                        args.sf, args.mode, gendb_query_ids, queries, args.timeout)
                 else:
                     print("  ClickHouse not available, skipping.")
             except Exception as e:
@@ -2153,9 +2375,25 @@ def main():
                 if umbra_available():
                     umbra_container = umbra_start(data_dir, args.sf)
                     umbra_setup(data_dir, args.sf, args.setup)
-                    print("\n=== Umbra Benchmark ===")
+                    # Restart Umbra to clear internal buffer pool
+                    subprocess.run(
+                        ["docker", "restart", umbra_container],
+                        capture_output=True, timeout=30,
+                    )
+                    for _ in range(60):
+                        time.sleep(1)
+                        try:
+                            c = psycopg2.connect(
+                                host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                                password="postgres", dbname="postgres", connect_timeout=3)
+                            c.close()
+                            break
+                        except Exception:
+                            pass
+                    print("  Umbra container restarted (buffer pool cleared).")
+                    print(f"\n=== Umbra Benchmark ({args.mode} mode) ===")
                     all_results["Umbra"] = umbra_benchmark(
-                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                        args.sf, args.mode, gendb_query_ids, queries, args.timeout)
                 else:
                     print("  Umbra not available, skipping.")
             except Exception as e:
@@ -2174,9 +2412,14 @@ def main():
                 if monetdb_available():
                     monetdb_farm = monetdb_server_start(args.sf)
                     monetdb_setup(data_dir, args.sf, args.setup)
-                    print("\n=== MonetDB Benchmark ===")
+                    # Restart MonetDB to clear internal caches
+                    monetdb_server_stop(monetdb_farm)
+                    time.sleep(2)
+                    monetdb_farm = monetdb_server_start(args.sf)
+                    print("  MonetDB restarted (internal caches cleared).")
+                    print(f"\n=== MonetDB Benchmark ({args.mode} mode) ===")
                     all_results["MonetDB"] = monetdb_benchmark(
-                        args.sf, args.runs, gendb_query_ids, queries, args.timeout)
+                        args.sf, args.mode, gendb_query_ids, queries, args.timeout)
                 else:
                     print("  MonetDB not available, skipping.")
             except Exception as e:
@@ -2187,10 +2430,8 @@ def main():
 
     # --- Results summary ---
     print("\n" + "=" * 60)
-    if args.first_run:
-        print("RESULTS SUMMARY (first run only, in ms)")
-    else:
-        print("RESULTS SUMMARY (average of N runs, in ms)")
+    mode_label = "hot avg of 3" if args.mode == "hot" else "cold single run"
+    print(f"RESULTS SUMMARY ({mode_label}, in ms)")
     print("=" * 60)
     all_queries = sorted(
         set(q for results in all_results.values() for q in results),
@@ -2245,12 +2486,8 @@ def main():
     if len(all_results) >= min_systems:
         print()
         plot_results(all_results, args.output, scale_factor=str(args.sf),
-                     timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids)
-
-    if gendb_history and gendb_history["num_iters"] > 0:
-        base_name = args.output.stem.replace("_per_query", "")
-        iter_plot_path = args.output.with_name(base_name + "_gendb_iterations" + args.output.suffix)
-        plot_gendb_iterations(gendb_history, iter_plot_path, scale_factor=str(args.sf))
+                     timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids,
+                     gendb_history=gendb_history)
 
 
 if __name__ == "__main__":

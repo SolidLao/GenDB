@@ -1,0 +1,53 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_filter", "scan_filter", "aggregate", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != -1",
+      "selectivity": 0.999,
+      "notes": "stmt IS NOT NULL; table sorted by stmt; zone map skips any all-NULL blocks (max_val == -1)"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array[S*R] where S=stmt_dict.size(), R=rfile_dict.size(); index = stmt_code*R + rfile_code; fits in L1 cache (8 slots)",
+    "count_distinct_adsh": "bitset per group over 86135 adsh codes (86135 bits = ~10.75 KB/group x 8 groups = ~86 KB per thread); thread-local, OR-merge after parallel phase",
+    "zone_map": "pre_stmt_zone_map.bin — iterate 97 blocks, skip block if max_val == -1"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_local": {
+      "cnt": "int64_t[S*R]",
+      "sum_line": "int64_t[S*R]",
+      "adsh_bitset": "uint64_t[S*R][ceil(86135/64)] — one bitset per group slot"
+    },
+    "merge": "sequential post-barrier merge of 8-slot arrays (cnt, sum_line) + bitset OR per group; trivial cost at 8 groups"
+  },
+  "indexes": [
+    {
+      "index": "pre_stmt_zone_map",
+      "file": "indexes/pre_stmt_zone_map.bin",
+      "purpose": "skip_blocks where block max_val == -1 (all-NULL stmt blocks)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns_loaded": ["stmt", "rfile", "adsh", "line"],
+    "total_io_mb": 115,
+    "strategy": "fused_single_pass",
+    "notes": "Selectivity ~99.9% — fused scan+filter+aggregate in one loop body; selection vector overhead not worthwhile. Process row i: if stmt_col[i]==-1 skip; else key=stmt_col[i]*R+rfile_col[i]; cnt[key]++; sum_line[key]+=line_col[i]; set bit adsh_col[i] in adsh_bitset[key]."
+  },
+  "output_phase": {
+    "decode": "for each non-zero cnt slot: stmt_dict[stmt_code], rfile_dict[rfile_code]",
+    "num_filings": "popcount over adsh_bitset[key] (86135 bits = 1344 uint64_t words per group)",
+    "avg_line": "(double)sum_line[key] / cnt[key]",
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "sort": "std::sort on at most 8 result rows — trivial"
+  },
+  "execution_target": "cpp"
+}

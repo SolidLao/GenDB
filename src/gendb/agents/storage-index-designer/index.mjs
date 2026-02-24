@@ -7,6 +7,6 @@ export const config = {
   name: "Storage/Index Designer",
   configKey: "storage_designer",
   promptPath: resolve(__dirname, "prompt.md"),
-  allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+  allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
   model: "sonnet",
 };

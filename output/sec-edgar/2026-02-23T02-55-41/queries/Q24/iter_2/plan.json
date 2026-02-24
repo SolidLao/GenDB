@@ -1,0 +1,156 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "build_pre_hash_set",
+    "scan_num_zone_map_guided",
+    "filter_uom_ddate_value",
+    "anti_join_probe",
+    "thread_local_aggregate",
+    "merge_aggregate",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "type": "anti_join",
+      "build": "pre(adsh, tag, version) — all 9,600,799 rows",
+      "probe": "num(filtered: uom=USD, ddate IN [20230101,20231231], value IS NOT NULL)",
+      "join_keys": ["adsh", "tag", "version"],
+      "semantic": "keep num rows with NO matching pre row"
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "implementation": "zone_map_block_skip + row_level_integer_compare",
+      "selectivity": 0.25,
+      "note": "YYYYMMDD integer direct compare; zone map skips blocks where max_ddate < 20230101 OR min_ddate > 20231231"
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "implementation": "load num/uom_dict.txt at runtime, find usd_code, compare int32_t",
+      "selectivity": 0.87
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "implementation": "!std::isnan(value)",
+      "selectivity": 0.99
+    }
+  ],
+  "data_structures": {
+    "pre_anti_join_set": {
+      "type": "open_addressing_hash_set",
+      "slot": "struct PreSlot { int32_t adsh; int32_t tag; int32_t ver; int32_t valid; }  /* 16 bytes */",
+      "capacity": 33554432,
+      "capacity_note": "next_power_of_2(9600799 * 2) = 2^25",
+      "memory_mb": 512,
+      "init": "std::fill(pre_ht.begin(), pre_ht.end(), PreSlot{0,0,0,0})  /* C20: no memset */",
+      "hash_fn": "uint64_t k1 = ((uint64_t)(uint32_t)adsh << 32) | (uint32_t)tag; h = k1 * 6364136223846793005ULL + (uint32_t)ver * 1442695040888963407ULL",
+      "mask": "cap - 1",
+      "probing": "bounded linear: for(uint64_t p=0; p<cap; p++) { slot=(h+p)&mask; ... }  /* C24 */"
+    },
+    "aggregation_map": {
+      "type": "thread_local_open_addressing_hash_map",
+      "key": "uint64_t = ((uint64_t)(uint32_t)tag_code << 32) | (uint32_t)ver_code",
+      "value": "struct AggSlot { uint64_t key; int64_t count; double sum_value; }  /* 24 bytes */",
+      "capacity_per_thread": 131072,
+      "capacity_note": "next_power_of_2(50000 * 2) = 2^17 = 131072  /* C9: full cardinality per thread */",
+      "threads": 64,
+      "merge": "sequential merge of 64 thread-local maps into single global map"
+    }
+  },
+  "phases": [
+    {
+      "name": "build_pre_hash_set",
+      "description": "Single-threaded scan of pre (9.6M rows): load adsh.bin, tag.bin, version.bin via mmap reinterpret_cast (P2). Insert each (adsh, tag, ver) triple into pre_ht using bounded linear probing (C24).",
+      "columns": ["pre/adsh.bin", "pre/tag.bin", "pre/version.bin"],
+      "parallelism": "single_threaded",
+      "estimated_rows": 9600799
+    },
+    {
+      "name": "scan_filter_antijoin_aggregate",
+      "description": "Parallel morsel-driven scan of num. For each morsel (block of 100K rows): (1) zone-map skip on ddate; (2) row-level filter: ddate IN range AND uom==usd_code AND !isnan(value); (3) probe pre_ht with (adsh,tag,ver) — keep row if NOT found; (4) update thread-local agg map with (tag_code, ver_code) key.",
+      "columns": [
+        "num/indexes/ddate_zone_map.bin",
+        "num/ddate.bin",
+        "num/uom.bin",
+        "num/value.bin",
+        "num/adsh.bin",
+        "num/tag.bin",
+        "num/version.bin"
+      ],
+      "dict_lookups": [
+        "num/uom_dict.txt  → find usd_code at runtime (C2)"
+      ],
+      "parallelism": "morsel_driven_64_threads",
+      "zone_map_index": "num/indexes/ddate_zone_map.bin",
+      "zone_map_skip_condition": "block.max_ddate < 20230101 OR block.min_ddate > 20231231  /* C19 */",
+      "estimated_rows_after_filter": 8570000,
+      "estimated_rows_after_antijoin": 6500000
+    },
+    {
+      "name": "merge_and_having",
+      "description": "Merge 64 thread-local agg maps into global map. Apply HAVING count > 10.",
+      "parallelism": "sequential_merge"
+    },
+    {
+      "name": "topk_output",
+      "description": "Collect surviving groups, std::partial_sort top-100 by cnt DESC (P6). Decode tag_code via num/tag_dict.txt and ver_code via num/version_dict.txt (C18). Output CSV.",
+      "dict_lookups": [
+        "num/tag_dict.txt",
+        "num/version_dict.txt"
+      ]
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 64,
+    "thread_local_agg": true,
+    "morsel_size": 100000,
+    "pre_build": "single_threaded"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/ddate_zone_map.bin",
+      "purpose": "skip_blocks where ddate range [20230101,20231231] cannot intersect block",
+      "layout": "[uint32_t num_blocks][{int32_t min_val, int32_t max_val, uint32_t block_size}...]"
+    }
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "mode": "thread_local_then_merge",
+    "group_by": ["tag_code", "version_code"],
+    "aggregates": [
+      {"func": "COUNT(*)", "output": "cnt"},
+      {"func": "SUM(n.value)", "output": "total", "type": "double"}
+    ],
+    "estimated_groups": 50000,
+    "having": "cnt > 10"
+  },
+  "output": {
+    "columns": ["n.tag (decoded)", "n.version (decoded)", "cnt", "total"],
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "format": "csv"
+  },
+  "memory_budget": {
+    "pre_hash_set_mb": 512,
+    "thread_local_agg_mb": 192,
+    "total_estimated_mb": 704,
+    "available_mb": 385024
+  },
+  "correctness_checks": [
+    "C2: usd_code looked up from num/uom_dict.txt at runtime — never hardcoded",
+    "C9: pre_ht capacity = next_power_of_2(9600799*2)=33554432; agg capacity=131072 per thread (full cardinality)",
+    "C19: zone-map skip only on ddate (has index num/indexes/ddate_zone_map.bin)",
+    "C20: std::fill for PreSlot sentinel initialization, not memset",
+    "C24: bounded probing for-loop (p < cap) in both pre_ht insert and probe",
+    "C15: agg key includes BOTH tag_code AND version_code",
+    "C18: decode tag/version codes to strings for output"
+  ],
+  "execution_target": "cpp"
+}

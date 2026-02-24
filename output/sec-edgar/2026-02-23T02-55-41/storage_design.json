@@ -1,0 +1,134 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "sf3.gendb"
+  },
+  "shared_dicts": {
+    "note": "adsh/tag/version are shared across tables; adsh_code == sub_row_index (elegant O(1) join)",
+    "adsh": "built from sub.csv first; code_k == row_k in sub (PK property)",
+    "tag": "built from tag.csv first; code shared across num/pre/tag columns",
+    "version": "built from tag.csv first; code shared across num/pre/tag columns"
+  },
+  "tables": {
+    "sub": {
+      "columns": [
+        {"name": "adsh",      "cpp_type": "int32_t", "semantic_type": "dict_shared_adsh",   "encoding": "shared adsh dict; code == row_index"},
+        {"name": "cik",       "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "direct"},
+        {"name": "name",      "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/name_dict.txt"},
+        {"name": "sic",       "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "direct"},
+        {"name": "countryba", "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/countryba_dict.txt"},
+        {"name": "stprba",    "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/stprba_dict.txt"},
+        {"name": "cityba",    "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/cityba_dict.txt"},
+        {"name": "countryinc","cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/countryinc_dict.txt"},
+        {"name": "form",      "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/form_dict.txt; ~30 distinct"},
+        {"name": "period",    "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "YYYYMMDD integer"},
+        {"name": "fy",        "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "fiscal year (e.g. 2022)"},
+        {"name": "fp",        "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/fp_dict.txt"},
+        {"name": "filed",     "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "YYYYMMDD integer"},
+        {"name": "prevrpt",   "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "0/1 flag"},
+        {"name": "nciks",     "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "direct"},
+        {"name": "afs",       "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/afs_dict.txt"},
+        {"name": "wksi",      "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "0/1 flag"},
+        {"name": "fye",       "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; sub/fye_dict.txt"}
+      ],
+      "skipped_columns": ["accepted", "instance"],
+      "file_format": {"filename": "sub.csv", "delimiter": ",", "has_header": true,
+        "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"]},
+      "sort_order": ["adsh"],
+      "block_size": 100000,
+      "estimated_rows": "86135",
+      "indexes": [
+        {"name": "adsh_row_map", "type": "direct_array", "columns": ["adsh"],
+         "file": "sub/indexes/adsh_row_map.bin",
+         "note": "int32_t array[adsh_code] = sub_row_index; O(1) lookup; 344KB; adsh_code==row_index so this is identity (kept for explicitness)"}
+      ]
+    },
+    "tag": {
+      "columns": [
+        {"name": "tag",      "cpp_type": "int32_t", "semantic_type": "dict_shared_tag",     "encoding": "shared tag dict"},
+        {"name": "version",  "cpp_type": "int32_t", "semantic_type": "dict_shared_version", "encoding": "shared version dict"},
+        {"name": "custom",   "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "0/1 flag"},
+        {"name": "abstract", "cpp_type": "int32_t", "semantic_type": "integer",             "encoding": "0/1 flag"},
+        {"name": "datatype", "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; tag/datatype_dict.txt"},
+        {"name": "iord",     "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; tag/iord_dict.txt; I or D"},
+        {"name": "crdr",     "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; tag/crdr_dict.txt; C or D"},
+        {"name": "tlabel",   "cpp_type": "int32_t", "semantic_type": "dict_local",          "encoding": "per-table dict; tag/tlabel_dict.txt"}
+      ],
+      "skipped_columns": ["doc"],
+      "file_format": {"filename": "tag.csv", "delimiter": ",", "has_header": true,
+        "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"]},
+      "sort_order": ["tag", "version"],
+      "block_size": 100000,
+      "estimated_rows": "1070662",
+      "indexes": [
+        {"name": "tagver_hash", "type": "hash", "columns": ["tag", "version"],
+         "file": "tag/indexes/tagver_hash.bin",
+         "layout": "header: [uint64_t ht_size]; slots: [{int32_t tag_code, int32_t ver_code, int32_t row_idx, int32_t valid}]; open-addressing linear probe",
+         "note": "(tag_code,ver_code) -> tag_row_index; used for num->tag join in Q4"}
+      ]
+    },
+    "num": {
+      "columns": [
+        {"name": "adsh",    "cpp_type": "int32_t", "semantic_type": "dict_shared_adsh",   "encoding": "shared adsh dict; adsh_code == sub_row_index"},
+        {"name": "tag",     "cpp_type": "int32_t", "semantic_type": "dict_shared_tag",    "encoding": "shared tag dict"},
+        {"name": "version", "cpp_type": "int32_t", "semantic_type": "dict_shared_version","encoding": "shared version dict"},
+        {"name": "ddate",   "cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "YYYYMMDD integer direct (NOT epoch days); e.g. 20230101"},
+        {"name": "qtrs",    "cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "direct"},
+        {"name": "uom",     "cpp_type": "int32_t", "semantic_type": "dict_local",         "encoding": "per-table dict; num/uom_dict.txt; ~25 distinct"},
+        {"name": "coreg",   "cpp_type": "int32_t", "semantic_type": "dict_local",         "encoding": "per-table dict; num/coreg_dict.txt; empty string = code 0"},
+        {"name": "value",   "cpp_type": "double",  "semantic_type": "decimal",            "encoding": "IEEE 754 double; NaN = NULL"}
+      ],
+      "skipped_columns": ["footnote"],
+      "file_format": {"filename": "num.csv", "delimiter": ",", "has_header": true,
+        "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"]},
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "39401761",
+      "indexes": [
+        {"name": "ddate_zone_map", "type": "zone_map", "columns": ["ddate"],
+         "file": "num/indexes/ddate_zone_map.bin",
+         "layout": "[uint32_t num_blocks][{int32_t min, int32_t max, uint32_t block_size}...]",
+         "note": "YYYYMMDD integer; Q24 uses ddate BETWEEN 20230101 AND 20231231"}
+      ]
+    },
+    "pre": {
+      "columns": [
+        {"name": "adsh",    "cpp_type": "int32_t", "semantic_type": "dict_shared_adsh",   "encoding": "shared adsh dict"},
+        {"name": "report",  "cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "direct"},
+        {"name": "line",    "cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "direct"},
+        {"name": "stmt",    "cpp_type": "int32_t", "semantic_type": "dict_local",         "encoding": "per-table dict; pre/stmt_dict.txt; 8 distinct"},
+        {"name": "inpth",   "cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "0/1 flag"},
+        {"name": "rfile",   "cpp_type": "int32_t", "semantic_type": "dict_local",         "encoding": "per-table dict; pre/rfile_dict.txt; 2 distinct (H/X)"},
+        {"name": "tag",     "cpp_type": "int32_t", "semantic_type": "dict_shared_tag",    "encoding": "shared tag dict"},
+        {"name": "version", "cpp_type": "int32_t", "semantic_type": "dict_shared_version","encoding": "shared version dict"},
+        {"name": "plabel",  "cpp_type": "int32_t", "semantic_type": "dict_local",         "encoding": "per-table dict; pre/plabel_dict.txt"},
+        {"name": "negating","cpp_type": "int32_t", "semantic_type": "integer",            "encoding": "0/1 flag"}
+      ],
+      "file_format": {"filename": "pre.csv", "delimiter": ",", "has_header": true,
+        "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"]},
+      "sort_order": ["adsh"],
+      "block_size": 100000,
+      "estimated_rows": "9600799",
+      "indexes": []
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DOUBLE": "double",
+    "VARCHAR_dict": "int32_t"
+  },
+  "date_encoding": "NOT_APPLICABLE — ddate/period/filed are YYYYMMDD integers stored as int32_t directly",
+  "join_optimization": {
+    "num_to_sub": "adsh_code == sub_row_index; direct array index, no hash lookup needed",
+    "pre_to_sub": "same shared adsh dict; adsh_code == sub_row_index",
+    "num_to_tag": "use tagver_hash index; key=(tag_code,version_code)->tag_row",
+    "num_to_pre": "build runtime hash set from pre (adsh,tag,version) codes; Q24 anti-join"
+  },
+  "hardware_config": {
+    "cpu_cores": "64",
+    "l3_cache_mb": "44",
+    "disk_type": "hdd",
+    "total_memory_gb": "376",
+    "simd": "AVX512F AVX512BW AVX512VL AVX2"
+  }
+}

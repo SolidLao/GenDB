@@ -8,6 +8,6 @@ export const config = {
   name: "Query Optimizer",
   configKey: "query_optimizer",
   promptPath: resolve(__dirname, "prompt.md"),
-  allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+  allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
   model: "sonnet",
 };

@@ -1,0 +1,110 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["filter_sub_fy2023", "parallel_scan_num_agg", "partitioned_merge", "topk_sort", "decode_output"],
+  "join_order": [
+    {
+      "build": "sub(fy=2023)",
+      "probe": "num(uom='USD')",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8600,
+      "notes": "Sequential scan of sub (86K rows). Collect rows where fy==2023 (~8.6K). Build open-addressing hash map adsh_code→name_code (cap=32768, ~256KB, fits in L1/L2). Also populate adsh membership bitset or hash set for fast rejection during num scan."
+    },
+    {
+      "build": "pre(stmt='IS') via pre_is_hash mmap index",
+      "probe": "num(uom='USD', adsh in fy2023_set)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 1860000,
+      "notes": "Use pre-built mmap index indexes/pre_is_hash.bin (4M slots x 16B = 64MB). Composite key hash(adsh_code, tag_code, ver_code) -> plabel_code. Zero build cost (P11). Simultaneously applies stmt='IS' filter and retrieves plabel_code for GROUP BY. Returns -1 if no matching IS row."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887,
+      "technique": "dict_code_compare: int16_t usd_code = find_code(uom_dict, 'USD') at runtime (C2)"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0,
+      "technique": "skip rows where value is NaN/sentinel; apply after uom filter"
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.10,
+      "technique": "direct int32_t compare on sub/fy.bin; sequential scan of 86K rows"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194,
+      "technique": "pre-filtered implicitly via pre_is_hash index; no separate pre table scan needed"
+    }
+  ],
+  "data_structures": {
+    "fy2023_adsh_to_name": "open_addressing_hash_map(cap=32768, key=int32_t adsh_code, val=int32_t name_code, 32B/slot, ~1MB, fits L2)",
+    "pre_is_lookup": "pre_built_mmap_index(indexes/pre_is_hash.bin, 4M slots x 16B = 64MB, IsSlot={adsh_code,tag_code,ver_code,plabel_code}, empty=adsh_code==INT32_MIN)",
+    "sub_adsh_lookup": "pre_built_mmap_index(indexes/sub_adsh_hash.bin, 256K slots x 8B = 2MB, key=adsh_code->sub_row_idx)",
+    "thread_local_aggregation": "open_addressing_hash_map per thread (cap=524288, key=(name_code int32_t, is_code int32_t, tag_code int32_t, plabel_code int32_t)=16B, val=(sum_cents int64_t, count int64_t)=16B, 32B/slot, 16MB/thread, 64 instances total)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "phases": {
+      "filter_sub_fy2023": "sequential (86K rows, negligible cost)",
+      "parallel_scan_num": "#pragma omp parallel for schedule(dynamic, 65536) over 39.4M num rows; each thread owns local agg hash map; zero shared mutable state during scan",
+      "merge": "partitioned_merge: T x G = 64 x 186K = ~12M > 2M threshold; hash each local entry to P=64 partitions; each thread independently merges its assigned partition; fully parallel, zero contention"
+    }
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "indexes/sub_adsh_hash.bin",
+      "purpose": "adsh_code -> sub_row lookup to retrieve name_code during num scan; layout: [uint32_t cap=262144][{int32_t adsh_code, uint32_t row_idx} x 262144]"
+    },
+    {
+      "index": "pre_is_hash",
+      "file": "indexes/pre_is_hash.bin",
+      "purpose": "composite join on (adsh,tag,version) with implicit stmt='IS' filter; returns plabel_code for GROUP BY key; layout: [uint32_t cap=4194304][{int32_t adsh,int32_t tag,int32_t ver,int32_t plabel} x 4194304]"
+    }
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "key_columns": ["name_code (int32_t)", "is_code (int32_t, constant='IS' but must be in key)", "tag_code (int32_t)", "plabel_code (int32_t)"],
+    "key_size_bytes": 16,
+    "key_note": "C30 CRITICAL: ALL 4 GROUP BY dimensions must be in hash key. Missing any one dimension causes exact N-fold duplication of both sum and count.",
+    "sum_accumulator": "int64_t sum_cents; sum_cents += llround(num_value[i] * 100.0);  // C29 MANDATORY — no double, no float, no long double, no Kahan",
+    "count_accumulator": "int64_t count",
+    "thread_local": true,
+    "agg_cap_per_thread": 524288,
+    "agg_cap_rationale": "~186K expected groups (8.6K fy2023 adsh codes x avg IS pre rows per adsh); cap = next_power_of_2(186000 * 2) = 524288 (C9, P23)",
+    "merge_strategy": "partitioned_merge (T x G ~ 12M > 2M threshold per aggregation-optimization skill)"
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "topk_method": "std::partial_sort or min-heap O(n log 200) after merge (P6)",
+    "decimal_output": "printf(\"%lld.%02lld\", sum_cents/100, llabs(sum_cents%100))  // C29: exact fixed-point output",
+    "decode": {
+      "name_code": "sub/name_dict.txt loaded at runtime (C2)",
+      "is_code": "pre/stmt_dict.txt loaded at runtime -> always decodes to 'IS' (C2)",
+      "tag_code": "tag_global_dict.txt loaded at runtime (C2)",
+      "plabel_code": "pre/plabel_dict.txt loaded at runtime (C2)"
+    },
+    "csv_header": "name,stmt,tag,plabel,total_value,cnt"
+  },
+  "correctness_constraints": [
+    "C2: Load usd_code=find_code(uom_dict,'USD') and is_code=find_code(stmt_dict,'IS') at runtime; NEVER hardcode dict codes",
+    "C9: AGG_CAP = next_power_of_2(estimated_groups * 2) = 524288; size per full group cardinality not per-thread share",
+    "C20: Use std::fill() not memset() for INT32_MIN sentinel initialization in any runtime-built hash tables",
+    "C24: All hash table probes use bounded for-loop (probe < cap), never unbounded while-loop",
+    "C29: MANDATORY int64_t cents accumulation via llround(v*100.0); NO double/float/long double/Kahan accumulator for SUM(value)",
+    "C30: GROUP BY hash key MUST include ALL 4 dimensions: name_code, is_code, tag_code, plabel_code; any missing dimension causes exact N-fold duplication of sum and count"
+  ],
+  "execution_target": "cpp"
+}

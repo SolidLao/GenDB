@@ -1,0 +1,104 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "scan_num_filter_uom_value",
+    "probe_sub_filter_sic",
+    "probe_pre_filter_stmt",
+    "probe_tag_filter_abstract",
+    "aggregate_thread_local",
+    "merge_apply_having",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "sub (pre-built sub_adsh_index, ~86K rows)",
+      "probe": "num (filtered: uom='USD' AND value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 86135,
+      "probe_cardinality": 39401761,
+      "post_filter_selectivity": 0.061,
+      "notes": "Most selective dimension filter (6.1% pass). Probe sub_adsh_index per num row, check sic BETWEEN 4000 AND 4999. Fail-fast: ~93.9% rejection eliminates need to probe pre/tag."
+    },
+    {
+      "build": "pre (pre-built pre_join_index, ~9.6M rows)",
+      "probe": "num (survived sub+sic check, ~2.1M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "probe_cardinality": 2100000,
+      "post_filter_selectivity": 0.112,
+      "notes": "Second most selective filter (11.2% pass on stmt='EQ'). Probe pre_join_index on (adsh_code, tag_code, version_code) — multivalue: iterate payload rows checking pre_stmt[pre_row]==eq_code. Early-exit if no pre row passes stmt filter."
+    },
+    {
+      "build": "tag (pre-built tag_index, ~1.07M rows)",
+      "probe": "num (survived sub+sic+pre+stmt checks, ~235K rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "probe_cardinality": 235000,
+      "post_filter_selectivity": 0.95,
+      "notes": "Least selective filter (95% pass, abstract=0). Probe tag_index on (tag_code, version_code). Yields tag_row for tlabel_code (GROUP BY key) and abstract check."
+    }
+  ],
+  "probe_order_rationale": "sub (0.061) → pre (0.112) → tag (0.95). Ordered by ascending selectivity for maximum early-termination benefit. Most num rows (93.9%) rejected at sub+sic check, never reaching pre or tag probes.",
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.872, "phase": "scan", "notes": "Resolve 'USD' dict code at startup from num/uom_dict.txt"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.99, "phase": "scan", "notes": "Test std::isnan(v) — NaN sentinel for NULL"},
+    {"table": "sub", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.061, "phase": "after_sub_probe", "notes": "Raw int32_t range check: sub_sic[sub_row] >= 4000 && sub_sic[sub_row] <= 4999"},
+    {"table": "pre", "predicate": "stmt = 'EQ'", "selectivity": 0.112, "phase": "after_pre_probe", "notes": "Resolve 'EQ' dict code at startup from pre/stmt_dict.txt; check pre_stmt[pre_row] == eq_code"},
+    {"table": "tag", "predicate": "abstract = 0", "selectivity": 0.95, "phase": "after_tag_probe", "notes": "tag_abstract[tag_row] == 0"}
+  ],
+  "data_structures": {
+    "sub_adsh_index": "pre-built mmap hash table (SubSlot{adsh_code,sub_row}, cap=262144, sentinel adsh_code==-1, hash_i32)",
+    "pre_join_index": "pre-built mmap multivalue hash table (PreSlot{adsh_code,tag_code,version_code,payload_offset,payload_count}, cap=next_pow2(n_unique*2), pool=uint32_t[], sentinel adsh_code==-1, hash_i32x3)",
+    "tag_index": "pre-built mmap hash table (TagSlot{tag_code,version_code,tag_row}, cap=4194304, sentinel tag_code==-1, hash_i32x2)",
+    "aggregation": "thread-local open-addressing hash map keyed by Q4Key{int32_t sic; int32_t tlabel_code; int16_t stmt_code} (pack to 12 bytes), value={int64_t sum_cents, int64_t cnt, unordered_set<int32_t> cik_set}; capacity=next_pow2(group_cardinality*2)",
+    "topk_buffer": "std::vector<ResultRow> with std::partial_sort for LIMIT 500 (O(n log k))"
+  },
+  "aggregation_key": {
+    "struct": "Q4Key { int32_t sic; int32_t tlabel_code; int16_t stmt_code; }",
+    "note_C15": "ALL THREE GROUP BY dimensions must be in key — missing any one causes wrong group merging",
+    "value_struct": "{ int64_t sum_cents; int64_t cnt; std::unordered_set<int32_t> cik_set; }",
+    "distinct_cik": "per-group unordered_set<int32_t> collecting sub_cik[sub_row]; size() after merge = COUNT(DISTINCT cik)",
+    "sum_avg_C29": "MANDATORY int64_t cents accumulator: iv=llround(v*100.0); sum_cents+=iv; cnt++; AVG=(double)sum_cents/cnt/100.0"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "work_division": "num rows partitioned into morsels (~65536 rows each); each thread processes its morsel independently with thread-local aggregation map",
+    "merge": "sequential merge of 64 thread-local maps into final map (P17/P20) — merge cik_sets per group, accumulate sum_cents and cnt",
+    "note_P17": "NEVER use shared aggregation map with mutex — use thread-local then single merge pass"
+  },
+  "indexes": [
+    {"index": "sub_adsh_index", "file": "sf3.gendb/indexes/sub_adsh_index.bin", "purpose": "join_lookup: num.adsh_code → sub row"},
+    {"index": "tag_index", "file": "sf3.gendb/indexes/tag_index.bin", "purpose": "join_lookup: (num.tag_code, num.version_code) → tag row"},
+    {"index": "pre_join_index", "file": "sf3.gendb/indexes/pre_join_index.bin", "purpose": "join_lookup_multivalue: (num.adsh_code, num.tag_code, num.version_code) → pre row(s)"}
+  ],
+  "dict_lookups_at_startup": [
+    {"file": "num/uom_dict.txt", "find": "USD", "store_as": "int16_t usd_code"},
+    {"file": "pre/stmt_dict.txt", "find": "EQ", "store_as": "int16_t eq_code"},
+    {"file": "tag/tlabel_dict.txt", "load_full": true, "purpose": "decode tlabel_code → string for output"},
+    {"file": "pre/stmt_dict.txt", "load_full": true, "purpose": "decode stmt_code → string for output"}
+  ],
+  "aggregation": "hash_group_by (thread-local open-addressing, merge after barrier)",
+  "having": "cik_set.size() >= 2 — applied after merge during result materialization",
+  "output": {
+    "columns": ["s.sic (int32_t raw)", "t.tlabel (dict decode, double-quoted C31)", "p.stmt (dict decode, double-quoted C31)", "num_companies (cik_set.size())", "total_value (sum_cents/100 formatted)", "avg_value (printf %.2f)"],
+    "order_by": ["total_value DESC", "sic ASC (tiebreaker C33)"],
+    "limit": 500,
+    "sum_format": "printf(\"%lld.%02lld\", sum_cents/100, std::abs(sum_cents%100))",
+    "avg_format": "printf(\"%.2f\", (double)sum_cents / cnt / 100.0)",
+    "string_quoting_C31": "ALL string columns (tlabel, stmt) must be wrapped in double-quotes — printf(\"\\\"%s\\\"\", str.c_str())"
+  },
+  "correctness_checklist": [
+    "C15: Q4Key must include sic + tlabel_code + stmt_code (all three GROUP BY dimensions)",
+    "C24: All index probes use bounded for-loop (probe < cap), not unbounded while",
+    "C27: Each index: declare cap, mask=cap-1, ht-pointer at function scope before any loop",
+    "C29: sum/avg on num.value MUST use int64_t cents — NO double/long double/Kahan accumulator",
+    "C31: Double-quote tlabel AND stmt in CSV output (tlabel may contain commas)",
+    "C33: Secondary sort key (sic ASC) for deterministic TOP-500 output on total_value ties",
+    "C2: Resolve usd_code and eq_code from dicts at runtime — never hardcode"
+  ],
+  "execution_target": "cpp"
+}

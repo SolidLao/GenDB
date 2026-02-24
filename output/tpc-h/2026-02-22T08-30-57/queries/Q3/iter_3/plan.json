@@ -1,0 +1,197 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer",
+    "build_custkey_hashset",
+    "scan_orders_zonemap",
+    "probe_custkey_hashset",
+    "build_orderkey_hashmap",
+    "scan_lineitem_zonemap",
+    "probe_orderkey_hashmap",
+    "hash_aggregate",
+    "topk_heap"
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "build": "customer(filtered on c_mktsegment='BUILDING', ~300K rows)",
+      "build_key": "c_custkey",
+      "probe": "orders(filtered on o_orderdate < 9204, ~7.35M rows)",
+      "probe_key": "o_custkey",
+      "join_type": "semi_join",
+      "output_cardinality": 735000,
+      "rationale": "300K custkeys → tiny hash set; 7.35M orders probe it; ~10% match rate"
+    },
+    {
+      "step": 2,
+      "build": "orders(after customer semi-join, ~735K rows)",
+      "build_key": "o_orderkey",
+      "build_payload": "{ int32_t o_orderdate; int32_t o_shippriority; }",
+      "probe": "lineitem(filtered on l_shipdate > 9204, ~33M rows)",
+      "probe_key": "l_orderkey",
+      "join_type": "hash_join",
+      "output_cardinality": 2940000,
+      "rationale": "735K orderkey build side; 33M lineitem probe; ~4 lineitems/order → ~2.94M matches"
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "encoding": "dictionary_uint8",
+      "dict_file": "customer/c_mktsegment_dict.txt",
+      "dict_lookup": "load dict at runtime; find i where dict[i] == 'BUILDING'; filter rows where code == i",
+      "correctness": "C2 — never hardcode code 0",
+      "selectivity": 0.20,
+      "input_rows": 1500000,
+      "output_rows": 300000,
+      "zone_map": "none (customer not sorted on mktsegment)"
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "predicate": "o_orderdate < 9204",
+      "encoding": "int32_t epoch days",
+      "zone_map_index": "indexes/orders_orderdate_zonemap.bin",
+      "zone_map_layout": "[uint32_t num_blocks=150][int32_t min, int32_t max per block]",
+      "zone_map_block_size": 100000,
+      "zone_map_skip_condition": "block_min >= 9204",
+      "zone_map_strategy": "binary search on sorted data to find last qualifying block; skip all blocks after",
+      "zone_map_pruning_pct": 51,
+      "selectivity": 0.49,
+      "input_rows": 15000000,
+      "output_rows": 7350000
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "predicate": "l_shipdate > 9204",
+      "encoding": "int32_t epoch days",
+      "zone_map_index": "indexes/lineitem_shipdate_zonemap.bin",
+      "zone_map_layout": "[uint32_t num_blocks=600][int32_t min, int32_t max per block]",
+      "zone_map_block_size": 100000,
+      "zone_map_skip_condition": "block_max <= 9204",
+      "zone_map_strategy": "binary search on sorted data to find first qualifying block; skip all blocks before",
+      "zone_map_pruning_pct": 45,
+      "selectivity": 0.55,
+      "input_rows": 59986052,
+      "output_rows": 33000000
+    }
+  ],
+  "data_structures": {
+    "customer_custkey_hashset": {
+      "type": "open_addressing_hashset",
+      "key_type": "int32_t",
+      "sentinel": "INT32_MIN via std::fill — NEVER memset (C20)",
+      "capacity": "next_power_of_2(300000 * 2) = 1048576",
+      "load_factor_max": 0.5,
+      "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (cap - 1)",
+      "probing": "bounded for-loop: for(uint32_t p=0; p<cap; p++) — C24",
+      "purpose": "semi-join: check o_custkey in qualifying customers",
+      "built_by": "single-threaded (300K rows trivial); read-only during orders scan"
+    },
+    "orders_orderkey_hashmap": {
+      "type": "open_addressing_hashmap",
+      "key_type": "int32_t (o_orderkey)",
+      "value_type": "struct { int32_t o_orderdate; int32_t o_shippriority; }",
+      "sentinel": "INT32_MIN via std::fill — NEVER memset (C20)",
+      "capacity": "next_power_of_2(735000 * 2) = 2097152",
+      "load_factor_max": 0.5,
+      "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (cap - 1)",
+      "probing": "bounded for-loop: for(uint32_t p=0; p<cap; p++) — C24",
+      "purpose": "join lookup: lineitem probes o_orderkey to retrieve o_orderdate, o_shippriority",
+      "built_by": "sequential merge after parallel orders scan; read-only during lineitem scan"
+    },
+    "aggregation_hashmap": {
+      "type": "open_addressing_hashmap",
+      "key_type": "struct AggKey { int32_t l_orderkey; int32_t o_orderdate; int32_t o_shippriority; }",
+      "value_type": "double (revenue accumulator)",
+      "sentinel": "key.l_orderkey == INT32_MIN via std::fill — C20",
+      "capacity": "next_power_of_2(735000 * 2) = 2097152",
+      "load_factor_max": 0.5,
+      "hash_fn": "combine all 3 key fields: h = orderkey * 2654435761 ^ orderdate * 40503 ^ shippriority",
+      "probing": "bounded for-loop with full key comparison — C24, C15",
+      "correctness": "C15 — key MUST include ALL 3 GROUP BY columns",
+      "purpose": "GROUP BY (l_orderkey, o_orderdate, o_shippriority) with SUM accumulation",
+      "parallelism": "thread-local per-thread hashmaps (each sized to full 2097152); merge at end"
+    },
+    "topk_heap": {
+      "type": "min_heap",
+      "size": 10,
+      "comparator": "min by revenue (so top-10 highest revenue survive); tie-break by o_orderdate DESC (larger date = less preferred for ASC sort)",
+      "purpose": "LIMIT 10 ORDER BY revenue DESC, o_orderdate ASC — O(n log 10) no full sort"
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "phase_1_customer_scan": {
+      "description": "Scan 1.5M customer rows, filter mktsegment, collect c_custkey",
+      "threading": "single-threaded or 4 threads (trivial data volume)",
+      "output": "global custkey_hashset (built before orders scan starts)"
+    },
+    "phase_2_orders_scan": {
+      "description": "Zone-map guided parallel scan of orders, probe custkey_hashset (read-only), collect qualifying order rows",
+      "threading": "parallel morsel scan across 64 threads, ~73 blocks total after zone-map pruning",
+      "output_collection": "thread-local vectors of (o_orderkey, o_orderdate, o_shippriority) → merge into global orders_orderkey_hashmap"
+    },
+    "phase_3_lineitem_scan": {
+      "description": "Zone-map guided parallel scan of lineitem, probe orders_orderkey_hashmap (read-only), accumulate revenue",
+      "threading": "parallel morsel scan across 64 threads, ~330 blocks after zone-map pruning",
+      "aggregation": "thread-local agg hashmaps (each sized to full 2097152 capacity — C9); merge sequentially at end into global agg map",
+      "merge_note": "~735K groups, sequential merge is fast (<10ms); no atomic needed"
+    },
+    "phase_4_topk": {
+      "description": "Single-threaded scan of agg hashmap, maintain min-heap of 10",
+      "threading": "single-threaded (trivial at 735K groups)"
+    }
+  },
+  "indexes": [
+    {
+      "index": "orders_orderdate_zonemap",
+      "file": "indexes/orders_orderdate_zonemap.bin",
+      "layout": "[uint32_t num_blocks=150][int32_t min, int32_t max] per block",
+      "purpose": "skip blocks where block_min >= 9204; binary search on sorted orders for last qualifying block",
+      "estimated_blocks_scanned": 73,
+      "estimated_blocks_skipped": 77
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "layout": "[uint32_t num_blocks=600][int32_t min, int32_t max] per block",
+      "purpose": "skip blocks where block_max <= 9204; binary search for first qualifying block",
+      "estimated_blocks_scanned": 330,
+      "estimated_blocks_skipped": 270
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "group_by_columns": ["l_orderkey", "o_orderdate", "o_shippriority"],
+    "aggregate_function": "SUM(l_extendedprice * (1.0 - l_discount))",
+    "revenue_formula": "l_extendedprice * (1.0 - l_discount)",
+    "decimal_note": "l_extendedprice and l_discount stored as native double — direct multiply, no scale conversion",
+    "estimated_groups": 735000,
+    "implementation": "thread-local open-addressing hashmaps → sequential final merge"
+  },
+  "columns_accessed": {
+    "customer": ["c_mktsegment", "c_custkey"],
+    "orders": ["o_custkey", "o_orderdate", "o_orderkey", "o_shippriority"],
+    "lineitem": ["l_shipdate", "l_orderkey", "l_extendedprice", "l_discount"]
+  },
+  "output": {
+    "columns": ["l_orderkey", "revenue", "o_orderdate", "o_shippriority"],
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "topk_strategy": "min_heap size 10 over agg hashmap entries"
+  },
+  "correctness_checklist": {
+    "C2": "Load customer/c_mktsegment_dict.txt; find i where dict[i]=='BUILDING'; filter by code==i — never hardcode 0",
+    "C9": "All hash tables sized next_power_of_2(estimated_count * 2); thread-local tables sized for FULL cardinality",
+    "C15": "Agg hashmap key struct includes ALL 3 GROUP BY fields: l_orderkey, o_orderdate, o_shippriority",
+    "C19": "Zone-map skip only on o_orderdate (orders, sorted) and l_shipdate (lineitem, sorted) — both have indexes",
+    "C20": "All hash table sentinel init via std::fill(..., INT32_MIN) — never memset",
+    "C24": "All hash probing uses bounded for-loop: for(uint32_t p=0; p<cap; p++)"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,94 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "pass1_scan_num_build_max_map",
+    "merge_thread_local_max_maps",
+    "pass2_scan_num_probe_max_map",
+    "join_sub_adsh_hash_filter_fy2022",
+    "topk_100"
+  ],
+  "join_order": [
+    {
+      "build": "num(uom=pure AND value IS NOT NULL) GROUP BY (adsh_code, tag_code) -> max_value",
+      "probe": "num(uom=pure AND value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 80000,
+      "notes": "Two-pass over num. Pass 1: parallel morsel-driven scan, thread-local open-addressing hash maps keyed on uint64 packed key ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tag_code, value=double max_value. Cap=262144=next_pow2(80000*2), slot=16B, 4MB per thread. After Pass 1, merge 64 thread-local maps into single shared read-only max_map. Pass 2: parallel scan probes merged max_map, checks n.value == max_map[key] (exact double equality). Per C9/P23: sized on filtered group count 80000, not raw table size."
+    },
+    {
+      "build": "sub via pre-built sub_adsh_hash mmap index",
+      "probe": "num candidates passing max_map equality check",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 16882,
+      "notes": "Use pre-built sub_adsh_hash.bin (P11, zero build cost). Probe n.adsh_code -> sub_row_id via hash_int32 and linear probe. Then check sub_fy[sub_row_id] == 2022 (s.fy filter, ~19.6% selectivity on sub -> ~16882 qualifying). Collect (value, adsh_code, tag_code, name_code) into thread-local candidate vectors."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == pure_code AND !std::isnan(value)",
+      "selectivity": 0.0024,
+      "estimated_rows": 94564,
+      "notes": "Applied in both Pass 1 and Pass 2. Load uom_dict.txt at runtime to resolve pure_code (C2)."
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2022",
+      "selectivity": 0.196,
+      "estimated_rows": 16882,
+      "notes": "Applied after sub_adsh_hash probe using sub_fy column. INT32_MIN is null sentinel for fy."
+    }
+  ],
+  "data_structures": {
+    "max_map_thread_local": "open_addressing_hash_map per thread: key=uint64_t packed (adsh_code<<32|tag_code), value=double max_value, sentinel_key=UINT64_MAX, cap=262144, slot=16B (8B key + 8B value), total=4MB/thread. Initialize with mmap(MAP_ANONYMOUS)+omp parallel for to distribute page faults across cores (P22, C20: never memset for non-zero sentinels).",
+    "max_map_global": "single merged open_addressing_hash_map after Pass 1 merge, same layout as thread-local, cap=262144, read-only in Pass 2",
+    "sub_adsh_hash": "pre_built_mmap_index: sf3.gendb/sub/indexes/sub_adsh_hash.bin, cap=262144, slot=SubADSHSlot{int32_t adsh_code, int32_t row_id, int32_t _pad0, int32_t _pad1}=16B, empty sentinel adsh_code==INT32_MIN",
+    "candidates": "thread_local std::vector<struct{double value; int32_t adsh_code; int32_t tag_code; int32_t name_code;}>, merged across threads before top-100 selection"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_scan": "parallel over num row morsels; each thread maintains its own max_map; no synchronization during scan",
+    "pass1_merge": "sequential merge of 64 thread-local max_maps into global max_map: scan each thread-local map's 262144 slots, update global map with max(existing, candidate) for non-sentinel slots",
+    "pass2_scan": "parallel over num row morsels; shared read-only global max_map (no synchronization); thread-local candidate vectors",
+    "candidate_merge": "merge thread-local candidate vectors; expected small total (<10K); apply std::partial_sort for top-100 (P6)"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "sf3.gendb/sub/indexes/sub_adsh_hash.bin",
+      "purpose": "join_lookup: n.adsh_code -> sub.row_id for fy filter and name retrieval. Declare sub_cap, sub_mask, sub_ht at function scope before any scan loop (C32)."
+    }
+  ],
+  "aggregation": "hash_group_by with uint64-packed composite key (adsh_code<<32|tag_code), MAX(double value) accumulation. No C29 concern: output is individual double values, not SUM aggregation.",
+  "hash_probe_pattern": {
+    "hash_function": "hash_int32 from build_indexes.cpp: (uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL",
+    "composite_hash": "hash_int32(adsh_code) ^ (hash_int32(tag_code) * 0x517CC1B727220A95ULL)",
+    "bounded_probing": "for (uint32_t p = 0; p < cap; p++) { slot = (start + p) & mask; ... } — C24 mandatory",
+    "sub_adsh_hash_probe": "uint32_t pos = (uint32_t)(hash_int32(n_adsh_code) & sub_mask); bounded probe; check adsh_code match; get row_id; check sub_fy[row_id]==2022"
+  },
+  "output": {
+    "order_by": ["n.value DESC", "s.name ASC", "n.tag ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on merged candidate vector (P6: O(n log k)), tiebreakers name+tag for deterministic output (C33)",
+    "encoding": {
+      "name": "printf(\"\\\"%s\\\"\", name_dict[name_code].c_str()) — C31: always double-quote, company names may contain commas",
+      "tag": "printf(\"\\\"%s\\\"\", tag_dict[tag_code].c_str()) — C31: always double-quote",
+      "value": "printf(\"%.10g\", value)"
+    },
+    "dict_loading": "load name_dict from sf3.gendb/sub/name_dict.txt; load tag_dict from sf3.gendb/shared/tag_dict.txt; load uom_dict from sf3.gendb/num/uom_dict.txt for pure_code resolution (C2)"
+  },
+  "correctness_checklist": [
+    "C2: load uom_dict.txt at runtime; resolve pure_code by string comparison; never hardcode",
+    "C9: max_map cap = next_pow2(80000*2) = 262144, based on filtered group cardinality (P23)",
+    "C20: use parallel mmap+fill for sentinel initialization; never memset for multi-byte non-zero sentinels",
+    "C24: ALL hash table probes (max_map + sub_adsh_hash) use bounded for-loop with probe < cap",
+    "C29: no SUM — MAX(double) is safe; direct double equality for n.value == max_value is correct",
+    "C31: double-quote name and tag in all CSV output rows",
+    "C32: declare sub_cap, sub_mask, sub_ht at run_query() function scope before scan loops",
+    "C33: tiebreakers ORDER BY name ASC, tag ASC after value DESC for deterministic top-100"
+  ],
+  "execution_target": "cpp"
+}

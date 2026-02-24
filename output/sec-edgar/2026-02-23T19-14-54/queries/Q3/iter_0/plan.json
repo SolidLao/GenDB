@@ -1,0 +1,118 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "build_sub_flat_array",
+    "parallel_scan_num",
+    "thread_local_aggregate_dual",
+    "merge_maps",
+    "compute_having_threshold",
+    "filter_topk",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022, ~14600 rows)",
+      "probe": "num(filtered: uom='USD', ~34.9M rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 14600,
+      "notes": "adsh_code in [0, 86135) — build flat array sub_info[adsh_code]={cik,name_code,valid} (86135 slots × 12B ≈ 1MB). O(1) direct lookup during num scan. Faster than probing sub_adsh_hash.bin. Pre-built index not needed — direct array has zero hash cost."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887,
+      "implementation": "load num/uom_dict.txt at runtime via find_code(); compare int16_t uom[i] == usd_code. C2: never hardcode dict code."
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0,
+      "implementation": "check double value is finite (isfinite check or skip if all rows are non-null per dataset)"
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.17,
+      "implementation": "compare int32_t fy[i] == 2022 directly"
+    }
+  ],
+  "data_structures": {
+    "sub_lookup": "direct_flat_array[86135] of {int32_t cik, int32_t name_code}, sentinel cik=-1 for non-fy2022 entries. ~1MB total, fits L2. Built by scanning sub (86K rows), using std::fill sentinel init (C20: never memset for multi-byte sentinel).",
+    "map_a_outer_groupby": "thread_local open_addressing_hash_map — key=uint64_t packed((uint32_t)name_code << 32 | (uint32_t)cik), value=int64_t sum_cents. capacity=next_power_of_2(14600*2)=32768. slot=16B. per_thread_memory=512KB. 64_threads=32MB total. Bounded probing (C24). C9: capacity 2x estimated groups.",
+    "map_b_having_groupby": "thread_local open_addressing_hash_map — key=int32_t cik, value=int64_t sum_cents. capacity=32768. slot=16B. per_thread_memory=512KB. 64_threads=32MB total. Bounded probing (C24).",
+    "aggregation_merge": "two_phase_tree_merge: T×G = 64×14600 ≈ 930K (< 2M threshold). Merge groups of 8 threads in parallel (log₈(64)=2 rounds) then final 8→1. Reduces merge input 8× per round.",
+    "topk": "std::partial_sort or min-heap of size 100 on filtered Map A entries after HAVING (P6)"
+  },
+  "aggregation": {
+    "strategy": "thread_local_hash_agg_dual_map",
+    "map_a": {
+      "purpose": "outer GROUP BY (name_code, cik) → int64_t sum_cents",
+      "key": "uint64_t packed: (uint32_t)name_code << 32 | (uint32_t)cik",
+      "value": "int64_t sum_cents — C29 MANDATORY: accumulate as llround(value * 100.0), never double/float/long double/Kahan",
+      "capacity": 32768,
+      "note": "C15: key MUST include both name_code AND cik. C29: int64_t cents only."
+    },
+    "map_b": {
+      "purpose": "HAVING subquery GROUP BY cik → int64_t sum_cents",
+      "key": "int32_t cik",
+      "value": "int64_t sum_cents",
+      "capacity": 32768
+    },
+    "merge_strategy": "two_phase_tree_merge (T×G≈930K)",
+    "having_threshold": {
+      "computation": "grand_sum_cents = sum of all map_b values; num_ciks = count of distinct map_b entries; comparison: group_sum_cents * num_ciks > grand_sum_cents (integer multiply avoids division, exact)",
+      "note": "HAVING threshold = AVG(per-cik sub_total). Avoid floating-point division by cross-multiplying."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "parallel_phases": [
+      "parallel_scan_num with thread-local Map A and Map B",
+      "two_phase_tree_merge for Map A and Map B"
+    ],
+    "sequential_phases": [
+      "build_sub_flat_array (86K rows, trivial)",
+      "compute_having_threshold (single pass over merged Map B)",
+      "partial_sort top-100",
+      "decode and output"
+    ]
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "indexes/sub_adsh_hash.bin",
+      "purpose": "NOT USED — superseded by direct flat array. Direct array [adsh_code] → {cik,name_code} gives O(1) with zero hash overhead and fits in L2. Pre-built index (2MB) would require hash probing; direct array is faster for this query."
+    }
+  ],
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "format": {
+      "name": "decode int32_t name_code via sub/name_dict.txt → string",
+      "cik": "print int32_t directly",
+      "total_value": "int64_t cents: bool neg=(cents<0); if(neg) cents=-cents; printf('%s%lld.%02lld', neg?'-':'', (long long)(cents/100), (long long)(cents%100))"
+    },
+    "columns": ["name", "cik", "total_value"]
+  },
+  "critical_rules": {
+    "C29": "SUM(n.value) MUST accumulate as int64_t sum_cents += llround(value*100.0). Max observed value 5.94e13 >> 10^13 threshold. NEVER use double/float/long double/Kahan. Applies to both Map A and Map B accumulators.",
+    "C2": "Load num/uom_dict.txt and sub/name_dict.txt at runtime. Use find_code() for USD lookup.",
+    "C9": "Hash table capacity = next_power_of_2(estimated_groups * 2). Map A and Map B: next_power_of_2(14600*2)=32768.",
+    "C15": "Map A key must be composite (name_code, cik) — both GROUP BY columns required.",
+    "C20": "Use std::fill() to initialize sub_info array with sentinel, NOT memset().",
+    "C24": "All hash table probe loops: bounded for-loop (probe < cap), not unbounded while."
+  },
+  "memory_budget": {
+    "sub_flat_array": "86135 * 8B = 0.7MB",
+    "map_a_per_thread": "32768 * 16B = 0.5MB",
+    "map_b_per_thread": "32768 * 16B = 0.5MB",
+    "total_thread_local": "64 * 1MB = 64MB",
+    "l3_cache_mb": 44,
+    "hot_working_set": "sub_flat_array(0.7MB) + per-thread maps(1MB) << L3 per core — fully cache resident"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,199 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "subquery_agg_lineitem",
+    "probe_orders_index",
+    "probe_customer_index",
+    "probe_lineitem_index_for_sum",
+    "assemble_topk"
+  ],
+
+  "steps": [
+    {
+      "id": "subquery_agg_lineitem",
+      "description": "Parallel scan lineitem (l_orderkey, l_quantity); aggregate SUM(l_quantity) per orderkey into shared hash map; extract qualifying_orderkeys where sum > 300",
+      "inputs": [
+        "lineitem/l_orderkey.bin (59,986,052 rows x int32_t)",
+        "lineitem/l_quantity.bin (59,986,052 rows x double)"
+      ],
+      "strategy": "morsel_driven_parallel_scan",
+      "threads": 64,
+      "morsel_size": 65536,
+      "aggregation": {
+        "type": "shared_open_addressing_hash_map",
+        "key_type": "int32_t",
+        "value_type": "double",
+        "capacity": 33554432,
+        "capacity_note": "next_power_of_2(15000000 * 2) = 33554432 for <=50% load factor",
+        "sentinel": "INT32_MIN via std::fill",
+        "update": "atomic_double_cas_loop for SUM accumulation",
+        "probing": "bounded_linear_probing (for-loop probe < cap)"
+      },
+      "having_filter": "sum > 300.0",
+      "output": "qualifying_orderkeys: flat hash set (int32_t), ~2400 entries, capacity=next_power_of_2(2400*2)=4096"
+    },
+
+    {
+      "id": "probe_orders_index",
+      "description": "Index nested-loop: probe orders_orderkey_hash.bin with ~2400 qualifying orderkeys; collect order rows",
+      "inputs": [
+        "indexes/orders_orderkey_hash.bin",
+        "orders/o_custkey.bin",
+        "orders/o_orderdate.bin",
+        "orders/o_totalprice.bin"
+      ],
+      "strategy": "index_nested_loop_join",
+      "threads": 1,
+      "index": {
+        "file": "indexes/orders_orderkey_hash.bin",
+        "ht_size": 33554432,
+        "slot_bytes": 12,
+        "slot_struct": "{ int32_t key; uint32_t offset; uint32_t count; }",
+        "positions_offset_bytes": "8 + ht_size * 12",
+        "sentinel": "INT32_MIN",
+        "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (ht_size-1)",
+        "probing": "bounded_linear_probing (for-loop probe < ht_size)"
+      },
+      "probe_keys": "qualifying_orderkeys (~2400)",
+      "output_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_totalprice"],
+      "estimated_output_rows": 2400
+    },
+
+    {
+      "id": "probe_customer_index",
+      "description": "Index nested-loop: probe customer_custkey_hash.bin with ~2400 o_custkey values; retrieve c_name and c_custkey",
+      "inputs": [
+        "indexes/customer_custkey_hash.bin",
+        "customer/c_name.bin (fixed-width 26 bytes per row)",
+        "customer/c_custkey.bin"
+      ],
+      "strategy": "index_nested_loop_join",
+      "threads": 1,
+      "index": {
+        "file": "indexes/customer_custkey_hash.bin",
+        "ht_size": 4194304,
+        "slot_bytes": 12,
+        "slot_struct": "{ int32_t key; uint32_t offset; uint32_t count; }",
+        "positions_offset_bytes": "8 + ht_size * 12",
+        "sentinel": "INT32_MIN",
+        "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (ht_size-1)",
+        "probing": "bounded_linear_probing (for-loop probe < ht_size)"
+      },
+      "probe_keys": "o_custkey values from probe_orders_index (~2400)",
+      "c_name_access": "const char* name = c_name_data + (size_t)row_idx * 26; decode via std::string(name, strnlen(name, 26))",
+      "output_columns": ["c_name", "c_custkey"],
+      "estimated_output_rows": 2400
+    },
+
+    {
+      "id": "probe_lineitem_index_for_sum",
+      "description": "Index nested-loop: probe lineitem_orderkey_hash.bin with ~2400 qualifying orderkeys; sum l_quantity per orderkey",
+      "inputs": [
+        "indexes/lineitem_orderkey_hash.bin",
+        "lineitem/l_quantity.bin"
+      ],
+      "strategy": "index_nested_loop_join",
+      "threads": 1,
+      "index": {
+        "file": "indexes/lineitem_orderkey_hash.bin",
+        "ht_size": 33554432,
+        "slot_bytes": 12,
+        "slot_struct": "{ int32_t key; uint32_t offset; uint32_t count; }",
+        "positions_offset_bytes": "8 + ht_size * 12",
+        "sentinel": "INT32_MIN",
+        "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (ht_size-1)",
+        "probing": "bounded_linear_probing (for-loop probe < ht_size)"
+      },
+      "probe_keys": "qualifying_orderkeys (~2400)",
+      "aggregate": "SUM(l_quantity) per orderkey over positions[offset..offset+count)",
+      "estimated_lineitem_rows_accessed": 9600,
+      "output": "map: o_orderkey -> sum_qty (~2400 entries)"
+    },
+
+    {
+      "id": "assemble_topk",
+      "description": "Assemble ~2400 result rows; partial sort for top 100",
+      "strategy": "partial_sort_min_heap",
+      "sort_keys": [
+        {"column": "o_totalprice", "order": "DESC"},
+        {"column": "o_orderdate", "order": "ASC"}
+      ],
+      "limit": 100,
+      "input_rows": 2400,
+      "note": "std::partial_sort or std::nth_element + sort on ~2400 rows; O(n log k), k=100",
+      "date_decode": "use date_utils.h for o_orderdate epoch-days -> YYYY-MM-DD; requires gendb::init_date_tables() at main() start"
+    }
+  ],
+
+  "join_order": [
+    {"step": 1, "build": "qualifying_orderkeys hash set (~2400)", "probe": "orders_orderkey_hash index"},
+    {"step": 2, "build": "qualifying_custkeys (~2400)", "probe": "customer_custkey_hash index"},
+    {"step": 3, "build": "qualifying_orderkeys hash set (~2400)", "probe": "lineitem_orderkey_hash index"}
+  ],
+
+  "filters": [
+    {
+      "table": "lineitem (subquery)",
+      "predicate": "SUM(l_quantity) per l_orderkey > 300.0",
+      "selectivity": 0.00016,
+      "qualifying_rows": 2400
+    }
+  ],
+
+  "data_structures": {
+    "subquery_agg_map": "shared open-addressing hash map, capacity=33554432, key=int32_t, val=double, sentinel=INT32_MIN (std::fill), bounded probing",
+    "qualifying_orderkeys": "open-addressing hash set, capacity=4096 (next_power_of_2(2400*2)), key=int32_t, sentinel=INT32_MIN",
+    "orders_index": "pre-built mmap hash index (orders_orderkey_hash.bin), zero build cost",
+    "customer_index": "pre-built mmap hash index (customer_custkey_hash.bin), zero build cost",
+    "lineitem_index": "pre-built mmap hash index (lineitem_orderkey_hash.bin), zero build cost",
+    "result_buffer": "std::vector of ~2400 result structs, partial_sort for top-100"
+  },
+
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "64 (for subquery lineitem scan only)",
+    "parallel_phases": ["subquery_agg_lineitem"],
+    "sequential_phases": ["probe_orders_index", "probe_customer_index", "probe_lineitem_index_for_sum", "assemble_topk"],
+    "rationale": "Index probes and assembly are O(2400) — sequential overhead negligible; parallelism reserved for 60M-row lineitem scan"
+  },
+
+  "indexes": [
+    {"index": "orders_orderkey_hash.bin",   "purpose": "join_lookup, avoid full 15M-row orders scan"},
+    {"index": "customer_custkey_hash.bin",  "purpose": "join_lookup, avoid full 1.5M-row customer scan"},
+    {"index": "lineitem_orderkey_hash.bin", "purpose": "join_lookup, avoid second full 60M-row lineitem scan"}
+  ],
+
+  "aggregation": {
+    "subquery": "hash_group_by on l_orderkey with SUM(l_quantity), shared atomic hash map, 33554432 slots",
+    "outer_group_by": "identity (each qualifying o_orderkey is unique in TPC-H orders), no explicit hash aggregation needed; map o_orderkey -> sum_qty from lineitem index probe"
+  },
+
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "format": "CSV"
+  },
+
+  "correctness_notes": [
+    "C1/C11: call gendb::init_date_tables() at top of main(); decode o_orderdate with date_utils.h",
+    "C9: subquery hash map capacity = next_power_of_2(15000000 * 2) = 33554432; qualifying set capacity = 4096",
+    "C20: use std::fill(slots, slots+capacity, sentinel_slot) — NEVER memset for INT32_MIN sentinel",
+    "C24: all hash probes use bounded for-loop (probe < cap), not unbounded while",
+    "C15: outer GROUP BY key is o_orderkey (unique) — no composite key struct needed",
+    "l_quantity and o_totalprice are stored as native double — no DECIMAL scale factor conversion needed"
+  ],
+
+  "estimated_cardinalities": {
+    "lineitem_rows": 59986052,
+    "orders_rows": 15000000,
+    "customer_rows": 1500000,
+    "qualifying_orderkeys": 2400,
+    "qualifying_orders": 2400,
+    "qualifying_lineitem_rows_for_sum": 9600,
+    "output_rows_before_limit": 2400,
+    "output_rows_after_limit": 100
+  },
+
+  "execution_target": "cpp"
+}

@@ -1,0 +1,95 @@
+{
+  "query_id": "Q24",
+  "pipeline": ["prefetch", "filter_num", "anti_join_probe", "aggregate_thread_local", "merge_aggregates", "having_filter", "topk_sort", "decode_output"],
+  "join_order": [
+    {
+      "build": "pre (pre_triple_hash mmap index — pre-built)",
+      "probe": "num(filtered: uom=USD, ddate in 2023, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "pre_built_index",
+      "build_cardinality": 9600799,
+      "probe_input_cardinality": 9000000,
+      "anti_join_survivors": 50000,
+      "notes": "P11: pre_triple_hash already mmap'd — zero runtime build cost. Anti-join: probe (adsh_code, tag_code, ver_code); if NOT FOUND (empty slot encountered) → row has no matching pre row → include in aggregation. C24: bounded probing, probe < pth_cap. 512 MB index prefetched via MADV_WILLNEED before scan begins."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.872,
+      "notes": "Load uom_dict.txt at runtime; find usd_code for 'USD'. C2: never hardcode."
+    },
+    {
+      "table": "num",
+      "predicate": "ddate >= 20230101 && ddate <= 20231231",
+      "selectivity": 0.27,
+      "notes": "Raw int32_t YYYYMMDD compare. C1 exemption: this column is NOT epoch days — do NOT use date_utils.h."
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.98,
+      "notes": "NaN sentinel check for value IS NOT NULL."
+    }
+  ],
+  "data_structures": {
+    "anti_join_index": "pre_built_mmap(pre_triple_hash, cap=33554432, mask=33554431, slot=PreTripleSlot{adsh_code:int32_t, tag_code:int32_t, ver_code:int32_t, row_id:int32_t}, empty_sentinel=INT32_MIN, C20: use std::fill not memset for any runtime structures)",
+    "aggregation": "compact_hash_map(thread_local, cap=16384, key=uint64_t packed ((uint64_t)(uint32_t)tag_code << 32 | (uint32_t)ver_code), value={count:int64_t, sum_cents:int64_t}, slot_size=24_bytes, total_mem=16384*24*64_threads=24MB<L3_44MB)"
+  },
+  "prefetch": {
+    "pre_triple_hash": "madvise(pre_raw, pre_sz=536870916, MADV_WILLNEED) at start of data_loading phase BEFORE num scan begins — 512 MB critical to overlap I/O with num column loads",
+    "num_columns": "madvise uom.bin, ddate.bin, value.bin, adsh.bin, tag.bin, version.bin with MADV_WILLNEED in data_loading phase"
+  },
+  "indexes": [
+    {
+      "index": "pre_triple_hash",
+      "file": "sf3.gendb/pre/indexes/pre_triple_hash.bin",
+      "purpose": "anti_join_probe on (adsh_code, tag_code, ver_code)",
+      "header_parse": "C32: declare pth_cap, pth_mask, pth_ht at function scope before any parallel region",
+      "hash_function": "hash_combine(hash_combine(hash_int32(adsh_code), hash_int32(tag_code)), hash_int32(ver_code))"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "aggregation_details": {
+    "strategy": "thread_local_hash_maps_then_merge",
+    "key": "uint64_t packed: (uint64_t)(uint32_t)tag_code << 32 | (uint32_t)ver_code",
+    "key_constraint": "C15: key MUST encode BOTH tag_code AND ver_code — GROUP BY requires both dimensions",
+    "value_struct": "{ int64_t count; int64_t sum_cents; }",
+    "cap": 16384,
+    "cap_derivation": "next_pow2(5000 * 2) = 16384, sized for estimated ~5000 groups (P23: filtered count, not raw)",
+    "sum_constraint": "C29 HARD: accumulate int64_t cents via llround(value * 100.0); NO double/Kahan accumulator",
+    "having": "count > 10",
+    "merge_strategy": "P17: after morsel scan completes, each thread emits its occupied slots; merge into global hash map sequentially — ~5000 groups per thread, 64 threads, trivial merge cost"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "thread_local_agg": true,
+    "notes": "P20: thread-local aggregation is default to avoid contention. Each thread holds its own hash map (cap=16384, ~384KB). After scan, merge all thread-local maps into final global map."
+  },
+  "output": {
+    "order_by": ["cnt DESC", "tag_code ASC", "ver_code ASC"],
+    "order_by_notes": "C33: secondary tiebreakers tag_code ASC, ver_code ASC for deterministic TOP-N output",
+    "limit": 100,
+    "topk_strategy": "std::partial_sort on result vector after HAVING filter (P6: O(n log k))",
+    "encoding": {
+      "tag": "C31: printf(\"\\\"%s\\\"\", tag_dict[tag_code].c_str()) — defensive quoting, load sf3.gendb/shared/tag_dict.txt",
+      "version": "C31: printf(\"\\\"%s\\\"\", version_dict[ver_code].c_str()) — defensive quoting, load sf3.gendb/shared/version_dict.txt",
+      "cnt": "printf(\"%lld\", (long long)count)",
+      "total": "C29: int64_t sc = sum_cents; printf(\"%lld.%02lld\", (long long)(sc/100), (long long)std::abs(sc%100))"
+    }
+  },
+  "correctness_checklist": {
+    "C2": "Load uom_dict.txt at runtime for usd_code",
+    "C15": "GROUP BY key encodes BOTH tag_code and ver_code",
+    "C20": "No memset for multi-byte sentinels; use std::fill for runtime hash map init",
+    "C24": "Bounded probe loop: for (uint32_t probe = 0; probe < pth_cap; probe++)",
+    "C29": "SUM as int64_t cents — HARD CONSTRAINT, no double accumulator",
+    "C31": "All string outputs double-quoted",
+    "C32": "pth_cap, pth_mask, pth_ht declared at function scope before parallel region",
+    "C33": "Tiebreaker: tag_code ASC, ver_code ASC appended to sort comparator"
+  },
+  "execution_target": "cpp"
+}

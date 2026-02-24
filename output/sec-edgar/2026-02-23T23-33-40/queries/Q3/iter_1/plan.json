@@ -1,0 +1,126 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_sub_columns",
+    "parallel_scan_num",
+    "probe_sub_adsh_index",
+    "thread_local_dual_aggregate",
+    "merge_aggregations",
+    "compute_having_threshold",
+    "filter_having",
+    "topk_sort",
+    "output"
+  ],
+  "join_order": [
+    {
+      "build": "sub (via pre-built sub_adsh_index)",
+      "probe": "num (filtered: uom='USD' AND value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 262144,
+      "notes": "Use mmap'd sub_adsh_index.bin (cap=262144, SubSlot{adsh_code,sub_row}). Zero build cost (P11). After probe, apply sub_fy[sub_row]==2022 filter (~0.317 selectivity on sub side)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom == usd_code",
+      "selectivity": 0.872,
+      "notes": "Load num/uom_dict.txt at runtime to find usd_code (C2). Filter before index probe."
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.99,
+      "notes": "NULL encoded as quiet_NaN. Apply before index probe."
+    },
+    {
+      "table": "sub",
+      "predicate": "sub_fy[sub_row] == 2022",
+      "selectivity": 0.317,
+      "notes": "Applied after index probe resolves sub_row. Combined effective selectivity ~0.277."
+    }
+  ],
+  "data_structures": {
+    "sub_adsh_index": "pre_built_mmap_hash(cap=262144, SubSlot{adsh_code:int32,sub_row:int32}, sentinel=adsh_code==-1, hash=hash_i32)",
+    "sub_fy_array": "flat_array(int32_t[86135]) — mmap'd sub/fy.bin, zero-copy reinterpret_cast",
+    "sub_name_array": "flat_array(int32_t[86135]) — mmap'd sub/name.bin, zero-copy reinterpret_cast",
+    "sub_cik_array": "flat_array(int32_t[86135]) — mmap'd sub/cik.bin, zero-copy reinterpret_cast",
+    "main_agg_thread_local": "open_addressing_hash_map per thread, key=uint64_t packed(name_code<<32|cik), value=int64_t sum_cents, cap=next_pow2(27000*2)=65536",
+    "cik_agg_thread_local": "open_addressing_hash_map per thread, key=int32_t cik, value=int64_t sum_cents, cap=next_pow2(27000*2)=65536",
+    "main_agg_global": "open_addressing_hash_map (merged), key=uint64_t packed, value=int64_t sum_cents, cap=65536",
+    "cik_agg_global": "open_addressing_hash_map (merged), key=int32_t cik, value=int64_t sum_cents, cap=65536"
+  },
+  "aggregation": {
+    "main": {
+      "type": "hash_group_by",
+      "group_by": ["s.name_code (int32_t)", "s.cik (int32_t)"],
+      "key_encoding": "uint64_t packed = ((uint64_t)(uint32_t)name_code << 32) | (uint32_t)cik",
+      "accumulator": "int64_t sum_cents += llround(value * 100.0)",
+      "cardinality": 27000,
+      "cap": 65536,
+      "precision_rule": "C29 HARD: int64_t cents only — no double/long double/Kahan"
+    },
+    "having_subquery": {
+      "type": "hash_group_by",
+      "group_by": ["s2.cik (int32_t)"],
+      "accumulator": "int64_t sum_cents += llround(value * 100.0)",
+      "cardinality": 27000,
+      "cap": 65536,
+      "post_merge": "double threshold_cents = (double)total_cik_sum_cents / n_distinct_ciks",
+      "notes": "Accumulated simultaneously in same scan pass as main agg (P4). No second scan."
+    },
+    "merge_strategy": "two_phase_tree_merge",
+    "merge_notes": "T*G = 64 * 27000 = 1.7M (100K-2M range). Merge groups of 8 threads in parallel (log8(64)=2 rounds), then final 8→1. Applied to BOTH main_agg and cik_agg maps."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "scan_target": "num (39,401,761 rows) — partitioned into morsels",
+    "thread_local": ["main_agg hash map (cap=65536)", "cik_agg hash map (cap=65536)"],
+    "barrier": "after parallel scan; merge thread-local maps before threshold computation"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_index",
+      "file": "sf3.gendb/indexes/sub_adsh_index.bin",
+      "purpose": "join_lookup — probe with num.adsh_code to resolve sub_row",
+      "struct": "SubSlot{int32_t adsh_code; int32_t sub_row;}",
+      "cap": 262144,
+      "sentinel": "adsh_code == -1",
+      "hash_fn": "hash_i32",
+      "probe_pattern": "bounded for-loop (C24), break on sentinel or match"
+    }
+  ],
+  "single_pass_strategy": {
+    "description": "Scan num once. For each row: (1) filter uom==usd_code && !isnan(value); (2) probe sub_adsh_index → sub_row; (3) filter sub_fy[sub_row]==2022; (4) accumulate into thread-local main_agg[(name_code,cik)] and thread-local cik_agg[cik] in same iteration.",
+    "avoids": "Two-pass over 39M-row fact table"
+  },
+  "having_evaluation": {
+    "step1": "After merge: compute total_cik_sum_cents = SUM of all cik_agg values; n_distinct_ciks = count of cik_agg entries",
+    "step2": "double threshold_cents = (double)total_cik_sum_cents / n_distinct_ciks",
+    "step3": "Filter main_agg: keep entry if (double)sum_cents > threshold_cents",
+    "precision_note": "threshold_cents is AVG of int64_t cents sums, cast to double for comparison only — no precision loss at this scale"
+  },
+  "output": {
+    "columns": ["s.name (decode name_code via name_dict, double-quoted C31)", "s.cik (int32_t)", "total_value (formatted int64_t cents: sum_cents/100 + '.' + abs(sum_cents%100) zero-padded to 2 digits)"],
+    "order_by": ["total_value DESC", "name_code ASC (stable tiebreaker C33)", "cik ASC (stable tiebreaker C33)"],
+    "limit": 100,
+    "sort_algorithm": "std::partial_sort on result vector (P6, O(n log k))",
+    "string_quoting": "printf(\"\\\"%s\\\"\", name_dict[name_code].c_str()) — C31 mandatory"
+  },
+  "correctness_checklist": [
+    "C2: load num/uom_dict.txt at runtime for usd_code",
+    "C9: all hash caps = next_pow2(N*2); thread-local sized for FULL 27K groups not 27K/64",
+    "C15: main_agg key = packed(name_code, cik) — both GROUP BY columns",
+    "C24: sub_adsh_index probe uses bounded for-loop (probe < sub_cap)",
+    "C27: sub_cap/sub_mask/sub_ht declared at function scope before any probe loop",
+    "C29: accumulate as int64_t cents via llround(v*100.0) — NEVER double/Kahan",
+    "C31: double-quote name string in CSV output",
+    "C33: stable tiebreaker (name_code ASC, cik ASC) in sort comparator",
+    "P4: single scan over num — both main_agg and cik_agg accumulated in one pass",
+    "P11: sub_adsh_index is pre-built mmap — no runtime build cost",
+    "P20: thread-local aggregation maps mandatory — no shared map"
+  ],
+  "execution_target": "cpp"
+}

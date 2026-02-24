@@ -1,0 +1,63 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q1/iter_0/q1.cpp: In function ‘void run_Q1(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q1/iter_0/q1.cpp:132:11: warning: ‘void* memset(void*, int, size_t)’ clearing an object of non-trivial type ‘struct ThreadAgg’; use assignment or value-initialization instead [-Wclass-memaccess]\n  132 |     memset(tl_agg, 0, sizeof(tl_agg));\n      |     ~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-21T23-00-40/queries/Q1/iter_0/q1.cpp:48:20: note: ‘struct ThreadAgg’ declared here\n   48 | struct alignas(64) ThreadAgg {\n      |                    ^~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 57.15 ms\n[TIMING] main_scan: 37.59 ms\n[TIMING] output: 5.27 ms\n[TIMING] total: 100.11 ms\n",
+    "stderr": "",
+    "duration_ms": 133
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q1\": {\n      \"rows_expected\": 4,\n      \"rows_actual\": 4,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 53.74,
+    "main_scan": 33.57,
+    "output": 1.26,
+    "total": 88.65
+  },
+  "timing_ms": 175.70499999999998,
+  "cold_timing_ms": 87.39,
+  "hot_timing_ms": 88.315,
+  "hot_operation_timings": {
+    "data_loading": 48.02,
+    "main_scan": 33.69,
+    "output": 1.43,
+    "total": 83.22
+  },
+  "all_runs": [
+    {
+      "timing_ms": 87.39,
+      "operation_timings": {
+        "data_loading": 53.74,
+        "main_scan": 33.57,
+        "output": 1.26,
+        "total": 88.65
+      }
+    },
+    {
+      "timing_ms": 81.78999999999999,
+      "operation_timings": {
+        "data_loading": 48.02,
+        "main_scan": 33.69,
+        "output": 1.43,
+        "total": 83.22
+      }
+    },
+    {
+      "timing_ms": 94.84,
+      "operation_timings": {
+        "data_loading": 57.15,
+        "main_scan": 37.59,
+        "output": 5.27,
+        "total": 100.11
+      }
+    }
+  ]
+}

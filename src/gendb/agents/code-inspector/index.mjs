@@ -8,6 +8,6 @@ export const config = {
   name: "Code Inspector",
   configKey: "code_inspector",
   promptPath: resolve(__dirname, "prompt.md"),
-  allowedTools: ["Read", "Glob", "Grep"],
+  allowedTools: ["Read", "Glob", "Grep", "Skill"],
   model: "sonnet",
 };

@@ -1,0 +1,50 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C27",
+      "category": "correctness",
+      "title": "Pre-built index refactoring: all 5 elements must change atomically",
+      "detect": "Compile errors: 'XXXSlot does not name a type', 'xxx_raw not declared in this scope', 'ps_hash not declared; did you mean cps_hash?'. Occurs when optimizer switches between runtime hash table and mmap'd pre-built index. Look for mismatch: struct defined as PSCompact/PSLocalSlot but probe loop uses PSSlot; or mmap call for index file missing while probe code references xxx_index_raw.",
+      "fix": "When adopting a pre-built hash index, update ALL 5 elements in the same edit: (1) struct definition (e.g., PSSlot with key+offset), (2) mmap call for the index file (ps_index_raw = mmap_file_bytes<uint8_t>(...)), (3) header parse (ht_size, positions pointer), (4) hash function name (ps_hash or inline lambda matching the index), (5) all probe loop sites. Never add the struct and forget the mmap, or refactor the probe loop while leaving old struct names in scope."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C28",
+      "category": "correctness",
+      "title": "Hash function rename must propagate to ALL call sites",
+      "detect": "Compile error: 'ps_hash was not declared in this scope; did you mean cps_hash?' — function renamed in definition (e.g., ps_hash → cps_hash for compact table) but probe loop still calls old name.",
+      "fix": "After renaming a hash function, grep all usage sites in the file and update them. Alternatively, keep the function name stable and only change the struct/logic inside it."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P17",
+      "category": "performance",
+      "title": "aggregation_merge >200ms → switch to thread-local per-key reduction",
+      "detect": "GENDB_PHASE('aggregation_merge') timing >200ms in operation_timings. Occurs when threads use shared std::unordered_map with mutex, or when sequential merge of thread-local maps is O(n_threads × groups).",
+      "fix": "Use thread-local hash maps that accumulate partial sums, then merge by iterating each thread-local map once into a global open-addressing table (no mutex needed if each key maps to a fixed slot). See P15 pattern. Expected: 200-400ms → <5ms."
+    },
+    {
+      "type": "experience_entry",
+      "id": "P18",
+      "category": "performance",
+      "title": "Q18-class queries: build_joins >300ms → pre-built lineitem orderkey hash index",
+      "detect": "build_joins phase >100ms when joining lineitem on l_orderkey to orders. Runtime hash build over 6M lineitem rows dominates total query time.",
+      "fix": "Use pre-built lineitem_orderkey_hash index via mmap (P11). Zero build cost eliminates the phase entirely. Expected 300-400ms → 0ms build_joins."
+    }
+  ],
+  "meta": {
+    "queries_total": 5,
+    "queries_success": 5,
+    "queries_slow": 0,
+    "queries_failed": 0,
+    "compile_failures_recovered": 2,
+    "queries": {
+      "Q1":  { "class": "SUCCESS", "start_ms": 147.0, "final_ms": 40.2,  "speedup": 3.7, "iters": 1 },
+      "Q6":  { "class": "SUCCESS", "start_ms": 17.4,  "final_ms": 17.4,  "speedup": 1.0, "iters": 0 },
+      "Q3":  { "class": "SUCCESS", "start_ms": 2012.2,"final_ms": 79.0,  "speedup": 25.5,"iters": 5 },
+      "Q9":  { "class": "SUCCESS", "start_ms": 229.6, "final_ms": 82.3,  "speedup": 2.8, "iters": 4, "compile_failures": 2 },
+      "Q18": { "class": "SUCCESS", "start_ms": 562.2, "final_ms": 132.0, "speedup": 4.3, "iters": 3 }
+    }
+  }
+}

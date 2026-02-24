@@ -1,0 +1,77 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["load_dicts", "filter_null_stmt", "scan_aggregate", "merge", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != null_code",
+      "selectivity": 0.99,
+      "notes": "null_code = index of empty string '' in stmt_dict.txt; skip rows where stmt maps to ''"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array[max_stmt_codes * max_rfile_codes]",
+    "array_index": "stmt_code * max_rfile_codes + rfile_code",
+    "array_slots": 18,
+    "per_slot": {
+      "count": "int64_t",
+      "sum_line": "int64_t",
+      "count_for_avg": "int64_t",
+      "distinct_adsh": "bitset(86135) — one per slot, ~10.7 KB each"
+    },
+    "thread_local_copies": 64,
+    "thread_local_memory_estimate_mb": 11,
+    "notes": "Direct array O(1) lookup; no hashing needed for ≤14 groups. Bitset enables efficient parallel OR-merge for COUNT(DISTINCT)."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_local_aggregation": true,
+    "merge_strategy": "sequential",
+    "merge_rationale": "T×G = 64×14 = 896 << 100K threshold; sequential merge of thread-local direct arrays is trivially fast",
+    "distinct_merge": "bitset OR across all thread-local bitsets per group slot"
+  },
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns_accessed": ["pre/stmt.bin", "pre/rfile.bin", "pre/adsh.bin", "pre/line.bin"],
+    "access_pattern": "single_pass_columnar",
+    "mmap_strategy": "mmap all 4 columns before parallel scan; MADV_SEQUENTIAL on each"
+  },
+  "dict_loading": {
+    "stmt_dict": "pre/stmt_dict.txt — load at runtime, NEVER hardcode codes (C2)",
+    "rfile_dict": "pre/rfile_dict.txt — load at runtime",
+    "adsh_dict": "adsh_global_dict.txt — NOT needed for query execution (adsh used as int32_t code only)",
+    "null_code_detection": "int16_t null_code = find_code(stmt_dict, ''); if stmt_code == null_code → skip row"
+  },
+  "indexes": [],
+  "aggregation": {
+    "type": "direct_array",
+    "group_cardinality_estimate": 14,
+    "key": "packed (stmt_code, rfile_code) → linear index",
+    "aggregates": [
+      {"name": "cnt", "expr": "COUNT(*)", "accumulator": "int64_t count"},
+      {"name": "num_filings", "expr": "COUNT(DISTINCT adsh)", "accumulator": "bitset(86135) per slot; popcount at output"},
+      {"name": "avg_line_num", "expr": "AVG(line)", "accumulator": "int64_t sum_line + int64_t count_for_avg; divide at output"}
+    ]
+  },
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "expected_rows": 14,
+    "sort_strategy": "std::sort on 14-element result array — trivial",
+    "format": "CSV",
+    "columns": ["stmt", "rfile", "cnt", "num_filings", "avg_line_num"],
+    "avg_format": "%.6f",
+    "decode": "decode stmt_code and rfile_code to strings via dict[code] before printing (C18)"
+  },
+  "correctness_notes": [
+    "C2: Load stmt_dict and rfile_dict at runtime; never hardcode dictionary codes",
+    "C15: Hash/array key MUST include BOTH stmt_code AND rfile_code",
+    "C18: Decode dict codes to strings for CSV output",
+    "C20: Use std::fill not memset for multi-byte initialization of aggregation arrays",
+    "P20: Thread-local aggregation arrays mandatory; never use shared aggregation map"
+  ],
+  "execution_target": "cpp"
+}

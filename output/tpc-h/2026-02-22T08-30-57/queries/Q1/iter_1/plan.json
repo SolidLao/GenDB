@@ -1,0 +1,115 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "thread_local_aggregate", "merge_accumulators", "sort_output"],
+
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "column": "l_shipdate",
+      "type": "int32_t",
+      "threshold": 10471,
+      "selectivity": 0.987,
+      "note": "DATE '1998-09-02' = epoch day 10471. Pre-computed constant — no runtime date conversion."
+    }
+  ],
+
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "layout": "[uint32_t num_blocks=600][int32_t min, int32_t max per block]",
+      "block_size": 100000,
+      "skip_condition": "block_min > 10471",
+      "blocks_total": 600,
+      "blocks_skipped_approx": 8,
+      "note": "lineitem sorted by l_shipdate — zone map is maximally effective. Skip tail blocks with all dates > 1998-09-02."
+    }
+  ],
+
+  "columns_accessed": [
+    {"column": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "role": "filter"},
+    {"column": "l_returnflag",    "file": "lineitem/l_returnflag.bin",    "type": "int8_t",  "role": "group_key"},
+    {"column": "l_linestatus",    "file": "lineitem/l_linestatus.bin",    "type": "int8_t",  "role": "group_key"},
+    {"column": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "double",  "role": "aggregate"},
+    {"column": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "role": "aggregate"},
+    {"column": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "role": "aggregate"},
+    {"column": "l_tax",           "file": "lineitem/l_tax.bin",           "type": "double",  "role": "aggregate"}
+  ],
+
+  "join_order": [],
+
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_count": 6,
+    "group_key": {
+      "encoding": "composite_index",
+      "formula": "rf_idx * 2 + ls_idx",
+      "l_returnflag_map": {"65": 0, "78": 1, "82": 2},
+      "l_linestatus_map": {"70": 0, "79": 1},
+      "note": "ASCII: A=65→0, N=78→1, R=82→2; F=70→0, O=79→1. 6 slots total."
+    },
+    "accumulators_per_group": [
+      {"name": "sum_qty",        "type": "double",  "init": 0.0, "expr": "l_quantity"},
+      {"name": "sum_base_price", "type": "double",  "init": 0.0, "expr": "l_extendedprice"},
+      {"name": "sum_disc_price", "type": "double",  "init": 0.0, "expr": "l_extendedprice * (1.0 - l_discount)"},
+      {"name": "sum_charge",     "type": "double",  "init": 0.0, "expr": "l_extendedprice * (1.0 - l_discount) * (1.0 + l_tax)"},
+      {"name": "sum_discount",   "type": "double",  "init": 0.0, "expr": "l_discount"},
+      {"name": "count_order",    "type": "int64_t", "init": 0,   "expr": "1"}
+    ],
+    "derived_at_output": [
+      {"name": "avg_qty",   "expr": "sum_qty / count_order"},
+      {"name": "avg_price", "expr": "sum_base_price / count_order"},
+      {"name": "avg_disc",  "expr": "sum_discount / count_order"}
+    ],
+    "thread_local": true,
+    "merge_strategy": "sequential_reduce",
+    "note": "6 groups × 64 threads = 384 accumulator slots total. Sequential merge is O(1) — trivially fast."
+  },
+
+  "data_structures": {
+    "group_accumulator": "flat_array[6]",
+    "thread_local_accumulators": "flat_array[64][6]",
+    "zone_map": "mmap_readonly"
+  },
+
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 64,
+    "morsel_size": 100000,
+    "total_rows": 59986052,
+    "rows_per_thread_approx": 937282,
+    "thread_local_state": "6-slot accumulator array (sum_qty, sum_base, sum_disc, sum_charge, sum_disc_acc, count)",
+    "merge_phase": "sequential sum over 64 thread-local arrays into 6 global slots"
+  },
+
+  "vectorization": {
+    "target": "AVX512",
+    "lanes": 8,
+    "pattern": "fused_filter_accumulate",
+    "note": "Process 8 rows per SIMD iteration. Mask on l_shipdate <= 10471, then conditional accumulate."
+  },
+
+  "scan_strategy": {
+    "pass_count": 1,
+    "description": "Single fused pass: read shipdate+returnflag+linestatus+quantity+extendedprice+discount+tax together. Filter on shipdate, index into 6-slot accumulator, update 6 values per qualifying row.",
+    "madvise": "MADV_SEQUENTIAL on all 7 column files (nearly full scan, 98.7% rows qualify)"
+  },
+
+  "output": {
+    "columns": [
+      "l_returnflag", "l_linestatus",
+      "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge",
+      "avg_qty", "avg_price", "avg_disc", "count_order"
+    ],
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "row_count": 6,
+    "sort_method": "std::sort on 6-element result array",
+    "l_returnflag_output": "cast int8_t to char, print as string",
+    "l_linestatus_output": "cast int8_t to char, print as string"
+  },
+
+  "execution_target": "cpp"
+}

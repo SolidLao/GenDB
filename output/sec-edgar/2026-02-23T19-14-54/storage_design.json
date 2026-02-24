@@ -1,0 +1,169 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "sf3.gendb"
+  },
+  "global_dictionaries": {
+    "adsh_global_dict.txt": {
+      "description": "Shared adsh strings across num, sub, pre tables",
+      "cardinality": 86135,
+      "code_type": "int32_t",
+      "used_by": ["num/adsh.bin", "sub/adsh.bin", "pre/adsh.bin"]
+    },
+    "tag_global_dict.txt": {
+      "description": "Shared XBRL tag name strings across num, pre, tag tables",
+      "cardinality": "~200000",
+      "code_type": "int32_t",
+      "used_by": ["num/tag.bin", "pre/tag.bin", "tag/tag.bin"]
+    },
+    "version_global_dict.txt": {
+      "description": "Shared taxonomy version strings across num, pre, tag tables",
+      "cardinality": "~84000",
+      "code_type": "int32_t",
+      "used_by": ["num/version.bin", "pre/version.bin", "tag/version.bin"]
+    }
+  },
+  "tables": {
+    "num": {
+      "file_format": { "filename": "num.csv", "delimiter": ",", "quoting": "RFC4180",
+        "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"] },
+      "estimated_rows": 39401761,
+      "block_size": 65536,
+      "sort_order": [],
+      "columns": [
+        { "name": "adsh",    "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_adsh_dict", "file": "num/adsh.bin" },
+        { "name": "tag",     "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_tag_dict",  "file": "num/tag.bin" },
+        { "name": "version", "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_version_dict", "file": "num/version.bin" },
+        { "name": "ddate",   "cpp_type": "int32_t", "semantic_type": "yyyymmdd_integer",
+          "encoding": "raw_int32", "note": "Stored as YYYYMMDD integer (schema type INTEGER, not DATE). Q24 BETWEEN 20230101 AND 20231231 compares directly.", "file": "num/ddate.bin" },
+        { "name": "qtrs",    "cpp_type": "int8_t",  "semantic_type": "integer",
+          "encoding": "raw_int8", "file": "num/qtrs.bin" },
+        { "name": "uom",     "cpp_type": "int16_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "num/uom_dict.txt", "file": "num/uom.bin" },
+        { "name": "value",   "cpp_type": "double",  "semantic_type": "monetary_decimal",
+          "encoding": "raw_double",
+          "C29_WARNING": "SUM must accumulate as int64_t cents (llround(v*100)) then divide by 100 for output. Sampled max value = 5.94e13, exceeds double precision for SUM. Verified: individual values fit in double; accumulation of many large values does NOT. Use: int64_t sum_cents = 0; sum_cents += llround(v * 100.0); then output sum_cents/100 and abs(sum_cents%100).",
+          "file": "num/value.bin" }
+      ],
+      "indexes": [
+        { "name": "num_ddate_zone_map", "type": "zone_map", "columns": ["ddate"],
+          "file": "indexes/num_ddate_zone_map.bin",
+          "format": "[uint32_t num_blocks][{int32_t min, int32_t max, uint32_t block_size} x num_blocks]",
+          "queries": ["Q24"] }
+      ]
+    },
+    "sub": {
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "quoting": "RFC4180",
+        "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"] },
+      "estimated_rows": 86135,
+      "block_size": 65536,
+      "sort_order": ["adsh"],
+      "columns": [
+        { "name": "adsh", "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_adsh_dict", "file": "sub/adsh.bin" },
+        { "name": "cik",  "cpp_type": "int32_t", "semantic_type": "integer",
+          "encoding": "raw_int32", "file": "sub/cik.bin" },
+        { "name": "name", "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "sub/name_dict.txt", "file": "sub/name.bin",
+          "note": "High cardinality (~80K distinct). int32_t codes." },
+        { "name": "sic",  "cpp_type": "int32_t", "semantic_type": "integer",
+          "encoding": "raw_int32", "file": "sub/sic.bin" },
+        { "name": "fy",   "cpp_type": "int32_t", "semantic_type": "integer",
+          "encoding": "raw_int32", "file": "sub/fy.bin" }
+      ],
+      "indexes": [
+        { "name": "sub_adsh_hash", "type": "hash", "columns": ["adsh"],
+          "file": "indexes/sub_adsh_hash.bin",
+          "format": "[uint32_t capacity][{int32_t adsh_code, uint32_t row_idx} x capacity]. Empty slot: adsh_code=-1. capacity=next_power_of_2(86135*2)=131072.",
+          "hash_fn": "h = ((uint32_t)adsh_code * 2654435761u) & (cap-1)",
+          "queries": ["Q2","Q3","Q4","Q6"] }
+      ]
+    },
+    "tag": {
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "quoting": "RFC4180",
+        "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"] },
+      "estimated_rows": 1070662,
+      "block_size": 65536,
+      "sort_order": [],
+      "columns": [
+        { "name": "tag",      "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_tag_dict", "file": "tag/tag.bin" },
+        { "name": "version",  "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_version_dict", "file": "tag/version.bin" },
+        { "name": "abstract", "cpp_type": "int32_t", "semantic_type": "boolean_integer",
+          "encoding": "raw_int32", "file": "tag/abstract.bin" },
+        { "name": "tlabel",   "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "tag/tlabel_dict.txt", "file": "tag/tlabel.bin",
+          "note": "High cardinality. int32_t codes." }
+      ],
+      "indexes": [
+        { "name": "tag_tv_hash", "type": "hash", "columns": ["tag","version"],
+          "file": "indexes/tag_tv_hash.bin",
+          "format": "[uint32_t capacity][{int32_t tag_code, int32_t version_code, uint32_t row_idx} x capacity]. Empty: tag_code=-1. capacity=next_power_of_2(1070662*2)=2097152.",
+          "hash_fn": "h = (((uint32_t)tag_code*2654435761u)^((uint32_t)version_code*1234567891u)) & (cap-1)",
+          "queries": ["Q4"] }
+      ]
+    },
+    "pre": {
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "quoting": "RFC4180",
+        "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"] },
+      "estimated_rows": 9600799,
+      "block_size": 65536,
+      "sort_order": [],
+      "columns": [
+        { "name": "adsh",    "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_adsh_dict", "file": "pre/adsh.bin" },
+        { "name": "tag",     "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_tag_dict",  "file": "pre/tag.bin" },
+        { "name": "version", "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "global_version_dict", "file": "pre/version.bin" },
+        { "name": "stmt",    "cpp_type": "int16_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "pre/stmt_dict.txt", "file": "pre/stmt.bin",
+          "note": "6 distinct values: BS,IS,CF,EQ,CI,HP. Load dict at runtime to get code for 'EQ','IS'." },
+        { "name": "rfile",   "cpp_type": "int16_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "pre/rfile_dict.txt", "file": "pre/rfile.bin",
+          "note": "2 distinct values: H, R." },
+        { "name": "line",    "cpp_type": "int32_t", "semantic_type": "integer",
+          "encoding": "raw_int32", "file": "pre/line.bin" },
+        { "name": "plabel",  "cpp_type": "int32_t", "semantic_type": "dict_string",
+          "encoding": "local_dict", "dict_file": "pre/plabel_dict.txt", "file": "pre/plabel.bin",
+          "note": "High cardinality. int32_t codes." }
+      ],
+      "indexes": [
+        { "name": "pre_atv_hash", "type": "hash", "columns": ["adsh","tag","version"],
+          "file": "indexes/pre_atv_hash.bin",
+          "description": "Existence hash set for (adsh,tag,version). Used by Q24 anti-join (check existence) and Q4/Q6 (semi-join).",
+          "format": "[uint32_t capacity][{int32_t adsh_code, int32_t tag_code, int32_t version_code} x capacity]. Empty: adsh_code=-1. capacity=next_power_of_2(9600799*2)=16777216.",
+          "hash_fn": "h = (((uint32_t)a*2654435761u)^((uint32_t)b*1234567891u)^((uint32_t)c*2246822519u)) & (cap-1)",
+          "queries": ["Q24","Q4","Q6"] },
+        { "name": "pre_eq_hash", "type": "hash", "columns": ["adsh","tag","version"],
+          "file": "indexes/pre_eq_hash.bin",
+          "description": "Existence hash set for (adsh,tag,version) where stmt='EQ'. For Q4 join filter.",
+          "format": "[uint32_t capacity][{int32_t adsh_code, int32_t tag_code, int32_t version_code} x capacity]. Empty: adsh_code=-1.",
+          "queries": ["Q4"] },
+        { "name": "pre_is_hash", "type": "hash", "columns": ["adsh","tag","version"],
+          "file": "indexes/pre_is_hash.bin",
+          "description": "Existence hash set for (adsh,tag,version) where stmt='IS'. For Q6 join filter. Also stores plabel_code.",
+          "format": "[uint32_t capacity][{int32_t adsh_code, int32_t tag_code, int32_t version_code, int32_t plabel_code} x capacity]. Empty: adsh_code=-1.",
+          "queries": ["Q6"] }
+      ]
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DOUBLE": "double",
+    "VARCHAR_low_card": "int16_t (dict-encoded)",
+    "VARCHAR_high_card": "int32_t (dict-encoded)"
+  },
+  "date_encoding": "NOT_APPLICABLE: ddate/period/filed are schema type INTEGER (YYYYMMDD), stored as raw int32_t. No epoch-day conversion.",
+  "hardware_config": {
+    "cpu_cores": "64",
+    "l3_cache_mb": "44",
+    "disk_type": "hdd",
+    "total_memory_gb": "376",
+    "simd": "AVX-512"
+  }
+}

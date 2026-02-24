@@ -1,0 +1,122 @@
+{
+  "query_id": "Q6",
+  "logical_plan": {
+    "pipeline": ["zone_map_prune_shipdate", "selective_block_prefetch", "fused_filter_aggregate"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "scalar_sum_thread_local_reduce",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "selectivity_estimate": 0.156,
+        "index": "lineitem_shipdate_zonemap",
+        "note": "lineitem is sorted by l_shipdate — binary search finds first/last qualifying block; ~84% of blocks pruned. Interior blocks skip per-row date check."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_discount BETWEEN 0.05 AND 0.07",
+        "selectivity_estimate": 0.282,
+        "applied_after": "shipdate_block_prune",
+        "note": "Discount zone map applied on candidate blocks only; minimal pruning power since lineitem is not sorted by discount."
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_quantity < 24.0",
+        "selectivity_estimate": 0.469,
+        "applied_after": "shipdate_block_prune",
+        "note": "Quantity zone map applied on candidate blocks; skip block if block_min >= 24.0. Moderate pruning benefit."
+      }
+    ],
+    "combined_selectivity": 0.021,
+    "qualifying_rows_estimate": 1259706
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "thread_local_double_scalar",
+      "zone_map_shipdate": "mmap_int32_min_max_per_block",
+      "zone_map_discount": "mmap_double_min_max_per_block",
+      "zone_map_quantity": "mmap_double_min_max_per_block"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": 64,
+      "morsel_unit": "block",
+      "qualifying_blocks_estimate": 94,
+      "blocks_per_thread": 2,
+      "synchronization": "thread_local_sum_final_reduce",
+      "note": "Qualifying blocks [first_block, last_block] partitioned evenly across 64 threads. Each thread accumulates a local double sum. Final reduce is a sequential sum of 64 thread-local values — no locks or atomics needed."
+    },
+    "index_usage": [
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600][int32_t min, int32_t max per block]",
+        "purpose": "binary_search_contiguous_block_range",
+        "detail": "Binary search for first block where block_max >= 8766 and last block where block_min < 9131. All blocks outside [first_block, last_block] are pruned (~84% skip rate). For interior blocks where block_min >= 8766 && block_max < 9131, omit per-row shipdate check in inner loop."
+      },
+      {
+        "index": "lineitem_discount_zonemap",
+        "file": "indexes/lineitem_discount_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600][double min, double max per block]",
+        "purpose": "skip_blocks_outside_discount_range",
+        "detail": "Within candidate block range, skip block if block_max < 0.05 || block_min > 0.07. Benefit is low within date range since discount is not sorted, but cost is negligible."
+      },
+      {
+        "index": "lineitem_quantity_zonemap",
+        "file": "indexes/lineitem_quantity_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600][double min, double max per block]",
+        "purpose": "skip_blocks_outside_quantity_range",
+        "detail": "Within candidate block range, skip block if block_min >= 24.0. Moderate pruning since quantity values cluster."
+      }
+    ],
+    "scan_strategy": "zone_map_binary_search_then_single_pass_fused",
+    "inner_loop_strategy": {
+      "approach": "avx2_masked_multiply_accumulate",
+      "vector_width": "256-bit (4 doubles per register)",
+      "operations": [
+        "load 4 l_shipdate int32 → compare [8766, 9131) → mask (skipped for interior blocks)",
+        "load 4 l_discount double → compare [0.05, 0.07] → mask",
+        "load 4 l_quantity double → compare < 24.0 → mask",
+        "combined_mask = shipdate_mask & discount_mask & quantity_mask",
+        "load 4 l_extendedprice double → multiply by l_discount double",
+        "masked accumulate into SIMD accumulator register",
+        "horizontal reduce at end of block to scalar double"
+      ],
+      "boundary_block_handling": "per-row shipdate range check for first and last qualifying blocks",
+      "interior_block_optimization": "omit shipdate predicate from mask — always true"
+    },
+    "column_access": {
+      "columns_needed": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+      "access_pattern": "qualifying_blocks_only_contiguous_sequential"
+    },
+    "memory_pattern": "streaming_sequential",
+    "io_strategy": {
+      "approach": "zone_map_guided_selective",
+      "phases": [
+        {
+          "phase": "zone_map_load",
+          "action": "mmap all 3 zone map files (tiny: 600 blocks × 8-16 bytes each, <50 KB total); binary search on shipdate zone map to find [first_block=~78, last_block=~171]"
+        },
+        {
+          "phase": "selective_prefetch",
+          "action": "madvise(MADV_WILLNEED) on qualifying byte ranges of all 4 columns in parallel across threads; covers only blocks [first_block, last_block] ≈ 15.6% of each column file",
+          "estimated_bytes_prefetched_per_column": "~376 MB total for 4 columns × 94 blocks × 100000 rows (vs 1.86 GB for full scan of all 4 columns)"
+        }
+      ],
+      "column_load_order": ["zone_maps", "l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+      "parallel_column_prefetch": true,
+      "prefetch_scope": "qualifying_blocks_only"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "data_loading_and_scan",
+    "qualifying_blocks": 94,
+    "total_blocks": 600,
+    "block_prune_rate": 0.843,
+    "rows_to_scan": 9400000,
+    "qualifying_rows": 1259706,
+    "estimated_ms": 10,
+    "notes": "I/O limited to ~15.6% of column data. With 64-thread parallel sequential reads and madvise prefetch, I/O and compute overlap heavily. Scalar aggregate with thread-local accumulation has zero contention. Hot-cache runs are pure compute-bound (AVX2 fused filter+multiply-accumulate over ~9.4M rows on 64 cores ≈ 5ms)."
+  }
+}

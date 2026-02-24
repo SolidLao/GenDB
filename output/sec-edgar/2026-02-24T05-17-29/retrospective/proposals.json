@@ -1,0 +1,64 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "P29",
+      "category": "performance",
+      "title": "Parallel dict loading for queries with 3+ dictionary columns",
+      "detect": "data_loading phase is >40ms AND query references 3 or more dictionary-encoded columns from different tables (each requiring a separate _dict.txt mmap load). Sequential dict loading serializes I/O and consumes 20-70ms per dict file on HDD.",
+      "fix": "Use #pragma omp parallel sections num_threads(N) where N = number of dict files. Each section loads one dict file via mmap+memchr. Keep dict mmap pointers alive at function scope so string_views remain valid. Seen Q6 iter_5: sequential loading of 5 dicts consumed ~70ms; parallel loading reduced data_loading phase from 132ms to 31ms (-76%).",
+      "impact": "70-100ms",
+      "freq": 1
+    },
+    {
+      "type": "experience_entry",
+      "id": "C34",
+      "category": "correctness",
+      "title": "Optimizer must lock in thread-local aggregation once validated — never revert to shared map",
+      "detect": "aggregation_merge spikes by >50% vs the best previously achieved value (e.g., 19ms -> 87ms in Q2 iter_4; 13ms -> 59ms in Q4 iter_5). This means a subsequent optimization iteration reverted from thread-local per-group reduction to a shared unordered_map. Diagnostic: aggregation_merge in iter_N+k is significantly worse than iter_N, with no change in group cardinality.",
+      "fix": "Once thread-local aggregation merge yields >20% improvement over baseline, treat the thread-local pattern as a LOCKED optimization. The optimizer must preserve the thread-local struct, per-thread map allocation, and merge loop in all subsequent iterations. Only the hash function, key layout, or capacity may be tuned — never revert the merge strategy itself.",
+      "sev": "HIGH",
+      "freq": 2
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P17",
+      "delta": 2,
+      "reason": "Q6 iter_0->1: aggregation_merge 350ms->13ms (36x). Q2 iter_0->2: aggregation_merge 67ms->19ms (3.5x). Both are direct thread-local aggregation wins on 50K and 80K groups respectively."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P20",
+      "delta": 2,
+      "reason": "Same as P17 — Q6 and Q2 both confirm catastrophic shared-map contention at scale. Shared map is now also confirmed destructive at 50K groups (Q6) not just >300K (previous data)."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P27",
+      "delta": 1,
+      "reason": "Q6 iter_5 applied concurrent madvise for pre_triple_hash + sub_adsh_hash indexes in parallel sections. Combined with parallel dict loading, total data_loading reduced from 132ms to 31ms."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P16",
+      "delta": 1,
+      "reason": "Q6 data_loading=132ms (iter_0-4) exceeded 150ms absolute threshold in iter_1 (149ms). Addressed in iter_5 via parallel dict loading + concurrent madvise."
+    },
+    {
+      "type": "note",
+      "id": "P20_threshold_update",
+      "title": "Update P20 shared-map catastrophe threshold to include 50K groups",
+      "detail": "Previous P20 data showed catastrophic merge at >300K groups. Q6 this run confirms 50K groups × 64 threads also produces 350ms merge. The catastrophe threshold is lower than previously thought — update P20 to cite 50K groups as confirmed bad case."
+    }
+  ],
+  "meta": {
+    "queries_total": 6,
+    "queries_success": 5,
+    "queries_slow": 1,
+    "queries_failed": 0,
+    "total_iterations": 23,
+    "correctness_failures": 0,
+    "run_date": "2026-02-24",
+    "dataset": "sec-edgar"
+  }
+}

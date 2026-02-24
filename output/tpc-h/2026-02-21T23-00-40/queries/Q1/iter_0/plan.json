@@ -1,0 +1,95 @@
+{
+  "query_id": "Q1",
+  "logical_plan": {
+    "pipeline": ["load_columns", "zone_map_early_termination", "filter_scan", "aggregate", "sort_output"],
+    "join_order": [],
+    "subquery_strategy": "none",
+    "aggregation": "array_direct",
+    "filter_pushdown": [
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate <= 10471",
+        "selectivity_estimate": 0.98,
+        "note": "Column sorted ascending; zone map enables early break on trailing blocks only. Effective cardinality: ~58.8M rows."
+      }
+    ],
+    "group_by": {
+      "keys": ["l_returnflag (int8_t)", "l_linestatus (int8_t)"],
+      "max_groups": 6,
+      "structure": "flat_array_6_slots",
+      "key_encoding": "composite (returnflag_byte, linestatus_byte) -> slot index via direct lookup table[3][2]"
+    },
+    "aggregates": [
+      {"name": "sum_qty",        "expr": "SUM(qty_lut[l_quantity_code])"},
+      {"name": "sum_base_price", "expr": "SUM(l_extendedprice)"},
+      {"name": "sum_disc_price", "expr": "SUM(l_extendedprice * (1.0 - disc_lut[l_discount_code]))"},
+      {"name": "sum_charge",     "expr": "SUM(l_extendedprice * (1.0 - disc_lut[l_discount_code]) * (1.0 + tax_lut[l_tax_code]))"},
+      {"name": "avg_qty",        "expr": "sum_qty / count_order"},
+      {"name": "avg_price",      "expr": "sum_base_price / count_order"},
+      {"name": "avg_disc",       "expr": "SUM(disc_lut[l_discount_code]) / count_order"},
+      {"name": "count_order",    "expr": "COUNT(*)"}
+    ],
+    "output_order": "ORDER BY l_returnflag ASC, l_linestatus ASC — 6 rows max, trivial sort at end"
+  },
+  "physical_plan": {
+    "data_structures": {
+      "aggregation": "flat_array[6] of AggSlot{sum_qty, sum_base_price, sum_disc_price, sum_charge, sum_disc, count} — indexed by (returnflag_idx * 2 + linestatus_idx)",
+      "thread_local_aggregation": "each of 64 threads maintains its own flat_array[6]; merged sequentially after parallel phase (6 groups × 64 threads = 384 additions total)",
+      "lut_decode": {
+        "l_quantity":  "double qty_lut[256]  — mmap lineitem/l_quantity_lookup.bin",
+        "l_discount":  "double disc_lut[256] — mmap lineitem/l_discount_lookup.bin",
+        "l_tax":       "double tax_lut[256]  — mmap lineitem/l_tax_lookup.bin"
+      }
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "64 (auto nproc)",
+      "morsel_size_rows": 65536,
+      "morsel_size_rationale": "L3 cache 44MB / 64 threads ≈ 687KB; ~7 bytes/row average for compressed cols → ~64K rows per morsel fits comfortably in per-thread L3 slice",
+      "synchronization": "thread_local_merge — each thread accumulates into its own flat_array[6], main thread merges after join (no atomics, no contention)",
+      "partition_count": 1,
+      "note": "No partitioning needed — 6-group aggregation has trivially small merge cost"
+    },
+    "index_usage": [
+      {
+        "index": "shipdate_zonemap",
+        "file": "lineitem/indexes/shipdate_zonemap.bin",
+        "layout": "[uint32_t num_blocks=600] then [int32_t min, int32_t max, uint32_t start_row] x 600; each block covers 100,000 rows",
+        "purpose": "early_termination — since l_shipdate is sorted ascending, scan zone map blocks in order and BREAK as soon as block_min > 10471; skips trailing ~2% of blocks (last few blocks near 1998-11-27). Gain is minimal at 98% selectivity but avoids reading final ~1.2M rows for free.",
+        "usage_mode": "mmap, read num_blocks, iterate blocks, break on block_min > 10471"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "scan_description": "One pass over lineitem columns; filter (l_shipdate <= 10471) and all aggregations are fused into a single loop body. No intermediate materialization. Each row: decode compressed cols via LUT → check shipdate predicate → map (returnflag, linestatus) to slot index → accumulate into thread-local AggSlot.",
+    "operator_fusion": {
+      "fused_ops": ["shipdate_filter", "qty_decode", "disc_decode", "tax_decode", "group_key_map", "aggregate_accumulate"],
+      "benefit": "eliminates all intermediate row buffers; single pass over ~480MB of column data"
+    },
+    "memory_pattern": "streaming_sequential",
+    "memory_pattern_detail": "All 7 columns scanned sequentially in column-major order. Byte-packed columns (quantity, discount, tax) have 4-8x smaller footprint vs double — reduces cache pressure and I/O volume significantly.",
+    "io_strategy": {
+      "approach": "zone_map_guided_selective",
+      "rationale": "98% selectivity means zone maps skip only trailing ~2% blocks, but cold-start I/O on HDD benefits from skipping even a few hundred KB. Primary benefit is the byte-packed columns reducing total I/O by ~3x on qty/discount/tax.",
+      "column_load_order": [
+        "lineitem/indexes/shipdate_zonemap.bin (zone maps — tiny, enables early termination)",
+        "lineitem/l_quantity_lookup.bin + lineitem/l_discount_lookup.bin + lineitem/l_tax_lookup.bin (LUT sidecar files — 256×8 bytes each, ~2KB each)",
+        "lineitem/l_shipdate.bin (filter column — int32_t, 240MB; zone-map-guided: prefetch all qualifying block ranges)",
+        "lineitem/l_returnflag.bin + lineitem/l_linestatus.bin (group key columns — int8_t, 60MB each)",
+        "lineitem/l_quantity.bin + lineitem/l_discount.bin + lineitem/l_tax.bin (byte-packed payload — uint8_t, 60MB each; 4-8x less I/O vs raw double)",
+        "lineitem/l_extendedprice.bin (raw double payload — 480MB; largest single column)"
+      ],
+      "parallel_column_prefetch": true,
+      "parallel_prefetch_note": "Issue madvise(MADV_WILLNEED) for all 7 column byte ranges concurrently using a prefetch thread pool before scan begins. HDD can pipeline multiple sequential read streams.",
+      "byte_packed_io_reduction": "l_quantity, l_discount, l_tax stored as uint8_t → 1 byte/row vs 8 bytes for double → 7x I/O reduction per column; total compressed I/O savings: ~3 × (60M × 7 bytes) = ~1.26GB saved",
+      "total_cold_io_estimate_mb": "~900MB (240MB shipdate + 60MB returnflag + 60MB linestatus + 60MB×3 byte-packed + 480MB extprice)"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "main_scan (CPU + I/O bound in cold path; CPU-bound in hot path)",
+    "cardinality_qualifying_rows": 58800000,
+    "hot_path_note": "Hot: 58.8M rows / 64 threads = ~919K rows/thread; at ~1B simple ops/sec/thread → ~1ms compute, dominated by memory bandwidth. Target: ~52ms (matches GenDB benchmark).",
+    "cold_path_note": "Cold: ~900MB HDD I/O; parallel prefetch across 64 threads. Byte-packed columns reduce I/O by ~1.26GB. Target: ~442ms (matches GenDB benchmark).",
+    "merge_cost": "negligible — 6 groups × 64 threads = 384 double additions",
+    "estimated_ms": 52
+  }
+}

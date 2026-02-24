@@ -1,0 +1,176 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "concurrent_madvise",
+    "scan_num",
+    "probe_sub_adsh_hash",
+    "filter_sic",
+    "probe_tag_pair_hash",
+    "filter_abstract",
+    "probe_pre_triple_hash",
+    "filter_stmt_eq",
+    "thread_local_aggregate",
+    "merge_aggregates",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub_adsh_hash (pre-built mmap index, 4MB)",
+      "probe": "num (filtered: uom_code==usd_code && !isnan(value), ~33.6M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 86135,
+      "notes": "sub_adsh_hash is 4MB — fully LLC-resident. Probe num after uom+null filters. Post-probe filter: sic BETWEEN 4000 AND 4999 (~4.1%) → ~1.38M survive. Read sub_row_id, sub_sic, sub_cik."
+    },
+    {
+      "build": "tag_pair_hash (pre-built mmap index, 64MB)",
+      "probe": "num (post-sub-filter, ~1.38M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "notes": "tag_pair_hash is 64MB (exceeds L3=44MB but madvise WILLNEED reduces latency). Composite key: (num.tag_code, num.ver_code). Post-probe filter: abstract==0 (~98%) → ~1.35M survive. Read tlabel_code for GROUP BY."
+    },
+    {
+      "build": "pre_triple_hash (pre-built mmap index, 512MB)",
+      "probe": "num (post-tag-filter, ~1.35M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "pre_triple_hash is 512MB (>> L3=44MB). madvise(MADV_WILLNEED) started FIRST in concurrent prefetch block. Composite key: (num.adsh_code, num.tag_code, num.ver_code). Get first_row_id, scan forward in sorted pre while adsh/tag/ver match, check stmt_code==eq_code. Post-filter: ~11% → ~148K survive. Read stmt_code for GROUP BY (always eq_code)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code (dict-encoded int16_t)",
+      "selectivity": 0.872,
+      "applied_at": "scan_num (first filter, cheapest)"
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.98,
+      "applied_at": "scan_num (second filter)"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic >= 4000 && sic <= 4999",
+      "selectivity": 0.041,
+      "applied_at": "post probe_sub_adsh_hash"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract == 0",
+      "selectivity": 0.98,
+      "applied_at": "post probe_tag_pair_hash"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == eq_code",
+      "selectivity": 0.11,
+      "applied_at": "post probe_pre_triple_hash (scan forward in sorted pre)"
+    }
+  ],
+  "data_structures": {
+    "sub_join": "pre-built mmap open-addressing hash (sub_adsh_hash, 4MB, fits LLC). Key: int32 adsh_code. Slot: SubADSHSlot {int32 adsh_code, int32 row_id, int32 _pad0, int32 _pad1}. Sentinel: adsh_code==INT32_MIN. Hash: hash_int32(adsh_code).",
+    "tag_join": "pre-built mmap open-addressing hash (tag_pair_hash, 64MB). Key: (int32 tag_code, int32 ver_code). Slot: TagPairSlot {int32 tag_code, int32 ver_code, int32 row_id, int32 _pad}. Sentinel: tag_code==INT32_MIN. Hash: hash_combine(hash_int32(tag_code), hash_int32(ver_code)).",
+    "pre_join": "pre-built mmap open-addressing hash (pre_triple_hash, 512MB). Key: (int32 adsh_code, int32 tag_code, int32 ver_code). Slot: PreTripleSlot {int32 adsh_code, int32 tag_code, int32 ver_code, int32 row_id (first in sorted pre)}. Sentinel: adsh_code==INT32_MIN. Hash: hash_combine(hash_combine(hash_int32(adsh_code), hash_int32(tag_code)), hash_int32(ver_code)). Multi-value: scan pre forward from first_row_id while keys match.",
+    "aggregation": "thread-local open-addressing hash map per thread. AGG_CAP = next_pow2(2000*2) = 4096 slots. Key struct: {int32_t sic; int32_t tlabel_code; int16_t stmt_code; int16_t _pad} (12 bytes, C15: all GROUP BY dims). Value: {int64_t sum_cents; int64_t count; std::unordered_set<int32_t> cik_set}. Sentinel: sic==INT32_MIN. Total thread-local memory: 64 * 4096 * ~40 bytes (excl. cik_set heap) ≈ 10MB << LLC (44MB). Merge strategy: sequential merge (T*G=128K, small enough)."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "pattern": "omp parallel for schedule(dynamic, 100000) over num rows. Each thread: filter num locally → probe sub/tag/pre indexes (read-only) → accumulate into thread-local aggregation hash map. After barrier: sequential merge of thread-local maps into global result map.",
+    "concurrent_prefetch": "omp parallel sections at startup: section1: madvise(pre_triple_hash, 512MB, MADV_WILLNEED); section2: madvise(tag_pair_hash, 64MB, MADV_WILLNEED); section3: madvise(sub_adsh_hash, 4MB, MADV_WILLNEED) — P27: concurrent madvise for all large index files"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "sf3.gendb/sub/indexes/sub_adsh_hash.bin",
+      "purpose": "join_lookup: num.adsh_code → sub.row_id for sic and cik retrieval",
+      "header_parse": "uint32_t sub_cap = *(uint32_t*)sub_raw; uint32_t sub_mask = sub_cap - 1; const SubADSHSlot* sub_ht = (const SubADSHSlot*)(sub_raw + 4); — C32: at function scope"
+    },
+    {
+      "index": "tag_pair_hash",
+      "file": "sf3.gendb/tag/indexes/tag_pair_hash.bin",
+      "purpose": "join_lookup: (num.tag_code, num.ver_code) → tag.row_id for abstract and tlabel_code retrieval",
+      "header_parse": "uint32_t tph_cap = *(uint32_t*)tag_raw; uint32_t tph_mask = tph_cap - 1; const TagPairSlot* tph_ht = (const TagPairSlot*)(tag_raw + 4); — C32: at function scope"
+    },
+    {
+      "index": "pre_triple_hash",
+      "file": "sf3.gendb/pre/indexes/pre_triple_hash.bin",
+      "purpose": "join_lookup: (num.adsh_code, num.tag_code, num.ver_code) → first pre.row_id; scan forward in sorted pre checking stmt_code==eq_code",
+      "header_parse": "uint32_t pth_cap = *(uint32_t*)pre_raw; uint32_t pth_mask = pth_cap - 1; const PreTripleSlot* pth_ht = (const PreTripleSlot*)(pre_raw + 4); — C32: at function scope"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "aggregation_key": {
+    "columns": ["s.sic (int32)", "t.tlabel_code (int32)", "p.stmt_code (int16)"],
+    "struct": "struct AggKey { int32_t sic; int32_t tlabel_code; int16_t stmt_code; int16_t _pad; }",
+    "sentinel": "sic == INT32_MIN",
+    "note": "C15: ALL three GROUP BY columns (sic, tlabel_code, stmt_code) must be in key. stmt_code is always eq_code but must still be included."
+  },
+  "aggregation_values": {
+    "sum_cents": "int64_t — C29 HARD CONSTRAINT: accumulate as llround(v * 100.0), output as printf(\"%lld.%02lld\", sc/100, llabs(sc%100))",
+    "count": "int64_t — for AVG = (double)sum_cents / (100.0 * count)",
+    "cik_set": "std::unordered_set<int32_t> per group — for COUNT(DISTINCT s.cik). Merge thread-local sets by iterating and inserting."
+  },
+  "having": {
+    "predicate": "cik_set.size() >= 2",
+    "applied_at": "post-merge, before topk sort"
+  },
+  "output": {
+    "order_by": ["total_value DESC", "sic ASC", "tlabel_code ASC"],
+    "limit": 500,
+    "sort_algorithm": "std::partial_sort (O(n log k), P6)",
+    "tiebreaker": "sic ASC then tlabel_code ASC — C33: stable deterministic ordering for LIMIT 500",
+    "format": {
+      "sic": "int32 raw: printf(\"%d\", sic)",
+      "tlabel": "double-quoted string — C31: printf(\"\\\"%s\\\"\", tlabel_dict[tlabel_code].c_str()) — tlabel frequently contains commas",
+      "stmt": "double-quoted string — C31: printf(\"\\\"%s\\\"\", stmt_dict[stmt_code].c_str())",
+      "num_companies": "cik_set.size() after merge",
+      "total_value": "C29: printf(\"%lld.%02lld\", (long long)(sc/100), (long long)llabs(sc%100))",
+      "avg_value": "C29: printf(\"%.2f\", (double)sum_cents / (100.0 * count))"
+    }
+  },
+  "dict_loading": {
+    "uom": "load sf3.gendb/num/uom_dict.txt → find usd_code where dict[i]==\"USD\"",
+    "stmt": "load sf3.gendb/pre/stmt_dict.txt → find eq_code where dict[i]==\"EQ\"",
+    "tlabel": "load sf3.gendb/tag/tlabel_dict.txt → decode tlabel_code at output time"
+  },
+  "prefetch": {
+    "strategy": "concurrent madvise MADV_WILLNEED at program start using omp parallel sections — P27",
+    "priority_order": [
+      "pre_triple_hash (512MB) — highest priority, largest, start first",
+      "num/value.bin (315MB)",
+      "num/adsh.bin (157MB)",
+      "num/tag.bin (157MB)",
+      "num/version.bin (157MB)",
+      "num/uom.bin (78MB)",
+      "tag_pair_hash (64MB)",
+      "sub_adsh_hash (4MB)"
+    ]
+  },
+  "correctness_notes": [
+    "C9: AGG_CAP = next_pow2(2000*2) = 4096 — sized to FILTERED group cardinality not raw table size",
+    "C15: AggKey includes sic + tlabel_code + stmt_code — ALL three GROUP BY columns",
+    "C20: Use std::fill for sentinel initialization, NEVER memset for INT32_MIN sentinel",
+    "C24: ALL hash table probes use bounded for-loop (probe < cap), never unbounded while",
+    "C29: SUM/AVG accumulate as int64_t cents via llround(v*100.0) — HARD CONSTRAINT",
+    "C31: double-quote ALL string output (tlabel contains commas, will break CSV)",
+    "C32: ALL index header variables (cap, mask, ht pointer) declared at function scope before any loop",
+    "C33: stable tiebreaker sic ASC + tlabel_code ASC appended to ORDER BY comparator"
+  ],
+  "estimated_surviving_rows": {
+    "after_uom_filter": 34338335,
+    "after_null_filter": 33651568,
+    "after_sub_sic_filter": 1379714,
+    "after_tag_abstract_filter": 1352120,
+    "after_pre_stmt_filter": 148733,
+    "final_groups_pre_having": 2000,
+    "final_groups_post_having": 500
+  },
+  "execution_target": "cpp"
+}

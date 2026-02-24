@@ -1,0 +1,194 @@
+{
+  "query_id": "Q3",
+  "sampling_notes": {
+    "customer_selectivity_measured": "20.7% (311K / 1.5M) — confirms guide estimate of 300K",
+    "orders_date_bias": "Sampling from start of sorted orders table returned 100% pass rate (all early-date rows) — not representative; guide estimate of 49% used",
+    "lineitem_date_bias": "Sampling from start of sorted lineitem table returned 0% pass rate (all early shipdate rows) — not representative; guide estimate of 55% used",
+    "extrapolated_cardinalities": {
+      "customer_after_filter": 311100,
+      "orders_after_date_and_cust_join": 735000,
+      "lineitem_after_shipdate_filter": 33000000,
+      "lineitem_after_full_join": 2940000,
+      "distinct_group_keys": 735000
+    }
+  },
+  "logical_plan": {
+    "pipeline": [
+      "scan_filter_customer",
+      "build_custkey_hash_set",
+      "scan_filter_orders_zone_map",
+      "probe_custkey_join",
+      "build_orderkey_hash_map",
+      "scan_filter_lineitem_zone_map",
+      "bloom_filter_precheck",
+      "probe_orderkey_join",
+      "hash_aggregate",
+      "topk_heap"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "customer (filtered on c_mktsegment='BUILDING', ~311K rows)",
+        "probe": "orders (filtered on o_orderdate<9204 via zone-map, ~7.35M rows)",
+        "join_key": "c_custkey = o_custkey",
+        "intermediate_size": "~735K qualifying orders",
+        "rationale": "Build on smallest side (300K filtered customers); probe orders with zone-map pruning (~51% blocks skipped)"
+      },
+      {
+        "step": 2,
+        "build": "qualifying orders (~735K rows, keyed on o_orderkey)",
+        "probe": "lineitem (filtered on l_shipdate>9204 via zone-map, ~33M rows)",
+        "join_key": "l_orderkey = o_orderkey",
+        "intermediate_size": "~2.94M matching lineitem rows",
+        "rationale": "Build on 735K qualifying orders; probe 33M filtered lineitems; bloom filter pre-screens ~88% non-matching probes"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "hash_group_by",
+    "aggregation_keys": ["l_orderkey", "o_orderdate", "o_shippriority"],
+    "aggregation_function": "SUM(l_extendedprice * (1 - l_discount)) as revenue",
+    "estimated_groups": 735000,
+    "filter_pushdown": [
+      {
+        "table": "customer",
+        "predicate": "c_mktsegment = 'BUILDING' (code == dict_index_of('BUILDING'))",
+        "selectivity_estimate": 0.207,
+        "filtered_rows": 311000
+      },
+      {
+        "table": "orders",
+        "predicate": "o_orderdate < 9204",
+        "selectivity_estimate": 0.49,
+        "filtered_rows": 7350000,
+        "index": "zone_map_guided — binary search on sorted column, skip blocks with block_min >= 9204 (~51% of 150 blocks pruned)"
+      },
+      {
+        "table": "lineitem",
+        "predicate": "l_shipdate > 9204",
+        "selectivity_estimate": 0.55,
+        "filtered_rows": 33000000,
+        "index": "zone_map_guided — binary search on sorted column, skip blocks with block_max <= 9204 (~45% of 600 blocks pruned)"
+      }
+    ],
+    "output": "TOP 10 by (revenue DESC, o_orderdate ASC) — min-heap of size 10, no full sort"
+  },
+  "physical_plan": {
+    "data_structures": {
+      "custkey_filter": "compact_hash_set(pre_sized=524288) — open-addressing, robin-hood, holds 311K int32 custkeys from qualifying customers",
+      "orderkey_build": "compact_hash_map(pre_sized=1572864) — open-addressing, robin-hood, 735K entries, payload=(o_orderdate:int32, o_shippriority:int32), built from qualifying orders after custkey probe",
+      "orderkey_bloom": "bloom_filter(bits=8388608, ~1MB, 3-hash, ~1% FP rate for 735K keys) — L3-resident, pre-screens 33M lineitem probes, eliminates ~88% non-matching rows before hash table lookup",
+      "aggregation": "partitioned_hash_map(16_partitions) — partition by (l_orderkey & 0xF), each partition owns independent compact hash map of ~46K groups; thread-local accumulation then merge; key=(l_orderkey, o_orderdate, o_shippriority), value=double revenue_sum",
+      "topk": "min_heap(size=10) — maintains top-10 by (revenue DESC, o_orderdate ASC); built from merged aggregation result"
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "auto(nproc=64)",
+      "morsel_size_rows": 100000,
+      "partition_count": 16,
+      "phases": {
+        "customer_scan_and_build": {
+          "strategy": "parallel_scan_sequential_build",
+          "note": "1.5M rows — parallel scan to collect custkeys into thread-local vectors, then sequential insert into shared compact_hash_set; small enough that build is ~2ms"
+        },
+        "orders_scan_and_probe": {
+          "strategy": "parallel_morsel_scan",
+          "note": "Zone-map prunes 51% of blocks; 64 threads each process ~57K rows (qualifying blocks only); probe custkey hash set; thread-local collect qualifying (o_orderkey, o_orderdate, o_shippriority); merge then build orderkey hash map sequentially"
+        },
+        "lineitem_scan_probe_and_aggregate": {
+          "strategy": "parallel_morsel_scan_with_thread_local_agg",
+          "note": "Zone-map prunes 45% of blocks (330 blocks remain); 64 threads each process ~515K rows; bloom filter pre-screens before hash probe; each thread maintains thread-local partitioned aggregation map; no synchronization during scan phase"
+        },
+        "aggregation_merge": {
+          "strategy": "partitioned_no_contention",
+          "note": "16 partitions merged sequentially or by 16 threads (one per partition); final 735K groups across all partitions"
+        }
+      },
+      "synchronization": "thread_local_merge"
+    },
+    "index_usage": [
+      {
+        "index": "orders_orderdate_zonemap",
+        "file": "indexes/orders_orderdate_zonemap.bin",
+        "purpose": "skip_blocks_where_block_min >= 9204; binary search on sorted o_orderdate to find last qualifying block; prunes ~51% of 150 blocks (~76 blocks skipped)",
+        "layout": "[uint32_t num_blocks=150][int32_t min, int32_t max per block]",
+        "skip_condition": "block_min >= 9204"
+      },
+      {
+        "index": "lineitem_shipdate_zonemap",
+        "file": "indexes/lineitem_shipdate_zonemap.bin",
+        "purpose": "skip_blocks_where_block_max <= 9204; binary search on sorted l_shipdate to find first qualifying block; prunes ~45% of 600 blocks (~270 blocks skipped)",
+        "layout": "[uint32_t num_blocks=600][int32_t min, int32_t max per block]",
+        "skip_condition": "block_max <= 9204"
+      }
+    ],
+    "prebuilt_index_usage": [],
+    "scan_strategy": "single_pass_fused",
+    "scan_details": {
+      "customer": {
+        "columns_loaded": ["c_mktsegment (filter)", "c_custkey (join key)"],
+        "strategy": "full_scan — only 1.5M rows × 2 columns = 7.5MB; fits in L3 (44MB)"
+      },
+      "orders": {
+        "columns_loaded": ["zone_map first", "o_orderdate (range filter)", "o_custkey (join probe)", "o_orderkey (build key)", "o_shippriority (payload)"],
+        "strategy": "zone_map_guided_selective — binary search to first qualifying block, scan to last qualifying block; fused filter+probe+collect in single pass"
+      },
+      "lineitem": {
+        "columns_loaded": ["zone_map first", "l_shipdate (range filter)", "l_orderkey (join probe + group key)", "l_extendedprice (payload)", "l_discount (payload)"],
+        "strategy": "zone_map_guided_selective — binary search to first qualifying block, scan all remaining blocks; fused filter+bloom_check+probe+aggregate in single pass"
+      }
+    },
+    "memory_pattern": {
+      "customer": "streaming_sequential — small (7.5MB), sequential read of 2 columns",
+      "orders": "streaming_sequential — zone-map selects 73 blocks × 4 columns = ~116MB; sequential within qualifying blocks",
+      "lineitem": "streaming_sequential_with_random_probe — 330 blocks × 3 columns × 4-8B = ~990MB of sequential reads; random accesses only into 735K-entry hash map (~12MB, fits in L3)"
+    },
+    "io_strategy": {
+      "approach": "zone_map_guided_selective",
+      "column_load_order": [
+        "zone_maps (orders + lineitem, tiny — load first)",
+        "c_mktsegment (customer filter column)",
+        "c_custkey (customer join key)",
+        "o_orderdate (orders filter + payload)",
+        "o_custkey (orders join key — probe customer set)",
+        "o_orderkey (orders build key)",
+        "o_shippriority (orders payload)",
+        "l_shipdate (lineitem filter column)",
+        "l_orderkey (lineitem join key + group key)",
+        "l_extendedprice (lineitem payload — load only qualifying blocks)",
+        "l_discount (lineitem payload — load only qualifying blocks)"
+      ],
+      "parallel_column_prefetch": true,
+      "prefetch_strategy": "madvise_WILLNEED on qualifying block ranges only (identified via zone map binary search before prefetch); issue concurrent madvise calls for all lineitem payload columns in parallel to overlap HDD seeks",
+      "hdd_notes": "HDD disk — sequential access patterns are critical; zone-map pruning reduces total I/O from ~2.4GB (full lineitem) to ~1.3GB (55% of blocks); parallel madvise issues concurrent I/O requests to maximize HDD throughput"
+    },
+    "late_materialization": {
+      "applied": true,
+      "details": "l_extendedprice and l_discount loaded in same pass as l_orderkey (no benefit to deferring since all needed per row); o_shippriority loaded with qualifying orders only (not full 15M rows)"
+    },
+    "bloom_filter": {
+      "applied_to": "lineitem -> orders join (probe side pre-screening)",
+      "build_size": "735K order keys",
+      "filter_size_bytes": 1048576,
+      "estimated_false_positive_rate": 0.01,
+      "expected_elimination_rate": 0.88,
+      "benefit": "88% of 33M lineitem probes (~29M) eliminated before expensive hash table lookup; hash table (~12MB) too large for L2 but fits in L3 — bloom filter (1MB, L3-resident) avoids most cache-miss hash probes"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_and_probe",
+    "phase_breakdown": {
+      "customer_scan_and_hash_build": "~5ms (1.5M × 2 cols = 7.5MB, parallel scan)",
+      "orders_zone_map_load": "~1ms (tiny, 150 × 8B = 1.2KB)",
+      "orders_scan_probe_collect": "~15ms (73 qualifying blocks × 4 cols = ~116MB, parallel; 7.35M rows probing 300K hash set)",
+      "orders_hash_build": "~3ms (735K entries, sequential)",
+      "lineitem_zone_map_load": "~1ms (600 × 8B = 4.8KB)",
+      "lineitem_prefetch_io": "~80ms cold / ~0ms hot (HDD I/O for ~1.3GB data, parallel madvise)",
+      "lineitem_scan_bloom_probe_agg": "~40ms (330 blocks × 3 cols; 64-threaded; bloom pre-screens 88% non-matches)",
+      "aggregation_merge": "~5ms (16 partitions, 735K total groups)",
+      "topk_heap": "<1ms (10 elements)"
+    },
+    "estimated_ms": 150,
+    "cold_estimated_ms": 280,
+    "notes": "HDD cold-start dominated by lineitem I/O (~1.3GB after zone-map pruning); parallel madvise reduces effective latency; hot run is CPU-bound on lineitem scan + bloom-filtered hash probes across 64 threads. Target competitive with DuckDB/Umbra via aggressive zone-map pruning + bloom filter + 64-thread parallelism."
+  }
+}

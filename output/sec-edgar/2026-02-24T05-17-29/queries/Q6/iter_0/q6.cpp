@@ -1,0 +1,463 @@
+#include <iostream>
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+#include <cmath>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <fstream>
+#include <climits>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <omp.h>
+#include "timing_utils.h"
+
+// ─── Hash utilities ──────────────────────────────────────────────────────────
+
+static inline uint64_t hash_int32(int32_t key) {
+    return (uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL;
+}
+
+static inline uint64_t hash_combine(uint64_t h1, uint64_t h2) {
+    return h1 ^ (h2 * 0x9E3779B97F4A7C15ULL + 0x517CC1B727220A95ULL + (h1 << 6) + (h1 >> 2));
+}
+
+// ─── Pre-built index slot structs ────────────────────────────────────────────
+
+struct SubADSHSlot {
+    int32_t adsh_code;  // INT32_MIN = empty
+    int32_t row_id;
+    int32_t _pad0;
+    int32_t _pad1;
+};  // 16 bytes
+
+struct PreTripleSlot {
+    int32_t adsh_code;  // INT32_MIN = empty
+    int32_t tag_code;
+    int32_t ver_code;
+    int32_t row_id;     // FIRST row in sorted pre for this key
+};  // 16 bytes
+
+// ─── Aggregation structures ───────────────────────────────────────────────────
+
+struct Q6Key {
+    int32_t name_code;
+    int32_t tag_code;
+    int32_t plabel_code;
+    int16_t stmt_code;
+    int16_t _pad;
+};
+
+struct Q6Group {
+    int64_t sum_cents = 0;
+    int64_t count     = 0;
+};
+
+struct Q6AggSlot {
+    Q6Key   key;
+    Q6Group group;
+    bool    occupied = false;
+};
+
+static constexpr uint32_t AGG_CAP  = 131072;  // next_power_of_2(50000 * 2)
+static constexpr uint32_t AGG_MASK = AGG_CAP - 1;
+
+static inline uint64_t hash_q6key(const Q6Key& k) {
+    uint64_t h = hash_int32(k.name_code);
+    h = hash_combine(h, hash_int32(k.tag_code));
+    h = hash_combine(h, hash_int32(k.plabel_code));
+    h = hash_combine(h, hash_int32((int32_t)k.stmt_code));
+    return h;
+}
+
+// Insert into thread-local aggregation hash map
+static inline void agg_insert(Q6AggSlot* ht, const Q6Key& key, int64_t iv) {
+    uint32_t pos = (uint32_t)(hash_q6key(key) & AGG_MASK);
+    for (uint32_t probe = 0; probe < AGG_CAP; probe++) {
+        uint32_t slot = (pos + probe) & AGG_MASK;
+        if (!ht[slot].occupied) {
+            ht[slot].occupied = true;
+            ht[slot].key      = key;
+            ht[slot].group.sum_cents = iv;
+            ht[slot].group.count     = 1;
+            return;
+        }
+        const Q6Key& sk = ht[slot].key;
+        if (sk.name_code    == key.name_code    &&
+            sk.tag_code     == key.tag_code      &&
+            sk.plabel_code  == key.plabel_code   &&
+            sk.stmt_code    == key.stmt_code) {
+            ht[slot].group.sum_cents += iv;
+            ht[slot].group.count     += 1;
+            return;
+        }
+    }
+}
+
+// ─── Dict loader ─────────────────────────────────────────────────────────────
+
+static std::vector<std::string> load_dict(const std::string& path) {
+    std::vector<std::string> dict;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) dict.push_back(line);
+    return dict;
+}
+
+// ─── mmap helper ─────────────────────────────────────────────────────────────
+
+static const uint8_t* mmap_file(const std::string& path, size_t& out_size) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) { perror(path.c_str()); exit(1); }
+    struct stat st;
+    fstat(fd, &st);
+    out_size = (size_t)st.st_size;
+    void* p = mmap(nullptr, out_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    close(fd);
+    return (const uint8_t*)p;
+}
+
+// ─── Result row for output ───────────────────────────────────────────────────
+
+struct ResultRow {
+    int32_t name_code;
+    int16_t stmt_code;
+    int32_t tag_code;
+    int32_t plabel_code;
+    int64_t sum_cents;
+    int64_t count;
+};
+
+// ─── Main query function ──────────────────────────────────────────────────────
+
+void run_q6(const std::string& gendb_dir, const std::string& results_dir) {
+    GENDB_PHASE("total");
+
+    // ─── Data loading ────────────────────────────────────────────────────────
+    size_t num_uom_sz, num_adsh_sz, num_tag_sz, num_ver_sz, num_val_sz;
+    size_t sub_fy_sz, sub_name_sz;
+    size_t pre_stmt_sz, pre_plabel_sz, pre_adsh_sz, pre_tag_sz, pre_ver_sz;
+    size_t sub_idx_sz, pre_idx_sz;
+
+    const int16_t* num_uom  = nullptr;
+    const int32_t* num_adsh = nullptr;
+    const int32_t* num_tag  = nullptr;
+    const int32_t* num_ver  = nullptr;
+    const double*  num_val  = nullptr;
+    const int32_t* sub_fy   = nullptr;
+    const int32_t* sub_name = nullptr;
+    const int16_t* pre_stmt   = nullptr;
+    const int32_t* pre_plabel = nullptr;
+    const int32_t* pre_adsh   = nullptr;
+    const int32_t* pre_tag    = nullptr;
+    const int32_t* pre_ver    = nullptr;
+    const uint8_t* sub_raw  = nullptr;
+    const uint8_t* pre_raw  = nullptr;
+
+    std::vector<std::string> uom_dict, name_dict, stmt_dict, tag_dict, plabel_dict;
+    int16_t usd_code = -1, is_code = -1;
+
+    {
+        GENDB_PHASE("data_loading");
+
+        // Load dictionaries
+        uom_dict    = load_dict(gendb_dir + "/num/uom_dict.txt");
+        name_dict   = load_dict(gendb_dir + "/sub/name_dict.txt");
+        stmt_dict   = load_dict(gendb_dir + "/pre/stmt_dict.txt");
+        tag_dict    = load_dict(gendb_dir + "/shared/tag_dict.txt");
+        plabel_dict = load_dict(gendb_dir + "/pre/plabel_dict.txt");
+
+        for (int16_t i = 0; i < (int16_t)uom_dict.size(); i++)
+            if (uom_dict[i] == "USD") { usd_code = i; break; }
+        for (int16_t i = 0; i < (int16_t)stmt_dict.size(); i++)
+            if (stmt_dict[i] == "IS") { is_code = i; break; }
+
+        // mmap columns
+        num_uom  = reinterpret_cast<const int16_t*>(mmap_file(gendb_dir + "/num/uom.bin",     num_uom_sz));
+        num_adsh = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/num/adsh.bin",    num_adsh_sz));
+        num_tag  = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/num/tag.bin",     num_tag_sz));
+        num_ver  = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/num/version.bin", num_ver_sz));
+        num_val  = reinterpret_cast<const double*> (mmap_file(gendb_dir + "/num/value.bin",   num_val_sz));
+        sub_fy   = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/sub/fy.bin",      sub_fy_sz));
+        sub_name = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/sub/name.bin",    sub_name_sz));
+        pre_stmt   = reinterpret_cast<const int16_t*>(mmap_file(gendb_dir + "/pre/stmt.bin",   pre_stmt_sz));
+        pre_plabel = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/pre/plabel.bin", pre_plabel_sz));
+        pre_adsh   = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/pre/adsh.bin",   pre_adsh_sz));
+        pre_tag    = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/pre/tag.bin",    pre_tag_sz));
+        pre_ver    = reinterpret_cast<const int32_t*>(mmap_file(gendb_dir + "/pre/version.bin",pre_ver_sz));
+
+        // mmap pre-built indexes
+        sub_raw = mmap_file(gendb_dir + "/sub/indexes/sub_adsh_hash.bin",  sub_idx_sz);
+        pre_raw = mmap_file(gendb_dir + "/pre/indexes/pre_triple_hash.bin", pre_idx_sz);
+
+        // Parallel madvise for large indexes and columns (P27)
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            { madvise((void*)pre_raw, pre_idx_sz, MADV_WILLNEED); }
+            #pragma omp section
+            { madvise((void*)sub_raw, sub_idx_sz, MADV_WILLNEED); }
+            #pragma omp section
+            { madvise((void*)num_uom,  num_uom_sz,  MADV_SEQUENTIAL); }
+            #pragma omp section
+            { madvise((void*)num_adsh, num_adsh_sz, MADV_SEQUENTIAL); }
+        }
+        madvise((void*)num_tag,  num_tag_sz,  MADV_SEQUENTIAL);
+        madvise((void*)num_ver,  num_ver_sz,  MADV_SEQUENTIAL);
+        madvise((void*)num_val,  num_val_sz,  MADV_SEQUENTIAL);
+        madvise((void*)pre_stmt,   pre_stmt_sz,   MADV_RANDOM);
+        madvise((void*)pre_plabel, pre_plabel_sz, MADV_RANDOM);
+        madvise((void*)pre_adsh,   pre_adsh_sz,   MADV_RANDOM);
+        madvise((void*)pre_tag,    pre_tag_sz,    MADV_RANDOM);
+        madvise((void*)pre_ver,    pre_ver_sz,    MADV_RANDOM);
+    }
+
+    // Row counts
+    const size_t num_N = num_uom_sz / sizeof(int16_t);
+    const size_t pre_N = pre_adsh_sz / sizeof(int32_t);
+
+    // ─── Index header parse (C32: at function scope) ─────────────────────────
+    uint32_t sub_cap  = *(const uint32_t*)sub_raw;
+    uint32_t sub_mask = sub_cap - 1;
+    const SubADSHSlot* sub_ht = (const SubADSHSlot*)(sub_raw + 4);
+
+    uint32_t pth_cap  = *(const uint32_t*)pre_raw;
+    uint32_t pth_mask = pth_cap - 1;
+    const PreTripleSlot* pth_ht = (const PreTripleSlot*)(pre_raw + 4);
+
+    // ─── Main scan with thread-local aggregation ──────────────────────────────
+    const int nthreads = omp_get_max_threads();
+    // Allocate thread-local aggregation hash maps
+    std::vector<std::vector<Q6AggSlot>> tl_agg(nthreads);
+
+    {
+        GENDB_PHASE("main_scan");
+
+        #pragma omp parallel num_threads(nthreads)
+        {
+            int tid = omp_get_thread_num();
+            // Initialize thread-local hash map (C20: use fill, not memset)
+            tl_agg[tid].resize(AGG_CAP);
+            for (auto& s : tl_agg[tid]) s.occupied = false;
+
+            Q6AggSlot* ht = tl_agg[tid].data();
+
+            const size_t MORSEL = 100000;
+            size_t total_morsels = (num_N + MORSEL - 1) / MORSEL;
+
+            #pragma omp for schedule(dynamic, 1)
+            for (size_t m = 0; m < total_morsels; m++) {
+                size_t row_start = m * MORSEL;
+                size_t row_end   = std::min(row_start + MORSEL, num_N);
+
+                for (size_t i = row_start; i < row_end; i++) {
+                    // Filter: uom == USD
+                    if (num_uom[i] != usd_code) continue;
+                    // Filter: value IS NOT NULL
+                    double v = num_val[i];
+                    if (std::isnan(v)) continue;
+
+                    int32_t ak = num_adsh[i];
+                    int32_t tc = num_tag[i];
+                    int32_t vc = num_ver[i];
+
+                    // Probe sub_adsh_hash → get sub row, check fy == 2023
+                    uint32_t spos = (uint32_t)(hash_int32(ak) & sub_mask);
+                    int32_t name_code = -1;
+                    for (uint32_t probe = 0; probe < sub_cap; probe++) {
+                        uint32_t slot = (spos + probe) & sub_mask;
+                        if (sub_ht[slot].adsh_code == INT32_MIN) break;
+                        if (sub_ht[slot].adsh_code == ak) {
+                            int32_t sr = sub_ht[slot].row_id;
+                            if (sub_fy[sr] == 2023) {
+                                name_code = sub_name[sr];
+                            }
+                            break;
+                        }
+                    }
+                    if (name_code < 0) continue;
+
+                    // Probe pre_triple_hash
+                    uint64_t ph = hash_combine(
+                        hash_combine(hash_int32(ak), hash_int32(tc)),
+                        hash_int32(vc));
+                    uint32_t ppos = (uint32_t)(ph & pth_mask);
+
+                    int32_t first_row = -1;
+                    for (uint32_t probe = 0; probe < pth_cap; probe++) {
+                        uint32_t slot = (ppos + probe) & pth_mask;
+                        if (pth_ht[slot].adsh_code == INT32_MIN) break;
+                        if (pth_ht[slot].adsh_code == ak &&
+                            pth_ht[slot].tag_code   == tc &&
+                            pth_ht[slot].ver_code   == vc) {
+                            first_row = pth_ht[slot].row_id;
+                            break;
+                        }
+                    }
+                    if (first_row < 0) continue;
+
+                    // Multi-value scan: scan forward while (adsh, tag, ver) match
+                    int64_t iv = llround(v * 100.0);
+                    int32_t r = first_row;
+                    while (r < (int32_t)pre_N &&
+                           pre_adsh[r] == ak &&
+                           pre_tag[r]  == tc &&
+                           pre_ver[r]  == vc) {
+                        if (pre_stmt[r] == is_code) {
+                            int32_t plabel_code = pre_plabel[r];
+                            Q6Key key;
+                            key.name_code   = name_code;
+                            key.tag_code    = tc;
+                            key.plabel_code = plabel_code;
+                            key.stmt_code   = is_code;
+                            key._pad        = 0;
+                            agg_insert(ht, key, iv);
+                        }
+                        r++;
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Merge thread-local aggregation maps (sort-based, O(n log n)) ───────────
+    // Collect all occupied entries → sort by key → sequential merge pass.
+    // Avoids global hash-map overflow that caused 65s in the naive approach.
+    std::vector<ResultRow> result_rows;
+    {
+        GENDB_PHASE("aggregation_merge");
+
+        // Flat entry for sort-merge; compact to reduce cache pressure
+        struct FlatEntry {
+            int32_t name_code;
+            int32_t tag_code;
+            int32_t plabel_code;
+            int16_t stmt_code;
+            int16_t _pad;
+            int64_t sum_cents;
+            int64_t count;
+        };
+
+        // Count occupied slots across all threads
+        size_t total_occ = 0;
+        for (int t = 0; t < nthreads; t++)
+            for (uint32_t s = 0; s < AGG_CAP; s++)
+                if (tl_agg[t][s].occupied) total_occ++;
+
+        std::vector<FlatEntry> flat;
+        flat.reserve(total_occ);
+
+        for (int t = 0; t < nthreads; t++) {
+            for (uint32_t s = 0; s < AGG_CAP; s++) {
+                const Q6AggSlot& sl = tl_agg[t][s];
+                if (!sl.occupied) continue;
+                flat.push_back({
+                    sl.key.name_code,
+                    sl.key.tag_code,
+                    sl.key.plabel_code,
+                    sl.key.stmt_code,
+                    0,
+                    sl.group.sum_cents,
+                    sl.group.count
+                });
+            }
+            // Free thread-local memory early
+            tl_agg[t].clear();
+            tl_agg[t].shrink_to_fit();
+        }
+
+        // Sort by composite key (name, tag, plabel, stmt)
+        std::sort(flat.begin(), flat.end(), [](const FlatEntry& a, const FlatEntry& b) {
+            if (a.name_code   != b.name_code)   return a.name_code   < b.name_code;
+            if (a.tag_code    != b.tag_code)     return a.tag_code    < b.tag_code;
+            if (a.plabel_code != b.plabel_code)  return a.plabel_code < b.plabel_code;
+            return a.stmt_code < b.stmt_code;
+        });
+
+        // Sequential merge of consecutive identical keys
+        result_rows.reserve(flat.size());
+        for (size_t i = 0; i < flat.size(); ) {
+            size_t j = i + 1;
+            int64_t sc  = flat[i].sum_cents;
+            int64_t cnt = flat[i].count;
+            while (j < flat.size() &&
+                   flat[j].name_code   == flat[i].name_code   &&
+                   flat[j].tag_code    == flat[i].tag_code     &&
+                   flat[j].plabel_code == flat[i].plabel_code  &&
+                   flat[j].stmt_code   == flat[i].stmt_code) {
+                sc  += flat[j].sum_cents;
+                cnt += flat[j].count;
+                j++;
+            }
+            ResultRow row;
+            row.name_code   = flat[i].name_code;
+            row.stmt_code   = flat[i].stmt_code;
+            row.tag_code    = flat[i].tag_code;
+            row.plabel_code = flat[i].plabel_code;
+            row.sum_cents   = sc;
+            row.count       = cnt;
+            result_rows.push_back(row);
+            i = j;
+        }
+    }
+
+    // ─── Sort + LIMIT ─────────────────────────────────────────────────────────
+    {
+        GENDB_PHASE("sort_topk");
+
+        size_t k = std::min((size_t)200, result_rows.size());
+        // C33: stable tiebreaker — use lexicographic name string (not name_code)
+        // to match reference SQL engine ordering for ties in total_value.
+        std::partial_sort(result_rows.begin(), result_rows.begin() + k, result_rows.end(),
+            [&](const ResultRow& a, const ResultRow& b) {
+                if (a.sum_cents != b.sum_cents) return a.sum_cents > b.sum_cents;
+                return name_dict[a.name_code] < name_dict[b.name_code];
+            });
+        result_rows.resize(k);
+    }
+
+    // ─── Output ───────────────────────────────────────────────────────────────
+    {
+        GENDB_PHASE("output");
+
+        std::string out_path = results_dir + "/Q6.csv";
+        FILE* fp = fopen(out_path.c_str(), "w");
+        if (!fp) { perror(out_path.c_str()); exit(1); }
+
+        fprintf(fp, "name,stmt,tag,plabel,total_value,cnt\n");
+
+        for (const auto& row : result_rows) {
+            // C31: double-quote all string columns
+            fprintf(fp, "\"%s\",\"%s\",\"%s\",\"%s\",",
+                name_dict[row.name_code].c_str(),
+                stmt_dict[row.stmt_code].c_str(),
+                tag_dict[row.tag_code].c_str(),
+                plabel_dict[row.plabel_code].c_str());
+            // C29: output sum as cents
+            int64_t sc = row.sum_cents;
+            fprintf(fp, "%lld.%02lld,%lld\n",
+                (long long)(sc / 100),
+                (long long)std::abs(sc % 100),
+                (long long)row.count);
+        }
+
+        fclose(fp);
+    }
+}
+
+#ifndef GENDB_LIBRARY
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <gendb_dir> [results_dir]" << std::endl;
+        return 1;
+    }
+    std::string gendb_dir   = argv[1];
+    std::string results_dir = argc > 2 ? argv[2] : ".";
+    run_q6(gendb_dir, results_dir);
+    return 0;
+}
+#endif

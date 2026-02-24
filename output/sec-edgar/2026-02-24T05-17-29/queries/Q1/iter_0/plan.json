@@ -1,0 +1,75 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["filter_scan", "direct_array_agg", "bitset_merge", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != -1",
+      "selectivity": 0.98,
+      "note": "WHERE stmt IS NOT NULL; NULL sentinel = -1 for int16_t dict column"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_flat_array(size=12)",
+    "aggregation_key": "stmt_code * 2 + rfile_code — maps to slot [0..11], zero hash overhead",
+    "count_distinct": "bitset(86135 bits = 10767 bytes) per group per thread — 12 groups × 10767B = ~126KB per thread; 64 threads × 126KB = ~8MB total, well within 44MB LLC",
+    "merge_strategy": "sequential_merge — T×G = 64×12 = 768 << 100K threshold; bitset OR-merge across threads"
+  },
+  "aggregation_struct": {
+    "fields": {
+      "cnt": "int64_t",
+      "sum_line": "int64_t",
+      "count_line": "int64_t",
+      "adsh_bitset": "uint8_t[10767] — bit i set if adsh_code i seen in this group"
+    },
+    "array_size": 12,
+    "key_formula": "int key = (int)stmt_code * 2 + (int)rfile_code",
+    "key_range": "[0..11] for stmt_code in {0..5}, rfile_code in {0..1}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_local": "each thread owns one flat array[12] of agg structs with embedded bitsets",
+    "merge": "sequential post-scan: for each thread t, for each slot k: global[k].cnt += t[k].cnt; global[k].sum_line += t[k].sum_line; global[k].count_line += t[k].count_line; global[k].adsh_bitset OR= t[k].adsh_bitset"
+  },
+  "columns_scanned": [
+    {"file": "sf3.gendb/pre/stmt.bin",  "type": "int16_t", "rows": 9600799, "bytes": 19201598},
+    {"file": "sf3.gendb/pre/rfile.bin", "type": "int16_t", "rows": 9600799, "bytes": 19201598},
+    {"file": "sf3.gendb/pre/adsh.bin",  "type": "int32_t", "rows": 9600799, "bytes": 38403196},
+    {"file": "sf3.gendb/pre/line.bin",  "type": "int32_t", "rows": 9600799, "bytes": 38403196}
+  ],
+  "dict_files": [
+    {"file": "sf3.gendb/pre/stmt_dict.txt",          "column": "stmt",  "distinct": 6},
+    {"file": "sf3.gendb/pre/rfile_dict.txt",          "column": "rfile", "distinct": 2},
+    {"file": "sf3.gendb/shared/adsh_dict.txt",        "column": "adsh",  "distinct": 86135, "note": "not decoded at runtime — adsh_code used as bitset index directly"}
+  ],
+  "scan_loop": {
+    "filter": "if (stmt_code == -1) continue;",
+    "key": "int key = (int)stmt_code * 2 + (int)rfile_code;",
+    "updates": [
+      "local_agg[key].cnt++",
+      "local_agg[key].sum_line += (int64_t)line_col[i]",
+      "local_agg[key].count_line++",
+      "int bit = adsh_col[i]; local_agg[key].adsh_bitset[bit >> 3] |= (1u << (bit & 7));"
+    ]
+  },
+  "output": {
+    "decode": "stmt_dict[stmt_code], rfile_dict[rfile_code]",
+    "avg_line": "(double)sum_line / (double)count_line",
+    "num_filings": "__builtin_popcountll over adsh_bitset words",
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "csv_quoting": "C31: double-quote ALL string columns — printf(\"\\\"%s\\\"\", stmt_str) and printf(\"\\\"%s\\\"\", rfile_str)",
+    "precision_note": "line is int32_t; sum fits in int64_t; no C29 risk. AVG output as double."
+  },
+  "indexes": [],
+  "correctness_checks": [
+    "C15: key includes BOTH stmt_code AND rfile_code",
+    "C18: decode stmt/rfile codes via dict vectors at output time",
+    "C31: quote stmt and rfile string output columns",
+    "C2: load stmt_dict.txt and rfile_dict.txt at runtime, never hardcode codes",
+    "adsh bitset indexed by adsh_code (int32_t); must verify adsh_code fits [0, 86134]"
+  ],
+  "execution_target": "cpp"
+}

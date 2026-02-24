@@ -1,0 +1,240 @@
+{
+  "query_id": "Q9",
+  "sampling_results": {
+    "sample_rate": 0.01,
+    "sampled_lineitem_rows": 599861,
+    "part_filter_selectivity": 0.0544,
+    "qualifying_parts": 108782,
+    "lineitem_pass_part_join": 32559,
+    "lineitem_join_selectivity": 0.0543,
+    "estimated_qualifying_lineitem_rows": 3259329,
+    "distinct_suppkeys_in_qualifying": 26985,
+    "estimated_output_groups": 175
+  },
+  "logical_plan": {
+    "pipeline": [
+      "scan_filter_part",
+      "build_dim_lookups",
+      "parallel_scan_lineitem",
+      "probe_part_bitset",
+      "lookup_supplier_nation",
+      "lookup_partsupp_composite",
+      "lookup_orders_year",
+      "thread_local_aggregate",
+      "merge_aggregate",
+      "sort_output"
+    ],
+    "join_order": [
+      {
+        "step": 1,
+        "build": "part(filtered_green, ~108782 rows)",
+        "probe": "lineitem(l_partkey)",
+        "structure": "bitset[2000001]",
+        "note": "Part filter cuts 94.57% of lineitem rows → reduces 60M to ~3.26M"
+      },
+      {
+        "step": 2,
+        "build": "supplier(100000 rows) → direct_array[100001]",
+        "probe": "qualifying_lineitem(l_suppkey)",
+        "structure": "direct_array",
+        "note": "Trivial O(1) array lookup, s_suppkey range 1..100000"
+      },
+      {
+        "step": 3,
+        "build": "nation(25 rows) → direct_array[25]",
+        "probe": "qualified_lineitem(s_nationkey)",
+        "structure": "direct_array",
+        "note": "25 entries — 650 bytes, fits in L1 cache"
+      },
+      {
+        "step": 4,
+        "build": "partsupp composite_hash (pre-built mmap, 0 build cost)",
+        "probe": "qualifying_lineitem(l_partkey, l_suppkey)",
+        "structure": "mmap_open_address_hash",
+        "note": "Use pre-built composite_hash.bin; retrieve ps_supplycost row_idx"
+      },
+      {
+        "step": 5,
+        "build": "orders orderkey_hash (pre-built mmap, 0 build cost)",
+        "probe": "qualifying_lineitem(l_orderkey)",
+        "structure": "mmap_open_address_hash",
+        "note": "Use pre-built orderkey_hash.bin; retrieve o_orderdate → EXTRACT(YEAR)"
+      }
+    ],
+    "subquery_strategy": "none",
+    "aggregation": "direct_array_2d",
+    "aggregation_details": {
+      "key": "(n_nationkey [0..24], year-1992 [0..6])",
+      "structure": "double[25][8]",
+      "groups_upper_bound": 175,
+      "strategy": "thread_local_flat_array_merge",
+      "note": "25 nations × 7 years = 175 groups max; direct 2D array avoids any hash overhead"
+    },
+    "filter_pushdown": [
+      {
+        "table": "part",
+        "predicate": "p_name LIKE '%green%' (strstr)",
+        "selectivity_estimate": 0.0544,
+        "qualifying_rows": 108782,
+        "applied_at": "scan_time",
+        "result": "bitset[2000001] of qualifying p_partkey values"
+      }
+    ],
+    "semi_join_reduction": {
+      "filter": "part_green_bitset on l_partkey",
+      "reduction_factor": 0.9457,
+      "rows_eliminated": 56726723,
+      "rows_remaining": 3259329
+    }
+  },
+  "physical_plan": {
+    "build_phase": {
+      "part_filter": {
+        "scan": "part/p_name.bin (2M × 56B = 112MB)",
+        "predicate": "strstr(name, 'green') != nullptr",
+        "output": "bitset<2000001> part_green (250KB, fits in L3)",
+        "also_needed": "part/p_partkey.bin — read row i to get partkey for bitset[partkey]=1",
+        "parallelism": "single_threaded (112MB, fast enough; avoids bitset sync overhead)"
+      },
+      "supplier_lookup": {
+        "scan": "supplier/s_suppkey.bin + supplier/s_nationkey.bin (100K rows, ~800KB total)",
+        "output": "int32_t s_nationkey_arr[100001] indexed by s_suppkey",
+        "size": "400KB — fits in L2 cache",
+        "parallelism": "single_threaded (trivial)"
+      },
+      "nation_lookup": {
+        "scan": "nation/n_nationkey.bin + nation/n_name.bin (25 rows, ~650B)",
+        "output": "char nation_name_arr[25][26] indexed by n_nationkey (0..24)",
+        "size": "650 bytes — fits in L1 cache",
+        "parallelism": "single_threaded (trivial)"
+      },
+      "partsupp_index": {
+        "source": "partsupp/indexes/composite_hash.bin",
+        "layout": "[uint32_t capacity=16777216] then [int64_t key, uint32_t row_idx, uint32_t _pad] × capacity",
+        "size": "16777216 × 16B + 4B = ~256MB",
+        "access": "mmap + madvise(MADV_WILLNEED) during prefetch phase",
+        "build_cost": "zero (pre-built index)",
+        "also_mmap": "partsupp/ps_supplycost.bin (8M × 8B = 64MB)"
+      },
+      "orders_index": {
+        "source": "orders/indexes/orderkey_hash.bin",
+        "layout": "[uint32_t capacity=33554432] then [int32_t key, uint32_t row_idx] × capacity",
+        "size": "33554432 × 8B + 4B = ~268MB",
+        "access": "mmap + madvise(MADV_WILLNEED) during prefetch phase",
+        "build_cost": "zero (pre-built index)",
+        "also_mmap": "orders/o_orderdate.bin (15M × 4B = 60MB)"
+      }
+    },
+    "data_structures": {
+      "part_filter": "bitset(2000001) — 250KB, O(1) lookup by partkey, L3-resident",
+      "supplier_join": "direct_array int32_t[100001] — 400KB, O(1) by s_suppkey",
+      "nation_join": "direct_array char[25][26] — 650B, O(1) by n_nationkey",
+      "partsupp_join": "mmap_open_address_hash (pre-built composite_hash.bin, capacity=16777216)",
+      "orders_join": "mmap_open_address_hash (pre-built orderkey_hash.bin, capacity=33554432)",
+      "aggregation": "thread_local double[25][8] flat_array — 1.6KB per thread, zero contention"
+    },
+    "lineitem_probe_loop": {
+      "columns_loaded": [
+        "lineitem/l_partkey.bin (4B × 60M = 240MB) — primary filter key",
+        "lineitem/l_suppkey.bin (4B × 60M = 240MB) — supplier join key",
+        "lineitem/l_orderkey.bin (4B × 60M = 240MB) — orders join key",
+        "lineitem/l_extendedprice.bin (8B × 60M = 480MB) — payload",
+        "lineitem/l_discount.bin (1B × 60M = 60MB) — byte_pack compressed payload",
+        "lineitem/l_quantity.bin (1B × 60M = 60MB) — byte_pack compressed payload"
+      ],
+      "lookup_tables": [
+        "lineitem/l_discount_lookup.bin (256 doubles = 2KB)",
+        "lineitem/l_quantity_lookup.bin (256 doubles = 2KB)"
+      ],
+      "per_row_logic": [
+        "1. if (!part_green_bitset[l_partkey]) continue;  // eliminates 94.57%",
+        "2. int32_t nationkey = s_nationkey_arr[l_suppkey];",
+        "3. int32_t year = extract_year(o_orderdate[orderkey_hash_lookup(l_orderkey)]);",
+        "4. double supplycost = ps_supplycost[composite_hash_lookup(l_partkey, l_suppkey)];",
+        "5. double amount = l_extendedprice*(1.0-disc_lut[l_discount]) - supplycost*qty_lut[l_quantity];",
+        "6. thread_local_agg[nationkey][year-1992] += amount;"
+      ],
+      "year_extraction": {
+        "method": "precomputed_epoch_boundaries",
+        "boundaries": "epoch_days for 1992-01-01=8035, 1993-01-01=8400, 1994-01-01=8766, 1995-01-01=9131, 1996-01-01=9496, 1997-01-01=9862, 1998-01-01=10227, 1999-01-01=10592",
+        "lookup": "binary search on 8-element array → O(1) effectively"
+      },
+      "composite_hash_probe": {
+        "key_encoding": "composite_key = (int64_t)l_partkey * 100003LL + l_suppkey",
+        "hash_fn": "h = (uint32_t)((uint64_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (capacity-1)",
+        "collision": "linear probing until key match or INT64_MIN"
+      },
+      "orderkey_hash_probe": {
+        "hash_fn": "h = ((uint32_t)l_orderkey * 2654435761u) & (capacity-1)",
+        "collision": "linear probing until key match or INT32_MIN"
+      }
+    },
+    "parallelism": {
+      "strategy": "morsel_driven",
+      "thread_count": "64 (nproc)",
+      "morsel_size": 65536,
+      "note": "64 threads × 65536 rows/morsel = 916 morsels covering 60M lineitem rows",
+      "build_phase": "single_threaded (small tables, trivial)",
+      "probe_phase": "OpenMP parallel_for over lineitem morsels",
+      "synchronization": "thread_local_agg_arrays — no contention during scan; sequential merge post-scan",
+      "merge_phase": "single_threaded sum of 64 double[25][8] arrays (trivial)"
+    },
+    "index_usage": [
+      {
+        "index": "composite_hash",
+        "file": "partsupp/indexes/composite_hash.bin",
+        "purpose": "O(1) lookup of ps_supplycost row_idx given (l_partkey, l_suppkey) composite key",
+        "build_cost": "zero — pre-built, mmap access"
+      },
+      {
+        "index": "orderkey_hash",
+        "file": "orders/indexes/orderkey_hash.bin",
+        "purpose": "O(1) lookup of o_orderdate row_idx given l_orderkey",
+        "build_cost": "zero — pre-built, mmap access"
+      }
+    ],
+    "scan_strategy": "single_pass_fused",
+    "memory_pattern": "streaming_sequential_lineitem_with_random_index_probes",
+    "io_strategy": {
+      "approach": "full_column_mmap_with_parallel_prefetch",
+      "note": "No range predicate on lineitem → no zone maps available; load all needed columns",
+      "column_load_order": [
+        "part/p_name.bin (filter column, 112MB)",
+        "part/p_partkey.bin (filter key, 8MB)",
+        "lineitem/l_partkey.bin (primary join key / filter, 240MB)",
+        "lineitem/l_suppkey.bin (join key, 240MB)",
+        "lineitem/l_orderkey.bin (join key, 240MB)",
+        "lineitem/l_discount.bin (compressed payload, 60MB)",
+        "lineitem/l_quantity.bin (compressed payload, 60MB)",
+        "lineitem/l_extendedprice.bin (payload, 480MB)",
+        "partsupp/indexes/composite_hash.bin (pre-built index, 256MB)",
+        "partsupp/ps_supplycost.bin (payload, 64MB)",
+        "orders/indexes/orderkey_hash.bin (pre-built index, 268MB)",
+        "orders/o_orderdate.bin (payload, 60MB)"
+      ],
+      "parallel_column_prefetch": true,
+      "prefetch_strategy": "issue madvise(MADV_WILLNEED) on all columns concurrently via thread pool before build phase",
+      "hdd_note": "HDD sequential bandwidth ~150MB/s; parallel prefetch issues concurrent I/O requests to maximize throughput"
+    },
+    "output_sort": {
+      "rows": 175,
+      "order": "nation ASC, o_year DESC",
+      "method": "std::sort on 175-element vector — trivial"
+    }
+  },
+  "estimated_cost": {
+    "dominant_phase": "lineitem_scan_and_index_probes",
+    "phase_breakdown": {
+      "part_filter_scan": "~50ms hot / ~800ms cold (112MB p_name + 8MB p_partkey)",
+      "supplier_nation_build": "<5ms (trivial small tables)",
+      "lineitem_parallel_scan_hot": "~400ms (1.32GB / 64 threads, ~21MB/thread; random index probes for 3.26M qualifying rows)",
+      "lineitem_parallel_scan_cold": "~900ms+ (dominated by HDD I/O for 1.32GB lineitem + 256MB composite_hash + 268MB orderkey_hash)",
+      "aggregation_merge": "<1ms (64 × 1.6KB arrays)",
+      "sort": "<1ms (175 rows)"
+    },
+    "estimated_ms_hot": 500,
+    "estimated_ms_cold": 1100,
+    "bottleneck_hot": "Random cache misses into composite_hash.bin (256MB) and orderkey_hash.bin (268MB) for 3.26M qualifying rows",
+    "bottleneck_cold": "HDD I/O volume: ~2.4GB total data (lineitem columns + indexes)"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "compile": {
+    "status": "pass",
+    "output": {
+      "stdout": "",
+      "stderr": "In file included from /home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q3/iter_4/q3.cpp:23:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h: In function ‘void run_Q3(const string&, const string&)’:\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:34: warning: ‘%02d’ directive writing between 2 and 4 bytes into a region of size between 0 and 4 [-Wformat-overflow=]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                                  ^~~~\n/home/jl4492/GenDB/src/gendb/utils/date_utils.h:52:23: note: directive argument in the range [-128, 127]\n   52 |     std::sprintf(buf, \"%04d-%02d-%02d\", y, m, d);\n      |                       ^~~~~~~~~~~~~~~~\nIn file included from /usr/include/stdio.h:894,\n                 from /usr/include/c++/11/cstdio:42,\n                 from /home/jl4492/GenDB/output/tpc-h/2026-02-22T01-02-38/queries/Q3/iter_4/q3.cpp:8:\n/usr/include/x86_64-linux-gnu/bits/stdio2.h:38:34: note: ‘__builtin___sprintf_chk’ output between 11 and 17 bytes into a destination of size 12\n   38 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,\n      |          ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   39 |                                   __glibc_objsize (__s), __fmt,\n      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n   40 |                                   __va_arg_pack ());\n      |                                   ~~~~~~~~~~~~~~~~~\n"
+    }
+  },
+  "run": {
+    "status": "pass",
+    "output": "[TIMING] data_loading: 1.24 ms\n[TIMING] dim_filter: 7.09 ms\n[TIMING] build_joins: 95.45 ms\n[TIMING] main_scan: 55.43 ms\n[TIMING] output: 0.88 ms\n[TIMING] aggregation_merge: 27.52 ms\n[TIMING] total: 189.21 ms\n",
+    "stderr": "",
+    "duration_ms": 218
+  },
+  "validation": {
+    "status": "pass",
+    "output": "{\n  \"match\": true,\n  \"queries\": {\n    \"Q3\": {\n      \"rows_expected\": 10,\n      \"rows_actual\": 10,\n      \"match\": true\n    }\n  }\n}\n"
+  },
+  "operation_timings": {
+    "data_loading": 76.09,
+    "dim_filter": 29.91,
+    "build_joins": 111.9,
+    "main_scan": 81.18,
+    "output": 20.42,
+    "aggregation_merge": 43.38,
+    "total": 363.71
+  },
+  "timing_ms": 524.775,
+  "cold_timing_ms": 343.28999999999996,
+  "hot_timing_ms": 181.485,
+  "hot_operation_timings": {
+    "data_loading": 1.29,
+    "dim_filter": 7.92,
+    "build_joins": 99.26,
+    "main_scan": 42.54,
+    "output": 0.91,
+    "aggregation_merge": 22.1,
+    "total": 175.55
+  },
+  "all_runs": [
+    {
+      "timing_ms": 343.28999999999996,
+      "operation_timings": {
+        "data_loading": 76.09,
+        "dim_filter": 29.91,
+        "build_joins": 111.9,
+        "main_scan": 81.18,
+        "output": 20.42,
+        "aggregation_merge": 43.38,
+        "total": 363.71
+      }
+    },
+    {
+      "timing_ms": 174.64000000000001,
+      "operation_timings": {
+        "data_loading": 1.29,
+        "dim_filter": 7.92,
+        "build_joins": 99.26,
+        "main_scan": 42.54,
+        "output": 0.91,
+        "aggregation_merge": 22.1,
+        "total": 175.55
+      }
+    },
+    {
+      "timing_ms": 188.33,
+      "operation_timings": {
+        "data_loading": 1.24,
+        "dim_filter": 7.09,
+        "build_joins": 95.45,
+        "main_scan": 55.43,
+        "output": 0.88,
+        "aggregation_merge": 27.52,
+        "total": 189.21
+      }
+    }
+  ]
+}

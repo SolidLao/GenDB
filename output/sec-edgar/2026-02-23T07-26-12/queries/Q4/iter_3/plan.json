@@ -1,0 +1,164 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "mmap_prebuilt_indexes",
+    "build_pre_eq_hash",
+    "scan_num_fused_probe_aggregate",
+    "merge_thread_local_agg",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "build": "sub (filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "index": "sub_adsh_hash",
+      "build_cardinality": 5300,
+      "notes": "mmap sub_adsh_hash (262144 slots x 8B = 2MB); probe adsh_code -> row_id; check sic[row_id] BETWEEN 4000 AND 4999 at probe time; retrieve sic[row_id] and cik[row_id]. Zero build cost (P11)."
+    },
+    {
+      "step": 2,
+      "build": "tag (filtered: abstract = 0)",
+      "probe": "(num.tag_code, num.version_code)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "index": "tag_tv_hash",
+      "build_cardinality": 1070662,
+      "notes": "mmap tag_tv_hash (4194304 slots x 16B = 64MB); probe (tag_code, version_code) -> row_id using hash h = tag_code*2654435761ULL ^ version_code*40503ULL; check abstract[row_id] == 0 at probe time; retrieve tlabel[row_id]. Empty slot sentinel: tag_code == INT32_MIN (use std::fill, not memset -- C20). Zero build cost (P11)."
+    },
+    {
+      "step": 3,
+      "build": "pre (filtered: stmt = 'EQ')",
+      "probe": "(num.adsh_code, num.tag_code, num.version_code)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1060000,
+      "notes": "Runtime open-addressing hash SET of (adsh_code, tag_code, version_code). Scan pre using pre_stmt_zone_map: skip blocks where max_val < eq_code || min_val > eq_code. ~1.06M qualifying rows. cap = next_pow2(1060000*2) = 2097152 (2^21). Slot: {int32_t adsh_code; int32_t tag_code; int32_t version_code; int32_t _pad} = 16B. Total: 2^21 * 16 = 32MB (fits L3=44MB). Sentinel: adsh_code == INT32_MIN (std::fill, C20). Bounded probing with for-loop (C24). Hash: composite_hash3(adsh_code, tag_code, version_code)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.872,
+      "method": "dict_code_compare: int16_t usd_code = find_code(uom_dict, 'USD') at startup (C2)",
+      "zone_map": "num_uom_zone_map",
+      "zone_map_skip": "skip block if max_val < usd_code || min_val > usd_code"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "std::isnan(value) check; skip row if NaN"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.11,
+      "method": "dict_code_compare: int16_t eq_code = find_code(stmt_dict, 'EQ') at startup (C2)",
+      "zone_map": "pre_stmt_zone_map",
+      "zone_map_skip": "skip block if max_val < eq_code || min_val > eq_code; pre is sorted by stmt so EQ blocks are contiguous"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.061,
+      "method": "range_check at probe time: sic[row_id] >= 4000 && sic[row_id] <= 4999"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0,
+      "method": "value_check at probe time: abstract[row_id] == 0"
+    }
+  ],
+  "data_structures": {
+    "sub_lookup": "pre_built_mmap_index: sub_adsh_hash (adsh_code -> row_id); 262144 slots x 8B = 2MB; sic/cik filtered at probe",
+    "tag_lookup": "pre_built_mmap_index: tag_tv_hash ((tag_code,version_code) -> row_id); 4194304 slots x 16B = 64MB; abstract filtered at probe",
+    "pre_eq_hash": "runtime open-addressing hash_set: key=(adsh_code,tag_code,version_code) packed 3xi32 + pad; cap=2097152; slot=16B; total=32MB; sentinel adsh_code=INT32_MIN via std::fill (C20); bounded for-loop probing (C24)",
+    "aggregation": "thread_local open-addressing hash_map: key=(sic:int32,tlabel_code:int32); value={sum_cents:int64,agg_count:int64,cik_set:flat_hash_set<int32>}; cap=8192 per thread (full group cardinality, C9); merge post-barrier (P20)",
+    "cik_distinct": "per-group flat_hash_set<int32_t> cik_set for COUNT(DISTINCT s.cik); evaluated during merge for HAVING >= 2"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "build_pre_eq_hash": "single-threaded (32MB build, fast zone-map scan of pre)",
+    "scan_num": "parallel morsel-driven over 39.4M num rows; each thread holds own agg hash map (cap=8192) and cik_sets",
+    "aggregation_merge": "sequential merge of thread-local maps post-barrier (~5K groups x nthreads; fast); apply HAVING COUNT(DISTINCT cik) >= 2 during merge (P17)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_zone_map",
+      "file": "indexes/num_uom_zone_map.bin",
+      "purpose": "skip non-USD blocks during num scan; 395 blocks of 100K rows"
+    },
+    {
+      "index": "pre_stmt_zone_map",
+      "file": "indexes/pre_stmt_zone_map.bin",
+      "purpose": "skip non-EQ blocks during pre build scan; 97 blocks of 100K rows"
+    },
+    {
+      "index": "sub_adsh_hash",
+      "file": "indexes/sub_adsh_hash.bin",
+      "purpose": "zero-cost adsh_code -> sub row_id lookup; sic/cik retrieved from sub column arrays"
+    },
+    {
+      "index": "tag_tv_hash",
+      "file": "indexes/tag_tv_hash.bin",
+      "purpose": "zero-cost (tag_code,version_code) -> tag row_id lookup; abstract/tlabel retrieved from tag column arrays"
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "key_columns": ["s.sic (int32)", "t.tlabel_code (int32)"],
+    "notes": "p.stmt is constant 'EQ' (single-value filter) — store eq_code as scalar, output literal at decode; GROUP BY key is effectively (sic, tlabel_code) (C15)",
+    "aggregates": [
+      {
+        "func": "COUNT_DISTINCT",
+        "column": "s.cik",
+        "output": "num_companies",
+        "impl": "per-group flat_hash_set<int32_t> cik_set; insert cik[sub_row_id] each match; size() at output"
+      },
+      {
+        "func": "SUM",
+        "column": "n.value",
+        "output": "total_value",
+        "impl": "int64_t sum_cents += llround(value * 100.0) per qualifying row (C29)"
+      },
+      {
+        "func": "AVG",
+        "column": "n.value",
+        "output": "avg_value",
+        "impl": "int64_t agg_count++; avg = (double)sum_cents / agg_count / 100.0 (C29)"
+      }
+    ],
+    "having": "cik_set.size() >= 2 (applied during post-merge phase)",
+    "hash_capacity": 8192
+  },
+  "precision": {
+    "rule": "C29",
+    "reason": "n.value max=1e14 exceeds double safe-accumulation threshold of 1e13",
+    "sum_accumulation": "int64_t sum_cents += llround(value * 100.0)",
+    "total_value_output": "printf(\"%lld.%02lld\", (long long)(sum_cents/100), (long long)std::abs(sum_cents%100))",
+    "avg_value_output": "printf(\"%.2f\", (double)sum_cents / agg_count / 100.0)"
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "sort_impl": "std::partial_sort or fixed min-heap of 500 (O(n log 500))",
+    "decode": [
+      "tlabel_code -> string via tag/tlabel_dict.txt (C2, C18)",
+      "stmt output: literal 'EQ' string (constant filter value)"
+    ]
+  },
+  "hash_capacities": {
+    "pre_eq_hash": "next_pow2(1060000 * 2) = 2097152 (C9, P23)",
+    "agg_thread_local": "next_pow2(5000 * 2) = 8192 per thread — full group cardinality, not groups/nthreads (C9)"
+  },
+  "execution_target": "cpp"
+}

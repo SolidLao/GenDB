@@ -1,0 +1,81 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 141
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "98 row(s) differ across 3 column(s)",
+          "column_failures": {
+            "name": {
+              "category": "exact",
+              "failure_count": 98,
+              "samples": [
+                {
+                  "expected": "FEDERAL NATIONAL MORTGAGE ASSOCIATION FANNIE MAE",
+                  "actual": "HSBC HOLDINGS PLC",
+                  "row": 2,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "JPMORGAN CHASE & CO",
+                  "actual": "10X CAPITAL VENTURE ACQUISITION CORP. II",
+                  "row": 3,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            },
+            "cik": {
+              "category": "exact",
+              "failure_count": 98,
+              "samples": [
+                {
+                  "expected": "310522",
+                  "actual": "1089113",
+                  "abs_diff": 778591,
+                  "rel_diff_pct": 250.7362,
+                  "row": 2,
+                  "pattern": "value_mismatch"
+                },
+                {
+                  "expected": "19617",
+                  "actual": "1848898",
+                  "abs_diff": 1829281,
+                  "rel_diff_pct": 9324.9783,
+                  "row": 3,
+                  "pattern": "scale_error"
+                }
+              ]
+            }
+          },
+          "mismatch_patterns": {
+            "string_mismatch": 3,
+            "value_mismatch": 5,
+            "scale_error": 1
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 121.93666666666667,
+  "hot_timing_ms": 121.93666666666667,
+  "operation_timings": {
+    "data_loading": 32.77,
+    "dim_filter": 0.24,
+    "main_scan": 26.26,
+    "aggregation_merge": 12.47,
+    "output": 0.24,
+    "total": 118.13
+  }
+}

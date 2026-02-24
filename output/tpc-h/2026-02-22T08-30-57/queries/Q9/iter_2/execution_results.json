@@ -1,0 +1,22 @@
+{
+  "compile": {
+    "status": "fail",
+    "output": "/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp: In function ‘void run_q9(const string&, const string&)’:\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:209:56: error: ‘ps_mask’ was not declared in this scope; did you mean ‘ps_hash’?\n  209 |                 uint32_t ps_slot_idx = ps_hash(ps_key, ps_mask);\n      |                                                        ^~~~~~~\n      |                                                        ps_hash\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:211:50: error: ‘ps_ht_size’ was not declared in this scope\n  211 |                 for (uint32_t probe = 0; probe < ps_ht_size; probe++) {\n      |                                                  ^~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:212:27: error: ‘PSSlot’ does not name a type\n  212 |                     const PSSlot& sl = ps_slots[ps_slot_idx];\n      |                           ^~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:213:25: error: ‘sl’ was not declared in this scope\n  213 |                     if (sl.key == INT64_MIN) break;\n      |                         ^~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:214:25: error: ‘sl’ was not declared in this scope\n  214 |                     if (sl.key == ps_key) {\n      |                         ^~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:215:34: error: ‘ps_positions’ was not declared in this scope\n  215 |                         ps_row = ps_positions[sl.offset];\n      |                                  ^~~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:120:24: warning: unused variable ‘ps_local_ht’ [-Wunused-variable]\n  120 |     static PSLocalSlot ps_local_ht[2097152];\n      |                        ^~~~~~~~~~~\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp: At global scope:\n/home/jl4492/GenDB/output/tpc-h/2026-02-22T08-30-57/queries/Q9/iter_2/q9.cpp:120:24: warning: ‘ps_local_ht’ defined but not used [-Wunused-variable]\n"
+  },
+  "run": {
+    "status": "fail",
+    "output": "",
+    "stderr": "",
+    "duration_ms": 0
+  },
+  "validation": {
+    "status": "skipped",
+    "output": ""
+  },
+  "operation_timings": {},
+  "timing_ms": null,
+  "cold_timing_ms": null,
+  "hot_timing_ms": null,
+  "hot_operation_timings": {},
+  "all_runs": []
+}

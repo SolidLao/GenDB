@@ -1,0 +1,109 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 903
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "3 row(s) differ",
+          "sample_mismatches": [
+            {
+              "row": 3,
+              "expected": [
+                "ALLY FINANCIAL INC.",
+                "40729.00",
+                "26713994000190.67"
+              ],
+              "actual": [
+                "ALLY FINANCIAL INC.",
+                "40729.00",
+                "26713994000190.66"
+              ],
+              "cell_details": [
+                {
+                  "expected": "26713994000190.67",
+                  "actual": "26713994000190.66",
+                  "abs_diff": 0.011719,
+                  "magnitude": 26713994000190.67,
+                  "relative_diff": 0,
+                  "pattern": "precision_loss",
+                  "col": 2
+                }
+              ]
+            },
+            {
+              "row": 4,
+              "expected": [
+                "ALPHABET INC.",
+                "1652044.00",
+                "44584616000657.84"
+              ],
+              "actual": [
+                "ALPHABET INC.",
+                "1652044.00",
+                "44584616000657.83"
+              ],
+              "cell_details": [
+                {
+                  "expected": "44584616000657.84",
+                  "actual": "44584616000657.83",
+                  "abs_diff": 0.015625,
+                  "magnitude": 44584616000657.84,
+                  "relative_diff": 0,
+                  "pattern": "precision_loss",
+                  "col": 2
+                }
+              ]
+            },
+            {
+              "row": 8,
+              "expected": [
+                "AMERICAN INTERNATIONAL GROUP, INC.",
+                "5272.00",
+                "70762683001798.19"
+              ],
+              "actual": [
+                "AMERICAN INTERNATIONAL GROUP, INC.",
+                "5272.00",
+                "70762683001798.20"
+              ],
+              "cell_details": [
+                {
+                  "expected": "70762683001798.19",
+                  "actual": "70762683001798.20",
+                  "abs_diff": 0.015625,
+                  "magnitude": 70762683001798.19,
+                  "relative_diff": 0,
+                  "pattern": "precision_loss",
+                  "col": 2
+                }
+              ]
+            }
+          ],
+          "mismatch_patterns": {
+            "precision_loss": 26
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 883.9266666666666,
+  "hot_timing_ms": 883.9266666666666,
+  "operation_timings": {
+    "data_loading": 36.58,
+    "main_scan": 839.6,
+    "output": 0.83,
+    "total": 877.91
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 346
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q4": {
+          "rows_expected": 500,
+          "rows_actual": 500,
+          "match": false,
+          "error": "500 row(s) differ across 9 column(s)",
+          "column_failures": {
+            "tlabel": {
+              "category": "exact",
+              "failure_count": 489,
+              "samples": [
+                {
+                  "expected": "Equity, Including Portion Attributable to Noncontrolling Interest",
+                  "actual": "Equity",
+                  "row": 0,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "Stockholders' Equity, Including Portion Attributable to Noncontrolling Interest",
+                  "actual": "Stockholders' Equity",
+                  "row": 1,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            },
+            "stmt": {
+              "category": "exact",
+              "failure_count": 371,
+              "samples": [
+                {
+                  "expected": "EQ",
+                  "actual": "Including Portion Attributable to Noncontrolling Interest",
+                  "row": 0,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "EQ",
+                  "actual": "Including Portion Attributable to Noncontrolling Interest",
+                  "row": 1,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            }
+          },
+          "mismatch_patterns": {
+            "string_mismatch": 9,
+            "value_mismatch": 9
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 304.59999999999997,
+  "hot_timing_ms": 304.59999999999997,
+  "operation_timings": {
+    "data_loading": 50.63,
+    "dim_filter": 0.18,
+    "main_scan": 41.4,
+    "aggregation_merge": 40.46,
+    "output": 0.88,
+    "total": 300.49
+  }
+}

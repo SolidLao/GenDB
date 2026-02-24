@@ -5,6 +5,7 @@
 
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { defaults } from "./gendb.config.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,8 +15,8 @@ export const BENCHMARKS_DIR = resolve(PROJECT_ROOT, "benchmarks");
 export const OUTPUT_DIR = resolve(PROJECT_ROOT, "output");
 export const AGENTS_DIR = resolve(__dirname, "agents");
 
-export const DEFAULT_SCHEMA = resolve(BENCHMARKS_DIR, "tpc-h/schema.sql");
-export const DEFAULT_QUERIES = resolve(BENCHMARKS_DIR, "tpc-h/queries.sql");
+export const DEFAULT_SCHEMA = resolve(BENCHMARKS_DIR, defaults.targetBenchmark, "schema.sql");
+export const DEFAULT_QUERIES = resolve(BENCHMARKS_DIR, defaults.targetBenchmark, "queries.sql");
 
 /** Resolve the data directory for a given benchmark and scale factor. */
 export function getDataDir(benchmark, scaleFactor) {

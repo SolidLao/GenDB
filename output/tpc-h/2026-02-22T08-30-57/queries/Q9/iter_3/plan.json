@@ -1,0 +1,166 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "filter_part",
+    "build_supplier_array",
+    "build_nation_array",
+    "mmap_partsupp_hash_index",
+    "mmap_orders_hash_index",
+    "parallel_scan_lineitem",
+    "merge_aggregates",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "part",
+      "rows_in": 2000000,
+      "predicate": "strstr(p_name + i*56, \"green\") != nullptr",
+      "rows_out": 106000,
+      "output": "partkey_bitset[2000001] (flat bool/bitset array, direct index by p_partkey)"
+    },
+    {
+      "step": 2,
+      "op": "build_direct_array",
+      "table": "supplier",
+      "rows_in": 100000,
+      "key": "s_suppkey (dense 1..100000)",
+      "value": "s_nationkey",
+      "output": "suppkey_to_nationkey[100001] int32_t direct array"
+    },
+    {
+      "step": 3,
+      "op": "build_direct_array",
+      "table": "nation",
+      "rows_in": 25,
+      "key": "n_nationkey (0..24)",
+      "value": "n_name (char[26], strnlen-trimmed to std::string)",
+      "output": "nation_name[25] string array; nation_sort_idx[25] for stable ordering"
+    },
+    {
+      "step": 4,
+      "op": "mmap_prebuilt_index",
+      "index": "partsupp_keys_hash",
+      "file": "indexes/partsupp_keys_hash.bin",
+      "layout": "uint32_t ht_size=16777216; then ht_size x {int64_t key, uint32_t offset, uint32_t count} (16 bytes/slot); then 8000000 x uint32_t row_idx",
+      "sentinel": "key == INT64_MIN (use std::fill, NOT memset)",
+      "hash_fn": "uint64_t h = composite_key * 0x9E3779B97F4A7C15ULL; h ^= h >> 33; return h & mask",
+      "composite_key": "(int64_t)l_partkey << 32 | (uint32_t)l_suppkey",
+      "purpose": "probe with (l_partkey, l_suppkey) -> ps_row_idx -> ps_supplycost"
+    },
+    {
+      "step": 5,
+      "op": "mmap_prebuilt_index",
+      "index": "orders_orderkey_hash",
+      "file": "indexes/orders_orderkey_hash.bin",
+      "layout": "uint32_t ht_size=33554432; then ht_size x {int32_t key, uint32_t offset, uint32_t count} (12 bytes/slot); then 15000000 x uint32_t row_idx",
+      "sentinel": "key == INT32_MIN (use std::fill, NOT memset)",
+      "hash_fn": "(uint32_t)((uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL >> 32) & (ht_size-1)",
+      "purpose": "probe with l_orderkey -> o_row_idx -> o_orderdate -> extract_year"
+    },
+    {
+      "step": 6,
+      "op": "parallel_probe_and_aggregate",
+      "table": "lineitem",
+      "rows_in": 59986052,
+      "parallelism": "morsel_driven, 64 threads, morsel_size=65536",
+      "per_row_pipeline": [
+        "check partkey_bitset[l_partkey] — skip if false (~94.7% skip)",
+        "probe partsupp_keys_hash with (l_partkey<<32 | (uint32_t)l_suppkey) — bounded for-loop, probe < ht_size — get ps_row_idx",
+        "load ps_supplycost = ps_supplycost_data[ps_row_idx] (native double)",
+        "probe orders_orderkey_hash with l_orderkey — bounded for-loop — get o_row_idx",
+        "load o_orderdate = o_orderdate_data[o_row_idx] (int32_t epoch days)",
+        "year = extract_year(o_orderdate) using date_utils.h (requires init_date_tables() at startup)",
+        "nation_idx = suppkey_to_nationkey[l_suppkey]",
+        "amount = l_extendedprice*(1.0 - l_discount) - ps_supplycost*l_quantity  (all native double, no scale factor)",
+        "slot = nation_idx * 7 + (year - 1992)",
+        "thread_local_agg[slot] += amount"
+      ],
+      "rows_passing_partkey_filter": 3180000,
+      "rows_out": 3180000
+    },
+    {
+      "step": 7,
+      "op": "merge_thread_local_aggregates",
+      "groups": 175,
+      "method": "sequential_sum over 64 thread-local double[175] arrays into final double[175]"
+    },
+    {
+      "step": 8,
+      "op": "sort_and_emit",
+      "rows": 175,
+      "order_by": ["nation ASC", "o_year DESC"],
+      "method": "std::sort on 175-element vector of (nation_string, year, sum_profit)"
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "strstr(p_name + i*56, \"green\") != nullptr",
+      "selectivity": 0.053,
+      "rows_in": 2000000,
+      "rows_out": 106000
+    }
+  ],
+  "data_structures": {
+    "part_filter": "flat_array bool[2000001] (partkey_bitset, direct index by partkey, ~2MB, cache-friendly for lineitem probe)",
+    "supplier_lookup": "direct_array int32_t[100001] suppkey_to_nationkey (dense keys 1..100000, ~400KB)",
+    "nation_lookup": "direct_array std::string[25] nation_name indexed by nationkey (25 entries)",
+    "partsupp_join": "pre_built_index mmap (partsupp_keys_hash.bin, 16M slots x 16 bytes = 256MB, zero build cost)",
+    "orders_join": "pre_built_index mmap (orders_orderkey_hash.bin, 33M slots x 12 bytes = 384MB, zero build cost)",
+    "aggregation": "direct_array double[175] per thread (nation_idx*7 + (year-1992)), 64 thread-local copies"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "64",
+    "morsel_size": 65536,
+    "parallel_phases": ["scan_part (optional, small)", "scan_lineitem (primary parallel phase)"],
+    "serial_phases": ["build_supplier_array", "build_nation_array", "mmap_index_setup", "merge_aggregates", "sort_output"],
+    "thread_local_state": "double agg[175] zero-initialized per thread"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_keys_hash",
+      "file": "indexes/partsupp_keys_hash.bin",
+      "purpose": "O(1) lookup (l_partkey, l_suppkey) -> ps_row_idx -> ps_supplycost, zero build cost"
+    },
+    {
+      "index": "orders_orderkey_hash",
+      "file": "indexes/orders_orderkey_hash.bin",
+      "purpose": "O(1) lookup l_orderkey -> o_row_idx -> o_orderdate, zero build cost"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_groups": {
+    "count": 175,
+    "encoding": "slot = nation_idx * 7 + (year - 1992)",
+    "year_range": "1992..1998 (slots 0..6)",
+    "nation_range": "0..24 (25 nations by nationkey)"
+  },
+  "date_handling": {
+    "rule": "C1+C11: call gendb::init_date_tables() once at top of main(); use extract_year(o_orderdate) from date_utils.h",
+    "column": "o_orderdate (int32_t epoch days since 1970-01-01)"
+  },
+  "decimal_handling": {
+    "l_extendedprice": "native double, no scale factor",
+    "l_discount": "native double, no scale factor",
+    "l_quantity": "native double, no scale factor",
+    "ps_supplycost": "native double, no scale factor",
+    "amount_formula": "l_extendedprice * (1.0 - l_discount) - ps_supplycost * l_quantity"
+  },
+  "correctness_checklist": [
+    "C1: date_utils.h for o_orderdate epoch-day extraction",
+    "C11: gendb::init_date_tables() at top of main()",
+    "C20: std::fill (not memset) for INT32_MIN/INT64_MIN sentinel initialization in any runtime-built tables",
+    "C24: bounded for-loop probing (probe < ht_size) in all hash index lookups",
+    "C22: use exact DB path from Query Guide: /home/jl4492/GenDB/benchmarks/tpc-h/gendb/sf10.gendb"
+  ],
+  "output": {
+    "columns": ["nation", "o_year", "sum_profit"],
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "row_count": 175
+  },
+  "execution_target": "cpp"
+}

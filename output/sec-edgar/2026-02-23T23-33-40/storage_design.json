@@ -1,0 +1,159 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "sf3.gendb",
+    "layout": "one .bin file per column under <table>/ subdirectory"
+  },
+  "tables": {
+    "sub": {
+      "columns": [
+        {"name": "adsh",       "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "sub/adsh_dict.txt",      "note": "global dict shared with num.adsh, pre.adsh — same file content"},
+        {"name": "cik",        "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "name",       "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "sub/name_dict.txt"},
+        {"name": "sic",        "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "countryba",  "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/countryba_dict.txt"},
+        {"name": "stprba",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/stprba_dict.txt"},
+        {"name": "cityba",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/cityba_dict.txt"},
+        {"name": "countryinc", "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/countryinc_dict.txt"},
+        {"name": "form",       "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/form_dict.txt"},
+        {"name": "period",     "cpp_type": "int32_t", "semantic_type": "yyyymmdd_integer", "note": "raw YYYYMMDD integer — NOT epoch days"},
+        {"name": "fy",         "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "fp",         "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/fp_dict.txt"},
+        {"name": "filed",      "cpp_type": "int32_t", "semantic_type": "yyyymmdd_integer", "note": "raw YYYYMMDD integer — NOT epoch days"},
+        {"name": "prevrpt",    "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "nciks",      "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "afs",        "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/afs_dict.txt"},
+        {"name": "wksi",       "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "fye",        "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "sub/fye_dict.txt"}
+      ],
+      "skipped_columns": ["accepted", "instance"],
+      "file_format": {
+        "filename": "sub.csv", "delimiter": ",",
+        "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"]
+      },
+      "sort_order": [],
+      "block_size": 65536,
+      "estimated_rows": "86135",
+      "indexes": [
+        {
+          "name": "sub_adsh_index",
+          "type": "hash",
+          "columns": ["adsh"],
+          "file": "indexes/sub_adsh_index.bin",
+          "layout": "uint32_t cap | cap × {int32_t adsh_code, int32_t sub_row} | sentinel: adsh_code = -1",
+          "hash_fn": "hash_i32(k): uint32_t x=k; x=((x>>16)^x)*0x45d9f3b; x=((x>>16)^x)*0x45d9f3b; x=(x>>16)^x; return x",
+          "probe": "slot = hash_i32(adsh_code) & mask; bounded loop cap iterations"
+        }
+      ]
+    },
+    "num": {
+      "columns": [
+        {"name": "adsh",    "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "num/adsh_dict.txt",    "note": "same content as sub/adsh_dict.txt"},
+        {"name": "tag",     "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "num/tag_dict.txt",     "note": "global dict shared with pre/tag_dict.txt and tag/tag_dict.txt"},
+        {"name": "version", "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "num/version_dict.txt", "note": "global dict shared with pre/version_dict.txt and tag/version_dict.txt"},
+        {"name": "ddate",   "cpp_type": "int32_t", "semantic_type": "yyyymmdd_integer", "note": "raw YYYYMMDD integer — NOT epoch days. Filter: BETWEEN 20230101 AND 20231231 as integer comparison"},
+        {"name": "qtrs",    "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "uom",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "num/uom_dict.txt"},
+        {"name": "coreg",   "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "num/coreg_dict.txt", "note": "empty string = NULL, stored as code 0"},
+        {"name": "value",   "cpp_type": "double",  "semantic_type": "decimal",
+          "note": "C29 WARNING: max observed ~3e15 >> 1e13. SUM/AVG MUST accumulate as int64_t cents: iv=llround(v*100.0); sum_cents+=iv; output sum_cents/100 with abs(sum_cents%100) for decimal. NULL rows store NaN (std::numeric_limits<double>::quiet_NaN())."}
+      ],
+      "skipped_columns": ["footnote"],
+      "file_format": {
+        "filename": "num.csv", "delimiter": ",",
+        "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"]
+      },
+      "sort_order": [],
+      "block_size": 65536,
+      "estimated_rows": "39401761",
+      "indexes": [
+        {
+          "name": "num_ddate_zone_map",
+          "type": "zone_map",
+          "columns": ["ddate"],
+          "file": "indexes/num_ddate_zone_map.bin",
+          "layout": "uint32_t num_blocks | per block: int32_t min_ddate, int32_t max_ddate, uint32_t row_count",
+          "note": "YYYYMMDD integer range per 65536-row block; use for Q24 BETWEEN filter skip"
+        }
+      ]
+    },
+    "tag": {
+      "columns": [
+        {"name": "tag",      "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "tag/tag_dict.txt",      "note": "same content as num/tag_dict.txt"},
+        {"name": "version",  "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "tag/version_dict.txt",  "note": "same content as num/version_dict.txt"},
+        {"name": "custom",   "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "abstract", "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "datatype", "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "tag/datatype_dict.txt"},
+        {"name": "iord",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "tag/iord_dict.txt"},
+        {"name": "crdr",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "tag/crdr_dict.txt"},
+        {"name": "tlabel",   "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "tag/tlabel_dict.txt"}
+      ],
+      "skipped_columns": ["doc"],
+      "file_format": {
+        "filename": "tag.csv", "delimiter": ",",
+        "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"]
+      },
+      "sort_order": [],
+      "block_size": 65536,
+      "estimated_rows": "1070662",
+      "indexes": [
+        {
+          "name": "tag_index",
+          "type": "hash",
+          "columns": ["tag","version"],
+          "file": "indexes/tag_index.bin",
+          "layout": "uint32_t cap | cap × {int32_t tag_code, int32_t version_code, int32_t tag_row} | sentinel: tag_code = -1",
+          "hash_fn": "hash_i32x2(a,b): uint64_t h=(uint64_t)(uint32_t)a*2654435761ULL^(uint64_t)(uint32_t)b*2246822519ULL; return (uint32_t)(h^(h>>32))",
+          "probe": "slot = hash_i32x2(tag_code,version_code) & mask; bounded loop cap iterations"
+        }
+      ]
+    },
+    "pre": {
+      "columns": [
+        {"name": "adsh",     "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "pre/adsh_dict.txt",    "note": "same content as sub/adsh_dict.txt"},
+        {"name": "report",   "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "line",     "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "stmt",     "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "pre/stmt_dict.txt"},
+        {"name": "inpth",    "cpp_type": "int32_t", "semantic_type": "integer"},
+        {"name": "rfile",    "cpp_type": "int16_t", "semantic_type": "dict_string", "encoding": "int16_dict", "dict_file": "pre/rfile_dict.txt"},
+        {"name": "tag",      "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "pre/tag_dict.txt",     "note": "same content as tag/tag_dict.txt"},
+        {"name": "version",  "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "pre/version_dict.txt", "note": "same content as tag/version_dict.txt"},
+        {"name": "plabel",   "cpp_type": "int32_t", "semantic_type": "dict_string", "encoding": "int32_dict", "dict_file": "pre/plabel_dict.txt"},
+        {"name": "negating", "cpp_type": "int32_t", "semantic_type": "integer"}
+      ],
+      "file_format": {
+        "filename": "pre.csv", "delimiter": ",",
+        "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"]
+      },
+      "sort_order": [],
+      "block_size": 65536,
+      "estimated_rows": "9600799",
+      "indexes": [
+        {
+          "name": "pre_join_index",
+          "type": "hash_multivalue",
+          "columns": ["adsh","tag","version"],
+          "file": "indexes/pre_join_index.bin",
+          "layout": "uint32_t cap | cap × PreSlot{int32_t adsh_code, int32_t tag_code, int32_t version_code, uint32_t payload_offset, uint32_t payload_count} | payload pool: uint32_t pre_row_indices[] | sentinel: adsh_code = -1 | pool_start_offset = 4 + cap*20 bytes",
+          "hash_fn": "hash_i32x3(a,b,c): uint64_t h=(uint64_t)(uint32_t)a*2654435761ULL; h^=(uint64_t)(uint32_t)b*2246822519ULL; h^=(uint64_t)(uint32_t)c*3266489917ULL; return (uint32_t)(h^(h>>32))",
+          "probe": "slot = hash_i32x3(adsh_code,tag_code,version_code) & mask; bounded loop cap iterations; match on all 3 keys",
+          "note": "Used for Q4/Q6 join and Q24 anti-join (p.adsh IS NULL check)"
+        }
+      ]
+    }
+  },
+  "type_mappings": {
+    "INTEGER":              "int32_t",
+    "DOUBLE":               "double",
+    "VARCHAR_small_card":   "int16_t (dict-encoded, <65535 distinct values)",
+    "VARCHAR_large_card":   "int32_t (dict-encoded, >=65535 or unknown distinct values)"
+  },
+  "date_encoding": "NOT epoch days — all date-like columns in this schema are declared INTEGER with YYYYMMDD format and stored as raw int32_t. Do NOT apply date_utils.h conversions.",
+  "hardware_config": {
+    "cpu_cores": "64",
+    "l3_cache_mb": "44",
+    "disk_type": "hdd",
+    "total_memory_gb": "376",
+    "simd": "avx512f,avx512bw,avx512vl,avx2"
+  }
+}

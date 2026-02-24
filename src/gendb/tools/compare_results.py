@@ -7,7 +7,7 @@ TPC-H mode: positional comparison (validates ORDER BY correctness).
 Outputs JSON summary to stdout.
 
 Usage:
-    python3 compare_results.py <expected_dir> <actual_dir> [--precision 2] [--tpch]
+    python3 compare_results.py <expected_dir> <actual_dir> [--precision 2] [--tpch] [--financial]
 
 With --tpch, uses TPC-H validation rules (TPC-H spec 2.1.4.4):
   a) Singleton column values and COUNT aggregates: exact match
@@ -77,6 +77,232 @@ def read_csv_raw(path, sort=False):
     if sort:
         rows.sort()
     return [h.strip().lower() for h in headers], rows
+
+
+def classify_financial_column(header):
+    """Classify a column header into a financial tolerance category using heuristics.
+
+    General-purpose: works for any financial workload (SEC-EDGAR, etc.).
+    Reuses TPC-H tolerance categories so compare_tpch_value() handles the math.
+
+    Returns one of:
+      'exact_count'  — count-like columns: exact match
+      'sum_money'    — monetary sums/totals: abs diff <= $100
+      'avg'          — averages: 1% relative tolerance
+      'exact'        — everything else: exact match
+    """
+    h = header.strip().lower()
+    # Count columns — exact
+    if h in ("cnt", "count") or h.endswith("_count") or h.endswith("_cnt"):
+        return "exact_count"
+    # num_* columns (but NOT num_value which is a monetary amount)
+    if h.startswith("num_") and h != "num_value":
+        return "exact_count"
+    # Monetary sums/totals — $100 tolerance
+    if (h.startswith("total_") or h == "total" or h.startswith("sum_")
+            or h in ("revenue", "total_revenue", "value")):
+        return "sum_money"
+    # Averages — 1% relative tolerance
+    if h.startswith("avg_"):
+        return "avg"
+    # Everything else — exact
+    return "exact"
+
+
+def _detect_order_column(headers, categories, rows):
+    """Detect the ORDER BY column by finding a monotonically non-increasing numeric column.
+
+    Scans numeric columns (sum_money, avg, exact_count, exact) and returns the index
+    of the first column whose values are monotonically non-increasing in the expected rows.
+    Returns None if no such column is found.
+    """
+    numeric_cats = {"sum_money", "avg", "exact_count", "exact"}
+    for col_idx in range(len(headers)):
+        cat = categories[col_idx] if col_idx < len(categories) else "exact"
+        if cat not in numeric_cats:
+            continue
+        # Check if this column is monotonically non-increasing
+        prev_val = None
+        is_monotonic = True
+        has_values = False
+        for row in rows:
+            if col_idx >= len(row):
+                is_monotonic = False
+                break
+            val_s = row[col_idx].strip()
+            if val_s == "" or val_s.lower() in ("null", "nan", "none"):
+                continue
+            try:
+                val_f = float(val_s)
+            except (ValueError, OverflowError):
+                is_monotonic = False
+                break
+            has_values = True
+            if prev_val is not None and val_f > prev_val:
+                is_monotonic = False
+                break
+            prev_val = val_f
+        if is_monotonic and has_values and prev_val is not None:
+            # Also require at least some variation (not all same value)
+            # to avoid false positives on constant columns
+            first_val = None
+            for row in rows:
+                if col_idx < len(row):
+                    try:
+                        first_val = float(row[col_idx].strip())
+                        break
+                    except (ValueError, OverflowError):
+                        continue
+            if first_val is not None and first_val != prev_val:
+                return col_idx
+    return None
+
+
+def _group_by_order_value(rows, col_idx):
+    """Group consecutive rows by their value at col_idx.
+
+    Returns list of (order_value_str, [row_tuples]) groups.
+    """
+    groups = []
+    current_val = None
+    current_group = []
+    for row in rows:
+        val = row[col_idx] if col_idx < len(row) else ""
+        if val != current_val:
+            if current_group:
+                groups.append((current_val, current_group))
+            current_val = val
+            current_group = [row]
+        else:
+            current_group.append(row)
+    if current_group:
+        groups.append((current_val, current_group))
+    return groups
+
+
+def _compare_rows_financial(exp_rows, act_rows, headers, categories, column_failures, row_offset=0):
+    """Compare rows positionally using financial tolerance rules. Returns number of mismatched rows."""
+    row_mismatches = 0
+    for i, (exp_row, act_row) in enumerate(zip(exp_rows, act_rows)):
+        max_cols = max(len(exp_row), len(act_row), len(headers))
+        row_has_mismatch = False
+
+        for col_idx in range(max_cols):
+            exp_val = exp_row[col_idx] if col_idx < len(exp_row) else ""
+            act_val = act_row[col_idx] if col_idx < len(act_row) else ""
+            cat = categories[col_idx] if col_idx < len(categories) else "exact"
+            col_name = headers[col_idx] if col_idx < len(headers) else f"col_{col_idx}"
+
+            match, detail = compare_tpch_value(exp_val, act_val, cat)
+            if not match:
+                row_has_mismatch = True
+                if col_name not in column_failures:
+                    column_failures[col_name] = {
+                        "category": cat,
+                        "failure_count": 0,
+                        "samples": [],
+                    }
+                column_failures[col_name]["failure_count"] += 1
+                if len(column_failures[col_name]["samples"]) < 3:
+                    if detail:
+                        detail["row"] = row_offset + i
+                    column_failures[col_name]["samples"].append(detail or {"row": row_offset + i})
+
+        if row_has_mismatch:
+            row_mismatches += 1
+    return row_mismatches
+
+
+def compare_query_financial(expected_path, actual_path):
+    """Compare two CSV files using financial tolerance rules.
+
+    Positional comparison (validates ORDER BY correctness), with tie-aware handling:
+    when consecutive rows share the same ORDER BY value, their relative order is
+    undefined per SQL spec, so they are compared as sets rather than positionally.
+    Uses heuristic column classification with tolerances matching TPC-H rules.
+    """
+    if not os.path.exists(expected_path):
+        return {"match": False, "error": "expected file not found", "rows_expected": 0, "rows_actual": 0}
+    if not os.path.exists(actual_path):
+        return {"match": False, "error": "actual file not found", "rows_expected": 0, "rows_actual": 0}
+
+    exp_headers, exp_rows = read_csv_raw(expected_path, sort=False)
+    act_headers, act_rows = read_csv_raw(actual_path, sort=False)
+
+    result = {
+        "rows_expected": len(exp_rows),
+        "rows_actual": len(act_rows),
+    }
+
+    if len(exp_rows) != len(act_rows):
+        result["match"] = False
+        result["error"] = f"row count mismatch: expected {len(exp_rows)}, got {len(act_rows)}"
+        return result
+
+    headers = exp_headers if exp_headers else act_headers
+    categories = [classify_financial_column(h) for h in headers]
+
+    # Detect ORDER BY column for tie-aware comparison
+    order_col = _detect_order_column(headers, categories, exp_rows)
+
+    column_failures = {}
+    row_mismatches = 0
+
+    if order_col is None:
+        # No ORDER BY column detected — strict positional comparison
+        row_mismatches = _compare_rows_financial(exp_rows, act_rows, headers, categories, column_failures)
+    else:
+        # Tie-aware comparison: group by ORDER BY value, compare tied groups as sets
+        exp_groups = _group_by_order_value(exp_rows, order_col)
+        act_groups = _group_by_order_value(act_rows, order_col)
+
+        if len(exp_groups) != len(act_groups):
+            # Different group structure — fall back to strict positional
+            row_mismatches = _compare_rows_financial(exp_rows, act_rows, headers, categories, column_failures)
+        else:
+            row_offset = 0
+            for (exp_val, exp_group), (act_val, act_group) in zip(exp_groups, act_groups):
+                if exp_val != act_val or len(exp_group) != len(act_group):
+                    # Group mismatch — compare positionally
+                    row_mismatches += _compare_rows_financial(
+                        exp_group, act_group, headers, categories, column_failures, row_offset)
+                elif len(exp_group) == 1:
+                    # Single-row group — positional comparison
+                    row_mismatches += _compare_rows_financial(
+                        exp_group, act_group, headers, categories, column_failures, row_offset)
+                else:
+                    # Multi-row tie group — sort both sides by all columns, then compare
+                    sorted_exp = sorted(exp_group)
+                    sorted_act = sorted(act_group)
+                    row_mismatches += _compare_rows_financial(
+                        sorted_exp, sorted_act, headers, categories, column_failures, row_offset)
+                row_offset += len(exp_group)
+
+    if column_failures:
+        result["match"] = False
+        result["error"] = f"{row_mismatches} row(s) differ across {len(column_failures)} column(s)"
+        result["column_failures"] = column_failures
+        if order_col is not None:
+            result["tie_aware"] = True
+            result["order_column"] = headers[order_col] if order_col < len(headers) else f"col_{order_col}"
+        pattern_counts = {}
+        for col_name, cf in column_failures.items():
+            for sample in cf.get("samples", []):
+                exp_s = sample.get("expected", "")
+                act_s = sample.get("actual", "")
+                if exp_s and act_s:
+                    p = _classify_mismatch_pattern(exp_s, act_s)
+                    sample["pattern"] = p
+                    pattern_counts[p] = pattern_counts.get(p, 0) + 1
+        if pattern_counts:
+            result["mismatch_patterns"] = pattern_counts
+    else:
+        result["match"] = True
+        if order_col is not None:
+            result["tie_aware"] = True
+            result["order_column"] = headers[order_col] if order_col < len(headers) else f"col_{order_col}"
+
+    return result
 
 
 def classify_tpch_column(header):
@@ -321,10 +547,66 @@ def compare_query_tpch(expected_path, actual_path):
         result["match"] = False
         result["error"] = f"{row_mismatches} row(s) differ across {len(column_failures)} column(s)"
         result["column_failures"] = column_failures
+        # Auto-classify mismatch patterns across all column failures
+        pattern_counts = {}
+        for col_name, cf in column_failures.items():
+            for sample in cf.get("samples", []):
+                exp_s = sample.get("expected", "")
+                act_s = sample.get("actual", "")
+                if exp_s and act_s:
+                    p = _classify_mismatch_pattern(exp_s, act_s)
+                    sample["pattern"] = p
+                    pattern_counts[p] = pattern_counts.get(p, 0) + 1
+        if pattern_counts:
+            result["mismatch_patterns"] = pattern_counts
     else:
         result["match"] = True
 
     return result
+
+
+def _classify_mismatch_pattern(exp_s, act_s):
+    """Auto-classify a mismatch into a pattern category for diagnostic feedback."""
+    try:
+        exp_f = float(exp_s)
+        act_f = float(act_s)
+    except (ValueError, OverflowError):
+        if act_s == "" or act_s.lower() in ("null", "nan", "none"):
+            return "zero_output"
+        return "string_mismatch"
+
+    abs_diff = abs(exp_f - act_f)
+    magnitude = abs(exp_f) if exp_f != 0 else 0
+
+    if act_f == 0 and exp_f != 0:
+        return "zero_output"
+    if exp_f != 0 and act_f != 0 and (exp_f > 0) != (act_f > 0):
+        return "sign_flip"
+    if magnitude > 0:
+        ratio = act_f / exp_f if exp_f != 0 else float('inf')
+        if 90 < ratio < 110 or 0.009 < ratio < 0.011:
+            return "scale_error"
+    if magnitude > 1e10 and abs_diff < 1.0:
+        return "precision_loss"
+    return "value_mismatch"
+
+
+def _enrich_cell_detail(exp_s, act_s):
+    """Produce enriched per-cell mismatch detail with abs_diff, magnitude, relative_diff, pattern."""
+    detail = {"expected": exp_s, "actual": act_s}
+    try:
+        exp_f = float(exp_s)
+        act_f = float(act_s)
+        abs_diff = abs(exp_f - act_f)
+        magnitude = abs(exp_f)
+        detail["abs_diff"] = round(abs_diff, 6)
+        detail["magnitude"] = round(magnitude, 2)
+        if magnitude > 0:
+            detail["relative_diff"] = round(abs_diff / magnitude, 8)
+    except (ValueError, OverflowError):
+        pass
+    detail["pattern"] = _classify_mismatch_pattern(exp_s, act_s)
+    return detail
 
 
 def compare_query(expected_path, actual_path, precision):
@@ -346,10 +628,12 @@ def compare_query(expected_path, actual_path, precision):
     if len(exp_rows) != len(act_rows):
         result["match"] = False
         result["error"] = f"row count mismatch: expected {len(exp_rows)}, got {len(act_rows)}"
+        result["pattern"] = "row_count_mismatch"
         return result
 
     # Compare rows (already sorted)
     mismatches = []
+    pattern_counts = {}
     for i, (exp_row, act_row) in enumerate(zip(exp_rows, act_rows)):
         # Pad shorter row with empty strings
         max_cols = max(len(exp_row), len(act_row))
@@ -357,16 +641,37 @@ def compare_query(expected_path, actual_path, precision):
         act_padded = act_row + ("",) * (max_cols - len(act_row))
         if exp_padded != act_padded:
             if len(mismatches) < 3:  # Only report first 3 mismatches
+                enriched_cells = []
+                for col_idx in range(max_cols):
+                    e = exp_padded[col_idx] if col_idx < len(exp_padded) else ""
+                    a = act_padded[col_idx] if col_idx < len(act_padded) else ""
+                    if e != a:
+                        cell_detail = _enrich_cell_detail(e, a)
+                        cell_detail["col"] = col_idx
+                        enriched_cells.append(cell_detail)
+                        p = cell_detail.get("pattern", "unknown")
+                        pattern_counts[p] = pattern_counts.get(p, 0) + 1
                 mismatches.append({
                     "row": i,
                     "expected": list(exp_padded),
                     "actual": list(act_padded),
+                    "cell_details": enriched_cells,
                 })
+            else:
+                # Still count patterns for diagnostic even beyond 3 sample mismatches
+                for col_idx in range(max_cols):
+                    e = exp_padded[col_idx] if col_idx < len(exp_padded) else ""
+                    a = act_padded[col_idx] if col_idx < len(act_padded) else ""
+                    if e != a:
+                        p = _classify_mismatch_pattern(e, a)
+                        pattern_counts[p] = pattern_counts.get(p, 0) + 1
 
     if mismatches:
         result["match"] = False
         result["error"] = f"{len(mismatches)} row(s) differ"
         result["sample_mismatches"] = mismatches
+        if pattern_counts:
+            result["mismatch_patterns"] = pattern_counts
     else:
         result["match"] = True
 
@@ -379,6 +684,7 @@ def main():
     parser.add_argument("actual_dir", help="Directory with actual CSV files")
     parser.add_argument("--precision", type=int, default=2, help="Decimal places for float comparison (default: 2)")
     parser.add_argument("--tpch", action="store_true", help="Use TPC-H precision rules (per-column tolerance)")
+    parser.add_argument("--financial", action="store_true", help="Use financial tolerance rules (heuristic column classification)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.expected_dir):
@@ -406,6 +712,8 @@ def main():
 
         if args.tpch:
             result = compare_query_tpch(expected_path, actual_path)
+        elif args.financial:
+            result = compare_query_financial(expected_path, actual_path)
         else:
             result = compare_query(expected_path, actual_path, args.precision)
         queries[query_name] = result

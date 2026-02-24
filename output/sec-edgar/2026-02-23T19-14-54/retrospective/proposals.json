@@ -1,0 +1,66 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "C31",
+      "category": "correctness",
+      "title": "CSV output: always double-quote string/dictionary columns",
+      "detect": "Validation shows column shift: value in col N appears in col N+1 in actual output. String column (e.g. tlabel) expected 'Equity, Including Portion...' but actual shows 'Equity' with remainder shifted into next column. Pattern: string_mismatch on multiple adjacent columns with no row-count error.",
+      "fix": "Wrap ALL string and dictionary-decoded output columns in double-quotes: printf(\"\\\"%s\\\"\", str.c_str()). Apply universally — never use bare %s for string columns in CSV output. Applies to any column whose dictionary or raw values may contain commas (label, description, name, tag, etc.)."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C32",
+      "category": "correctness",
+      "title": "Pre-built index header parse must be complete: cap + mask + ht pointer ALL declared before loop",
+      "detect": "Compile error: 'is_mask was not declared in this scope' / 'is_cap was not declared in this scope' / 'is_ht was not declared in this scope'. File mmap succeeded but the three-line header parse block (cap, mask, ht) was omitted or placed in a different scope.",
+      "fix": "After mmap of index file raw pointer, always emit all three declarations immediately: (1) uint32_t X_cap = *(const uint32_t*)X_raw; (2) uint32_t X_mask = X_cap - 1; (3) const XSlot* X_ht = (const XSlot*)(X_raw + 4); Place at function scope, never inside if-blocks or data_loading lambdas if the variables are used in main_scan."
+    },
+    {
+      "type": "experience_entry",
+      "id": "C33",
+      "category": "correctness",
+      "title": "TOP-N ordering: always include stable tiebreaker in sort comparator",
+      "detect": "Validation: row count correct; first K rows match reference exactly; rows K+1...N contain the correct SET of entities but in wrong ORDER (permuted among themselves). Multiple output columns wrong simultaneously (name, tag, val). Breakpoint K corresponds to first rank position with tied aggregate values.",
+      "fix": "Always append a unique stable secondary key to every std::sort / std::partial_sort comparator in TOP-N queries: if (a->primary_key != b->primary_key) return a->primary_key > b->primary_key; return a->entity_id < b->entity_id; — use cik, adsh, or dictionary code as tiebreaker. Also applies to ORDER BY in SQL logic translation."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "C25",
+      "category": "correctness",
+      "title": "C25 frequency increment",
+      "detect": "Q4: 5/6 iterations returned rows_actual=0 with rows_expected=500. Filter elimination never recovered because no passing baseline existed.",
+      "fix": "freq 2 → 3. Emphasize: without a passing baseline the optimizer has no safe revert anchor — first priority must be establishing a correct (even if slow) baseline."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "C27",
+      "category": "correctness",
+      "title": "C27 frequency increment",
+      "detect": "Q6 iter_4: mmap of is_hash index performed correctly, but header parsing (is_cap, is_mask, is_ht) missing from scope where loop runs. Compile error 'is_mask not declared in this scope; did you mean fd_mask?'",
+      "fix": "freq 1 → 2. The missing element in this instance was element (3) header parse — distinct from elements (1)-(2) and (4)-(5) which were present."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P17",
+      "category": "performance",
+      "title": "P17 frequency increment",
+      "detect": "Q6: aggregation_merge 300-310ms across all 6 iterations. Thread-local merge never applied. Q24: aggregation_merge 60ms despite 6 optimization iterations.",
+      "fix": "freq 4 → 5. aggregation_merge >100ms with no improvement across multiple iters = thread-local merge not applied at all."
+    },
+    {
+      "type": "frequency_increment",
+      "id": "P20",
+      "category": "performance",
+      "title": "P20 frequency increment",
+      "detect": "Q6 aggregation_merge 300ms+ (shared map). Q24 final 60ms (partially improved but AGG_CAP oversized per P25).",
+      "fix": "freq 2 → 3."
+    }
+  ],
+  "meta": {
+    "queries_total": 6,
+    "queries_success": 3,
+    "queries_slow": 1,
+    "queries_failed": 2
+  }
+}

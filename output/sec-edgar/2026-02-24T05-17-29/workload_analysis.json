@@ -1,0 +1,106 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d=1MiB(32), L1i=1MiB(32), L2=32MiB(32), L3=44MiB(2)",
+    "disk_type": "hdd",
+    "memory_gb": "376"
+  },
+  "tables": {
+    "num": {
+      "role": "fact",
+      "exact_row_count": 39401761,
+      "hot_columns": ["adsh", "tag", "version", "uom", "ddate", "value"],
+      "column_stats": {
+        "uom": { "approx_distinct": 15, "top_values": "USD=87.2%, shares=8.0%, pure=0.24%, others=4.56%" },
+        "ddate": { "min": "19970930", "max": "20271231", "note": "2023 range ~27% of rows" },
+        "qtrs": { "approx_distinct": 8 },
+        "value": { "note": "nullable; NULLs sparse" }
+      }
+    },
+    "pre": {
+      "role": "fact",
+      "exact_row_count": 9600799,
+      "hot_columns": ["adsh", "tag", "version", "stmt", "rfile", "plabel"],
+      "column_stats": {
+        "stmt": { "approx_distinct": 6, "top_values": "BS=33%, CF=30%, IS=18%, EQ=11%, CI=7%, UN=2%" },
+        "rfile": { "approx_distinct": 2, "top_values": "H, R" },
+        "inpth": { "approx_distinct": 2 }
+      }
+    },
+    "sub": {
+      "role": "dimension",
+      "exact_row_count": 86135,
+      "hot_columns": ["adsh", "fy", "cik", "sic", "name"],
+      "column_stats": {
+        "fy": { "approx_distinct": 30, "top_values": "2022=19.6%, 2023=18.8%, 2024=12.9%" },
+        "sic": { "min": "0", "max": "8900", "approx_distinct": 500, "note": "4000-4999 range = 4.1% of rows" },
+        "cik": { "approx_distinct": 8886 },
+        "form": { "approx_distinct": 20, "top_values": "10-K=58.8%, 10-Q=17.6%, 20-F=1.1%" },
+        "countryba": { "approx_distinct": 50, "top_values": "US dominates" }
+      }
+    },
+    "tag": {
+      "role": "dimension",
+      "exact_row_count": 1070662,
+      "hot_columns": ["tag", "version", "abstract", "tlabel"],
+      "column_stats": {
+        "abstract": { "approx_distinct": 2, "note": "0=concrete; sample shows ~100% concrete (custom extension tags)" },
+        "custom": { "approx_distinct": 2 },
+        "iord": { "approx_distinct": 2, "top_values": "I, D" },
+        "crdr": { "approx_distinct": 2, "top_values": "C, D" }
+      }
+    }
+  },
+  "joins": [
+    {
+      "left": "sub.adsh", "right": "num.adsh", "type": "PK-FK",
+      "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 20
+    },
+    {
+      "left": "sub.adsh", "right": "pre.adsh", "type": "PK-FK",
+      "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 250
+    },
+    {
+      "left": "tag.(tag,version)", "right": "num.(tag,version)", "type": "PK-FK",
+      "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 355
+    },
+    {
+      "left": "tag.(tag,version)", "right": "pre.(tag,version)", "type": "PK-FK",
+      "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 8
+    },
+    {
+      "left": "num.(adsh,tag,version)", "right": "pre.(adsh,tag,version)", "type": "FK-FK",
+      "selectivity": "medium", "left_unique": false, "right_unique": false, "right_max_duplicates": 8
+    }
+  ],
+  "filters": [
+    { "table": "num", "column": "uom", "operator": "=", "selectivity": 0.872, "query": "Q2,Q3,Q4,Q6,Q24" },
+    { "table": "num", "column": "uom", "operator": "=", "selectivity": 0.0024, "query": "Q2(pure)" },
+    { "table": "num", "column": "ddate", "operator": "BETWEEN", "selectivity": 0.27, "query": "Q24" },
+    { "table": "num", "column": "value", "operator": "IS NOT NULL", "selectivity": 0.98, "query": "Q2,Q3,Q4,Q6,Q24" },
+    { "table": "sub", "column": "fy", "operator": "=", "selectivity": 0.196, "query": "Q2,Q3" },
+    { "table": "sub", "column": "fy", "operator": "=", "selectivity": 0.188, "query": "Q6" },
+    { "table": "sub", "column": "sic", "operator": "BETWEEN", "selectivity": 0.041, "query": "Q4" },
+    { "table": "pre", "column": "stmt", "operator": "=", "selectivity": 0.107, "query": "Q4(EQ)" },
+    { "table": "pre", "column": "stmt", "operator": "=", "selectivity": 0.178, "query": "Q6(IS)" },
+    { "table": "pre", "column": "stmt", "operator": "IS NOT NULL", "selectivity": 0.98, "query": "Q1" },
+    { "table": "tag", "column": "abstract", "operator": "=", "selectivity": 0.98, "query": "Q4" }
+  ],
+  "aggregations": [
+    { "group_by": ["stmt", "rfile"], "functions": ["COUNT(*)", "COUNT(DISTINCT adsh)", "AVG(line)"], "query": "Q1", "estimated_groups": "12" },
+    { "group_by": ["adsh", "tag"], "functions": ["MAX(value)"], "query": "Q2(subquery)", "estimated_groups": "80000" },
+    { "group_by": ["s.name", "s.cik"], "functions": ["SUM(n.value)"], "query": "Q3", "estimated_groups": "16000" },
+    { "group_by": ["s2.cik"], "functions": ["SUM(n2.value)"], "query": "Q3(subquery)", "estimated_groups": "8000" },
+    { "group_by": ["s.sic", "t.tlabel", "p.stmt"], "functions": ["COUNT(DISTINCT s.cik)", "SUM(n.value)", "AVG(n.value)"], "query": "Q4", "estimated_groups": "2000" },
+    { "group_by": ["s.name", "p.stmt", "n.tag", "p.plabel"], "functions": ["SUM(n.value)", "COUNT(*)"], "query": "Q6", "estimated_groups": "50000" },
+    { "group_by": ["n.tag", "n.version"], "functions": ["COUNT(*)", "SUM(n.value)"], "query": "Q24", "estimated_groups": "5000" }
+  ],
+  "ordering": [
+    { "columns": ["cnt DESC"], "limit": null, "query": "Q1" },
+    { "columns": ["n.value DESC", "s.name", "n.tag"], "limit": 100, "query": "Q2" },
+    { "columns": ["total_value DESC"], "limit": 100, "query": "Q3" },
+    { "columns": ["total_value DESC"], "limit": 500, "query": "Q4" },
+    { "columns": ["total_value DESC"], "limit": 200, "query": "Q6" },
+    { "columns": ["cnt DESC"], "limit": 100, "query": "Q24" }
+  ]
+}

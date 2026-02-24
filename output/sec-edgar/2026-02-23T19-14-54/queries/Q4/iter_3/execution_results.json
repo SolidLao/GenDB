@@ -1,0 +1,34 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 332
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q4": {
+          "rows_expected": 500,
+          "rows_actual": 0,
+          "match": false,
+          "error": "row count mismatch: expected 500, got 0"
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 268.66,
+  "hot_timing_ms": 268.66,
+  "operation_timings": {
+    "data_loading": 58.71,
+    "dim_filter": 0.2,
+    "main_scan": 26.68,
+    "aggregation_merge": 17.86,
+    "output": 0.31,
+    "total": 255.99
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "query_id": "Q4",
+
+  "pipeline": [
+    "load_sub_filter",
+    "mmap_tag_index",
+    "build_pre_hash",
+    "scan_num_parallel",
+    "aggregation_merge",
+    "having_filter",
+    "topk_sort"
+  ],
+
+  "join_order": [
+    {
+      "step": 1,
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num.adsh via direct row index (adsh_code == sub_row_index)",
+      "build_rows": 5260,
+      "structure": "bool sub_passes[86135] + int32_t sub_sic[86135] + int32_t sub_cik[86135]",
+      "note": "Direct array lookup O(1); adsh_code is sub row index"
+    },
+    {
+      "step": 2,
+      "build": "tag — pre-built tagver_hash.bin (mmap, zero build cost)",
+      "probe": "num.(tag_code, ver_code) via pre-built index",
+      "build_rows": 1070662,
+      "structure": "mmap tagver_hash.bin: [{tag_code,ver_code,row_idx,valid}...]; probe gives row_idx → tag.abstract[row_idx], tag.tlabel[row_idx]",
+      "hash_fn": "h = (tag_code * 2654435761ULL) ^ (ver_code * 2246822519ULL); slot = h & (ht_size-1)",
+      "probing": "bounded: for(uint64_t p=0; p<ht_size; p++) { slot=(h+p)&mask; if(!valid) break; if match return row_idx; }",
+      "note": "P11: pre-built index eliminates build phase; C24: bounded probe loop"
+    },
+    {
+      "step": 3,
+      "build": "pre(stmt='EQ') → hash_map keyed on (adsh_code, tag_code, ver_code)",
+      "probe": "num.(adsh_code, tag_code, ver_code)",
+      "build_rows_estimate": 1238503,
+      "structure": "open_addressing_hash_map; capacity=next_power_of_2(1238503*2)=4194304",
+      "key_packing": "k1=(uint64_t)(uint32_t)adsh_code<<32|(uint32_t)tag_code; k2=(uint64_t)(uint32_t)ver_code; slot entry stores {k1,k2,valid}",
+      "hash_fn": "h = k1 * 6364136223846793005ULL ^ k2 * 2246822519ULL; slot = h & (cap-1)",
+      "probing": "bounded: for(uint64_t p=0; p<cap; p++) { slot=(h+p)&mask; if(!valid) break; if(k1==e.k1&&k2==e.k2) hit; }",
+      "value": "none (existence check suffices; stmt is constant EQ_code)",
+      "note": "C9: capacity=next_power_of_2(2*1.24M)=4194304; C24: bounded probe; EQ_code looked up from stmt_dict at runtime (C2)"
+    }
+  ],
+
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.843,
+      "note": "Lookup USD code from uom_dict at runtime (C2); check num_uom[i] == usd_code"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0,
+      "note": "Empirically 100% pass — skip !isnan check (or keep for safety at zero cost)"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.076,
+      "applied_as": "sub_passes[adsh_code] bool array check during num scan"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity_on_pre": 0.129,
+      "selectivity_on_num": 0.222,
+      "applied_as": "pre hash table membership; only EQ rows inserted at build time"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0,
+      "note": "Non-selective but required; check tag_abstract[row_idx] == 0 after pre-built index lookup"
+    }
+  ],
+
+  "filter_application_order": [
+    "1. num_uom[i] == usd_code  (eliminates 15.7%)",
+    "2. sub_passes[adsh_code]  (eliminates ~92% of remaining)",
+    "3. tagver_hash probe → get row_idx → tag_abstract[row_idx] == 0",
+    "4. pre_hash probe → existence check (eliminates ~78%)",
+    "5. Survivors (~1.34% of num) → aggregate"
+  ],
+
+  "data_structures": {
+    "sub_filter": "bool sub_passes[86135] (stack or heap array); int32_t sub_sic[86135]; int32_t sub_cik[86135] — loaded once, read-only during probe",
+    "tag_join": "mmap pre-built tagver_hash.bin — zero build cost; layout: [uint64_t ht_size][{int32_t tag_code, int32_t ver_code, int32_t row_idx, int32_t valid}...]; access tag_abstract and tag_tlabel arrays by row_idx",
+    "pre_join": "open_addressing hash set; capacity=4194304 (next_power_of_2(1238503*2)); entry={uint64_t k1, uint64_t k2, bool valid}; ~100MB",
+    "aggregation": "thread_local open_addressing hash map; key=uint64_t ((uint32_t)sic<<32|(uint32_t)tlabel_code); value={double sum_val, int64_t cnt_val, open_addressing_hash_set<int32_t> distinct_ciks}; sized next_power_of_2(est_groups*2)"
+  },
+
+  "group_by_key": {
+    "columns": ["s.sic", "t.tlabel_code", "p.stmt_code"],
+    "pack": "uint64_t key = ((uint64_t)(uint32_t)sic << 32) | (uint32_t)tlabel_code",
+    "stmt_note": "stmt is constant EQ_code for all surviving rows; include in output but not needed in hash key (C15 satisfied: all 3 GROUP BY columns deterministic)",
+    "correctness_c15": "sic and tlabel_code uniquely identify group; stmt constant=EQ"
+  },
+
+  "aggregates": [
+    {
+      "func": "SUM",
+      "column": "n.value",
+      "type": "double",
+      "thread_local": "double sum_val accumulated per group"
+    },
+    {
+      "func": "COUNT",
+      "column": "n.value",
+      "type": "int64_t",
+      "thread_local": "int64_t cnt_val per group (for AVG = sum/cnt)"
+    },
+    {
+      "func": "COUNT_DISTINCT",
+      "column": "s.cik",
+      "structure": "per-group open_addressing hash set of int32_t cik values in thread-local map; union across threads during merge",
+      "merge": "for each group key: iterate all threads, insert each thread's cik set into global set; final distinct count = global set size"
+    }
+  ],
+
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "morsel_size": 65536,
+    "shared_read_only": [
+      "sub_passes[86135]",
+      "sub_sic[86135]",
+      "sub_cik[86135]",
+      "tagver_hash (mmap)",
+      "tag_abstract (mmap)",
+      "tag_tlabel (mmap)",
+      "pre_hash_set",
+      "num_adsh (mmap)",
+      "num_uom (mmap)",
+      "num_value (mmap)",
+      "num_tag (mmap)",
+      "num_version (mmap)"
+    ],
+    "thread_local": [
+      "aggregation hash map (key→{sum,cnt,distinct_cik_set})"
+    ],
+    "merge_strategy": "sequential merge of thread-local maps into global map; union distinct_cik sets per group; acceptable since group count is small (~thousands)"
+  },
+
+  "indexes": [
+    {
+      "index": "tag/indexes/tagver_hash.bin",
+      "purpose": "join_lookup: (tag_code, ver_code) → tag row_idx in O(1); eliminates runtime hash table build for 1.07M tag rows",
+      "layout": "[uint64_t ht_size][{int32_t tag_code, int32_t ver_code, int32_t row_idx, int32_t valid}...]"
+    }
+  ],
+
+  "aggregation": "hash_group_by",
+
+  "post_aggregation": {
+    "having": "COUNT(DISTINCT cik) >= 2  — filter groups after merge",
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "sort_algo": "std::partial_sort on filtered groups (O(n log k), k=500)"
+  },
+
+  "output": {
+    "columns": ["s.sic (int32_t)", "t.tlabel (decode via tlabel_dict, C18)", "p.stmt (decode via stmt_dict, C18)", "num_companies (int64_t)", "total_value (double)", "avg_value (double = sum/cnt)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "decode_note": "C18: decode tlabel_code via tlabel_dict[code] and stmt_code via stmt_dict[code] for output"
+  },
+
+  "correctness_checklist": {
+    "C2": "All dictionary codes (USD, EQ) looked up at runtime from dict files, never hardcoded",
+    "C9": "pre_hash capacity = next_power_of_2(1238503*2) = 4194304; agg hash sized next_power_of_2(est_groups*2)",
+    "C15": "Group key captures all 3 GROUP BY columns: sic, tlabel_code, stmt_code",
+    "C18": "tlabel and stmt decoded via dict vectors for CSV output",
+    "C20": "No memset for multi-byte sentinels; use std::fill or explicit loop initialization",
+    "C24": "All hash table probes use bounded for-loop (probe < capacity), not unbounded while"
+  },
+
+  "execution_target": "cpp"
+}

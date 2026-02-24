@@ -1,0 +1,105 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_uom_dict",
+    "build_fy2022_filter",
+    "parallel_scan_num_dual_accumulate",
+    "merge_thread_local_maps",
+    "compute_having_threshold",
+    "apply_having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "type": "direct_array_lookup",
+      "build": "sub(fy2022_filter: bool[86135])",
+      "probe": "num(adsh → sub_row_index direct)",
+      "note": "adsh_code == sub_row_index; no hash join needed; sub_row = num_adsh[i] is O(1)"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.317,
+      "cardinality_after": 27300,
+      "implementation": "bool fy2022[86135]; scan sub/fy.bin; fy2022[i] = (sub_fy[i] == 2022)"
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.87,
+      "implementation": "load num/uom_dict.txt at runtime; find usd_code index; filter num_uom[i] == usd_code"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99,
+      "implementation": "!std::isnan(num_value[i])"
+    },
+    {
+      "table": "num (via direct lookup)",
+      "predicate": "s.fy = 2022",
+      "implementation": "fy2022[num_adsh[i]] — direct bool array check after sub_row = num_adsh[i]"
+    }
+  ],
+  "data_structures": {
+    "fy2022_filter": "flat_array bool[86135] — O(1) lookup by sub_row_index; fits in L2 cache",
+    "outer_aggregation": "open_addressing_hash_map(capacity=65536, key=uint64_t packed (name_code<<32|cik), value=double sum) — thread-local per thread, sized for full 27K cardinality per C9",
+    "inner_aggregation": "open_addressing_hash_map(capacity=65536, key=int32_t cik, value=double sum) — thread-local per thread, sized for full 20K cardinality per C9",
+    "topk_buffer": "std::vector<(uint64_t key, double sum)> — std::partial_sort top 100 DESC"
+  },
+  "dual_accumulation": {
+    "description": "Single pass over num; each row contributes to BOTH outer (name,cik) and inner (cik) aggregations",
+    "outer_key": "uint64_t key = ((uint64_t)(uint32_t)sub_name[sub_row] << 32) | (uint32_t)sub_cik[sub_row]",
+    "inner_key": "int32_t cik = sub_cik[sub_row]",
+    "note": "Eliminates second scan over num; computes scalar subquery in same pass (P4)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "morsel_size": 100000,
+    "parallel_phases": [
+      "parallel_scan_num_dual_accumulate: #pragma omp parallel for schedule(dynamic, 100000) — each thread owns thread-local outer_map + inner_map"
+    ],
+    "merge_phase": "sequential merge of 64 thread-local outer_maps (27K groups) and inner_maps (20K groups) into global maps — small enough for O(nthreads * groups) sequential merge",
+    "thread_local_sizing": "Each thread's hash maps sized for FULL cardinality (65536 slots), NOT cardinality/nthreads (C9)"
+  },
+  "indexes": [
+    {
+      "index": "adsh_code == sub_row_index (implicit)",
+      "purpose": "Direct sub column access: sub_fy[adsh_code], sub_name[adsh_code], sub_cik[adsh_code] — no file needed"
+    }
+  ],
+  "madvise_hints": {
+    "num/adsh.bin": "MADV_SEQUENTIAL",
+    "num/uom.bin": "MADV_SEQUENTIAL",
+    "num/value.bin": "MADV_SEQUENTIAL",
+    "sub/fy.bin": "MADV_SEQUENTIAL",
+    "sub/name.bin": "MADV_RANDOM",
+    "sub/cik.bin": "MADV_RANDOM"
+  },
+  "scalar_subquery": {
+    "description": "HAVING threshold = AVG(per-cik SUM(value)) computed from inner_map after merge",
+    "implementation": "double total_sum = 0.0; int64_t cik_count = 0; for each slot in global_inner_map: total_sum += slot.value; cik_count++; double threshold = total_sum / cik_count;"
+  },
+  "aggregation": "hash_group_by with open-addressing thread-local maps; dual-key composite (name_code, cik) for outer; single-key cik for inner",
+  "output": {
+    "having": "total_value > threshold (scalar subquery result)",
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "decode": "name_dict[sub_name[sub_row]].c_str() for name string output (C18)",
+    "columns": ["s.name (decoded string)", "s.cik (int32_t)", "total_value (double)"]
+  },
+  "hash_table_rules": {
+    "capacity": "next_power_of_2(estimated_groups * 2) — outer: next_power_of_2(27000*2)=65536; inner: next_power_of_2(20000*2)=65536 (C9)",
+    "probing": "bounded for-loop: for(int probe=0; probe<cap; probe++) — NOT unbounded while (C24)",
+    "sentinel_init": "std::fill() for multi-byte sentinels — NEVER memset for non-zero patterns (C20)"
+  },
+  "dict_loading": {
+    "uom_dict": "load num/uom_dict.txt at runtime; scan for 'USD' to get usd_code (C2)",
+    "name_dict": "load sub/name_dict.txt at runtime for output decoding (C2)"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,149 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["load_indexes", "filter_num", "probe_sub", "probe_pre", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "sub_adsh_hash (pre-built mmap, 262144 slots, ~4MB)",
+      "probe": "num (filtered: uom='USD' && !isnan(value))",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 86135,
+      "probe_cardinality": 33600000,
+      "post_filter": "sub_fy[row] == 2023",
+      "post_filter_selectivity": 0.188,
+      "output_cardinality": 6317000,
+      "notes": "sub_adsh_hash is 4MB — fully cache-resident. Probe num adsh_code; verify fy==2023; read name_code."
+    },
+    {
+      "build": "pre_triple_hash (pre-built mmap, 33554432 slots, ~512MB)",
+      "probe": "surviving num rows after sub join (~6.3M)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 9600799,
+      "probe_cardinality": 6317000,
+      "post_filter": "pre_stmt[r] == is_code",
+      "post_filter_selectivity": 0.178,
+      "output_cardinality": 1130000,
+      "notes": "pre_triple_hash is 512MB — exceeds LLC. Issue madvise(MADV_WILLNEED) at query start. Multi-value: scan forward while (adsh,tag,ver) match. Filter stmt==is_code. Read plabel_code."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.872,
+      "encoding": "int16_t dict-encoded; resolve usd_code from uom_dict.txt at runtime"
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.98,
+      "encoding": "double IEEE 754; NaN sentinel for NULL"
+    },
+    {
+      "table": "sub",
+      "predicate": "sub_fy[sub_row] == 2023",
+      "selectivity": 0.188,
+      "encoding": "int32_t raw; INT32_MIN sentinel for NULL"
+    },
+    {
+      "table": "pre",
+      "predicate": "pre_stmt[r] == is_code",
+      "selectivity": 0.178,
+      "encoding": "int16_t dict-encoded; resolve is_code from stmt_dict.txt at runtime"
+    }
+  ],
+  "data_structures": {
+    "sub_join": "pre_built_mmap_hash(sub_adsh_hash, 262144 slots, 16B/slot = 4MB) — cache-resident, zero build cost",
+    "pre_join": "pre_built_mmap_hash(pre_triple_hash, 33554432 slots, 16B/slot = 512MB) — madvise WILLNEED at start",
+    "aggregation": "thread_local_open_addressing_hash_map(AGG_CAP=131072, slot=48B) — 64 threads × 131072 × 48B = ~384MB total; partitioned merge post-scan",
+    "aggregation_key": "Q6Key { int32_t name_code; int32_t tag_code; int32_t plabel_code; int16_t stmt_code; int16_t _pad; } — ALL 4 GROUP BY dimensions (C15, C30)",
+    "aggregation_value": "Q6Group { int64_t sum_cents; int64_t count; } — C29: SUM as int64_t cents",
+    "topk": "std::partial_sort on global result vector, k=200 — O(n log k)"
+  },
+  "aggregation": {
+    "strategy": "thread_local_hash_map_partitioned_merge",
+    "estimated_groups": 50000,
+    "agg_cap_per_thread": 131072,
+    "agg_cap_formula": "next_power_of_2(50000 * 2) = 131072",
+    "slot_size_bytes": 48,
+    "total_agg_memory_bytes": 402653184,
+    "llc_bytes": 47185920,
+    "memory_budget_decision": "total_agg_mem (384MB) > LLC (44MB); T×G = 64×50000 = 3.2M > 2M → use partitioned merge: P=64 partitions, each thread drains its owned partition post-scan",
+    "merge_strategy": "partitioned_merge",
+    "num_partitions": 64,
+    "sum_precision": "int64_t cents — C29 HARD CONSTRAINT: iv = llround(v * 100.0); sum_cents += iv",
+    "output_sum": "printf(\"%lld.%02lld\", sum_cents/100, std::abs(sum_cents%100))"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "morsel_size": 100000,
+    "scan_target": "num (39.4M rows) — split into ~394 morsels of 100K rows each",
+    "thread_local_state": "each thread: AGG_CAP-slot open-addressing hash map for partial aggregation",
+    "merge_phase": "partitioned merge — 64 partitions, one thread per partition, fully parallel, zero contention"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "sf3.gendb/sub/indexes/sub_adsh_hash.bin",
+      "purpose": "join_lookup — map num.adsh_code → sub row_id",
+      "slot_struct": "SubADSHSlot { int32_t adsh_code; int32_t row_id; int32_t _pad0; int32_t _pad1; }",
+      "capacity": 262144,
+      "hash_fn": "hash_int32(adsh_code) & sub_mask",
+      "empty_sentinel": "adsh_code == INT32_MIN",
+      "probe_bound": "C24: for(uint32_t probe=0; probe<sub_cap; probe++)"
+    },
+    {
+      "index": "pre_triple_hash",
+      "file": "sf3.gendb/pre/indexes/pre_triple_hash.bin",
+      "purpose": "join_lookup — map (num.adsh_code, num.tag_code, num.version_code) → pre first_row_id",
+      "slot_struct": "PreTripleSlot { int32_t adsh_code; int32_t tag_code; int32_t ver_code; int32_t row_id; }",
+      "capacity": 33554432,
+      "hash_fn": "hash_combine(hash_combine(hash_int32(ak), hash_int32(tc)), hash_int32(vc)) & pth_mask",
+      "empty_sentinel": "adsh_code == INT32_MIN",
+      "probe_bound": "C24: for(uint32_t probe=0; probe<pth_cap; probe++)",
+      "multi_value": "scan forward from first_row while (adsh,tag,ver) match; filter stmt==is_code"
+    }
+  ],
+  "io_prefetch": {
+    "strategy": "parallel_madvise_sections",
+    "implementation": "#pragma omp parallel sections — P27: concurrent madvise for all large index files",
+    "sections": [
+      { "file": "pre_triple_hash.bin", "size_mb": 512, "advice": "MADV_WILLNEED" },
+      { "file": "sub_adsh_hash.bin",   "size_mb": 4,   "advice": "MADV_WILLNEED" }
+    ],
+    "column_madvise": [
+      "num/uom.bin (~75MB)",
+      "num/adsh.bin (~150MB)",
+      "num/tag.bin (~150MB)",
+      "num/version.bin (~150MB)",
+      "num/value.bin (~300MB)",
+      "sub/fy.bin (~0.3MB)",
+      "sub/name.bin (~0.3MB)",
+      "pre/stmt.bin (~18MB)",
+      "pre/plabel.bin (~37MB)"
+    ]
+  },
+  "correctness_rules": {
+    "C15_C30": "Q6Key MUST contain all 4 GROUP BY dimensions: name_code, stmt_code, tag_code, plabel_code",
+    "C24": "ALL hash table probes use bounded for-loop: probe < cap",
+    "C29": "SUM accumulates as int64_t cents via llround(v*100.0); output as sum/100 + abs(sum%100)",
+    "C31": "ALL string outputs double-quoted: name (commas), stmt, tag, plabel (commas)",
+    "C32": "pre_triple_hash header (pth_cap, pth_mask, pth_ht) declared at run_query() function scope",
+    "C33": "Sort comparator: primary=sum_cents DESC, secondary=name_code ASC (stable tiebreaker)"
+  },
+  "output": {
+    "columns": ["s.name", "p.stmt", "n.tag", "p.plabel", "total_value", "cnt"],
+    "order_by": ["total_value DESC", "name_code ASC"],
+    "limit": 200,
+    "sort_algorithm": "std::partial_sort, k=200",
+    "string_decoding": {
+      "s.name":   "name_dict[name_code] — double-quoted",
+      "p.stmt":   "stmt_dict[stmt_code] — double-quoted",
+      "n.tag":    "tag_dict[tag_code] — double-quoted",
+      "p.plabel": "plabel_dict[plabel_code] — double-quoted"
+    }
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,131 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_dicts_and_indexes",
+    "parallel_num_scan_dual_agg",
+    "merge_thread_local_aggs",
+    "compute_threshold",
+    "having_filter",
+    "topk_sort",
+    "output"
+  ],
+  "join_order": [
+    {
+      "build": "sub_adsh_hash (pre-built mmap index, 262144 slots x 16B = ~4MB)",
+      "probe": "num (filtered: uom_code==usd_code AND !isnan(value))",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 86135,
+      "post_probe_filter": "sub_fy[sub_row] == 2022",
+      "qualifying_sub_rows": 16882,
+      "notes": "Pre-built sub_adsh_hash used — zero build cost (P11). After hash probe, check sub_fy[sub_row]==2022 inline. Only ~16,882 sub rows pass fy=2022."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.872,
+      "notes": "Resolve usd_code at startup by scanning uom_dict.txt; filter int16_t dict code"
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.99,
+      "notes": "NaN sentinel check — apply together with uom filter in same branch"
+    },
+    {
+      "table": "sub",
+      "predicate": "fy[sub_row] == 2022",
+      "selectivity": 0.196,
+      "notes": "Applied inline post-probe; INT32_MIN sentinel must NOT match"
+    }
+  ],
+  "dual_aggregation": {
+    "description": "Single pass over num accumulates BOTH subquery (per-cik) and main (per name_code,cik) simultaneously — avoids double scan of 39M-row fact table (P4)",
+    "subquery_agg": {
+      "purpose": "Compute AVG(SUM(value) per cik) threshold T",
+      "key_type": "int32_t cik",
+      "value_type": "int64_t sum_cents",
+      "estimated_groups": 8000,
+      "capacity": 16384,
+      "capacity_formula": "next_power_of_2(8000 * 2) = 16384",
+      "slot_size_bytes": 16,
+      "per_thread_memory_bytes": 262144,
+      "total_thread_local_memory_bytes": 16777216,
+      "fits_l3": true,
+      "notes": "64 threads x 16384 slots x 16B = 16MB < 44MB L3"
+    },
+    "main_agg": {
+      "purpose": "SUM(value) per (name, cik) for HAVING + output",
+      "key_type": "uint64_t packed = ((uint64_t)(uint32_t)name_code << 32) | (uint32_t)cik",
+      "value_type": "int64_t sum_cents",
+      "estimated_groups": 16000,
+      "capacity": 32768,
+      "capacity_formula": "next_power_of_2(16000 * 2) = 32768",
+      "slot_size_bytes": 16,
+      "per_thread_memory_bytes": 524288,
+      "total_thread_local_memory_bytes": 33554432,
+      "fits_l3": true,
+      "notes": "64 threads x 32768 slots x 16B = 32MB < 44MB L3; key packs both GROUP BY dims (C15)"
+    }
+  },
+  "data_structures": {
+    "sub_adsh_index": "pre-built mmap hash index (sub_adsh_hash.bin); 262144 slots x 16B = 4MB; fully cache-resident during scan",
+    "cik_agg_map": "thread-local open-addressing hash map; cap=16384; key=int32_t cik; val=int64_t sum_cents; empty sentinel key=INT32_MIN via std::fill (C20)",
+    "name_cik_agg_map": "thread-local open-addressing hash map; cap=32768; key=uint64_t packed (name_code<<32|cik); val=int64_t sum_cents; empty sentinel=UINT64_MAX via std::fill (C20)",
+    "aggregation_merge": "sequential merge of thread-local maps post-scan; low group count (8K+16K) makes this fast"
+  },
+  "decimal_accumulation": {
+    "rule": "C29_HARD_CONSTRAINT",
+    "method": "int64_t cents: iv = llround(v * 100.0); sum_cents += iv",
+    "forbidden": ["double accumulator", "long double accumulator", "Kahan summation", "Neumaier summation"],
+    "output_format": "printf(\"%lld.%02lld\", (long long)(sum_cents/100), (long long)std::abs(sum_cents%100))",
+    "rationale": "num.value max ~1.88e17; double has ~15.95 sig digits; accumulation causes +-0.01 mismatches at values >= 1e13"
+  },
+  "threshold_computation": {
+    "step": "post_merge_subquery_agg",
+    "formula": "T = (double)total_cik_cents_sum / ((double)cik_count * 100.0)",
+    "type": "double",
+    "having_check": "(double)sum_cents / 100.0 > T"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "thread_local_aggregation": true,
+    "dual_agg_per_thread": true,
+    "merge_strategy": "sequential_merge_post_scan",
+    "notes": "Each thread owns local cik_agg + name_cik_agg; merge sequentially after parallel scan completes; merge cost negligible at 8K+16K groups"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_hash",
+      "file": "sf3.gendb/sub/indexes/sub_adsh_hash.bin",
+      "purpose": "join_lookup",
+      "layout": "[uint32_t cap=262144][SubADSHSlot x 262144]; slot={int32_t adsh_code, int32_t row_id, int32_t _pad0, int32_t _pad1}",
+      "empty_sentinel": "adsh_code == INT32_MIN",
+      "hash_fn": "hash_int32(key) = (uint64_t)(uint32_t)key * 0x9E3779B97F4A7C15ULL",
+      "probe": "bounded for-loop probe < cap (C24)"
+    }
+  ],
+  "aggregation": "dual_hash_group_by",
+  "output": {
+    "order_by": ["total_value DESC", "cik ASC"],
+    "limit": 100,
+    "tiebreaker": "cik ASC — stable unique secondary key to prevent non-determinism (C33)",
+    "sort_method": "std::partial_sort on result vector after HAVING filter (P6)",
+    "string_quoting": "C31: always double-quote name column — printf(\"\\\"%s\\\"\", name_dict[name_code].c_str())"
+  },
+  "correctness_rules_applied": {
+    "C9": "Hash table capacity = next_power_of_2(group_count * 2); sized on FILTERED group cardinality (P23)",
+    "C15": "Main agg key includes BOTH GROUP BY dims: name_code AND cik packed as uint64_t",
+    "C20": "Use std::fill for sentinel initialization — never memset for multi-byte sentinels",
+    "C24": "All hash probes use bounded for-loop (probe < cap), not unbounded while",
+    "C29": "HARD CONSTRAINT: int64_t cents accumulation; no double/Kahan accumulators",
+    "C31": "Double-quote all string/dict output columns in CSV",
+    "C32": "Pre-built index header parse (cap, mask, ht pointer) declared at function scope before any loop",
+    "C33": "Stable tiebreaker cik ASC appended to ORDER BY comparator"
+  },
+  "execution_target": "cpp"
+}
