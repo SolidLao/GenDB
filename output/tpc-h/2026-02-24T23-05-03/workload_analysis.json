@@ -1,0 +1,188 @@
+{
+  "hardware": {
+    "cpu_cores": "64 logical (32 physical, 2 sockets x 16 cores, HT enabled)",
+    "cache_sizes": "L1d 1MiB x32, L1i 1MiB x32, L2 32MiB x32, L3 44MiB x2",
+    "simd": "AVX-512 (avx512f avx512bw avx512vl avx512vnni)",
+    "disk_type": "hdd",
+    "memory_gb": "376"
+  },
+  "tables": {
+    "lineitem": {
+      "role": "fact",
+      "exact_row_count": 59986052,
+      "hot_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_shipdate", "l_extendedprice", "l_discount", "l_quantity", "l_returnflag", "l_linestatus"],
+      "column_stats": {
+        "l_shipdate":      { "min": "1992-01-02", "max": "1998-12-01", "approx_distinct": 2526 },
+        "l_returnflag":    { "min": "A", "max": "R", "approx_distinct": 3, "distribution": {"A": 14804077, "N": 30373792, "R": 14808183} },
+        "l_linestatus":    { "min": "F", "max": "O", "approx_distinct": 2, "distribution": {"F": 29998258, "O": 29987794} },
+        "l_discount":      { "min": "0.00", "max": "0.10", "approx_distinct": 11 },
+        "l_quantity":      { "min": "1", "max": "50", "approx_distinct": 50 }
+      }
+    },
+    "orders": {
+      "role": "fact",
+      "exact_row_count": 15000000,
+      "hot_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_totalprice", "o_shippriority"],
+      "column_stats": {
+        "o_orderdate":   { "min": "1992-01-01", "max": "1998-08-02", "approx_distinct": 2406 },
+        "o_orderstatus": { "min": "F", "max": "P", "approx_distinct": 3, "distribution": {"F": 7309184, "O": 7307464, "P": 383352} }
+      }
+    },
+    "customer": {
+      "role": "dimension",
+      "exact_row_count": 1500000,
+      "hot_columns": ["c_custkey", "c_mktsegment", "c_nationkey"],
+      "column_stats": {
+        "c_mktsegment": { "min": "AUTOMOBILE", "max": "MACHINERY", "approx_distinct": 5,
+          "distribution": {"MACHINERY": 300441, "BUILDING": 300276, "AUTOMOBILE": 300036, "HOUSEHOLD": 299751, "FURNITURE": 299496} }
+      }
+    },
+    "part": {
+      "role": "dimension",
+      "exact_row_count": 2000000,
+      "hot_columns": ["p_partkey", "p_name", "p_brand", "p_type"],
+      "column_stats": {
+        "p_type":  { "approx_distinct": 150 },
+        "p_brand": { "approx_distinct": 25 },
+        "p_name":  { "approx_distinct": 2000000 }
+      }
+    },
+    "partsupp": {
+      "role": "fact",
+      "exact_row_count": 8000000,
+      "hot_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"],
+      "column_stats": {}
+    },
+    "supplier": {
+      "role": "dimension",
+      "exact_row_count": 100000,
+      "hot_columns": ["s_suppkey", "s_nationkey"],
+      "column_stats": {}
+    },
+    "nation": {
+      "role": "dimension",
+      "exact_row_count": 25,
+      "hot_columns": ["n_nationkey", "n_name"],
+      "column_stats": { "n_nationkey": { "min": "0", "max": "24", "approx_distinct": 25 } }
+    },
+    "region": {
+      "role": "dimension",
+      "exact_row_count": 5,
+      "hot_columns": ["r_regionkey", "r_name"],
+      "column_stats": {}
+    }
+  },
+  "joins": [
+    {
+      "left": "customer.c_custkey", "right": "orders.o_custkey",
+      "type": "PK-FK", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 10
+    },
+    {
+      "left": "orders.o_orderkey", "right": "lineitem.l_orderkey",
+      "type": "PK-FK", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 7
+    },
+    {
+      "left": "part.p_partkey", "right": "lineitem.l_partkey",
+      "type": "PK-FK", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 30
+    },
+    {
+      "left": "supplier.s_suppkey", "right": "lineitem.l_suppkey",
+      "type": "PK-FK", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 7
+    },
+    {
+      "left": "partsupp.(ps_partkey,ps_suppkey)", "right": "lineitem.(l_partkey,l_suppkey)",
+      "type": "PK-FK composite", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 7
+    },
+    {
+      "left": "nation.n_nationkey", "right": "supplier.s_nationkey",
+      "type": "PK-FK", "selectivity": "low",
+      "left_unique": true, "right_unique": false, "right_max_duplicates": 4000
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem", "column": "l_shipdate", "operator": "<=",
+      "value": "1998-09-02", "selectivity": 0.985, "query": "Q1"
+    },
+    {
+      "table": "lineitem", "column": "l_shipdate", "operator": "BETWEEN",
+      "value": "[1994-01-01, 1995-01-01)", "selectivity": 0.154, "query": "Q6"
+    },
+    {
+      "table": "lineitem", "column": "l_discount", "operator": "BETWEEN",
+      "value": "[0.05, 0.07]", "selectivity": 0.273, "query": "Q6"
+    },
+    {
+      "table": "lineitem", "column": "l_quantity", "operator": "<",
+      "value": "24", "selectivity": 0.460, "query": "Q6"
+    },
+    {
+      "table": "lineitem", "column": "combined Q6 filters", "operator": "AND",
+      "selectivity": 0.020, "query": "Q6"
+    },
+    {
+      "table": "customer", "column": "c_mktsegment", "operator": "=",
+      "value": "BUILDING", "selectivity": 0.200, "query": "Q3"
+    },
+    {
+      "table": "orders", "column": "o_orderdate", "operator": "<",
+      "value": "1995-03-15", "selectivity": 0.486, "query": "Q3"
+    },
+    {
+      "table": "lineitem", "column": "l_shipdate", "operator": ">",
+      "value": "1995-03-15", "selectivity": 0.540, "query": "Q3"
+    },
+    {
+      "table": "part", "column": "p_name", "operator": "LIKE '%green%'",
+      "selectivity": 0.054, "query": "Q9"
+    },
+    {
+      "table": "lineitem", "column": "l_orderkey (subquery)", "operator": "IN",
+      "selectivity": 0.0000416, "query": "Q18",
+      "note": "624 out of 15M orders have sum(l_quantity)>300"
+    }
+  ],
+  "aggregations": [
+    {
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "functions": ["SUM(l_quantity)", "SUM(l_extendedprice)", "SUM(l_extendedprice*(1-l_discount))", "SUM(l_extendedprice*(1-l_discount)*(1+l_tax))", "AVG(l_quantity)", "AVG(l_extendedprice)", "AVG(l_discount)", "COUNT(*)"],
+      "query": "Q1", "estimated_groups": "4"
+    },
+    {
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "functions": ["SUM(l_extendedprice*(1-l_discount))"],
+      "query": "Q3", "estimated_groups": "~3500000 (post-filter)"
+    },
+    {
+      "group_by": [],
+      "functions": ["SUM(l_extendedprice*l_discount)"],
+      "query": "Q6", "estimated_groups": "1"
+    },
+    {
+      "group_by": ["n_name", "EXTRACT(YEAR FROM o_orderdate)"],
+      "functions": ["SUM(l_extendedprice*(1-l_discount)-ps_supplycost*l_quantity)"],
+      "query": "Q9", "estimated_groups": "175"
+    },
+    {
+      "group_by": ["l_orderkey"],
+      "functions": ["SUM(l_quantity)"],
+      "query": "Q18-subquery", "estimated_groups": "15000000"
+    },
+    {
+      "group_by": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice"],
+      "functions": ["SUM(l_quantity)"],
+      "query": "Q18", "estimated_groups": "~624 (post-subquery filter)"
+    }
+  ],
+  "ordering": [
+    { "columns": ["l_returnflag ASC", "l_linestatus ASC"], "limit": null, "query": "Q1" },
+    { "columns": ["revenue DESC", "o_orderdate ASC"], "limit": 10, "query": "Q3" },
+    { "columns": ["nation ASC", "o_year DESC"], "limit": null, "query": "Q9" },
+    { "columns": ["o_totalprice DESC", "o_orderdate ASC"], "limit": 100, "query": "Q18" }
+  ]
+}

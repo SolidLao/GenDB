@@ -1,0 +1,155 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "phase1_scan_lineitem_partitioned_aggregate",
+    "phase1_having_filter_to_bitmap",
+    "phase2_scan_orders_bitmap_filter",
+    "phase2_scan_lineitem_bitmap_aggregate",
+    "reconstruct_cname_sort_topk"
+  ],
+
+  "phases": {
+    "phase1_subquery": {
+      "description": "Scan all 60M lineitem rows; accumulate SUM(l_quantity) per l_orderkey via 64-way scan-time partitioned aggregation; HAVING SUM > 300 → ~624 qualifying orderkeys stored in 7.5MB bitset",
+      "strategy": "scan_time_partitioned_aggregation",
+      "num_partitions": 64,
+      "p1_cap_per_partition": 524288,
+      "p1_cap_note": "next_power_of_2(15000000 / 64 * 2) = next_power_of_2(468750) = 524288",
+      "per_partition_memory_bytes": 6291456,
+      "per_partition_fits_llc": true,
+      "slot": "int32_t key + int64_t sum_qty_int (l_quantity is integer-valued double, accumulate as int64 via (int64_t)l_quantity)",
+      "slot_size_bytes": 12,
+      "total_partition_memory_bytes": 402653184,
+      "CRITICAL_C36_p1_part": "HIGH 6 bits: ((uint32_t)key * 2654435761u) >> 26  — partition routing",
+      "CRITICAL_C36_p1_hash": "LOW bits:  ((uint32_t)key * 2654435761u) & (P1_CAP - 1)  — slot within partition",
+      "CRITICAL_C36_note": "p1_part and p1_hash MUST use orthogonal bit ranges of same hash. Both using low bits → catastrophic probe chains → timeout",
+      "scatter_phase": "64 threads each route (l_orderkey, l_quantity_int) into 64 per-thread partition buffers; barrier after scan",
+      "aggregate_phase": "thread t drains all 64 threads' buffers for partition t into one 524288-slot hash table; HAVING filter: collect keys where sum_qty > 300",
+      "having_threshold": 300,
+      "qualifying_orderkeys": 624,
+      "output_structure": "bitset uint8_t[7500001] (60M bits = 7.5MB); set bit: bitmap[ok >> 3] |= (1u << (ok & 7)); test: bitmap[ok >> 3] & (1u << (ok & 7))"
+    },
+    "phase2_main": {
+      "description": "Filter orders + lineitem by 7.5MB bitset; aggregate SUM(l_quantity) per qualifying order; sort 624 results; emit top 100",
+      "orders_qualifying": 624,
+      "lineitem_qualifying": 4368,
+      "orders_phase": "parallel scan 15M orders rows; for each row test orderkey_bitmap[o_orderkey >> 3] & (1u << (o_orderkey & 7)); collect qualifying (o_orderkey, o_custkey, o_orderdate, o_totalprice) into flat result array (~624 entries)",
+      "lineitem_phase": "parallel scan 60M lineitem rows; bitmap filter l_orderkey → probe 2048-slot hash map keyed by o_orderkey; accumulate SUM(l_quantity) as double into hash map slot",
+      "phase2_agg_cap": 2048,
+      "phase2_agg_note": "next_power_of_2(624 * 2) = 2048; 2048 * 12 bytes = 24KB — L1-resident, zero contention",
+      "phase2_agg_slot": "int32_t o_orderkey + double sum_qty",
+      "cname_reconstruction": "sprintf(buf, 'Customer#%09d', c_custkey) — c_name NOT in binary; no customer_pk_hash lookup needed",
+      "customer_binary_needed": false
+    }
+  },
+
+  "join_order": [
+    {
+      "build": "lineitem(all 60M rows) → 64-partition hash aggregation",
+      "probe": "partition buffers per-thread",
+      "type": "semi",
+      "strategy": "scan_time_partitioned_hash_aggregation",
+      "build_cardinality": 15000000,
+      "output_cardinality": 624,
+      "notes": "Subquery: GROUP BY l_orderkey HAVING SUM(l_quantity) > 300. Partitioned agg avoids T×G thread-local memory explosion (64×33M×12B >> LLC). Each partition's 524288-slot table = 6.3MB fits per-core LLC slice."
+    },
+    {
+      "build": "orders(624 qualifying rows collected in flat array)",
+      "probe": "lineitem(4368 qualifying rows via bitmap filter)",
+      "type": "inner",
+      "strategy": "compact_hash_map",
+      "build_cardinality": 624,
+      "probe_cardinality": 4368,
+      "notes": "2048-slot hash map keyed by o_orderkey; probe-aggregate fused: each matching lineitem row adds l_quantity directly into HT slot sum_qty. L1-resident."
+    },
+    {
+      "build": "c_name reconstruction (no binary table read)",
+      "probe": "qualifying orders (624 rows)",
+      "type": "inner",
+      "strategy": "direct_reconstruct",
+      "build_cardinality": 0,
+      "notes": "c_name = sprintf('Customer#%09d', c_custkey). c_custkey already in qualifying orders array. No customer_pk_hash mmap needed."
+    }
+  ],
+
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) per l_orderkey > 300 (HAVING)",
+      "selectivity": 0.0000415,
+      "input_rows": 15000000,
+      "qualifying_rows": 624,
+      "phase": "phase1"
+    },
+    {
+      "table": "orders",
+      "predicate": "orderkey_bitmap[o_orderkey >> 3] & (1u << (o_orderkey & 7))",
+      "selectivity": 0.0000415,
+      "input_rows": 15000000,
+      "qualifying_rows": 624,
+      "phase": "phase2"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "orderkey_bitmap[l_orderkey >> 3] & (1u << (l_orderkey & 7))",
+      "selectivity": 0.0000728,
+      "input_rows": 59986052,
+      "qualifying_rows": 4368,
+      "phase": "phase2"
+    }
+  ],
+
+  "data_structures": {
+    "phase1_partition_buffers": "per-thread vector<pair<int32_t,int32_t>>[64] for scatter phase; 60M rows / 64 partitions ≈ 937K rows/partition/thread buffer",
+    "phase1_partition_hash_tables": "64 open-addressing hash maps, each P1_CAP=524288 slots, slot={int32_t key, int64_t sum_qty}, sentinel key=INT32_MIN (std::fill — C20), bounded probe C24",
+    "orderkey_bitmap": "uint8_t[7500001] = 7.5MB bitset; L3-resident; covers o_orderkey max ≈ 60M",
+    "phase2_agg_map": "compact open-addressing hash_map, cap=2048 slots, slot={int32_t o_orderkey, double sum_qty}, sentinel=INT32_MIN, 24KB L1-resident",
+    "result_buffer": "flat array of 624 structs {int32_t o_orderkey, int32_t c_custkey, int32_t o_orderdate, double o_totalprice, double sum_qty}; in-place std::sort"
+  },
+
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_scatter": "64 threads, each thread maintains 64 partition buffers; morsel-driven over lineitem rows; no synchronization during scatter",
+    "phase1_aggregate": "#pragma omp parallel for (64 threads, one partition per thread); each thread drains own partition buffers, builds 524288-slot HT, applies HAVING, writes qualifying keys to shared bitmap with atomic OR",
+    "phase2_orders_scan": "64 threads morsel-driven over 15M orders rows; bitmap test per row; qualifying rows appended to shared vector with mutex or lock-free append",
+    "phase2_lineitem_scan": "64 threads morsel-driven over 60M lineitem rows; bitmap test per row; probe 2048-slot (L1-resident) agg map with __atomic_fetch_add or CAS for sum_qty",
+    "sort": "single-threaded std::sort on 624 result structs (trivial)"
+  },
+
+  "indexes": [
+    {
+      "index": "orders_pk_hash",
+      "purpose": "NOT_USED",
+      "reason": "orders scanned directly with bitmap filter; all 624 qualifying rows collected in flat array from sequential scan; hash index probes unnecessary"
+    },
+    {
+      "index": "customer_pk_hash",
+      "purpose": "NOT_USED",
+      "reason": "c_name reconstructed via sprintf('Customer#%09d', c_custkey); no customer binary columns needed; index mmap skipped entirely"
+    }
+  ],
+
+  "aggregation": "two_phase: phase1=scan_time_partitioned_hash(64 partitions, 15M groups, slot=int32+int64, C36 orthogonal bits); phase2=compact_hash_map(2048 slots, 624 groups, probe_aggregate_fused)",
+
+  "correctness_rules": {
+    "C36_CRITICAL": "p1_part MUST use HIGH 6 bits: (key*2654435761u)>>26; p1_hash MUST use LOW bits: (key*2654435761u)&(P1_CAP-1). Both using low bits → all keys in partition cluster in same slots → catastrophic probe chains → 300s timeout",
+    "C11": "call gendb::init_date_tables() once at top of main() before any epoch_to_date_str calls",
+    "C20": "use std::fill<int32_t>(ht, ht+P1_CAP, INT32_MIN) for sentinel init — NEVER memset (memset(buf,0x80,n)→0x80808080≠INT32_MIN)",
+    "C24": "ALL hash table probes use bounded for-loop: for(uint32_t pr=0; pr<cap; pr++) — never unbounded while",
+    "C31": "printf(\"\\\"%s\\\",\", cname) — always double-quote c_name in CSV output",
+    "C33": "sort comparator: if(a.o_totalprice != b.o_totalprice) return a.o_totalprice > b.o_totalprice; if(a.o_orderdate != b.o_orderdate) return a.o_orderdate < b.o_orderdate; return a.o_orderkey < b.o_orderkey; (o_orderkey as stable tiebreaker)",
+    "P37": "P1_CAP = next_power_of_2(15000000 / 64 * 2) = 524288. Do NOT use P1_CAP=65536 (undersized for sf10 — that was sf1 sizing). Initialize lazily per thread during aggregate phase to avoid 402MB init stall.",
+    "date_output": "char buf[11]; gendb::epoch_to_date_str(o_orderdate_value, buf); — formats YYYY-MM-DD"
+  },
+
+  "output": {
+    "columns": ["c_name (reconstructed)", "c_custkey", "o_orderkey", "o_orderdate (epoch→YYYY-MM-DD)", "o_totalprice", "sum_qty (SUM l_quantity as double)"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "tiebreaker": "o_orderkey ASC (C33 — stable deterministic ordering)",
+    "limit": 100,
+    "total_groups": 624
+  },
+
+  "execution_target": "cpp"
+}

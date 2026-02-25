@@ -1,0 +1,100 @@
+{
+  "proposals": [
+    {
+      "type": "experience_entry",
+      "id": "P31",
+      "category": "performance",
+      "action": "increment_freq",
+      "title": "Plateau detection — Q3 iters 2–4 confirmed 3-iteration plateau",
+      "detect": "3 consecutive iterations all within 1% of each other (Q3: 138.1→137.4→137.1 ms). Plateau ran without early stopping, wasting 2 iterations before a separate breakthrough at iter_5.",
+      "fix": "Increment freq counter. Also consider adding a 'breakthrough escape' note: a plateau stop at iter K does NOT prevent a new optimization direction from being tried at iter K+1 if the optimizer has an untried technique. The plateau signals 'stop incremental tuning, pivot to new strategy'.",
+      "new_freq": 3
+    },
+    {
+      "type": "experience_entry",
+      "id": "P12",
+      "category": "performance",
+      "action": "increment_freq",
+      "title": "Regression revert — Q18 iter_1 was 92% slower than iter_0",
+      "detect": "Q18 iter_1: 416 ms vs iter_0: 217 ms (+92%). Optimizer correctly identified as non-improving and reverted direction in iter_2 (226 ms). Final best achieved at iter_4 (136 ms).",
+      "fix": "Increment freq counter. Regression revert is working correctly.",
+      "new_freq": 7
+    },
+    {
+      "type": "experience_entry",
+      "id": "P35",
+      "category": "performance",
+      "action": "increment_freq",
+      "title": "memmem dict scan — Q9 dim_filter 102 ms → 13.7 ms (−87%)",
+      "detect": "Q9 iter_0: dim_filter=102 ms dominated by LIKE '%green%' scan over part dictionary. iter_1: applied memmem raw scan, dim_filter dropped to 13.7 ms. Pattern matches P35 trigger (dim_filter >100ms, LIKE '%keyword%', dict column).",
+      "fix": "Increment freq counter. P35 is well-validated.",
+      "new_freq": 2
+    },
+    {
+      "type": "experience_entry",
+      "id": "P36",
+      "category": "performance",
+      "action": "increment_freq",
+      "title": "Static mmap caching — Q3 data_loading 63 ms → 0.1 ms (−99.8%)",
+      "detect": "Q3 iter_0: data_loading=63.3 ms (hot run). iter_1: 0.1 ms. Pattern matches P36 trigger (data_loading >5ms on hot runs when columns already OS-cached).",
+      "fix": "Increment freq counter. P36 continues to fire early and eliminate large hot-run data_loading overhead.",
+      "new_freq": 2
+    },
+    {
+      "type": "experience_entry",
+      "id": "C36",
+      "category": "correctness",
+      "action": "increment_freq",
+      "title": "Orthogonal bit-range hash — Q18 partitioned aggregation succeeded",
+      "detect": "Q18 iter_4: subquery_precompute improved 197 ms → 116 ms (41%) after applying C36-compliant orthogonal bit-range routing (p1_part=HIGH 6 bits, p1_hash=LOW bits). Previous run had timeout with both using low bits; this run avoided that failure.",
+      "fix": "Increment freq counter. C36 orthogonal bit separation is now a confirmed correctness+performance requirement for partitioned aggregation.",
+      "new_freq": 2
+    },
+    {
+      "type": "experience_entry",
+      "id": "P37",
+      "category": "performance",
+      "action": "increment_freq",
+      "title": "Per-partition P1_CAP sizing — Q18 best 136 ms vs previous run timeout",
+      "detect": "Q18 iter_4 applied P37 formula (P1_CAP = next_power_of_2(15M/64×2) = 524288, 6.3MB/partition). Previous run had P1_CAP=524K causing ~1000ms. This run achieved 115 ms subquery_precompute.",
+      "fix": "Increment freq counter. Formula is validated: always use total_unique_keys / NUM_PARTITIONS * 2 as the per-partition slot count.",
+      "new_freq": 2
+    },
+    {
+      "type": "experience_entry",
+      "id": "P39",
+      "category": "performance",
+      "action": "new",
+      "title": "Plateau-pivot: after 3-iter plateau, switch to structurally different optimization (not incremental tuning)",
+      "detect": "Q3 iters 2–4 all within 1% (137–138 ms). Incremental tuning of same code structure is exhausted. iter_5 broke through with a structurally new approach (ht_init phase appeared, dim_filter halved, build_joins improved). The breakthrough required switching optimization direction entirely, not just parameter tuning.",
+      "fix": "When P31 plateau is detected after 3 non-improving iterations, force optimizer to pivot to a categorically new technique: change aggregation strategy, fuse phases, switch join algorithm, or change scan pattern. Do not just tweak constants within the same code structure. Log 'PLATEAU_PIVOT' and select the highest-impact untried technique from experience skill.",
+      "new_freq": 1,
+      "new_sev": "MED",
+      "new_impact": "saves 2-3 wasted iterations + unlocks structural improvements"
+    },
+    {
+      "type": "experience_entry",
+      "id": "P40",
+      "category": "performance",
+      "action": "new",
+      "title": "main_scan SIMD vectorization — final frontier when main_scan >40ms with no join/HT bottleneck",
+      "detect": "Q1 (44.7ms), Q3 (47.5ms), Q9 (33.8ms), Q6 (30.1ms) all plateau with main_scan as final dominant bottleneck (85–92% of total after all join/agg/data_loading optimizations). Arithmetic intensity is low (multiply-accumulate of DECIMAL/double columns). SIMD can process 4–8 rows per cycle vs 1.",
+      "fix": "When main_scan >30ms and is >80% of total after 2+ optimization iterations: (1) ensure -O3 -march=native is in compile flags; (2) restructure inner loop for auto-vectorization (SOA layout, no aliasing, counted loop); (3) if auto-vec fails, use AVX2 intrinsics (_mm256_loadu_pd, _mm256_fmadd_pd) for double accumulation. Trigger: main_scan >30ms AND no other phase >10ms.",
+      "new_freq": 1,
+      "new_sev": "MED",
+      "new_impact": "2-4x main_scan reduction (theoretical)"
+    }
+  ],
+  "meta": {
+    "queries_total": 5,
+    "queries_success": 5,
+    "queries_slow": 0,
+    "queries_failed": 0,
+    "run_date": "2026-02-24",
+    "workload": "TPC-H SF10",
+    "total_iterations": 18,
+    "wasted_iterations_estimate": 3,
+    "regressions_detected": 2,
+    "regressions_recovered": 2
+  }
+}

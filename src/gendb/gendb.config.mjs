@@ -6,8 +6,8 @@
 export const defaults = {
   maxOptimizationIterations: 5,
   stallThreshold: 5,  // consecutive non-improving iterations before adaptive stop
-  scaleFactor: 3,    // 10 for tpc-h, 3 for sec-edgar
-  targetBenchmark: "sec-edgar", // "tpc-h" / "sec-edgar"
+  scaleFactor: 10,    // 10 for tpc-h, 3 for sec-edgar
+  targetBenchmark: "tpc-h", // "tpc-h" / "sec-edgar"
   model: "sonnet",
   optimizationTarget: "hot",  // "hot" (optimize avg hot runs) or "cold" (optimize cold run)
   maxConcurrentQueries: 22,

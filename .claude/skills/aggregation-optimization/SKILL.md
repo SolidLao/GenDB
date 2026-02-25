@@ -19,6 +19,7 @@ These ranges are approximate guidelines. The actual crossover points depend on s
 | Low (per-thread map fits L1/L2) | Direct array with lightweight hash or small hash map | Cache-resident per thread |
 | Moderate (per-thread map fits LLC) | Thread-local hash tables + merge | See parallelism skill for thread-local sizing |
 | High (total thread-local memory exceeds LLC) | Thread-local hash tables + partitioned merge, or scan-time partitioned aggregation | Evaluate Memory Budget Gate below |
+| High cardinality + integer accumulator (groups >> threads) | Shared hash table with LOCK XADD (`__atomic_fetch_add`) | See Shared XADD Aggregation below |
 | Very high (groups cannot be estimated) | Two-phase: sample to estimate, then partitioned | Memory management critical |
 
 ## Memory Budget Gate (MANDATORY — evaluate before choosing thread-local strategy)
@@ -32,6 +33,7 @@ Compare against hardware LLC (last-level cache) total capacity. Query the target
 | ≤ LLC total | Per-thread hash maps (standard thread-local pattern) |
 | > LLC total, per-partition map fits per-core cache | Per-thread maps + partitioned merge (see below) |
 | > LLC total, per-partition map does NOT fit per-core cache | Strongly prefer scan-time partitioned aggregation (skip per-thread maps entirely) |
+| > LLC total, integer accumulator AND groups >> nthreads | Shared XADD aggregation (single pass, no partition buffers) — see below |
 
 The deciding factor is whether the working set (per-thread or per-partition) fits the relevant cache level. When it doesn't, initialization and merge costs dominate — this scales with total_agg_mem, not with any fixed byte threshold.
 
@@ -50,6 +52,19 @@ partition buffers.
 
 VIOLATION DIAGNOSTIC: If build_joins + aggregation_merge > 2× main_scan, the aggregation
 strategy is wrong — re-evaluate using this Memory Budget Gate.
+
+### Shared XADD Aggregation
+When to use: integer accumulator (COUNT, SUM of int), groups significantly outnumber threads (low collision probability), key domain excludes 0 (0 used as empty sentinel).
+
+Why it wins: single pass over data, no partition buffers, no per-thread maps, no merge phase. LOCK XADD (`__atomic_fetch_add`) is a single hardware instruction with no CAS retry loop — contention is negligible when groups far outnumber threads because concurrent threads rarely hit the same slot.
+
+Pattern:
+1. Allocate single shared hash table via `mmap(MAP_ANONYMOUS)` — zero-initialized (0 = empty)
+2. Distributed prefault: each thread touches its share of pages in parallel before scan
+3. Parallel scan: for each row, hash key → open-address probe → `__atomic_fetch_add(&slot.value, amount, __ATOMIC_RELAXED)` + software prefetch ahead to hide probe latency
+4. After scan: linear sweep for non-zero slots; defer `munmap` to after output
+
+Limitation: only works for integer accumulators (XADD). For floating-point, use CAS loop (Probe-Aggregate Fusion) or thread-local approaches.
 
 ## Precision Management for Aggregation
 
@@ -98,10 +113,42 @@ In these cases, double accumulation is fine.
   - **T×G 100K-2M**: Two-phase tree-merge: merge groups of 8 threads in parallel (log₈(T) rounds), then merge 8→1. Reduces sort input by 8×.
   - **T×G > 2M AND total_agg_mem ≤ LLC**: Partitioned merge: during aggregation, hash groups into P partitions (P=next_pow2(T)); during merge, each partition merged independently by one thread. Fully parallel, zero contention.
   - **T×G > 2M AND total_agg_mem > LLC**: Evaluate Memory Budget Gate above — may require scan-time partitioned aggregation.
-  - **DEFAULT: Thread-local aggregation is strongly preferred (P20). A single shared aggregation map causes severe contention at scale; only consider it for very few groups where atomic updates are trivially cheap.**
+  - **DEFAULT: Thread-local aggregation is strongly preferred (P20). A single shared aggregation map causes severe contention at scale; only consider it for very few groups where atomic updates are trivially cheap. Exception: integer accumulators with LOCK XADD — see Shared XADD Aggregation above.**
   - VIOLATION DIAGNOSTIC: If build_joins + aggregation_merge > 2× main_scan, wrong strategy chosen — re-evaluate using Memory Budget Gate.
 - CRITICAL: Size AGG_CAP per thread to next_pow2(estimated_groups × 2), not a large fixed ceiling. Over-sized per-thread tables waste memory and slow merge (P23, P25).
 - GROUP BY key: MUST include ALL SQL GROUP BY columns. For composite GROUP BY keys, see data-structures skill: Composite Key Hashing
+
+## Probe-Aggregate Fusion
+
+When a query joins two tables and then aggregates over the join result, AND the GROUP BY key is a superset of (or equals) the join key, the probe and aggregation can be fused into one operation: during the probe-side scan, on each match, accumulate the aggregate value directly into the join hash table slot rather than materializing intermediate tuples.
+
+### Conditions Favoring This Approach
+- GROUP BY key ⊇ join key (each probe-side row maps to exactly one aggregation group via the join key)
+- The join is a PK join or the GROUP BY key fully determines the group (no many-to-many ambiguity)
+- The intermediate materialization cost is significant (>5M qualifying probe rows that would otherwise fill partition buffers)
+
+### Implementation Pattern
+1. Build-side HT includes accumulator fields (e.g., `atomic<uint64_t> revenue`) initialized to zero
+2. During probe scan: `if match → atomic_add_double(&ht.revs[slot], revenue_value)`
+3. After scan: linear sweep over HT to extract non-zero accumulated results
+4. Atomic double-add via CAS loop: `load old_bits → memcpy to double → add → memcpy to uint64_t → CAS`
+
+### Benefits
+- Eliminates intermediate tuple materialization (flat buffers, partition buffers)
+- Eliminates separate aggregation_merge phase entirely
+- Reduces total memory traffic: one HT probe serves both join and aggregation
+- Measured: 79ms total vs 188ms with separate partition-buffer aggregation on same workload
+
+### Trade-offs and Caveats
+- **FP non-determinism**: atomic CAS addition from multiple threads produces non-deterministic accumulation order, which can cause ±0.01 rounding differences vs reference at float64 precision boundaries. This is acceptable when output tolerance allows it (e.g., TPC-H revenue columns have $100 tolerance) but may fail exact-match validation.
+- **Atomic contention**: if many probe rows map to a small number of HT slots (low GROUP BY cardinality), CAS contention increases. In that case, thread-local aggregation may be better.
+- **SoA layout recommended**: separate keys[], metadata[], accumulators[] arrays so only the accumulators[] array needs atomic operations — see hash-tables skill: SoA vs AoS Layout.
+- **Not compatible with Robin Hood hashing**: Robin Hood displaces existing entries, which conflicts with accumulators that are being atomically updated by other threads. Use simple linear probing with CAS-based build instead.
+
+### When NOT to Use
+- GROUP BY key has columns not derivable from the join key (need separate aggregation HT)
+- Exact FP reproducibility required and no tolerance on aggregate output
+- Very low GROUP BY cardinality where thread-local aggregation + merge is simpler and sufficient
 
 ## HAVING Clause Optimization
 - Pre-compute scalar subquery thresholds before main aggregation when possible
@@ -137,4 +184,4 @@ If the chosen aggregation strategy underperforms after implementation, use timin
 The goal is not to prescribe one strategy but to quickly diagnose and pivot when a strategy doesn't fit the workload.
 
 ## Common Pitfalls
-→ See experience skill: C9 (hash table capacity), C15 (missing GROUP BY dimension), C29 (double precision), P3 (sort vs hash), P15 (merge cost), P20 (thread-local default)
+→ See experience skill: C9 (hash table capacity), C15 (missing GROUP BY dimension), C29 (double precision), P3 (sort vs hash), P15 (merge cost), P20 (thread-local default), P33 (probe-aggregate fusion)

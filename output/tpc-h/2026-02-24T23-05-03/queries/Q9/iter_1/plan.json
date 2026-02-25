@@ -1,0 +1,142 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "load_nation",
+    "load_supplier",
+    "dim_filter_part",
+    "build_joins",
+    "main_scan_lineitem",
+    "aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "nation(25)",
+      "probe": "supplier(100K)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "n_nationkey in [0,24]; build nation_name[25] direct array; also build nation_dict from n_name_dict.txt"
+    },
+    {
+      "build": "supplier(100K) + nation(25)",
+      "probe": "lineitem(60M)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "s_suppkey in [1,100000]; build suppkey_to_nationidx[100001] dense direct array indexed by s_suppkey; zero-copy via supplier_pk_hash mmap (2MB, L2-resident); madvise WILLNEED at startup"
+    },
+    {
+      "build": "part(2M, filtered ~108K)",
+      "probe": "lineitem(60M)",
+      "type": "semi",
+      "strategy": "bitmap",
+      "build_cardinality": 108000,
+      "notes": "P32: p_partkey in [1,2000000]; bitmap = 250KB, L2-resident; P35: scan p_name_dict.txt via mmap+memmem() for 'green'; set part_bitmap[p_partkey] for qualifying rows; ~5.4% selectivity -> ~3.24M lineitem rows pass"
+    },
+    {
+      "build": "partsupp(8M, pre-built)",
+      "probe": "lineitem(~3.24M after part bitmap)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 8000000,
+      "notes": "P11: partsupp_pk_hash composite index (192MB); composite key (l_partkey, l_suppkey); hash = (uint64_t(pk)<<32|sk)*11400714819323198485ull>>32 & mask; retrieve ps_supplycost; C24: bounded probe loop; concurrent madvise with orders index (P27)"
+    },
+    {
+      "build": "orders(15M, pre-built)",
+      "probe": "lineitem(~3.24M after part bitmap)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 15000000,
+      "notes": "P11: orders_pk_hash index (256MB); hash = (uint32_t)l_orderkey*2654435761u & mask; retrieve o_orderdate; C1/C11: gendb::extract_year(o_orderdate) for GROUP BY o_year; C24: bounded probe loop; concurrent madvise with partsupp index (P27)"
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.054,
+      "qualifying_rows": 108000,
+      "notes": "P35: mmap p_name_dict.txt as raw bytes, scan with memmem() for 'green', collect qualifying int32_t codes; then scan p_name.bin to set part_bitmap[p_partkey]; C2: NEVER hardcode codes"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "part_bitmap[l_partkey]",
+      "selectivity": 0.054,
+      "qualifying_rows": 3239247,
+      "notes": "P32: O(1) bitmap test on L2-resident 250KB bitset; applied as FIRST filter in lineitem scan loop to skip hash probes for ~94.6% of rows"
+    }
+  ],
+  "data_structures": {
+    "nation_array": "direct_array[25] -> n_name string (from n_name_dict.txt via int16_t code)",
+    "suppkey_to_nationidx": "direct_array[100001] int32_t -> nation_idx; dense suppkey [1,100000]; populated by scanning supplier columns with supplier_pk_hash for row lookup",
+    "part_bitmap": "bitset(2000001) = 250KB; L2-resident; set bit for each qualifying p_partkey; P32 semi-join via single bit test",
+    "supplier_pk_hash": "pre_built_mmap: supplier/indexes/supplier_pk_hash.bin; cap=262144 (2^18); PKSlot{int32_t key, uint32_t row_idx}; hash=(uint32_t)key*2654435761u&mask; 2MB fits L2; madvise WILLNEED at startup",
+    "partsupp_pk_hash": "pre_built_mmap: partsupp/indexes/partsupp_pk_hash.bin; cap=16777216 (2^24); PSSlot{int32_t partkey, int32_t suppkey, uint32_t row_idx}; composite hash via 11400714819323198485ull; 192MB; concurrent madvise P27",
+    "orders_pk_hash": "pre_built_mmap: orders/indexes/orders_pk_hash.bin; cap=33554432 (2^25); PKSlot{int32_t key, uint32_t row_idx}; hash=(uint32_t)key*2654435761u&mask; 256MB; concurrent madvise P27",
+    "aggregation": "direct_2d_array ProfitSlot agg[25][10]; nation_idx=n_nationkey (0-24); year_idx=o_year-BASE_YEAR; 175 max groups; long double sum_profit per C35; thread-local copies, merge after parallel scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "lineitem_morsels": "chunk lineitem rows into ~64K-row morsels across 64 threads",
+    "thread_local_agg": "each thread owns ProfitSlot local_agg[25][10]; accumulate locally; merge with single-threaded reduction after scan (P17/P20; 175 groups x 64 threads = 11200 slots total - trivial merge)",
+    "bitmap_sharing": "part_bitmap read-only shared (no contention)",
+    "index_sharing": "all pre-built mmap indexes read-only shared (no contention)"
+  },
+  "indexes": [
+    {
+      "index": "supplier_pk_hash",
+      "file": "supplier/indexes/supplier_pk_hash.bin",
+      "purpose": "join_lookup: l_suppkey -> s_nationkey row; 2MB L2-resident",
+      "madvise": "MADV_WILLNEED at startup (sequential, small)"
+    },
+    {
+      "index": "partsupp_pk_hash",
+      "file": "partsupp/indexes/partsupp_pk_hash.bin",
+      "purpose": "join_lookup: (l_partkey,l_suppkey) -> ps_supplycost row; 192MB",
+      "madvise": "concurrent MADV_WILLNEED via omp parallel sections (P27)"
+    },
+    {
+      "index": "orders_pk_hash",
+      "file": "orders/indexes/orders_pk_hash.bin",
+      "purpose": "join_lookup: l_orderkey -> o_orderdate row; extract year; 256MB",
+      "madvise": "concurrent MADV_WILLNEED via omp parallel sections (P27)"
+    }
+  ],
+  "correctness_rules": {
+    "C1_C11": "gendb::init_date_tables() once at top of main(); use gendb::extract_year(o_orderdate[orow]) for EXTRACT(YEAR FROM o_orderdate)",
+    "C2": "load p_name_dict.txt and n_name_dict.txt at runtime; NEVER hardcode codes",
+    "C15": "GROUP BY key includes BOTH nation_idx AND o_year; agg[nation_idx][year_idx] encodes both dimensions",
+    "C18": "output nation as nation_dict[code].c_str() string, NOT raw int16_t",
+    "C20": "use std::fill() to initialize agg arrays; NEVER memset for non-zero sentinels",
+    "C24": "ALL hash table probes use bounded for-loop: for(uint32_t pr=0; pr<cap; pr++)",
+    "C31": "double-quote nation string in CSV output: printf(\"\\\"%s\\\"\", nation_name.c_str())",
+    "C35": "amount = (long double)ep*(1.0L-disc) - (long double)ps_sc*qty; accumulate as long double; C29 int64_t cents does NOT apply to multi-column derived expressions"
+  },
+  "amount_expression": {
+    "formula": "l_extendedprice*(1-l_discount) - ps_supplycost*l_quantity",
+    "cpp": "long double amount = (long double)ep*(1.0L - disc) - (long double)ps_sc*qty;",
+    "accumulation": "long double; C35 mandates long double for multi-column derived expressions"
+  },
+  "aggregation": "direct_array",
+  "aggregation_layout": {
+    "type": "ProfitSlot agg[25][10]",
+    "nation_axis": "n_nationkey (0-24) as first index",
+    "year_axis": "o_year - BASE_YEAR (e.g. 1992) as second index; 10 slots for safety",
+    "merge": "single-pass sum over 64 thread-local arrays (64 * 250 slots = 16000 long doubles = trivial)"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "format": "CSV",
+    "columns": ["nation (quoted string)", "o_year (int)", "sum_profit (long double, %.2Lf)"]
+  },
+  "data_loading_strategy": {
+    "phase1_concurrent_madvise": "omp parallel sections: madvise partsupp_pk_hash(192MB) + orders_pk_hash(256MB) simultaneously (P27)",
+    "phase2_sequential": "madvise supplier_pk_hash(2MB, fast); load nation arrays; load supplier suppkey->nationidx",
+    "phase3_part_filter": "P35: mmap p_name_dict.txt raw + memmem('green') scan; build part_bitmap[2M] in single pass over p_name.bin",
+    "static_mmap_caching": "P36: use static column pointers to avoid re-mmap on hot runs"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,125 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer_bitmap",
+    "build_orders_fused_ht",
+    "scan_lineitem_probe_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders(o_custkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300276,
+      "notes": "c_custkey in [1,1500000] is dense; flat bitmap 1.5M/8 = 187KB fits L2 cache. Load c_mktsegment_dict.txt at runtime (C2) to find building_code. Set bit for each qualifying c_custkey."
+    },
+    {
+      "build": "orders(filtered: o_orderdate<1995-03-15 AND o_custkey in customer_bitmap)",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1455000,
+      "notes": "Runtime compact HT over ~1.455M qualifying orders (not pre-built 256MB index). Probe-aggregate fusion (P33): embed long double revenue accumulator directly in HT slots. Zone-map skip on o_orderdate_zone_map: skip block b if blocks[b].mn >= date_threshold. Build with CAS-based parallel insert (P34)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.20,
+      "qualifying_rows": 300276
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.486,
+      "qualifying_rows": 7290000,
+      "zone_map_index": "o_orderdate_zone_map",
+      "zone_map_skip_condition": "blocks[b].mn >= date_threshold"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_custkey in customer_bitmap",
+      "selectivity": 0.20,
+      "combined_qualifying_rows": 1455000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.54,
+      "qualifying_rows": 32392468,
+      "zone_map_index": "l_shipdate_zone_map",
+      "zone_map_skip_condition": "blocks[b].mx <= ship_threshold"
+    }
+  ],
+  "data_structures": {
+    "customer_filter": "flat_bitmap(capacity=1500000_bits, size=187KB, L2-resident, indexed_directly_by_c_custkey)",
+    "orders_fused_ht": {
+      "layout": "SoA_open_addressing",
+      "capacity": 4194304,
+      "capacity_formula": "next_power_of_2(1455000 * 2) = 2^22 = 4194304",
+      "slot_fields": {
+        "keys": "std::atomic<int32_t>[4194304] (sentinel=INT32_MIN, 16MB)",
+        "orderdate": "int32_t[4194304] (16MB)",
+        "shippriority": "int32_t[4194304] (16MB)",
+        "revenue": "long double[4194304] with CAS-based atomic accumulation (64MB)"
+      },
+      "total_memory_mb": 112,
+      "hash_fn": "(uint32_t)key * 2654435761u & mask",
+      "probing": "bounded_for_loop (probe < capacity, C24)",
+      "sentinel_init": "std::fill keys with INT32_MIN (C20, NEVER memset)"
+    },
+    "aggregation": "fused_into_orders_fused_ht (probe-aggregate fusion P33, no separate aggregation phase)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_parallelism": {
+      "customer_scan": "sequential (1.5M rows, fast, build bitmap before orders scan)",
+      "orders_build": "parallel_omp_cas_insert (morsel-driven, 64 threads, atomic CAS on keys for concurrent HT construction)",
+      "lineitem_scan": "parallel_omp (morsel-driven, 64 threads, each thread: zone-map skip, shipdate filter, probe fused HT, CAS-accumulate long double revenue)"
+    }
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "file": "orders/indexes/o_orderdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "layout": "[uint32_t num_blocks][Block{int32_t mn, mx; uint32_t cnt}]",
+      "skip_condition": "blocks[b].mn >= date_threshold (all rows in block fail o_orderdate < threshold)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/indexes/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "layout": "[uint32_t num_blocks][Block{int32_t mn, mx; uint32_t cnt}]",
+      "skip_condition": "blocks[b].mx <= ship_threshold (all rows in block fail l_shipdate > threshold)"
+    }
+  ],
+  "aggregation": "probe_aggregate_fusion",
+  "date_handling": {
+    "init": "gendb::init_date_tables() at top of main() (C11)",
+    "date_threshold": "int32_t thr = gendb::date_to_epoch(\"1995-03-15\") (C1, C7)",
+    "o_orderdate_filter": "o_orderdate[row] < thr",
+    "l_shipdate_filter": "l_shipdate[row] > thr",
+    "note": "Same threshold value used for both filters"
+  },
+  "revenue_accumulation": {
+    "type": "long double",
+    "formula": "revenue += (long double)l_extendedprice[row] * (1.0L - (long double)l_discount[row])",
+    "rule": "C35: multi-column derived expression must use long double, NOT int64_t cents (C29 does not apply)"
+  },
+  "group_by_key": {
+    "columns": ["l_orderkey", "o_orderdate", "o_shippriority"],
+    "note": "C15: ALL three GROUP BY columns embedded in fused HT slot. l_orderkey is the HT lookup key; o_orderdate and o_shippriority stored as payload fields written at build time."
+  },
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "partial_sort or priority_queue over fused HT entries where keys[i] != INT32_MIN",
+    "tiebreaker": "o_orderdate ASC serves as stable secondary key (C33)"
+  },
+  "execution_target": "cpp"
+}

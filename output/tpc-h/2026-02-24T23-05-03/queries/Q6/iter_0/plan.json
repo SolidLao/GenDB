@@ -1,0 +1,94 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_skip", "fused_block_scan", "scalar_aggregate"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "block-level: blocks[b].mx < lo || blocks[b].mn >= hi",
+      "selectivity": 0.85,
+      "note": "Zone-map skip: ~85% of 916 blocks skipped; ~137 blocks qualify"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 && l_discount <= 0.07",
+      "selectivity": 0.273,
+      "note": "Most selective row-level filter; checked first within qualifying blocks"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.460,
+      "note": "Second row-level filter"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= lo && l_shipdate < hi",
+      "selectivity": 0.154,
+      "note": "int32 range; needed for boundary blocks; ~80-100% pass rate inside fully-qualified 1994 blocks"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "scalar_long_double",
+    "zone_map": "pre_built_index(l_shipdate_zone_map)"
+  },
+  "late_materialization": {
+    "enabled": false,
+    "rationale": "Zone map already skips 85% of blocks. Within qualifying blocks, loading all 4 columns in a fused pass is simpler and avoids random-access gather penalty. Block width = 65536 rows × (4+8+8+8)=28 bytes = 1.75MB per block, fits in cache."
+  },
+  "column_load_order": [
+    "lineitem/indexes/l_shipdate_zone_map.bin",
+    "lineitem/l_shipdate.bin",
+    "lineitem/l_discount.bin",
+    "lineitem/l_quantity.bin",
+    "lineitem/l_extendedprice.bin"
+  ],
+  "scan_strategy": {
+    "method": "zone_map_guided_block_scan",
+    "block_size": 65536,
+    "num_blocks": 916,
+    "qualifying_blocks_estimate": 137,
+    "row_filter_order": ["l_discount", "l_quantity", "l_shipdate"],
+    "fused": true,
+    "note": "Outer loop over blocks with zone-map skip; inner loop fuses all 3 row-level predicates + accumulation in one pass"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "morsel_unit": "block",
+    "threads": "auto(nproc)",
+    "reduction": "omp_parallel_reduction_long_double",
+    "schedule": "dynamic",
+    "note": "#pragma omp parallel reduction(+:revenue) with dynamic schedule over 916 blocks; ~137 qualifying; imbalance is low because non-qualifying blocks are trivially cheap"
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/indexes/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "skip_condition": "blocks[b].mx < lo || blocks[b].mn >= hi",
+      "expected_skip_rate": 0.85
+    }
+  ],
+  "aggregation": "scalar_no_group_by",
+  "precision": {
+    "accumulator_type": "long double",
+    "rule": "C35",
+    "rationale": "SUM(l_extendedprice * l_discount) is a two-column derived expression; C29 int64_t-cents does NOT apply; use long double per C35"
+  },
+  "date_constants": {
+    "lo": "gendb::date_to_epoch(\"1994-01-01\")",
+    "hi": "gendb::add_years(lo, 1)",
+    "init": "gendb::init_date_tables() called once at top of main()"
+  },
+  "output": {
+    "columns": ["revenue"],
+    "format": "printf(\"%.2Lf\\n\", revenue)"
+  },
+  "cardinality_estimates": {
+    "lineitem_total": 59986052,
+    "after_zone_map_block_skip": 9000000,
+    "after_all_row_filters": 1200000,
+    "combined_row_selectivity": 0.02
+  },
+  "execution_target": "cpp"
+}

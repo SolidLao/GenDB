@@ -56,6 +56,20 @@ Same size-based framework as anti-join. Early termination on first match.
 2. Probe outer: bloom-negative → skip; bloom-positive → verify against exact hash → emit match
 3. Stop probing on first match per outer row
 
+### Dense-Key Bitmap Semi-Join
+When the join key is a dense sequential integer (e.g., primary keys numbered 1..N), consider a flat bitmap or byte-array indexed directly by key value instead of a hash table:
+- **Bitmap** (N/8 bytes): `bitset[key >> 3] |= (1 << (key & 7))` — minimal memory, fits L2 for N up to ~2M
+- **Byte array** (N bytes): `bitmap[key] = 1` — simpler code, fits L2 for N up to ~250K
+
+Conditions favoring this approach:
+- Key values are dense integers in a bounded range [1, N] (gaps are fine — just waste a few bits)
+- N × element_size fits comfortably in L2 cache (typically ≤256KB-1MB)
+- The semi-join only needs existence check, not value retrieval
+
+Benefit: O(1) insert and lookup with zero hash overhead, no collision handling. Replaces hash index probe (~5 cache misses per probe on large hash) with single L2-resident memory access.
+
+When NOT applicable: sparse or non-integer keys, or N so large that the bitmap exceeds LLC.
+
 ### Dimension Semi-Join Pushdown (fact-dimension joins with selective dimension filter)
 
 When a fact table joins a dimension table AND the dimension has a selective filter:
@@ -75,6 +89,8 @@ random-access hash probes for the majority of non-qualifying rows.
 Default join pattern. Build smaller side, probe larger.
 - Pre-size hash table: capacity = next_power_of_2(build_cardinality * 2)
 - For data structure selection, see data-structures skill
+- When the query also aggregates over the join result AND the GROUP BY key is a superset of (or equals) the join key, consider probe-aggregate fusion — see aggregation-optimization skill: Probe-Aggregate Fusion. This eliminates intermediate materialization and separate aggregation phases.
+- When the build phase is a bottleneck and keys are unique (PK joins), consider CAS-based concurrent insert for parallel build — see hash-tables skill: CAS-Based Concurrent Insert
 
 ### Bloom Pre-Filter for L3-Exceeding Inner Joins
 When the build-side hash table exceeds L3 cache but a full inner join (not just existence) is needed:
@@ -140,4 +156,4 @@ If the chosen join strategy underperforms, use timing diagnostics to guide the n
 Strategy tables give starting points, not final answers. Measure, diagnose, adapt.
 
 ## Common Pitfalls
-→ See experience skill: C9 (hash table capacity), C24 (unbounded probing), P1 (std::unordered_map), P11 (pre-built indexes), P21 (bloom filter for anti-join), P23 (filtered cardinality)
+→ See experience skill: C9 (hash table capacity), C24 (unbounded probing), P1 (std::unordered_map), P11 (pre-built indexes), P21 (bloom filter for anti-join), P23 (filtered cardinality), P32 (dense-key bitmap semi-join), P33 (probe-aggregate fusion)

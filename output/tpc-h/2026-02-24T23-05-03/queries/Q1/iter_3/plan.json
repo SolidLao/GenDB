@@ -1,0 +1,87 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["date_init", "zone_map_load", "parallel_scan_filter_aggregate", "thread_local_merge", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= gendb::add_days(gendb::date_to_epoch(\"1998-12-01\"), -90)",
+      "selectivity": 0.985,
+      "notes": "Nearly full scan; date threshold computed via date_utils.h — C1/C7: NEVER hardcode or use N×365"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array(6_slots, indexed_by_rf_code*2+ls_code)",
+    "notes": "4 valid (rf,ls) group combos; rf has 3 codes [0,1,2], ls has 2 codes [0,1] → index = rf_code*2+ls_code ∈ [0,5], 4 slots active. 4 slots × ~80 bytes = 320 bytes per thread; 64 threads × 320B = 20KB total → fits in L1 cache. Zero hashing overhead."
+  },
+  "scan_strategy": {
+    "pattern": "fused_single_pass",
+    "rationale": "98.5% selectivity — selection vector overhead not worthwhile; fuse filter + aggregate in one tight loop over lineitem rows",
+    "column_load_order": ["l_shipdate", "l_returnflag", "l_linestatus", "l_quantity", "l_extendedprice", "l_discount", "l_tax"],
+    "zone_map_usage": "load l_shipdate_zone_map; skip blocks where blocks[b].mn > threshold (block guaranteed no-pass); for boundary blocks (mn<=threshold<mx) scan normally; with 98.5% selectivity almost no blocks skipped — still apply for correctness and boundary handling"
+  },
+  "aggregation": {
+    "strategy": "direct_array",
+    "slot_count": 6,
+    "index_formula": "rf_code * 2 + ls_code",
+    "valid_slots": 4,
+    "slot_layout": {
+      "rf_code": "int16_t",
+      "ls_code": "int16_t",
+      "sum_qty": "double",
+      "sum_base_price": "long double",
+      "sum_disc_price": "long double (C35: derived expression ep*(1-disc))",
+      "sum_charge": "long double (C35: derived expression ep*(1-disc)*(1+tax))",
+      "sum_disc": "double (for AVG(l_discount))",
+      "count": "int64_t"
+    },
+    "precision_rules": {
+      "sum_qty": "double — max group sum ~50M×50=2.5×10^9, well under 10^13",
+      "sum_base_price": "long double — max group sum ~50M×104949≈5×10^12, use long double for safety",
+      "sum_disc_price": "long double — C35: multi-column derived expression, MUST NOT use int64_t cents",
+      "sum_charge": "long double — C35: multi-column derived expression, MUST NOT use int64_t cents",
+      "sum_disc": "double — values in [0.00, 0.10], sum magnitude negligible",
+      "avg_computation": "computed post-merge as sum/count, not incrementally"
+    },
+    "merge_strategy": "sequential_merge",
+    "merge_rationale": "T×G = 64×4 = 256 — trivially small; sequential loop over 64 thread-local arrays, 4 slots each = 256 additions total"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "pattern": "each thread maintains own 4-slot AggSlot[6] local array; parallel scan over lineitem row morsels; single sequential merge after barrier",
+    "thread_local_init": "zero-initialize AggSlot[6] per thread before scan loop"
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/indexes/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "block_size": 65536,
+      "num_blocks": 916,
+      "skip_condition": "blocks[b].mn > threshold → skip entire block (0 rows pass)",
+      "partial_condition": "blocks[b].mn <= threshold AND blocks[b].mx > threshold → scan normally",
+      "full_pass_condition": "blocks[b].mx <= threshold → all rows pass, no per-row date check needed",
+      "expected_benefit": "minimal at 98.5% selectivity — nearly all blocks must be scanned; still apply for boundary blocks and full-pass optimization"
+    }
+  ],
+  "date_handling": {
+    "rule": "C1+C7: use date_utils.h exclusively",
+    "init": "gendb::init_date_tables() — call ONCE at top of main() before any date operations (C11)",
+    "threshold": "int32_t threshold = gendb::add_days(gendb::date_to_epoch(\"1998-12-01\"), -90)"
+  },
+  "dictionary_handling": {
+    "l_returnflag": "load lineitem/l_returnflag_dict.txt into std::vector<std::string> rf_dict at runtime — C2: NEVER hardcode codes",
+    "l_linestatus": "load lineitem/l_linestatus_dict.txt into std::vector<std::string> ls_dict at runtime — C2: NEVER hardcode codes",
+    "output_decode": "rf_dict[slot.rf_code].c_str() and ls_dict[slot.ls_code].c_str() — C18",
+    "csv_quoting": "C31: double-quote ALL string output columns — printf(\"\\\"%s\\\"\", str.c_str())"
+  },
+  "output": {
+    "columns": ["l_returnflag", "l_linestatus", "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge", "avg_qty", "avg_price", "avg_disc", "count_order"],
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "sort_on": "string labels decoded from rf_dict/ls_dict after merge",
+    "row_count": 4,
+    "format": "CSV with %.2f for monetary/quantity columns, %lld for count"
+  },
+  "execution_target": "cpp"
+}

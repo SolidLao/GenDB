@@ -78,5 +78,58 @@ Better cache locality for iteration-heavy patterns (star joins, aggregation with
 - **CRITICAL:** Size based on FILTERED row count, not raw table size (see experience P23)
 - Hash function: multiply-shift `(key * 0x9E3779B97F4A7C15ULL) >> shift` preferred over std::hash (which may be identity on some compilers, causing clustering with power-of-2 tables)
 
+### LLC-Aware Capacity Tuning
+When the hash table at standard 50% load slightly exceeds LLC (e.g., by <2×), consider whether reducing capacity to fit LLC improves overall performance:
+- Increasing load factor from 50% to 60-75% increases average probe length (from ~1.5 to ~2-3 for Robin Hood) but makes every probe an LLC hit (~20ns) instead of LLC miss (~100ns)
+- Net effect can be positive when the table is within ~2× of LLC size and a bloom pre-filter already eliminates most non-matching probes
+- Trade-off: higher load degrades worst-case probe length. Robin Hood hashing bounds probe variance, making this safer than linear probing at higher load
+- Decision rule: if `cap_50pct × slot_size > LLC` AND `cap_70pct × slot_size < LLC × 0.8`, the higher load factor is worth evaluating
+
+## CAS-Based Concurrent Insert
+
+When the build phase inserts unique keys (e.g., PK joins) and sequential insertion is a bottleneck, consider lock-free parallel insert using `compare_exchange_strong`:
+
+Conditions favoring this approach:
+- Keys are unique (PK column) — no duplicate-key conflicts between threads
+- Build-side cardinality is large enough (>100K entries) that sequential insert is measurable
+- Standard Robin Hood hashing is NOT compatible with concurrent insert (displacement chains create read-write conflicts). Use simple linear probing with CAS instead.
+
+Pattern: each thread CAS-claims empty slots. If CAS fails (another thread claimed it), re-read and continue probing. SoA layout (separate keys[], values[] arrays) works well since only keys[] needs atomic operations during build.
+
+Trade-off: CAS-based linear probing has slightly longer average probe chains than Robin Hood at the same load factor. But parallel build can be 5-10× faster than sequential Robin Hood for >1M entries, which typically outweighs the probe-length increase.
+
+## SoA vs AoS Layout
+
+**Struct-of-Arrays (SoA)**: separate arrays for keys[], values[], metadata[]. Advantages:
+- During probe, only keys[] array is touched for non-matching slots → smaller cache footprint
+- Enables selective atomic operations (atomic keys[] during build, atomic values[] during aggregation) without bloating non-atomic fields
+- Better for combined join+aggregation HTs where build phase touches keys+metadata but probe phase touches keys+accumulators
+
+**Array-of-Structs (AoS)**: single array of {key, value, metadata} slots. Advantages:
+- On a match, key + all payload in same cache line → one access
+- Simpler code, better for small slot sizes (≤16B)
+
+Guideline: when the hash table serves multiple phases with different access patterns (e.g., build writes keys+metadata, probe reads keys+accumulates values), SoA tends to perform better because each phase only warms the arrays it needs.
+
+## Software Prefetching for Hash Probes
+
+When the hash table fits LLC but individual probes still incur L3 latency (~10-15ns), consider software prefetching to hide latency during sequential scans:
+
+```
+// During probe-side scan, prefetch hash table slot for a future row
+if (r + PFDIST < r_end) {
+    uint32_t ph = hash(probe_keys[r + PFDIST]) & mask;
+    __builtin_prefetch(ht_keys + ph, 0, 1);    // read, L2 hint
+    __builtin_prefetch(ht_values + ph, 1, 1);   // write, L2 hint (if accumulating)
+}
+```
+
+Conditions favoring this:
+- HT fits LLC but is too large for L2 — individual probes hit L3
+- Probe-side scan is sequential (predictable access to probe columns, but random into HT)
+- Prefetch distance (PFDIST) should be tuned: 16-64 rows typical, depends on L3 latency / per-row work
+
+When NOT helpful: HT fits L2 (already fast), or HT exceeds LLC (prefetch into LLC still misses on eviction).
+
 ## Common Pitfalls
-→ See experience skill: C9 (capacity overflow), C20 (memset sentinel), C24 (unbounded probing), P1 (std::unordered_map), P7 (std::map with pair keys)
+→ See experience skill: C9 (capacity overflow), C20 (memset sentinel), C24 (unbounded probing), P1 (std::unordered_map), P7 (std::map with pair keys), P34 (SoA + CAS concurrent HT)

@@ -1355,9 +1355,12 @@ async function runQueryFullPipeline(
         try { await writeFile(optIterPlanPath, await readFile(planPath, "utf-8")); } catch {}
       }
 
-      // Copy best code as starting point
+      // Copy best code as starting point (fallback to iter_0 code if no passing iteration exists)
       if (bestCppPath && existsSync(bestCppPath)) {
         await writeFile(optIterCppPath, await readFile(bestCppPath, "utf-8"));
+      } else if (!existsSync(optIterCppPath) && existsSync(iterCppPath)) {
+        console.log(`[Orchestrator] [${queryId}] No passing iteration — seeding escalation with iter_0 code`);
+        await writeFile(optIterCppPath, await readFile(iterCppPath, "utf-8"));
       }
 
       const escalationPrompt = [
@@ -1433,9 +1436,12 @@ async function runQueryFullPipeline(
       continue;  // Skip normal optimizer path for this iteration
     }
 
-    // Copy best code as starting point
+    // Copy best code as starting point (fallback to iter_0 code if no passing iteration exists)
     if (bestCppPath && existsSync(bestCppPath)) {
       await writeFile(optIterCppPath, await readFile(bestCppPath, "utf-8"));
+    } else if (!existsSync(optIterCppPath) && existsSync(iterCppPath)) {
+      console.log(`[Orchestrator] [${queryId}] No passing iteration — seeding optimizer with iter_0 code`);
+      await writeFile(optIterCppPath, await readFile(iterCppPath, "utf-8"));
     }
 
     // Copy plan.json for optimizer reference
