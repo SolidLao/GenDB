@@ -1,0 +1,43 @@
+{
+  "query_id": "Q2",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 57.51333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 57.51333333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 24.13,
+        "build_joins": 1.82,
+        "dim_filter": 12.32,
+        "main_scan": 1.32,
+        "output": 0.39,
+        "total": 54.66
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 28.343333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 28.343333333333334,
+      "validation": "pass",
+      "strategy": "Root cause is two Category-A plan inefficiencies: (1) data_loading wastes ~12-15ms on per-string heap allocations while loading tag_numpre.dict (198,311 entries, 9.7MB) using fread+vector<string> — each of the ~198k entries with average length ~47 bytes (above SSO threshold) triggers a separate heap allocation; fix is to mmap the dict file and build a uint32_t offsets array + uint16_t lengths array (2 mallocs total), with string data accessed directly as char* pointers into the mmap buffer; (2) the dim_filter/merge phase wastes 12ms because building 2 thread-local hash maps (4MB each) and then merging them costs more than it saves — with only ~2 qualifying blocks and ~118k pure rows, single-threaded Phase 1 takes ~3ms and eliminates the 12ms merge entirely, also removing mmap(MAP_ANONYMOUS) page-fault overhead for the thread-local maps. Expected new total: ~30-35ms vs 58ms current.",
+      "operation_timings": {
+        "data_loading": 5.24,
+        "build_joins": 8.53,
+        "dim_filter": 0,
+        "main_scan": 8.4,
+        "output": 0.29,
+        "total": 28.15
+      }
+    }
+  ]
+}

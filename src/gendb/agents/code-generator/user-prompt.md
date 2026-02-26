@@ -1,11 +1,20 @@
-# Task: Generate C++ implementation for {{query_id}} (iteration 0)
+# Task: Generate C++ implementation for {{query_id}}
 
 {{#if plan_json}}
-## Execution Plan (from Query Planner)
-Implement this plan in C++. You may deviate if you identify a clearly superior approach.
+## Execution Plan
+Implement this plan in C++. Follow the plan faithfully — it was produced by the Query Optimizer based on profiling data.
 ```json
 {{plan_json}}
 ```
+{{/if}}
+
+{{#if anchors_section}}
+{{anchors_section}}
+{{/if}}
+
+{{#if performance_context}}
+## Performance Context
+{{performance_context}}
 {{/if}}
 
 ## Hardware Configuration
@@ -33,6 +42,14 @@ Authoritative reference for column types, encodings, index layouts, table stats.
 
 ## GenDB Storage Directory
 Binary columnar data: {{gendb_dir}}
+
+{{#if storage_extensions}}
+{{storage_extensions}}
+{{/if}}
+
+{{#if column_versions}}
+{{column_versions}}
+{{/if}}
 
 ## Ground Truth
 {{ground_truth}}

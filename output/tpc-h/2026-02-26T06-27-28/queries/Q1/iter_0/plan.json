@@ -1,0 +1,77 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "aggregate", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.97,
+      "notes": "1998-09-02 encoded as days_from_civil; ~97% rows pass; table sorted ascending so tail blocks pruned by zone map"
+    }
+  ],
+  "data_structures": {
+    "block_skip": "zone_map(lineitem_shipdate_zonemap) — skip block if min_val > 10471; early-terminate once min_val > threshold (sorted order)",
+    "aggregation": "direct_array[6] — Acc[rflag_code * 2 + lstatus_code]; thread-local per worker, merged after scan"
+  },
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "estimated_skipped_blocks": 3,
+    "estimated_scanned_blocks": 597,
+    "columns_read": [
+      "lineitem/l_shipdate.bin",
+      "lineitem/l_returnflag.bin",
+      "lineitem/l_linestatus.bin",
+      "lineitem/l_quantity.bin",
+      "lineitem/l_extendedprice.bin",
+      "lineitem/l_discount.bin",
+      "lineitem/l_tax.bin"
+    ]
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "granularity": "block",
+    "notes": "Each thread claims blocks from a shared atomic counter; maintains thread-local Acc[6]; final merge is O(6 * nthreads)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks — skip block b if zone_map[b].min_val > 10471; early-terminate on first skipped block due to ascending sort order"
+    }
+  ],
+  "aggregation": {
+    "strategy": "array_direct",
+    "key_expression": "rflag_code * 2 + lstatus_code",
+    "key_range": "0..5",
+    "accumulators": [
+      "sum_qty        += l_quantity",
+      "sum_base       += l_extendedprice",
+      "sum_disc_price += l_extendedprice * (1.0 - l_discount)",
+      "sum_charge     += l_extendedprice * (1.0 - l_discount) * (1.0 + l_tax)",
+      "sum_disc       += l_discount",
+      "cnt            += 1"
+    ],
+    "derived_at_output": [
+      "avg_qty   = sum_qty / cnt",
+      "avg_price = sum_base / cnt",
+      "avg_disc  = sum_disc / cnt"
+    ],
+    "merge": "sum thread-local Acc[6] arrays element-wise; O(6 * nthreads)"
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "sort_cardinality": 6,
+    "sort_strategy": "std::sort on 6-entry result array keyed by (returnflag_string, linestatus_string) loaded from dict files",
+    "dict_files": [
+      "lineitem/l_returnflag.dict",
+      "lineitem/l_linestatus.dict"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

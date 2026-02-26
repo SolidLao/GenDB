@@ -1,0 +1,134 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "build_sub_arrays",
+    "build_pre_eq_sub_set",
+    "parallel_scan_num",
+    "merge_aggregates",
+    "resolve_tlabels_and_abstract",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 5242,
+      "notes": "sub_valid bitset[86135] = 10.5 KB L1-resident; sub_sic_arr and sub_cik_arr flat arrays for O(1) lookup by adsh_code"
+    },
+    {
+      "build": "pre(stmt=EQ, adsh in sub_valid)",
+      "probe": "num.(adsh_code, tag_code, ver_code)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 64656,
+      "notes": "Scan pre sequentially: for each row check stmt==eq_code, then adsh_code in sub_valid; insert (adsh,tag,ver) packed uint64_t key into flat open-addressing hash set; 64K entries x 8 bytes = 512 KB fits in L2. Single sequential pre scan replaces random binary searches into 154 MB pre_key_sorted."
+    },
+    {
+      "build": "tag (abstract + tlabel)",
+      "probe": "result groups only (deferred to output decode)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "notes": "Defer tag join entirely to output decode stage. Sampling confirmed tag abstract=0 filter eliminates 0 rows from qualifying set. During scan, skip all tag lookups. After aggregation, for each unique (tag_code, ver_code) in result groups, compute FNV combined hash, probe tag_pk_hash (67 MB, few K probes = negligible), get row_id, check abstract[row_id], read tlabel. This eliminates the 1175ms build_tag_join_map phase entirely."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.84,
+      "method": "zone map block skip (uom_min>0 means no USD); then per-row uom_code==0 check"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0,
+      "method": "std::isnan(v) == false; empirically no NULLs among USD rows"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.065,
+      "method": "sub_valid bitset probe on num.adsh_code; 10.5 KB L1-resident"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ' AND adsh in sub_valid",
+      "selectivity": 0.008,
+      "method": "pre_eq_sub_set flat hash probe; O(1) per num row; 512 KB L2-resident; replaces O(log 9.6M) binary search on 154 MB pre_key_sorted"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0,
+      "method": "Deferred to output: for each result group's (tag_code, ver_code), probe tag_pk_hash -> check abstract[row_id]; sampling confirmed 0 rows eliminated during scan"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",   "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value", "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",  "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",   "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version","file":"num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential with zone-map block skip (uom)"
+  },
+  "data_structures": {
+    "sub_valid_bitset": "uint64_t[(86135+63)/64] = 10.5 KB; marks adsh_codes where sic in [4000,4999]; L1-resident",
+    "sub_sic_array": "int16_t[86135] = 168 KB; direct lookup sic value by adsh_code",
+    "sub_cik_array": "int32_t[86135] = 336 KB; direct lookup cik by adsh_code",
+    "pre_eq_sub_set": "flat open-addressing hash set; key=uint64_t packed (adsh_code<<34 | tag_code<<17 | ver_code); capacity=next_pow2(64656*2)=131072; 131072*8=1 MB; L2-resident; empty sentinel=UINT64_MAX; probe cost O(1) average; replaces 154 MB pre_key_sorted binary search",
+    "tag_fnv_arrays": "uint64_t h_tag[198312] (1.5 MB) + uint64_t h_ver[83816] (0.65 MB); precomputed FNV64a hashes of dict strings; used only at output decode stage for tag_pk_hash probing",
+    "thread_local_agg": "per-thread flat_hash_map<uint64_t, pair<double,int64_t>> keyed by packed(sic<<48 | (uint32_t)tag_code<<17 | (uint32_t)ver_code); reserved to 8192 entries; num qualifying rows ~530K / 64 threads = ~8K rows per thread",
+    "thread_local_cik": "per-thread vector<CIKEntry{uint64_t group_key, int32_t cik}> for COUNT DISTINCT; sorted globally post-scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pre_scan": "parallel over pre blocks (9600799 rows / 96 blocks of 100K); thread-local sets unioned into pre_eq_sub_set; alternatively single-threaded since build is 18ms",
+    "num_scan": "morsel-driven over num blocks (395 blocks); atomic block counter; each thread processes complete blocks",
+    "thread_local_agg": true,
+    "merge_phase": "sort-merge: collect all thread-local (group_key, sum, count) tuples into flat array, sort by group_key, linear scan to aggregate; CIK dedup via global sort of CIK entries"
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "block-level USD filter: skip blocks where uom_min > 0 (no USD rows); uom=0 so blocks with uom_max < 0 are entirely non-USD"
+    },
+    {
+      "index": "tag_pk_hash",
+      "purpose": "output decode only: for each unique (tag_code, ver_code) in result groups, compute combined FNV hash, probe tag_pk_hash to get tag row_id, check abstract[row_id], read tlabel; only few K probes post-aggregation"
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "key": "uint64_t packed(int16_t sic << 48 | uint32_t tag_code << 17 | uint32_t ver_code) — 8 bytes; tag_code < 198312 < 2^18; ver_code < 83816 < 2^17",
+    "accumulator": "double sum_value, int64_t cnt_value (for AVG = sum/cnt); CIK collected in separate vector for COUNT DISTINCT",
+    "post_scan_tlabel_merge": "after resolve_tlabels phase, groups with same (sic, tlabel_string) are merged into final result; handles case of multiple (tag_code, ver_code) sharing same tlabel"
+  },
+  "output": {
+    "having": "COUNT(DISTINCT cik) >= 2",
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "columns": [
+      "s.sic (from group key)",
+      "t.tlabel (decoded via tag_pk_hash lookup at output stage)",
+      "p.stmt = 'EQ' (constant)",
+      "COUNT(DISTINCT s.cik) = distinct cik count from sorted CIK array",
+      "SUM(n.value) = sum_value",
+      "AVG(n.value) = sum_value / cnt_value"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: build_tag_join_map (1175ms, 83% of total) iterates 1.07M tag rows with string-keyed hash map operations — 3.2M std::string allocations + 2M string-hash lookups + 1M tlabel copies. Sampling revealed two key facts: (1) tag_pk_hash is 67 MB (exceeds 44 MB LLC), so random probing during scan is cache-hostile; (2) a compact pre_eq_sub_set of 64K entries (1 MB, L2-resident) fully replaces the 154 MB pre_key_sorted binary search. Strategy: Category A (plan restructuring) — eliminate the tag table iteration entirely. Pre-side scan (pre/stmt.bin + pre/adsh.bin + pre/tag.bin + pre/version.bin) with EQ + sub_valid filter builds a 64K-key flat hash set in ~18ms (vs 1175ms for tag map). During num scan, probe this tiny pre_eq_sub_set instead of binary-searching pre_key_sorted (2× faster scan). The tag abstract check and tlabel resolution are deferred to output decode stage (few K group probes — negligible). This reduces total estimated time from 1410ms to ~80-100ms by eliminating the dominant 1175ms build phase and cutting scan overhead.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "query_id": "Q24",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 100.00666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 100.00666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 26.35,
+        "main_scan": 40.31,
+        "build_joins": 24.09,
+        "output": 0.39,
+        "total": 97.01
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 79.44666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 79.44666666666667,
+      "validation": "pass",
+      "strategy": "Root cause analysis identified two independent bottlenecks. (1) build_joins=24ms: the sequential single-threaded merge of 64 thread-local hash maps is a pure parallelism bottleneck (Category D). Total merge work is 64 maps × 65536 slots × 24 bytes = 100MB read plus ~1.28M hash probes, all serialized onto one thread. Replacing with an OpenMP parallel tree-reduction (log2(64)=6 rounds, each round fully parallel with barrier sync between rounds) reduces this to ~1ms wall time since each per-thread merge of a 1.5MB map stays resident in L3. (2) main_scan=40ms: the anti-join probes into the 402MB pre_existence_hash cause ~15.7M LLC cache misses (402MB >> 44MB L3). Adding software prefetch hints (__builtin_prefetch) with lookahead distance P=8 overlaps memory fetch latency with computation on the current row, converting serial miss stalls into overlapped accesses and improving effective throughput. Additionally, USD code is pre-seeded at index 0 so dict scanning is skipped. Combined, these two changes are projected to reduce total time from 100ms to ~75ms, well below the 94ms target.",
+      "operation_timings": {
+        "data_loading": 22.7,
+        "main_scan": 35.16,
+        "build_joins": 11.85,
+        "output": 0.74,
+        "total": 77.8
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 67.27666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 67.27666666666666,
+      "validation": "pass",
+      "strategy": "Two root causes addressed. (1) data_loading=23ms is dominated by 184K heap malloc() calls in load_dict for tag_numpre.dict: 93.1% of 198,311 tag strings average 47 bytes, well above the ~22-byte SSO threshold, so each triggers a separate heap allocation at ~100-150ns each = 18-25ms wasted. Fix (Category C): replace vector<string> with a flat DictStore — pre-reserve a single large buffer for all string bytes, store offsets and lengths as plain int arrays. This collapses 184K mallocs into 3 large allocations, cutting dict loading to ~1ms and data_loading from 23ms to ~3-5ms. Version strings (avg 20 bytes, 100% SSO-eligible) are fast and need no change. (2) main_scan prefetch P=8 gives only ~80ns head start against 70-100ns DRAM latency for probes into the 402MB pre_existence_hash — barely covering latency with no margin. Increasing to P=16 gives ~160ns head start, fully hiding DRAM latency and reducing probe stalls. Expected new total: ~58-62ms.",
+      "operation_timings": {
+        "data_loading": 12.28,
+        "main_scan": 35.26,
+        "build_joins": 14.32,
+        "output": 1.54,
+        "total": 65.1
+      }
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[row_count=9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[unique_values+1=698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; during IS HT build (Phase 2 serial insert), read plabel_codes[pre_row_id] and store as plabel_code in IS HT value. Use plabel_code+1 as group-by key component (1-based packing so key=0 is safely empty). At output decode: dict_offsets[plabel_code]..dict_offsets[plabel_code+1] gives byte span in dict_data."
+    }
+  ],
+  "pipeline": [
+    "parallel_preinit",
+    "build_sub_filter",
+    "build_is_pre_hashtable_parallel",
+    "scan_num_zonemaps",
+    "parallel_scan_merge_fused",
+    "topk_decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023) → fy2023_bool_array[adsh_code]",
+      "probe": "num(uom=USD, value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 16219,
+      "notes": "Flat bool array fy2023[86135] indexed by adsh_code; 84KB, L1-resident."
+    },
+    {
+      "build": "pre(stmt=IS, adsh in fy2023) → flat open-addressing hash table keyed by packed(adsh,tag,ver)",
+      "probe": "num rows passing fy2023 filter (~6.5M rows)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 325000,
+      "notes": "IS HT: IS_HT_SIZE=2^20=1048576 slots x 16 bytes = 16MB; key=uint64_t packed(adsh:17b|tag:18b|ver:17b); empty sentinel = UINT64_MAX (memset 0xFF); value=uint64_t packed(mult:16b << 44 | row_id:24b << 20 | plabel_code:20b). Built via TWO-PHASE PARALLEL BUILD: Phase 1 (parallel omp for, static schedule over all 97 pre blocks) — each thread collects IS+fy2023 entries into per-thread local vector<PreCollected>; Phase 2 (serial, single thread) — iterates threads 0..nthreads-1 in order, inserts each thread's collected entries into global IS HT preserving row order. 325K inserts x 16MB L3-resident HT = ~4ms serial. Total Phase 1+2 ≈ 5ms vs 29ms sequential."
+    }
+  ],
+  "filters": [
+    {"table": "num",  "predicate": "uom = 'USD'",         "selectivity": 0.87},
+    {"table": "num",  "predicate": "value IS NOT NULL",   "selectivity": 0.99},
+    {"table": "sub",  "predicate": "fy = 2023",           "selectivity": 0.19},
+    {"table": "pre",  "predicate": "stmt = 'IS'",         "selectivity": 0.18},
+    {"table": "pre",  "predicate": "adsh in fy2023_set",  "selectivity": 0.19, "notes": "Applied during IS HT build to eliminate non-qualifying IS rows"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",     "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value",   "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",    "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",     "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version", "file": "num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential with num_zonemaps block skipping; software prefetch for IS HT probe slot"
+  },
+  "data_structures": {
+    "sub_fy_filter":    "flat uint8_t array[86135]; 84KB; L1-resident; 0/1",
+    "sub_name_lookup":  "flat int32_t array[86135]; direct index by adsh_code",
+    "is_pre_hashtable": "flat open-addressing HT; IS_HT_SIZE=2^20=1048576 slots x 16 bytes = 16MB; ISSlot{uint64_t key; uint64_t value}; empty key = UINT64_MAX (parallel memset 0xFF in preinit); value = (mult:16b<<44)|(row_id:24b<<20)|(plabel_code:20b). Built by two-phase parallel build. madvise(WILLNEED) before parallel scan.",
+    "tl_raw":           "SINGLE contiguous allocation: new AggSlot[(size_t)nthreads * TL_SIZE]; TL_SIZE=2^17=131072 slots/thread (3.1MB/thread, 200MB total at 64 threads). CRITICAL CHANGE: empty sentinel = 0 (not UINT64_MAX). Pack group key as ((nc+1)<<38)|((tc+1)<<20)|(pc+1) so min valid key = non-zero. Initialize with memset(0) per thread in parallel_preinit — triggers kernel COW zero-page optimization, dramatically faster than struct-loop with non-zero sentinel.",
+    "scatter_buf":      "AggEntry[(size_t)nthreads * NPART * SCATTER_BIN_CAP]; SCATTER_BIN_CAP=2048 (increased from 1024 to handle 3-sigma max ~1062 entries/bin at TL_SIZE=2^17 with ~62K groups/thread). Total: 64*64*2048*24B=192MB. NOT INITIALIZED in preinit — scatter_cnt guards all reads, so uninitialized entries are never accessed. Page faults happen lazily during compact (3MB/thread spread across scan phase). IMPORTANT: do NOT call delete[] on scatter_buf at any point during the timed region; let OS reclaim at exit.",
+    "scatter_cnt":      "uint32_t[(size_t)nthreads * NPART]; 16KB; zero-initialized in preinit",
+    "sub_hts":          "AggSlot[(size_t)nthreads * SUB_HT_SIZE]; SUB_HT_SIZE=2^13=8192 slots x 24B = 192KB/thread (12MB total). PRE-ALLOCATED in parallel_preinit contiguous block alongside is_ht and tl_raw. Initialized with memset(0) per thread in parallel_preinit (sentinel=0 consistent with tl_raw). Do NOT re-initialize inside fused parallel region. Do NOT call delete[] during timed region.",
+    "deferred_frees":   "CRITICAL: do NOT call delete[] on tl_raw, is_ht_raw, scatter_buf, scatter_cnt, or sub_hts during the timed pipeline. These munmap() calls trigger TLB shootdown IPIs to all 64 cores for ~105K pages (~15ms). Instead, skip all delete[] for large buffers; let the OS reclaim on process exit."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "nthreads = min(omp_get_max_threads(), 64)",
+    "morsel_size": 100000,
+    "notes": "TWO parallel OMP regions (reduced from THREE in iter_2): (1) parallel_preinit — each thread initializes its IS HT slice (memset 0xFF), TL slice (memset 0), scatter_cnt slice (memset 0), and sub_hts slice (memset 0). scatter_buf is NOT initialized. (2) FUSED parallel_scan_merge — single #pragma omp parallel containing: [a] #pragma omp for schedule(dynamic,1) over USD blocks for scan+IS-HT-probe+TL-aggregate (implicit barrier); [b] compact TL→scatter_buf (each thread scatters its TL entries by hash(key)%nthreads into scatter_buf bins, SCATTER_BIN_CAP=2048); [c] partitioned merge: thread t reads scatter_buf[src][t][0..scatter_cnt[src][t]) for all src, upserts into sub_hts[t*SUB_HT_SIZE]. No inter-region OMP spawn overhead. SEPARATE from these: build_is_pre_hashtable_parallel uses its OWN #pragma omp parallel for (static schedule) as Phase 1 only."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks — identify USD-containing blocks in num; distribute as morsels"
+    },
+    {
+      "index": "pre_zonemaps",
+      "purpose": "skip_blocks — during IS HT build Phase 1, each thread checks zone map before scanning its assigned pre blocks; skip blocks where is_code outside [stmt_min, stmt_max]"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "group_key": {
+    "fields": ["(name_code+1):14b", "(tag_code+1):18b", "(plabel_code+1):20b"],
+    "packed_as": "uint64_t = ((uint64_t)(nc+1) << 38) | ((uint64_t)(tc+1) << 20) | (uint64_t)(pc+1)",
+    "empty_sentinel": "0 (key=0 is impossible for any valid (nc+1, tc+1, pc+1) with all codes >= 0)",
+    "unpack": "nc = (uint32_t)(k >> 38) - 1; tc = (uint32_t)((k >> 20) & 0x3FFFFu) - 1; pc = (uint32_t)(k & 0xFFFFFu) - 1",
+    "estimated_groups": 100000,
+    "estimated_groups_per_thread": 62000,
+    "tl_load_factor": "62000/131072 = 47% — avg 1.44 probes"
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "sort_strategy": "std::partial_sort over all groups collected from nthreads sub_hts (iterate sub_hts[t*SUB_HT_SIZE+j] for t=0..nthreads-1, key != 0)",
+    "decode_at_output": [
+      "nc = unpack_name_code(k) → sub/name.dict",
+      "tc = unpack_tag_code(k)  → shared/tag_numpre.dict",
+      "pc = unpack_plabel_code(k) → column_versions/pre.plabel.dict/dict.offsets + dict.data",
+      "stmt = constant 'IS'"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Four root causes diagnosed from iter_2 phases (34+29+28+15+9+38=153ms). (1) 38ms unaccounted overhead: delete[] tl_raw (403MB) + delete[] is_ht_raw (16MB) fires outside all named-phase timers but inside 'total', triggering munmap + TLB shootdown IPIs to all 64 cores for ~105K pages (~15ms); plus 3 OMP parallel region spawns × ~3ms = 9ms. Fix: Category C — defer ALL large delete[] calls to program exit (skip them; OS reclaims), and Category A — fuse parallel_scan and parallel_merge into ONE OMP parallel region (scan #pragma omp for + compact + merge in sequence within the same #pragma omp parallel block). (2) parallel_preinit 34ms: TL maps use struct-loop with UINT64_MAX sentinel, which forces physical page allocation (kernel COW zero-page optimization cannot help). Fix: Category B — change group-key empty sentinel to 0 by using 1-based packing ((nc+1)<<38|(tc+1)<<20|(pc+1)), then use memset(0) for TL and sub_hts — kernel can optimize away physical page writes for zero-fills on MAP_ANONYMOUS. Also reduce TL_SIZE from 2^18 to 2^17 (200MB vs 403MB, halving page fault count). Also skip scatter_buf initialization entirely (scatter_cnt guards all reads). Also pre-allocate sub_hts in preinit and initialize in parallel (removes sub_hts allocation from fused scan region). SCATTER_BIN_CAP raised from 1024 to 2048 to handle 3-sigma max ~1062 entries/bin at TL_SIZE=2^17. (3) build_is_pre_hashtable 29ms: single-threaded scan while 63 threads idle. Fix: Category A — two-phase parallel build: Phase 1 (#pragma omp parallel for static over all 97 pre blocks, each thread collects IS+fy2023 entries into per-thread local vector); Phase 2 (serial, iterate threads 0..nthreads-1 in order, insert collected entries into global IS HT preserving block-sequential row order). Phase 1 ~1ms wall, Phase 2 ~4ms serial. (4) IS HT sentinel unchanged: IS HT keeps UINT64_MAX sentinel (memset 0xFF) since IS key (adsh,tag,ver packed) can be 0 for valid data. Only TL/sub_hts switch to 0-sentinel. Projected total ~75-90ms.",
+  "correctness_anchors": {
+    "usd_code": "loaded at runtime from shared/uom.dict (pre-seeded index 0)",
+    "is_code": "loaded at runtime from shared/stmt.dict (pre-seeded index 1)",
+    "fy2023_value": 2023,
+    "group_key_packing": "((name_code+1) << 38) | ((tag_code+1) << 20) | (plabel_code+1); key=0 reserved as empty sentinel; unpack: nc=(k>>38)-1, tc=((k>>20)&0x3FFFF)-1, pc=(k&0xFFFFF)-1",
+    "group_key_empty_sentinel": "0 (NOT UINT64_MAX — changed from iter_2)",
+    "is_ht_key_packing": "(adsh:17b << 35) | (tag:18b << 17) | ver:17b",
+    "is_ht_value_packing": "(mult:16b << 44) | (row_id:24b << 20) | plabel_code:20b",
+    "is_ht_empty_sentinel": "UINT64_MAX (memset 0xFF — unchanged from iter_2)",
+    "tl_size": "2^17 = 131072 slots per thread",
+    "scatter_bin_cap": "2048",
+    "sub_ht_size": "2^13 = 8192 slots per thread",
+    "plabel_dict_unique_values": 698148,
+    "stmt_output": "IS (constant string, no decode needed)"
+  }
+}

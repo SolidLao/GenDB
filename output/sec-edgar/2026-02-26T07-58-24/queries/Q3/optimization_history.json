@@ -1,0 +1,50 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 122.35333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 122.35333333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 25.54,
+        "main_scan": 20.78,
+        "merge_thread_local_maps": 27.53,
+        "compute_threshold_avg_cik_sums": 0.09,
+        "having_filter_name_cik_map": 0.14,
+        "decode_name_codes": 6.69,
+        "topk_sort_limit_100": 0.02,
+        "output": 0.19,
+        "total": 121.09
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 28.566666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 28.566666666666666,
+      "validation": "pass",
+      "strategy": "Root cause is Category B (algorithm change): the thread-local hash maps in iter_0 use long double slots (24 bytes each), making the combined thread-local working set 64 x (393KB + 786KB) = 72MB — far exceeding L3 (44MB). This causes the merge phase to scan 72MB of cache-cold data (observed: 27.5ms). Fix: replace both hash maps with a single thread-local flat array double[16890] per thread (131KB), indexed by a pre-built compact adsh_code index that encodes the fy=2022 filter. This reduces per-thread working set to 131KB (fits in L2 per core), total merge data to 8.6MB (fits easily in L3), and eliminates hash computation + probing from the hot scan path. The scan loop simplifies to: one int16_t array lookup + one double array write per qualifying row (vs fy lookup + cik/name lookup + 2 hash inserts). Post-merge aggregation into cik and (name,cik) hash maps is trivial (16890 entries). Additionally, sub/name.dict is loaded upfront during data_loading to eliminate the separate 6.7ms decode_name_codes phase.",
+      "operation_timings": {
+        "data_loading": 0.84,
+        "dim_filter": 0.4,
+        "build_joins": 0.25,
+        "main_scan": 15.62,
+        "parallel_merge_compact_sum_array": 0.28,
+        "compute_threshold_avg_cik_sums": 0.05,
+        "having_filter_name_cik_map": 0.06,
+        "topk_sort_limit_100": 0.03,
+        "output": 0.34,
+        "total": 20.45
+      }
+    }
+  ]
+}

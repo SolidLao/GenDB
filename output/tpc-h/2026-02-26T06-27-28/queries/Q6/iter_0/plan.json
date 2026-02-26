@@ -1,0 +1,75 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.14,
+      "column_file": "lineitem/l_shipdate.bin",
+      "type": "int32_t"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "selectivity": 0.27,
+      "column_file": "lineitem/l_discount.bin",
+      "type": "double"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.46,
+      "column_file": "lineitem/l_quantity.bin",
+      "type": "double"
+    }
+  ],
+  "combined_selectivity": 0.017,
+  "estimated_output_rows": 1020000,
+  "data_structures": {
+    "aggregation": "scalar_accumulator_per_thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "granularity": "block",
+    "notes": "Partition qualifying block range [first_block, last_block] across threads; each thread accumulates a local double revenue, then sum-reduce at end"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "predicate_range": [8766, 9131],
+      "block_size": 100000,
+      "total_blocks": 600,
+      "notes": "Scan zone map to find contiguous [first_block, last_block] that overlap [8766,9131). Eliminates ~86% of blocks. Qualified blocks form a contiguous range because table is sorted by l_shipdate."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "columns_read": [
+      {"name": "l_shipdate",     "file": "lineitem/l_shipdate.bin",     "type": "int32_t", "role": "filter"},
+      {"name": "l_discount",     "file": "lineitem/l_discount.bin",     "type": "double",  "role": "filter+measure"},
+      {"name": "l_quantity",     "file": "lineitem/l_quantity.bin",     "type": "double",  "role": "filter"},
+      {"name": "l_extendedprice","file": "lineitem/l_extendedprice.bin","type": "double",  "role": "measure"}
+    ],
+    "read_strategy": "block_chunked",
+    "notes": "Read all four columns in block-aligned chunks of 100,000 rows to maximize L3 cache reuse (4 cols * 100K * 8B = 3.2 MB per chunk, fits in 44 MB L3). Apply l_shipdate filter first (cheapest int32 compare, highest block-level skip via zone map), then l_discount, then l_quantity. Accumulate revenue += l_extendedprice * l_discount only for passing rows."
+  },
+  "aggregation": {
+    "type": "scalar",
+    "expression": "SUM(l_extendedprice * l_discount)",
+    "output_column": "revenue",
+    "reduction": "sum_of_per_thread_accumulators"
+  },
+  "output": {
+    "order_by": [],
+    "limit": null,
+    "columns": ["revenue"]
+  },
+  "execution_target": "cpp"
+}

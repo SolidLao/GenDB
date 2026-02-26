@@ -9,5 +9,6 @@ export const config = {
   configKey: "code_inspector",
   promptPath: resolve(__dirname, "prompt.md"),
   allowedTools: ["Read", "Glob", "Grep", "Skill"],
+  domainSkillsPrompt: "## Domain Skills\nDomain skills (experience, hash tables, gendb-code-patterns, etc.) are available and will be loaded automatically when relevant. The experience skill contains critical correctness rules — always check it.",
   model: "sonnet",
 };

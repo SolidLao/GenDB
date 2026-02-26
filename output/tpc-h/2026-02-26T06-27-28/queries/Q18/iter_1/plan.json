@@ -1,0 +1,95 @@
+{
+  "query_id": "Q18",
+  "pipeline": ["scan_sorted_index_phase1", "collect_hot_keys", "lookup_orders", "lookup_customer", "scan_lineitem_phase2", "sort_topk"],
+  "join_order": [
+    {
+      "build": "lineitem_orderkey_sorted(sequential group scan)",
+      "probe": "l_quantity(random by row_id)",
+      "type": "semi",
+      "strategy": "sort_group_scan",
+      "build_cardinality": 59986052,
+      "notes": "Phase 1: scan sorted pairs sequentially; pairs are sorted by l_orderkey so groups are contiguous; accumulate l_quantity[row_id] per group; emit orderkey to hot_keys if sum > 300. No hash table needed. Each thread handles a disjoint range of complete groups by advancing start/end to group boundaries."
+    },
+    {
+      "build": "hot_keys(~3000)",
+      "probe": "orders_orderkey_hash",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3000,
+      "notes": "O(1) PK hash probe per hot orderkey; ~3000 probes total"
+    },
+    {
+      "build": "orders(filtered ~3000)",
+      "probe": "customer_custkey_hash",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3000,
+      "notes": "O(1) PK hash probe per qualifying order using o_custkey"
+    },
+    {
+      "build": "hot_keys(~3000)",
+      "probe": "lineitem_orderkey_sorted",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3000,
+      "notes": "Binary search into lineitem_orderkey_sorted for Phase 2 quantity aggregation per hot orderkey"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem_subquery",
+      "predicate": "SUM(l_quantity) > 300.0",
+      "selectivity": 0.002,
+      "applied_at": "phase1_during_sorted_scan"
+    }
+  ],
+  "scan": {
+    "table": "lineitem (via sorted index)",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey (via sorted pairs)", "file": "indexes/lineitem_orderkey_sorted.bin", "type": "struct{int32_t key; int32_t row_id;}[59986052]", "bytes_per_row": 8},
+      {"name": "l_quantity (random access by row_id)", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential for sorted index; random for l_quantity by row_id"
+  },
+  "data_structures": {
+    "phase1_agg": "none — sequential sort-group scan of lineitem_orderkey_sorted replaces hash table entirely",
+    "phase1_hot_keys": "per_thread vector<int32_t> merged into flat_array<int32_t> (expected ~3000 entries)",
+    "orders_lookup": "pre_built_index(orders_orderkey_hash.bin)",
+    "customer_lookup": "pre_built_index(customer_custkey_hash.bin)",
+    "lineitem_lookup": "pre_built_index(lineitem_orderkey_sorted.bin)",
+    "result_buffer": "per_thread vector<ResultRow>, merged after phase2"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_partitioning": "divide 60M sorted pairs into nthreads equal chunks; each thread advances its start index forward until pairs[start].key != pairs[start-1].key (first complete group boundary); advances end index similarly so no key spans two threads; threads process disjoint complete groups with zero coordination",
+    "phase2_partitioning": "hot_keys split into nthread chunks, each thread processes its chunk independently"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_orderkey_sorted",
+      "file": "indexes/lineitem_orderkey_sorted.bin",
+      "purpose": "Phase 1: sequential group scan (pairs sorted by l_orderkey → contiguous groups, no hash table needed); Phase 2: binary-search range scan for per-hot-key quantity aggregation"
+    },
+    {
+      "index": "orders_orderkey_hash",
+      "file": "indexes/orders_orderkey_hash.bin",
+      "purpose": "O(1) PK lookup of orders row by o_orderkey"
+    },
+    {
+      "index": "customer_custkey_hash",
+      "file": "indexes/customer_custkey_hash.bin",
+      "purpose": "O(1) PK lookup of customer row by c_custkey"
+    }
+  ],
+  "aggregation": "sort_group_by_via_sorted_index",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "o_orderdate_format": "days_since_epoch_1970 -> YYYY-MM-DD"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — Algorithm change): Phase 1 (dim_filter) consumed 11626ms of 12147ms total. The iter_0 plan used per-thread std::unordered_map<int32_t,double> with reserve(1<<20) per thread — this causes 64×8MB=512MB of bucket arrays far exceeding the 44MB L3 cache, ~16M heap-allocated linked-list nodes (one per row processed), a single-threaded merge into a 128MB global hash table, and 16M free() calls during swap(). The fix is to eliminate the hash table entirely by using the pre-built lineitem_orderkey_sorted index for Phase 1: since pairs are already sorted by l_orderkey, groups are contiguous and a sequential scan with a running sum replaces the hash aggregation. Each of the 64 threads advances its chunk boundaries to complete group edges (pairs[start].key != pairs[start-1].key), processes contiguous groups sequentially with random l_quantity[row_id] accesses, and emits hot keys to a thread-local vector — no hash table, no heap allocation, no merge step. Expected Phase 1 runtime: ~480MB sequential index read at 50GB/s + ~480MB random l_quantity reads at 10GB/s with 64 threads = ~55ms total, down from 11626ms. Phase 2 (point lookups for ~3000 hot keys) is unchanged."
+}

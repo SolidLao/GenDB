@@ -1,0 +1,80 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_usd_code_from_dict",
+    "zone_map_skip_non_usd_blocks",
+    "scan_num_parallel",
+    "filter_uom_value",
+    "direct_array_lookup_fy_cik_name",
+    "filter_fy_2022",
+    "dual_aggregate_cik_and_name_cik",
+    "merge_thread_local_maps",
+    "compute_threshold_avg_cik_sums",
+    "having_filter_name_cik_map",
+    "decode_name_codes",
+    "topk_sort_limit_100"
+  ],
+  "join_order": [
+    {
+      "build": "sub(columns: fy, cik, name — direct array, fully cached)",
+      "probe": "num(filtered: uom=USD, !isnan(value))",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "num.adsh_code == sub row_id; no hash join needed — direct index into sub/fy.bin[adsh_code], sub/cik.bin[adsh_code], sub/name.bin[adsh_code]. Sub columns are ~860 KB total and fit in L3 cache."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "notes": "Load usd_code at runtime from shared/uom.dict by matching string 'USD'. Never hardcode. ~34.3M rows pass."
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.99,
+      "notes": "IEEE 754 NaN sentinel for NULL. Applied together with uom filter."
+    },
+    {
+      "table": "sub",
+      "predicate": "sub/fy.bin[adsh_code] == (int16_t)2022",
+      "selectivity": 0.21,
+      "notes": "Direct array read. Combined with uom+value filters yields ~18% of num rows (~7.1M). Applied after uom+value to avoid wasted lookups."
+    }
+  ],
+  "subquery": {
+    "type": "scalar_subquery_materialized_before_main",
+    "strategy": "single_pass_dual_aggregate",
+    "description": "Both the HAVING subquery (GROUP BY cik) and the main query (GROUP BY name, cik) require identical scan+filter logic. Compute both in a single pass: maintain two thread-local hash maps simultaneously. After merging, derive threshold T = AVG over cik-level sums, then apply HAVING to the (name,cik)-level map."
+  },
+  "data_structures": {
+    "sub_columns_cache": "mmap sub/fy.bin, sub/cik.bin, sub/name.bin into memory at startup — 86,135 rows each, ~860 KB total, fits in L3",
+    "thread_local_cik_map": "compact_hash_map(int32_t cik → double sum), pre-sized next_pow2(8886*2)=16384 slots — fits in L2 cache per thread",
+    "thread_local_name_cik_map": "compact_hash_map(int64_t composite_key → double sum) where key = (int64_t)name_code << 32 | (uint32_t)cik, pre-sized next_pow2(16000*2)=32768 slots",
+    "threshold_scalar": "double T computed as AVG of merged cik_map values after parallel merge",
+    "output_buffer": "std::vector of (name_code, cik, sum) filtered by HAVING; partial_sort or std::nth_element + sort for top-100"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_unit_rows": 100000,
+    "thread_local_state": "each thread owns independent cik_map and name_cik_map; no synchronization during scan",
+    "merge_phase": "after all morsels complete, reduce thread-local maps sequentially (maps are small, merge is O(8886) per thread); compute T; apply HAVING; decode; sort top-100"
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks",
+      "notes": "Read indexes/num_zonemaps.bin. For each 100K-row block, skip if uom_min > usd_code OR uom_max < usd_code. Since num is sorted by (uom, ddate) and usd_code=0 is the lowest non-null code, USD rows cluster contiguously at the start. Zone maps allow skipping trailing non-USD blocks, reducing IO on HDD."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "decode_step": "after HAVING filter, decode name_code via sub/name.dict for surviving groups only (few hundred at most)"
+  },
+  "execution_target": "cpp"
+}

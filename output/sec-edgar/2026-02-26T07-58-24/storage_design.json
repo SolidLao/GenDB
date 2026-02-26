@@ -1,0 +1,127 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "sf3.gendb" },
+  "tables": {
+    "sub": {
+      "columns": [
+        {"name":"adsh",      "cpp_type":"char[20]", "semantic_type":"string_pk",     "encoding":"raw_fixed20", "file":"sub/adsh.bin"},
+        {"name":"cik",       "cpp_type":"int32_t",  "semantic_type":"integer",       "encoding":"raw",         "file":"sub/cik.bin"},
+        {"name":"name",      "cpp_type":"int32_t",  "semantic_type":"string",        "encoding":"dict_int32",  "file":"sub/name.bin", "dict":"sub/name.dict"},
+        {"name":"sic",       "cpp_type":"int16_t",  "semantic_type":"integer",       "encoding":"raw",         "file":"sub/sic.bin"},
+        {"name":"countryba", "cpp_type":"char[2]",  "semantic_type":"string",        "encoding":"raw_fixed2",  "file":"sub/countryba.bin"},
+        {"name":"stprba",    "cpp_type":"char[2]",  "semantic_type":"string",        "encoding":"raw_fixed2",  "file":"sub/stprba.bin"},
+        {"name":"cityba",    "cpp_type":"varlen",   "semantic_type":"string",        "encoding":"varlen",      "offsets":"sub/cityba.offsets", "data":"sub/cityba.data"},
+        {"name":"countryinc","cpp_type":"char[3]",  "semantic_type":"string",        "encoding":"raw_fixed3",  "file":"sub/countryinc.bin"},
+        {"name":"form",      "cpp_type":"int8_t",   "semantic_type":"string",        "encoding":"dict_int8",   "file":"sub/form.bin",  "dict":"sub/form.dict"},
+        {"name":"period",    "cpp_type":"int32_t",  "semantic_type":"date_yyyymmdd", "encoding":"raw",         "file":"sub/period.bin"},
+        {"name":"fy",        "cpp_type":"int16_t",  "semantic_type":"integer",       "encoding":"raw",         "file":"sub/fy.bin"},
+        {"name":"fp",        "cpp_type":"int8_t",   "semantic_type":"string",        "encoding":"dict_int8",   "file":"sub/fp.bin",    "dict":"sub/fp.dict"},
+        {"name":"filed",     "cpp_type":"int32_t",  "semantic_type":"date_yyyymmdd", "encoding":"raw",         "file":"sub/filed.bin"},
+        {"name":"accepted",  "cpp_type":"varlen",   "semantic_type":"string",        "encoding":"varlen",      "offsets":"sub/accepted.offsets", "data":"sub/accepted.data"},
+        {"name":"prevrpt",   "cpp_type":"int8_t",   "semantic_type":"flag",          "encoding":"raw",         "file":"sub/prevrpt.bin"},
+        {"name":"nciks",     "cpp_type":"int16_t",  "semantic_type":"integer",       "encoding":"raw",         "file":"sub/nciks.bin"},
+        {"name":"afs",       "cpp_type":"int8_t",   "semantic_type":"string",        "encoding":"dict_int8",   "file":"sub/afs.bin",   "dict":"sub/afs.dict"},
+        {"name":"wksi",      "cpp_type":"int8_t",   "semantic_type":"flag",          "encoding":"raw",         "file":"sub/wksi.bin"},
+        {"name":"fye",       "cpp_type":"char[4]",  "semantic_type":"string",        "encoding":"raw_fixed4",  "file":"sub/fye.bin"},
+        {"name":"instance",  "cpp_type":"varlen",   "semantic_type":"string",        "encoding":"varlen",      "offsets":"sub/instance.offsets", "data":"sub/instance.data"}
+      ],
+      "file_format": {"filename":"sub.csv","delimiter":",","has_header":true},
+      "sort_order": ["adsh"], "block_size": 10000, "estimated_rows": "86135",
+      "note": "Sorted by adsh. adsh_code = row_id (0-based). sub/adsh.bin IS the master adsh dictionary.",
+      "indexes": [
+        {"name":"sub_adsh_hash", "type":"hash", "columns":["adsh"], "file":"indexes/sub_adsh_hash.bin",
+         "description":"adsh_code(int32)->row_id(int32) Robin Hood open-addressing hash. Trivially identity since sub is sorted by adsh."}
+      ]
+    },
+    "num": {
+      "columns": [
+        {"name":"adsh",    "cpp_type":"int32_t","semantic_type":"fk_adsh",       "encoding":"dict_int32","file":"num/adsh.bin",    "dict":"sub/adsh.bin (fixed20 array, code=row_id)"},
+        {"name":"tag",     "cpp_type":"int32_t","semantic_type":"string",         "encoding":"dict_int32","file":"num/tag.bin",     "dict":"shared/tag_numpre.dict"},
+        {"name":"version", "cpp_type":"int32_t","semantic_type":"string",         "encoding":"dict_int32","file":"num/version.bin", "dict":"shared/version_numpre.dict"},
+        {"name":"ddate",   "cpp_type":"int32_t","semantic_type":"date_yyyymmdd",  "encoding":"raw",       "file":"num/ddate.bin"},
+        {"name":"qtrs",    "cpp_type":"int8_t", "semantic_type":"integer",        "encoding":"raw",       "file":"num/qtrs.bin"},
+        {"name":"uom",     "cpp_type":"int8_t", "semantic_type":"string",         "encoding":"dict_int8", "file":"num/uom.bin",    "dict":"shared/uom.dict", "note":"201 distinct values; codes 0-127 store as positive int8_t, codes 128-200 overflow to negative int8_t (-128..-56). USD=0, shares=1, pure=2. Query code reads code from dict file and compares directly."},
+        {"name":"coreg",   "cpp_type":"varlen", "semantic_type":"string",         "encoding":"varlen",    "offsets":"num/coreg.offsets","data":"num/coreg.data"},
+        {"name":"value",   "cpp_type":"double", "semantic_type":"decimal",        "encoding":"raw",       "file":"num/value.bin",  "null_sentinel":"NaN"},
+        {"name":"footnote","cpp_type":"varlen", "semantic_type":"string",         "encoding":"varlen",    "offsets":"num/footnote.offsets","data":"num/footnote.data"}
+      ],
+      "file_format": {"filename":"num.csv","delimiter":",","has_header":true},
+      "sort_order": ["uom","ddate"], "block_size": 100000, "estimated_rows": "39401761", "actual_rows": "39401761",
+      "note": "Sorted by (uom_code ASC, ddate ASC) using signed int8_t comparison. NULL(-1) and overflow codes(-128..-56) sort before 0..127. USD rows (code=0) occupy ~87% of data, clustered after null/overflow blocks.",
+      "indexes": [
+        {"name":"num_zonemaps","type":"zone_map","columns":["uom","ddate"],"file":"indexes/num_zonemaps.bin",
+         "layout":"[n_blocks:int32][per block: uom_min:int8, uom_max:int8, ddate_min:int32, ddate_max:int32]"},
+        {"name":"num_adsh_index","type":"inverted","columns":["adsh"],"file":"indexes/num_adsh_index.bin",
+         "layout":"[n_entries:int32][entry: adsh_code:int32, start_rowid:int32, count:int32] sorted by adsh_code. Consecutive num rows with same adsh are NOT guaranteed contiguous (sort is by uom,ddate); this stores sorted list."}
+      ]
+    },
+    "tag": {
+      "columns": [
+        {"name":"tag",     "cpp_type":"varlen","semantic_type":"string_pk","encoding":"varlen","offsets":"tag/tag.offsets","data":"tag/tag.data"},
+        {"name":"version", "cpp_type":"varlen","semantic_type":"string_pk","encoding":"varlen","offsets":"tag/version.offsets","data":"tag/version.data"},
+        {"name":"custom",  "cpp_type":"int8_t","semantic_type":"flag",    "encoding":"raw",   "file":"tag/custom.bin"},
+        {"name":"abstract","cpp_type":"int8_t","semantic_type":"flag",    "encoding":"raw",   "file":"tag/abstract.bin"},
+        {"name":"datatype","cpp_type":"int8_t","semantic_type":"string",  "encoding":"dict_int8","file":"tag/datatype.bin","dict":"tag/datatype.dict"},
+        {"name":"iord",    "cpp_type":"int8_t","semantic_type":"flag",    "encoding":"raw",   "file":"tag/iord.bin", "note":"I=0 D=1 null=-1"},
+        {"name":"crdr",    "cpp_type":"int8_t","semantic_type":"flag",    "encoding":"raw",   "file":"tag/crdr.bin", "note":"C=0 D=1 null=-1"},
+        {"name":"tlabel",  "cpp_type":"varlen","semantic_type":"string",  "encoding":"varlen","offsets":"tag/tlabel.offsets","data":"tag/tlabel.data"},
+        {"name":"doc",     "cpp_type":"varlen","semantic_type":"string",  "encoding":"varlen","offsets":"tag/doc.offsets","data":"tag/doc.data"}
+      ],
+      "file_format": {"filename":"tag.csv","delimiter":",","has_header":true},
+      "sort_order": [], "block_size": 100000, "estimated_rows": "1070662",
+      "indexes": [
+        {"name":"tag_pk_hash","type":"hash","columns":["tag","version"],"file":"indexes/tag_pk_hash.bin",
+         "layout":"Robin Hood hash. capacity=next_pow2(1070662*2). Each slot: [key_hash:uint64, row_id:int32, _pad:int32]. key_hash=wyhash(tag+\\x00+version). Empty slot: key_hash=0 AND row_id=-1."},
+        {"name":"tag_zonemaps","type":"zone_map","columns":["abstract"],"file":"indexes/tag_zonemaps.bin",
+         "layout":"[n_blocks:int32][per block: abstract_min:int8, abstract_max:int8]"}
+      ]
+    },
+    "pre": {
+      "columns": [
+        {"name":"adsh",    "cpp_type":"int32_t","semantic_type":"fk_adsh","encoding":"dict_int32","file":"pre/adsh.bin",    "dict":"sub/adsh.bin (fixed20 array)"},
+        {"name":"report",  "cpp_type":"int16_t","semantic_type":"integer","encoding":"raw",       "file":"pre/report.bin"},
+        {"name":"line",    "cpp_type":"int32_t","semantic_type":"integer","encoding":"raw",       "file":"pre/line.bin"},
+        {"name":"stmt",    "cpp_type":"int8_t", "semantic_type":"string", "encoding":"dict_int8", "file":"pre/stmt.bin",   "dict":"shared/stmt.dict", "note":"null=-1"},
+        {"name":"inpth",   "cpp_type":"int8_t", "semantic_type":"flag",   "encoding":"raw",       "file":"pre/inpth.bin"},
+        {"name":"rfile",   "cpp_type":"int8_t", "semantic_type":"string", "encoding":"dict_int8", "file":"pre/rfile.bin",  "dict":"shared/rfile.dict"},
+        {"name":"tag",     "cpp_type":"int32_t","semantic_type":"string", "encoding":"dict_int32","file":"pre/tag.bin",    "dict":"shared/tag_numpre.dict"},
+        {"name":"version", "cpp_type":"int32_t","semantic_type":"string", "encoding":"dict_int32","file":"pre/version.bin","dict":"shared/version_numpre.dict"},
+        {"name":"plabel",  "cpp_type":"varlen", "semantic_type":"string", "encoding":"varlen",    "offsets":"pre/plabel.offsets","data":"pre/plabel.data"},
+        {"name":"negating","cpp_type":"int8_t", "semantic_type":"flag",   "encoding":"raw",       "file":"pre/negating.bin"}
+      ],
+      "file_format": {"filename":"pre.csv","delimiter":",","has_header":true},
+      "sort_order": ["stmt","adsh"], "block_size": 100000, "estimated_rows": "9600799",
+      "indexes": [
+        {"name":"pre_zonemaps","type":"zone_map","columns":["stmt","adsh"],"file":"indexes/pre_zonemaps.bin",
+         "layout":"[n_blocks:int32][per block: stmt_min:int8, stmt_max:int8, adsh_min:int32, adsh_max:int32]"},
+        {"name":"pre_existence_hash","type":"hash","columns":["adsh","tag","version"],"file":"indexes/pre_existence_hash.bin",
+         "layout":"Robin Hood hash for existence. capacity=next_pow2(9600799*2). Each slot: [adsh_code:int32, tag_code:int32, ver_code:int32]. Empty slot: adsh_code=INT32_MIN. Hash=wyhash of 12 raw bytes. For Q24 anti-join."},
+        {"name":"pre_key_sorted","type":"sorted","columns":["adsh","tag","version","row_id"],"file":"indexes/pre_key_sorted.bin",
+         "layout":"[n:int32][entries sorted by (adsh,tag,ver): adsh_code:int32, tag_code:int32, ver_code:int32, row_id:int32]. Binary search for (adsh,tag,ver). Equal-range for all matching pre rows. For Q4/Q6 num->pre join."}
+      ]
+    }
+  },
+  "observed_dict_sizes": {
+    "adsh": 86135,
+    "tag_numpre": 198311,
+    "version_numpre": 83815,
+    "uom": 201,
+    "stmt": 8,
+    "rfile": "small"
+  },
+  "observed_codes": {
+    "uom_USD": 0, "uom_shares": 1, "uom_pure": 2,
+    "stmt_BS": 0, "stmt_IS": 1, "stmt_CF": 2, "stmt_EQ": 3, "stmt_CI": 4
+  },
+  "shared_dictionaries": {
+    "adsh":    {"file":"sub/adsh.bin","format":"N*char[20] sorted array; code=index"},
+    "tag":     {"file":"shared/tag_numpre.dict","format":"[n:uint32][len:uint16,bytes...]*n; shared by num.tag and pre.tag"},
+    "version": {"file":"shared/version_numpre.dict","format":"same; shared by num.version and pre.version"},
+    "uom":     {"file":"shared/uom.dict","format":"same; num.uom only"},
+    "stmt":    {"file":"shared/stmt.dict","format":"same; pre.stmt only"},
+    "rfile":   {"file":"shared/rfile.dict","format":"same; pre.rfile only"}
+  },
+  "type_mappings": {"INTEGER":"int32_t","DOUBLE":"double","DATE":"int32_t","VARCHAR_SMALL":"dict_int8","VARCHAR_LARGE":"dict_int32_or_varlen"},
+  "date_encoding": "yyyymmdd_integer_as_stored",
+  "null_encoding": {"double":"NaN","dict_int8":"-1","dict_int32":"-1","varlen":"offset[i]==offset[i+1]"},
+  "hardware_config": {"cpu_cores":"64","l3_cache_mb":"44","disk_type":"hdd","total_memory_gb":"376","simd":"avx512"}
+}

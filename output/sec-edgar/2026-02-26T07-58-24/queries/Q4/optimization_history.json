@@ -1,0 +1,74 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 1410.3566666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 1410.3566666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.03,
+        "build_sub_arrays": 0.18,
+        "build_tag_join_map": 1175.43,
+        "main_scan": 47.98,
+        "merge_thread_local_aggregates": 62.85,
+        "having_filter": 0.46,
+        "topk_sort": 0.07,
+        "decode_output": 1.35,
+        "total": 1400.13
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 189.76999999999998,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 189.76999999999998,
+      "validation": "pass",
+      "strategy": "Root cause: build_tag_join_map (1175ms, 83% of total) iterates 1.07M tag rows with string-keyed hash map operations — 3.2M std::string allocations + 2M string-hash lookups + 1M tlabel copies. Sampling revealed two key facts: (1) tag_pk_hash is 67 MB (exceeds 44 MB LLC), so random probing during scan is cache-hostile; (2) a compact pre_eq_sub_set of 64K entries (1 MB, L2-resident) fully replaces the 154 MB pre_key_sorted binary search. Strategy: Category A (plan restructuring) — eliminate the tag table iteration entirely. Pre-side scan (pre/stmt.bin + pre/adsh.bin + pre/tag.bin + pre/version.bin) with EQ + sub_valid filter builds a 64K-key flat hash set in ~18ms (vs 1175ms for tag map). During num scan, probe this tiny pre_eq_sub_set instead of binary-searching pre_key_sorted (2× faster scan). The tag abstract check and tlabel resolution are deferred to output decode stage (few K group probes — negligible). This reduces total estimated time from 1410ms to ~80-100ms by eliminating the dominant 1175ms build phase and cutting scan overhead.",
+      "operation_timings": {
+        "data_loading": 26.1,
+        "build_sub_arrays": 0.41,
+        "build_pre_eq_sub_set": 11.07,
+        "main_scan": 24.94,
+        "merge_aggregates": 60.05,
+        "resolve_tlabels_and_abstract": 24.06,
+        "having_filter": 0.03,
+        "topk_sort": 0.08,
+        "decode_output": 1.14,
+        "total": 187.89
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 106.04333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 106.04333333333334,
+      "validation": "pass",
+      "strategy": "Root causes: (1) merge_aggregates (60ms) dominated by STL unordered_map chained-bucket overhead across 64 thread-local maps and by sorting 530K 16-byte CIK entries with many duplicates (Category B + Category A); (2) resolve_tlabels (24ms) had a redundant second sort of the same ~530K-entry fg_cik vector (Category A); (3) data_loading (26ms) allocated ~282K std::string objects for dict entries that are only accessed for a few thousand FNV hash lookups (Category C); (4) build_pre_eq_sub_set (11ms) was single-threaded on 9.6M rows despite 64 cores available (Category D). Fixes: replace all std::unordered_map with custom flat open-addressing hash maps (two parallel arrays: uint64_t keys + AggAccum vals, capacity 16384 per thread); replace per-row (group_key:8B, cik:4B, pad:4B) CIK entries with 62-bit packed keys encoding (sic-4000:10b | tag_c:18b | ver_c:17b | adsh_c:17b) — sort+dedup per-thread first (8K entries, trivial), then global sort of ~50-100K unique (group,adsh) pairs instead of 530K duplicated 16-byte structs, decode adsh_c→cik at count stage; this eliminates the second sort in resolve_tlabels entirely; load dicts as raw mmap + uint32_t offset arrays (zero std::string allocations), compute FNV directly on raw byte ranges; parallelize pre scan with 64 thread-local mini flat sets (2048x8B=16KB, L1-resident), unioned into global set. Projected savings: merge_aggregates 60→15ms, resolve_tlabels 24→6ms, data_loading 26→12ms, build_pre_eq 11→2ms, total ~120ms→~60ms hot.",
+      "operation_timings": {
+        "data_loading": 7.84,
+        "build_sub_arrays": 0.45,
+        "build_pre_eq_sub_set_parallel": 7.52,
+        "parallel_scan_num": 20.43,
+        "merge_aggregates": 24.04,
+        "resolve_tlabels_and_abstract": 28.15,
+        "having_filter": 0.02,
+        "topk_sort": 0.08,
+        "decode_output": 1.29,
+        "total": 104.61
+      }
+    }
+  ]
+}

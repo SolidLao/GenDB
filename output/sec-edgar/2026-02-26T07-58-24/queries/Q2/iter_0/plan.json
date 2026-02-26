@@ -1,0 +1,108 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "load_dicts",
+    "zone_map_scan",
+    "build_m_hash_agg",
+    "probe_m_filter_sub",
+    "decode_topk"
+  ],
+  "join_order": [
+    {
+      "build": "num(uom=pure, value IS NOT NULL) → GROUP BY (adsh_code, tag_code) → MAX(value)",
+      "probe": "num(uom=pure, value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 118000,
+      "notes": "Phase 1: zone-map-guided scan of ~2 blocks builds hash-agg map {adsh_code,tag_code}->max_value (~118k entries, ~2MB, fits L3 cache). Phase 2: identical zone-map scan probes map; keeps rows where value == max_value (double equality)."
+    },
+    {
+      "build": "sub/fy.bin (86135 rows, mmap'd array)",
+      "probe": "num rows surviving m-probe (~118k rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row_id by encoding contract; check sub/fy.bin[adsh_code] == (int16_t)2022 as O(1) direct array index. No hash table needed. Selectivity ~21% reduces survivors to ~24.8k rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == pure_code",
+      "selectivity": 0.003,
+      "notes": "pure_code resolved at runtime from shared/uom.dict; expected value 2 but MUST load from dict"
+    },
+    {
+      "table": "num",
+      "predicate": "!isnan(value)",
+      "selectivity": 0.999
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == (int16_t)2022",
+      "selectivity": 0.21,
+      "notes": "applied as direct_array lookup sub/fy.bin[adsh_code] during Phase 2 probe"
+    }
+  ],
+  "data_structures": {
+    "uom_dict": "load shared/uom.dict at startup; scan entries to find code for string 'pure'; store as pure_code (int8_t)",
+    "m_hash_agg": "compact_hash_map pre_sized to 131072 buckets; key={adsh_code:int32, tag_code:int32} (8 bytes); value=max_value:double (8 bytes); ~2MB total; fits L3 cache; built in Phase 1, probed in Phase 2",
+    "sub_fy_array": "mmap sub/fy.bin as int16_t[86135]; O(1) lookup by adsh_code",
+    "sub_name_array": "mmap sub/name.bin as int32_t[86135] + load sub/name.dict; decode name string at final output stage only",
+    "tag_dict": "load shared/tag_numpre.dict; decode tag string at final output stage only",
+    "output_heap": "top-k heap (k=100) keyed by (value DESC, name ASC, tag ASC); populated during Phase 2 after all filters pass"
+  },
+  "scan_phases": [
+    {
+      "phase": 1,
+      "name": "build_m",
+      "columns": [
+        "num/uom.bin",
+        "num/value.bin",
+        "num/adsh.bin",
+        "num/tag.bin"
+      ],
+      "block_selection": "num_zonemaps: keep blocks where uom_min <= pure_code <= uom_max; expected ~2 blocks of 100k rows each",
+      "row_filter": "uom_code == pure_code && !isnan(value)",
+      "action": "hash_group_by on {adsh_code, tag_code} accumulating max(value)",
+      "output_rows_estimated": 118000,
+      "output": "m_hash_agg map"
+    },
+    {
+      "phase": 2,
+      "name": "probe_m_and_sub",
+      "columns": [
+        "num/uom.bin",
+        "num/value.bin",
+        "num/adsh.bin",
+        "num/tag.bin"
+      ],
+      "block_selection": "same zone-map-selected blocks as Phase 1",
+      "row_filter": "uom_code == pure_code && !isnan(value) && m_hash_agg.lookup({adsh_code, tag_code}) == value && sub/fy.bin[adsh_code] == (int16_t)2022",
+      "action": "insert surviving (adsh_code, tag_code, value) into top-100 output_heap",
+      "output_rows_estimated": 100
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Zone-map skip limits scan to ~2 blocks (~200k rows total). Phase 1: each thread processes assigned blocks, accumulates thread-local partial hash-agg maps, merged after scan completes. Phase 2: each thread processes assigned blocks with shared read-only m map, maintains thread-local top-100 heap, heaps merged at end. Effective parallelism bounded by ~2 blocks; assign one block per thread."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks",
+      "notes": "Read indexes/num_zonemaps.bin; for each block check uom_min <= pure_code <= uom_max; skip block if pure_code out of range. Reduces scan from 395 blocks to ~2 blocks. Applied identically to both Phase 1 and Phase 2."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["n.value DESC", "s.name ASC", "n.tag ASC"],
+    "limit": 100,
+    "decode_at_output": [
+      "s.name: sub/name.bin[adsh_code] -> int32 name_code -> sub/name.dict string",
+      "n.tag: tag_code -> shared/tag_numpre.dict string"
+    ]
+  },
+  "execution_target": "cpp"
+}

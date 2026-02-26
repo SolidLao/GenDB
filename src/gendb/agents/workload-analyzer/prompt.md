@@ -5,7 +5,7 @@ Analyze SQL schemas and queries to produce structured workload characterization.
 Downstream agents (Storage/Index Designer, Code Generator) use this to make optimization decisions.
 
 ## Thinking Discipline
-Your thinking budget is limited. Think concisely:
+Think concisely:
 - Profile data, analyze patterns, write JSON. No lengthy deliberation.
 
 ## Workflow

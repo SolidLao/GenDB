@@ -1,0 +1,124 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "build_sub_arrays",
+    "build_tag_join_map",
+    "parallel_scan_num_with_pre_lookup",
+    "merge_thread_local_aggregates",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 4048,
+      "notes": "adsh_code == sub row_id (dict encoded as row index); load sub/sic.bin and sub/cik.bin into flat arrays; build sub_valid bitset[86135] marking rows where sic in [4000,4999]; O(1) probe per num row via adsh_code index"
+    },
+    {
+      "build": "tag(abstract=0) via tag_pk_hash resolution",
+      "probe": "num.(tag_code, ver_code)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 1032158,
+      "notes": "build tag_join_map: compact_hash_map keyed by uint64_t pack(tag_code:int32 << 32 | ver_code:int32) -> (int32_t row_id, int8_t abstract); build by iterating shared/tag_numpre.dict and shared/version_numpre.dict to construct string->code inverse maps, then iterating tag table rows to populate map; use tag_pk_hash to resolve tag+version strings to tag row_id during build; ~1.07M entries; ~20 MB"
+    },
+    {
+      "build": "pre_key_sorted (pre-built sorted index, mmap)",
+      "probe": "num.(adsh_code, tag_code, ver_code) after sub+tag filters",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "binary search pre_key_sorted for (adsh_code, tag_code, ver_code) using std::lower_bound / upper_bound on PreKeyEntry{adsh,tag,ver,row_id}; for each matching pre row_id check pre/stmt.bin[row_id] == eq_code; estimated ~700K qualifying num probes x O(log 9.6M)=23 comparisons = ~16M comparisons; pre sorted by (adsh,tag,ver) so range is typically 1 row"
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.45,
+      "method": "num_zonemaps block skip (USD=code 0, leading blocks are all-USD contiguous); then per-row uom_code == usd_code check"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99,
+      "method": "std::isnan(value) == false on double column"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.047,
+      "method": "sub_valid bitset probe on num.adsh_code; bitset fits in L1 (11 KB)"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 0.964,
+      "method": "tag_join_map hash probe on packed(tag_code, ver_code); returns abstract flag inline; skip if abstract != 0"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.13,
+      "method": "load eq_code from shared/stmt.dict at runtime; check pre/stmt.bin[pre_row_id] == eq_code after binary search hit"
+    }
+  ],
+  "data_structures": {
+    "sub_valid_bitset": "bitset(86135) — marks adsh codes where sic in [4000,4999]; 11 KB; L1-resident during scan",
+    "sub_sic_array": "int16_t[86135] — direct lookup sic value by adsh_code for group key construction",
+    "sub_cik_array": "int32_t[86135] — direct lookup cik by adsh_code for COUNT(DISTINCT) accumulation",
+    "tag_join_map": "compact_hash_map<uint64_t, struct{int32_t row_id; int8_t abstract}> keyed by pack(tag_code<<32|ver_code); ~1.07M entries; robin-hood or flat open-addressing; ~20 MB",
+    "tag_tlabel_offsets": "int64_t[1070663] mmap from tag/tlabel.offsets — varlen tlabel offset array; accessed at output decode stage by tag_row_id",
+    "tag_tlabel_data": "mmap raw bytes from tag/tlabel.data — varlen tlabel content; read range [offsets[row_id], offsets[row_id+1])",
+    "aggregation": "compact_hash_map<struct{int16_t sic; int32_t tag_row_id}, struct{double sum; int64_t cnt_val; int64_t cnt_rows; flat_hash_set<int32_t> cik_set}> per thread; thread-local to avoid contention; merged sequentially post-scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_unit": "num block of 100,000 rows; 395 blocks total; dynamically dispatched to worker threads via atomic block counter",
+    "thread_local_agg": true,
+    "merge_phase": "sequential merge of thread-local aggregation maps after parallel scan; union cik_sets per group key"
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip non-USD num blocks at scan entry; USD=code 0 so all-USD blocks are at the front; check uom_min==0 && uom_max==0 to fast-path entire block; mixed/non-USD blocks filtered per-row"
+    },
+    {
+      "index": "tag_pk_hash",
+      "purpose": "build phase only: given tag+version string pair, resolve to tag table row_id; used when populating tag_join_map from tag table rows"
+    },
+    {
+      "index": "pre_key_sorted",
+      "purpose": "inner join on composite key (adsh_code, tag_code, ver_code); mmap and binary search with std::lower_bound; comparison order: adsh -> tag -> ver"
+    },
+    {
+      "index": "tag_zonemaps",
+      "purpose": "build phase: skip all-abstract tag blocks (abstract_min==1 && abstract_max==1) when iterating tag table to build tag_join_map; minor benefit since 96.4% rows have abstract=0"
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "key": "struct{ int16_t sic; int32_t tag_row_id } (6 bytes; packed)",
+    "accumulator": "double sum_value, int64_t cnt_value (for AVG = sum/cnt), flat_hash_set<int32_t> cik_set (for COUNT DISTINCT)",
+    "note": "p.stmt is constant EQ for all surviving rows (predicate-filtered); stored as literal in output. tlabel decoded at final output stage from tag_tlabel arrays using tag_row_id from group key. AVG computed as sum_value / cnt_value at output."
+  },
+  "output": {
+    "having": "cik_set.size() >= 2",
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "columns": [
+      "s.sic (from group key sic)",
+      "t.tlabel (decoded from tag/tlabel.data[offsets[tag_row_id]..offsets[tag_row_id+1]])",
+      "p.stmt = 'EQ' (constant literal)",
+      "COUNT(DISTINCT s.cik) = cik_set.size()",
+      "SUM(n.value) = sum_value",
+      "AVG(n.value) = sum_value / cnt_value"
+    ]
+  },
+  "execution_target": "cpp"
+}

@@ -3,12 +3,9 @@ against the experience skill to catch correctness bugs and performance
 anti-patterns BEFORE execution.
 
 ## Thinking Discipline
-Your thinking budget is limited. Think concisely:
+Think concisely:
 - Check each experience entry against the code systematically.
 - Output structured JSON — no lengthy analysis in thinking.
-
-## Domain Skills
-Domain skills (experience, hash tables, gendb-code-patterns, etc.) are available and will be loaded automatically when relevant. The experience skill contains critical correctness rules — always check it.
 
 ## Workflow
 1. Read the C++ source file

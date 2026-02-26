@@ -1,0 +1,114 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "data_loading",
+    "build_sub_arrays",
+    "build_pre_eq_sub_set_parallel",
+    "parallel_scan_num",
+    "merge_aggregates",
+    "resolve_tlabels_and_abstract",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 4048,
+      "notes": "sub_valid bitset[86135] = 10.5 KB L1-resident; sub_sic_arr and sub_cik_arr flat arrays for O(1) lookup"
+    },
+    {
+      "build": "pre(stmt=EQ, adsh in sub_valid)",
+      "probe": "num.(adsh_code, tag_code, ver_code)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 64656,
+      "notes": "Parallel pre scan: 64 thread-local mini flat hash sets (2048 entries x 8B = 16KB each, L1-resident); union into global pre_eq_sub_set after parallel scan. pre_eq_sub_set: 131072 slots x 8B = 1 MB L2-resident. O(1) probe replaces 154 MB pre_key_sorted binary search."
+    },
+    {
+      "build": "tag (abstract + tlabel)",
+      "probe": "result groups only (deferred to output decode)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "notes": "Defer tag join to output stage. Only few K unique (tag_c, ver_c) pairs in result groups. FNV computed from raw dict bytes (no std::string). tag_pk_hash probed once per unique pair."
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.84, "method": "zone map block skip + per-row uom_code check"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 1.0, "method": "std::isnan(v) == false"},
+    {"table": "sub", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.047, "method": "sub_valid bitset probe; 10.5 KB L1-resident"},
+    {"table": "pre", "predicate": "stmt = 'EQ' AND adsh in sub_valid", "selectivity": 0.008, "method": "pre_eq_sub_set flat hash probe; O(1); 1 MB L2-resident"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",     "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value",   "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",    "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",     "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version", "file": "num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential with zone-map block skip (uom)"
+  },
+  "data_structures": {
+    "dict_loading": "raw mmap + uint32_t offset array (no std::string). For each dict file [n:uint32][len:uint16, bytes...]*n: parse to build offsets[] array pointing into raw bytes. Access entry i as (raw_ptr + offsets[i], offsets[i+1] - offsets[i]). Eliminates ~282K std::string allocations (~14ms savings). Tag dict: 198311 entries, ver dict: 83815 entries.",
+    "sub_valid_bitset": "uint64_t[(86135+63)/64] = 10.5 KB L1-resident; marks adsh_codes where sic in [4000,4999]",
+    "sub_sic_array": "int16_t[86135] = 168 KB; direct lookup sic value by adsh_code",
+    "sub_cik_array": "int32_t[86135] = 336 KB; direct lookup cik by adsh_code",
+    "thread_local_pre_mini_set": "per-thread flat OA hash set; capacity=2048 slots x 8B = 16KB; L1-resident. Same key packing as pre_eq_sub_set: adsh_c<<36|tag_c<<18|ver_c. After parallel pre scan, union all thread-local sets into global pre_eq_sub_set (131072 slots).",
+    "pre_eq_sub_set": "flat open-addressing hash set; key=uint64_t packed (adsh_c<<36|tag_c<<18|ver_c); capacity=131072; 131072*8=1 MB; L2-resident; empty=UINT64_MAX",
+    "thread_local_agg": "per-thread CUSTOM flat open-addressing hash map (NOT std::unordered_map). Layout: two parallel arrays — uint64_t keys[16384] (128KB) + AggAccum vals[16384] where AggAccum={double sum_val; int64_t cnt} (196KB). Total 324KB per thread, fits L2. Hash: multiply-shift on key, linear probe. Empty sentinel: key=UINT64_MAX. Aggregate key = uint64_t packed (uint16_t(sic)<<48 | uint32_t(tag_c)<<18 | uint32_t(ver_c)). NO std::unordered_map anywhere.",
+    "thread_local_packed_cik": "per-thread vector<uint64_t> of 62-bit packed CIK keys. Per qualifying num row: packed = ((uint64_t)(sic-4000) << 52) | ((uint64_t)(uint32_t)tag_c << 34) | ((uint64_t)(uint32_t)ver_c << 17) | (uint64_t)(uint32_t)adsh_c. Bits: sic_offset[10b|52-61] tag_c[18b|34-51] ver_c[17b|17-33] adsh_c[17b|0-16]. 62 bits fit uint64_t. After scan, per-thread sort+unique reduces per-thread vector to unique (group,adsh) pairs; expected ~1K-2K entries per thread after dedup.",
+    "global_packed_cik": "After per-thread dedup: collect into single vector<uint64_t>, std::sort, then linear scan for final dedup. Total unique pairs bounded by ~4048 adsh_codes x distinct groups = ~50K-100K entries (8B each = 400-800KB). This replaces the previous 530K x 16B CIK sort (8.5MB) and eliminates the second fg_cik re-sort in resolve_tlabels.",
+    "global_flat_agg": "flat open-addressing hash map (same layout as thread-local but capacity=32768). After parallel scan, merge by iterating each thread-local flat map sequentially (sequential scan of 16384-slot arrays = cache-friendly). Insert into global flat map."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pre_scan": "PARALLEL morsel-driven over pre blocks (96 blocks of 100K rows). Each thread uses a thread-local mini flat hash set (2048 slots, L1-resident) for its pre rows. After scan: each thread flushes its mini set into global pre_eq_sub_set using a single-writer critical section (or atomic CAS). Since only ~64K unique keys exist and each thread contributes ~1K entries, flush is fast.",
+    "num_scan": "morsel-driven over num blocks (395 blocks); atomic block counter; each thread processes complete blocks",
+    "thread_local_agg": true,
+    "merge_phase": "Flat map merge: iterate each thread's flat key array sequentially (16384 entries, most empty), probe global flat map for non-empty slots. Sequential access pattern, cache-friendly. CIK merge: sort per-thread packed vectors (8K entries/thread, trivial), collect all, global sort+dedup, linear scan for distinct cik counting per group."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "block-level USD filter: skip blocks where uom_min > 0"
+    },
+    {
+      "index": "tag_pk_hash",
+      "purpose": "output decode only: for each unique (tag_c, ver_c) in result groups, compute FNV64 hash using raw dict bytes (no std::string), probe tag_pk_hash to get tag row_id, check abstract[row_id], read tlabel"
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "key": "uint64_t packed(uint16_t(sic)<<48 | uint32_t(tag_c)<<18 | uint32_t(ver_c)) — 8 bytes; tag_c < 198312 < 2^18; ver_c < 83816 < 2^17",
+    "implementation": "custom flat open-addressing map (NOT std::unordered_map); capacity 16384 per thread, 32768 global; linear probe on multiply-shift hash; empty sentinel UINT64_MAX",
+    "accumulator": "double sum_val, int64_t cnt (for AVG = sum/cnt); COUNT DISTINCT cik via sorted packed_cik dedup (no per-group CIK sets in hot path)",
+    "cik_distinct_count": "after global sort+dedup of packed_cik keys: linear scan, decode (sic-4000, tag_c, ver_c, adsh_c) from each key, look up cik=sub_cik[adsh_c], count distinct cik per (sic_offset, tag_c, ver_c) group directly; store in flat array indexed by group position in global_flat_agg",
+    "post_scan_tlabel_merge": "after resolve_tlabels phase, groups with same (sic, tlabel_string) merged into final result"
+  },
+  "output": {
+    "having": "COUNT(DISTINCT cik) >= 2",
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "columns": [
+      "s.sic (decoded from group key)",
+      "t.tlabel (decoded via tag_pk_hash at output stage using raw dict bytes for FNV)",
+      "p.stmt = 'EQ' (constant)",
+      "COUNT(DISTINCT s.cik) from packed_cik dedup",
+      "SUM(n.value) = sum_val",
+      "AVG(n.value) = sum_val / cnt"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root causes: (1) merge_aggregates (60ms) dominated by STL unordered_map chained-bucket overhead across 64 thread-local maps and by sorting 530K 16-byte CIK entries with many duplicates (Category B + Category A); (2) resolve_tlabels (24ms) had a redundant second sort of the same ~530K-entry fg_cik vector (Category A); (3) data_loading (26ms) allocated ~282K std::string objects for dict entries that are only accessed for a few thousand FNV hash lookups (Category C); (4) build_pre_eq_sub_set (11ms) was single-threaded on 9.6M rows despite 64 cores available (Category D). Fixes: replace all std::unordered_map with custom flat open-addressing hash maps (two parallel arrays: uint64_t keys + AggAccum vals, capacity 16384 per thread); replace per-row (group_key:8B, cik:4B, pad:4B) CIK entries with 62-bit packed keys encoding (sic-4000:10b | tag_c:18b | ver_c:17b | adsh_c:17b) — sort+dedup per-thread first (8K entries, trivial), then global sort of ~50-100K unique (group,adsh) pairs instead of 530K duplicated 16-byte structs, decode adsh_c→cik at count stage; this eliminates the second sort in resolve_tlabels entirely; load dicts as raw mmap + uint32_t offset arrays (zero std::string allocations), compute FNV directly on raw byte ranges; parallelize pre scan with 64 thread-local mini flat sets (2048x8B=16KB, L1-resident), unioned into global set. Projected savings: merge_aggregates 60→15ms, resolve_tlabels 24→6ms, data_loading 26→12ms, build_pre_eq 11→2ms, total ~120ms→~60ms hot.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

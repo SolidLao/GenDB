@@ -1,0 +1,132 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "preload_nation",
+    "filter_part_build_bitset",
+    "scan_lineitem_probe_join_aggregate",
+    "merge_thread_local_accumulators",
+    "sort_output"
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "estimated_output_rows": 110000
+    }
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "build": "part(filtered, p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "probe_cardinality": 59986052,
+      "output_cardinality": 3299000,
+      "notes": "Build bitset[2000001] of qualifying p_partkeys (256 KB, fits in L3). Probe with l_partkey using direct array bit-test. O(1) per lineitem row."
+    },
+    {
+      "step": 2,
+      "build": "partsupp(pre_built_index: partsupp_pk_hash)",
+      "probe": "lineitem_surviving(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8000000,
+      "probe_cardinality": 3299000,
+      "notes": "Probe partsupp_pk_hash with composite key (int64: l_partkey<<32 | uint32(l_suppkey)). splitmix64 hash. Fetch ps_supplycost by row_id."
+    },
+    {
+      "step": 3,
+      "build": "orders(pre_built_index: orders_orderkey_hash)",
+      "probe": "lineitem_surviving(l_orderkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 3299000,
+      "notes": "Probe orders_orderkey_hash with l_orderkey (knuth mult hash). Fetch o_orderdate by row_id. Extract year via Howard Hinnant civil_from_days."
+    },
+    {
+      "step": 4,
+      "build": "supplier(pre_built_index: supplier_suppkey_hash)",
+      "probe": "lineitem_surviving(l_suppkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 100000,
+      "probe_cardinality": 3299000,
+      "notes": "Probe supplier_suppkey_hash with l_suppkey (knuth mult hash). Fetch s_nationkey by row_id."
+    },
+    {
+      "step": 5,
+      "build": "nation(preloaded, 25 rows)",
+      "probe": "s_nationkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "probe_cardinality": 3299000,
+      "notes": "Load all 25 nation rows at startup into string array indexed by n_nationkey (values 0-24). Direct array access, zero hash overhead."
+    }
+  ],
+  "data_structures": {
+    "part_filter": "bitset(2000001) — 256 KB direct-indexed by p_partkey value; set bit for each qualifying part after LIKE scan",
+    "partsupp_join": "pre_built_index(partsupp_pk_hash) — composite int64 key, splitmix64 hash, linear probe",
+    "orders_join": "pre_built_index(orders_orderkey_hash) — int32 key, knuth mult hash, linear probe",
+    "supplier_join": "pre_built_index(supplier_suppkey_hash) — int32 key, knuth mult hash, linear probe",
+    "nation_lookup": "flat_array[25] of n_name strings, indexed by n_nationkey — preloaded at startup",
+    "aggregation": "thread_local direct_array[25][8] of double — indexed by (nation_id 0..24, year_offset from base_year). Merge after parallel scan. ~175 groups total."
+  },
+  "preload_steps": [
+    {
+      "step": "preload_nation",
+      "action": "Read nation/n_nationkey.bin and nation/n_name varlen; populate string nation_names[25] indexed by n_nationkey value"
+    },
+    {
+      "step": "load_indexes",
+      "action": "mmap partsupp_pk_hash.bin, orders_orderkey_hash.bin, supplier_suppkey_hash.bin (read-only, shared across threads)"
+    },
+    {
+      "step": "filter_part_build_bitset",
+      "action": "Single-threaded scan of part/p_name varlen (2M rows, fast); set bit in qualifying_parts bitset[2000001] for each row where memmem(data+start, len, 'green', 5) != nullptr"
+    }
+  ],
+  "compute": {
+    "year_extraction": "Howard Hinnant civil_from_days: z+=719468; era=(z>=0?z:z-146096)/146097; doe=z-era*146097; yoe=(doe-doe/1460+doe/36524-doe/146096)/365; y=yoe+era*400; doy=doe-(365*yoe+yoe/4-yoe/100); mp=(5*doy+2)/153; if(mp>=10) y++; return y;",
+    "amount_formula": "l_extendedprice[i] * (1.0 - l_discount[i]) - ps_supplycost * l_quantity[i]"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "parallel_phase": "scan_lineitem_probe_join_aggregate — split lineitem rows into morsels of ~100K rows; each thread owns local agg array[25][8]",
+    "serial_phases": ["preload_nation", "filter_part_build_bitset", "merge_thread_local_accumulators", "sort_output"],
+    "notes": "Part bitset read-only during parallel phase (no synchronization needed). Index files mmap'd read-only. Thread-local agg arrays avoid any atomic operations."
+  },
+  "indexes": [
+    {"index": "partsupp_pk_hash", "file": "indexes/partsupp_pk_hash.bin", "purpose": "composite_join_lookup(ps_partkey, ps_suppkey) -> row_id -> ps_supplycost"},
+    {"index": "orders_orderkey_hash", "file": "indexes/orders_orderkey_hash.bin", "purpose": "join_lookup(o_orderkey) -> row_id -> o_orderdate"},
+    {"index": "supplier_suppkey_hash", "file": "indexes/supplier_suppkey_hash.bin", "purpose": "join_lookup(s_suppkey) -> row_id -> s_nationkey"}
+  ],
+  "aggregation": {
+    "type": "direct_array",
+    "key": "(nation_id: 0..24, o_year_offset: o_year - min_year)",
+    "value": "double sum_profit",
+    "array_dims": "[25][8]",
+    "expected_groups": 175,
+    "thread_strategy": "thread_local arrays, reduce/merge after parallel scan completes"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "sort_input_rows": 175,
+    "notes": "Trivially cheap sort of 175 rows after aggregation merge"
+  },
+  "columns_accessed": {
+    "part": ["p_partkey", "p_name"],
+    "lineitem": ["l_partkey", "l_suppkey", "l_orderkey", "l_quantity", "l_extendedprice", "l_discount"],
+    "partsupp": ["ps_supplycost"],
+    "orders": ["o_orderdate"],
+    "supplier": ["s_nationkey"],
+    "nation": ["n_nationkey", "n_name"]
+  },
+  "execution_target": "cpp"
+}

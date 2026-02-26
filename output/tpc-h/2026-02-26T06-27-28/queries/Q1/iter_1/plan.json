@@ -1,0 +1,92 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_classify", "parallel_scan_two_path", "aggregate", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.97,
+      "notes": "1998-09-02 as days_from_civil. Table sorted ascending. Zone map classifies each block as ALL_PASS (max_val <= 10471), MIXED (min_val <= 10471 < max_val), or SKIP (min_val > 10471). ~597 ALL_PASS, ~1 MIXED, ~2-3 SKIP."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "columns": [
+      {"name": "l_shipdate",     "file": "lineitem/l_shipdate.bin",     "type": "int32_t", "bytes_per_row": 4, "note": "only read for MIXED blocks"},
+      {"name": "l_returnflag",   "file": "lineitem/l_returnflag.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_linestatus",   "file": "lineitem/l_linestatus.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",     "file": "lineitem/l_quantity.bin",     "type": "double",  "bytes_per_row": 8},
+      {"name": "l_extendedprice","file": "lineitem/l_extendedprice.bin","type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",     "file": "lineitem/l_discount.bin",     "type": "double",  "bytes_per_row": 8},
+      {"name": "l_tax",          "file": "lineitem/l_tax.bin",          "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "madvise": "call madvise(MADV_SEQUENTIAL | MADV_WILLNEED) and madvise(MADV_HUGEPAGE) on every mmap'd column immediately after mapping, before the parallel scan"
+  },
+  "data_structures": {
+    "block_classification": "enum BlockType { ALL_PASS=0, MIXED=1, SKIP=2 } block_type[600] — classify each block from zone map during dim_filter phase",
+    "aggregation": "direct_array[6] of double-only Accum — thread-local per worker, merged after scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "schedule": "static",
+    "notes": "static schedule: 600 blocks / nthreads gives contiguous chunks, lower overhead than dynamic; all blocks are equal size so load is balanced"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "block classification — ALL_PASS if max_val <= 10471, SKIP if min_val > 10471, MIXED otherwise. Early-terminate classification loop once min_val > 10471 (ascending sort order)."
+    }
+  ],
+  "aggregation": {
+    "strategy": "array_direct",
+    "key_expression": "rflag_code * 2 + lstatus_code",
+    "key_range": "0..5",
+    "accumulator_type": "double for ALL fields — no long double anywhere",
+    "two_path_inner_loop": {
+      "ALL_PASS_path": "No shipdate pointer loaded. No branch on shipdate. Inner loop: compute idx = rf[i]*2 + ls[i]; acc[idx].sum_qty += qty[i]; acc[idx].sum_price += price[i]; double disc=disc[i]; acc[idx].sum_disc_price += price[i]*(1.0-disc); acc[idx].sum_charge += price[i]*(1.0-disc)*(1.0+tax[i]); acc[idx].sum_disc += disc; acc[idx].cnt++. Mark with __restrict__ and #pragma GCC ivdep or #pragma omp simd to encourage auto-vectorization.",
+      "MIXED_path": "Load shipdate pointer. Inner loop with if (sd[i] > 10471) continue; Same accumulation in double.",
+      "SKIP_path": "continue — skip block entirely"
+    },
+    "prefetch": "Inside the inner loop body, add __builtin_prefetch(&qty[i + 64], 0, 0) (and similarly for price, disc, tax) to prefetch ~512 bytes ahead.",
+    "accumulators": [
+      "sum_qty        += l_quantity (double)",
+      "sum_price      += l_extendedprice (double)",
+      "sum_disc_price += l_extendedprice * (1.0 - l_discount) (double)",
+      "sum_charge     += l_extendedprice * (1.0 - l_discount) * (1.0 + l_tax) (double)",
+      "sum_disc       += l_discount (double)",
+      "cnt            += 1 (int64_t)"
+    ],
+    "derived_at_output": [
+      "avg_qty   = sum_qty / cnt",
+      "avg_price = sum_price / cnt",
+      "avg_disc  = sum_disc / cnt"
+    ],
+    "merge": "sum thread-local Acc[6] element-wise after scan; O(6 * nthreads)"
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "sort_cardinality": 6,
+    "format": "use %.2f for sum_qty, sum_base_price, avg_qty, avg_price, avg_disc; use %.4f for sum_disc_price; use %.6f for sum_charge; use %ld for count_order — all double format specifiers (no Lf)",
+    "dict_files": [
+      "lineitem/l_returnflag.dict",
+      "lineitem/l_linestatus.dict"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A + B): The iter_0 inner loop has two critical flaws that compound. First, it uses long double for sum_disc_price and sum_charge, forcing x87 FPU execution — this disables all SSE/AVX2 SIMD and runs at 1 op/instruction vs 4 with AVX2. Second, every row in every block incurs a shipdate read and a branch (if sd[i] > CUTOFF), even though 597 of 600 blocks are ALL_PASS (zone map max_val <= 10471) and need no per-row date check at all. The fix has two parts: (1) extend zone map classification to distinguish ALL_PASS / MIXED / SKIP blocks; for ALL_PASS blocks (99.8% of work), use a branchless inner loop that does not load l_shipdate, enabling the compiler to auto-vectorize with AVX2; (2) replace all long double accumulators with double, eliminating x87 and enabling 4-wide SIMD throughout. Additionally, madvise(SEQUENTIAL|WILLNEED|HUGEPAGE) is applied to all mmap'd columns to maximize hardware prefetch and eliminate TLB pressure from 4KB pages, and OpenMP schedule is changed from dynamic(4) to static for lower synchronization overhead.",
+  "correctness_anchors": {
+    "date_cutoff_days": 10471,
+    "date_cutoff_human": "1998-09-02",
+    "rflag_encoding": "A=0, N=1, R=2",
+    "lstatus_encoding": "F=0, O=1",
+    "group_key": "rflag_code * 2 + lstatus_code in [0..5]"
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "query_id": "Q18",
+  "pipeline": ["scan_lineitem_phase1", "build_hot_keys", "lookup_orders", "lookup_customer", "lookup_lineitem_phase2", "aggregate", "sort_topk"],
+  "phases": [
+    {
+      "phase": 1,
+      "label": "build_hot_orderkey_set",
+      "description": "Full parallel scan of lineitem (l_orderkey + l_quantity). Build thread-local hash maps {orderkey -> sum_qty}, merge, filter sum_qty > 300.0 to produce hot_keys set.",
+      "inputs": [
+        "lineitem/l_orderkey.bin",
+        "lineitem/l_quantity.bin"
+      ],
+      "output": "hot_keys: unordered_set<int32_t>",
+      "estimated_output_cardinality": 3000,
+      "parallelism": {
+        "strategy": "morsel_driven",
+        "threads": "auto(nproc)",
+        "merge": "thread_local_hash_maps_merged_at_end"
+      },
+      "data_structures": {
+        "per_thread_agg": "compact_hash_map<int32_t, double> (pre_sized ceil(15000000/nthreads))",
+        "merged_hot_keys": "hash_set<int32_t> (pre_sized 4096)"
+      }
+    },
+    {
+      "phase": 2,
+      "label": "point_lookup_join_aggregate",
+      "description": "For each hot orderkey: probe orders_orderkey_hash for order row, probe customer_custkey_hash for customer row, binary-search lineitem_orderkey_sorted for lineitem rows and accumulate SUM(l_quantity). Emit one result row per hot orderkey.",
+      "inputs": [
+        "indexes/orders_orderkey_hash.bin",
+        "orders/o_custkey.bin",
+        "orders/o_orderdate.bin",
+        "orders/o_totalprice.bin",
+        "orders/o_orderkey.bin",
+        "indexes/customer_custkey_hash.bin",
+        "customer/c_custkey.bin",
+        "customer/c_name.offsets",
+        "customer/c_name.data",
+        "indexes/lineitem_orderkey_sorted.bin",
+        "lineitem/l_quantity.bin"
+      ],
+      "output": "result_rows: vector<{c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum_qty}>",
+      "estimated_output_cardinality": 3000,
+      "parallelism": {
+        "strategy": "partition_parallel",
+        "threads": "auto(nproc)",
+        "partitioning": "hot_keys split into nthread chunks, each thread processes its chunk independently"
+      }
+    },
+    {
+      "phase": 3,
+      "label": "sort_and_limit",
+      "description": "In-memory sort of ~3000 result rows by o_totalprice DESC, o_orderdate ASC. Emit top 100.",
+      "parallelism": {
+        "strategy": "single_threaded",
+        "notes": "Result cardinality ~3000 rows; sort overhead negligible"
+      }
+    }
+  ],
+  "join_order": [
+    {
+      "build": "lineitem(subquery agg filtered)",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "hash_set_probe",
+      "build_cardinality": 3000,
+      "notes": "Phase 1 subquery: scan all 60M lineitem rows, aggregate by l_orderkey, filter SUM > 300 → hot_keys set of ~3000 entries"
+    },
+    {
+      "build": "hot_keys(~3000)",
+      "probe": "orders_orderkey_hash",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3000,
+      "notes": "O(1) hash probe per hot orderkey into pre-built orders PK hash index; ~3000 probes total"
+    },
+    {
+      "build": "orders(filtered ~3000 rows)",
+      "probe": "customer_custkey_hash",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3000,
+      "notes": "O(1) hash probe per qualifying order using o_custkey into pre-built customer PK hash index"
+    },
+    {
+      "build": "hot_keys(~3000)",
+      "probe": "lineitem_orderkey_sorted",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3000,
+      "notes": "Binary search into lineitem_orderkey_sorted (60M pairs sorted by l_orderkey) per hot key; fetch row_ids, accumulate l_quantity"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem_subquery",
+      "predicate": "SUM(l_quantity) > 300.0",
+      "selectivity": 0.002,
+      "applied_at": "phase1_post_aggregation"
+    }
+  ],
+  "data_structures": {
+    "phase1_per_thread_agg": "compact_hash_map<int32_t,double> sized ceil(15000000/nthreads)",
+    "hot_keys_set": "hash_set<int32_t> sized 4096",
+    "orders_lookup": "pre_built_index(orders_orderkey_hash.bin)",
+    "customer_lookup": "pre_built_index(customer_custkey_hash.bin)",
+    "lineitem_lookup": "pre_built_index(lineitem_orderkey_sorted.bin)",
+    "result_buffer": "flat_array<result_row> sized 4096",
+    "aggregation": "none_needed (each hot orderkey maps to exactly one orders row; grouping key unique per orderkey)"
+  },
+  "indexes": [
+    {
+      "index": "orders_orderkey_hash",
+      "file": "indexes/orders_orderkey_hash.bin",
+      "purpose": "O(1) PK lookup of orders row by o_orderkey"
+    },
+    {
+      "index": "customer_custkey_hash",
+      "file": "indexes/customer_custkey_hash.bin",
+      "purpose": "O(1) PK lookup of customer row by c_custkey"
+    },
+    {
+      "index": "lineitem_orderkey_sorted",
+      "file": "indexes/lineitem_orderkey_sorted.bin",
+      "purpose": "Binary-search range scan of lineitem rows by l_orderkey for phase 2 quantity aggregation"
+    }
+  ],
+  "aggregation": "none_for_main_query",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "o_orderdate_format": "days_since_epoch_1970 -> YYYY-MM-DD"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_morsel_size": 1000000,
+    "phase2_partitioning": "hot_keys_range_split_across_threads"
+  },
+  "execution_target": "cpp"
+}

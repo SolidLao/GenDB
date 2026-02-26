@@ -1,0 +1,106 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[row_count=9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[unique_values+1=698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; at build-IS-hash-table time, for each IS pre row i: plabel_code = plabel_codes[i] (uint32_t). Store plabel_code in the IS-pre hash table value alongside pre_row_id. Use plabel_code as integer group-by key component, eliminating secondary string grouping. At output decode time: dict_offsets[plabel_code]..dict_offsets[plabel_code+1] gives byte span in dict_data."
+    }
+  ],
+  "pipeline": [
+    "build_sub_filter",
+    "build_is_pre_hashtable",
+    "scan_num_zonemaps",
+    "parallel_scan_probe_aggregate",
+    "merge_aggregate",
+    "topk_decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023) → fy2023_bool_array[adsh_code]",
+      "probe": "num(uom=USD, value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 16219,
+      "notes": "Load sub/fy.bin; build flat bool array fy2023[86135] indexed by adsh_code (84KB, L1-resident). Also load sub/name.bin as flat int32 array for name_code lookup."
+    },
+    {
+      "build": "pre(stmt=IS) → flat open-addressing hash table keyed by packed(adsh,tag,ver)",
+      "probe": "num rows passing fy2023 filter (~6.5M rows)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1730000,
+      "notes": "Scan pre columns (stmt, adsh, tag, version, plabel_codes) using pre_zonemaps to identify IS-stmt blocks. For each IS row: key = pack_key(adsh_code:17b, tag_code:18b, ver_code:17b) into uint64_t; value = pack_val(pre_row_id:24b, plabel_code:20b) into uint64_t. Hash table: 2^21=2097152 slots, each slot = key(uint64_t) + value(uint64_t) = 16 bytes; total 32MB → fits in L3 (44MB). Replaces O(log 9.6M) binary search into 153MB pre_key_sorted with O(1) L3-resident hash probe."
+    }
+  ],
+  "filters": [
+    {"table": "num",  "predicate": "uom = 'USD'",         "selectivity": 0.87, "notes": "Load usd_code from shared/uom.dict at runtime; use num_zonemaps to identify USD-containing blocks"},
+    {"table": "num",  "predicate": "value IS NOT NULL",   "selectivity": 0.99, "notes": "std::isnan(value) sentinel; checked per-row"},
+    {"table": "sub",  "predicate": "fy = 2023",           "selectivity": 0.19, "notes": "Direct bool array lookup fy2023[adsh_code]; ~16219 qualifying adsh codes"},
+    {"table": "pre",  "predicate": "stmt = 'IS'",         "selectivity": 0.18, "notes": "Baked into IS-pre hash table at build time; IS rows only are inserted. No per-row check needed during probe."}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",     "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value",   "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",    "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",     "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version", "file": "num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential with num_zonemaps block skipping"
+  },
+  "data_structures": {
+    "sub_fy_filter":      "flat_bool_array[86135] — direct index by adsh_code; 84KB; L1-resident",
+    "sub_name_lookup":    "flat_int32_array[86135] — direct index by adsh_code; loaded from sub/name.bin",
+    "is_pre_hashtable":   "flat open-addressing hash table; 2^21 slots × 16 bytes = 32MB; key=uint64_t packed(adsh:17b|tag:18b|ver:17b); value=uint64_t packed(pre_row_id:24b|plabel_code:20b); built at runtime from pre IS rows; L3-resident",
+    "plabel_codes":       "mmap column_versions/pre.plabel.dict/codes.bin; uint32_t[9600799]; read sequentially during IS-pre hash table build",
+    "thread_local_agg":   "per-thread flat open-addressing hash map; 2^18=262144 slots × 24 bytes = 6.3MB per thread; key=uint64_t packed(name_code:14b|tag_code:18b|plabel_code:20b); value=struct{double sum; int64_t cnt}=16 bytes; each map is L3-resident per thread",
+    "global_merge_map":   "flat open-addressing hash map; 2^17=131072 slots × 24 bytes = 3MB; shared for serial merge phase; L3-resident throughout"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "IS-pre hash table built single-threaded (sequential pre scan, ~30ms). Num scan parallelized across 64 threads using USD block morsels from num_zonemaps. Each thread owns a thread-local flat hash map (~6MB, L3-resident) for aggregation with zero contention. After scan, serial merge of thread-local maps into 3MB global map (all L3-resident; estimated ~30ms vs 466ms for std::unordered_map merge)."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks — identify USD-containing blocks in num; distribute block morsels to threads"
+    },
+    {
+      "index": "pre_zonemaps",
+      "purpose": "skip_blocks — during IS-pre hash table build, use pre_zonemaps to skip non-IS stmt blocks (IS rows are contiguous segment since pre is sorted by (stmt, adsh)); scan only IS-stmt blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "group_key": {
+    "fields": ["name_code:int32 (14b)", "tag_code:int32 (18b)", "plabel_code:uint32 (20b)"],
+    "packed_as": "uint64_t = (name_code << 38) | (tag_code << 20) | plabel_code",
+    "estimated_groups": 100000,
+    "notes": "plabel_code from pre.plabel.dict eliminates secondary string grouping entirely. All group key components are integer codes — single-pass aggregation with no post-processing re-grouping. Decode at output time only for top 200 rows."
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "sort_strategy": "std::partial_sort over ~100K groups (top 200 extraction)",
+    "decode_at_output": [
+      "name_code  → sub/name.dict (format: [uint32_t n][uint16_t len, bytes...]*n)",
+      "tag_code   → shared/tag_numpre.dict (same format)",
+      "plabel_code → pre.plabel.dict: span = dict_offsets[plabel_code]..dict_offsets[plabel_code+1] in dict_data",
+      "stmt is always IS (constant string, no dict lookup needed)"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Three root causes identified. (1) decode_and_output (357ms): secondary string re-grouping was architecturally forced because pre_row_id is not a unique plabel identity — different adsh rows share the same plabel string. Fix: Category E, built pre.plabel.dict (dict-encoded uint32 codes for all 9.6M pre rows, 698K unique values). plabel_code is now part of the primary integer group key, eliminating the secondary string grouping pass entirely. (2) merge_aggregate (466ms): 64 std::unordered_map instances collectively exceed L3 (44MB); serial merge is cache-thrashing pointer-chasing. Fix: Category B, replace with flat open-addressing hash maps (2^18 slots × 24 bytes = 6.3MB per thread, L3-resident during scan) and a 3MB global merge target that stays cache-warm throughout serial merge. (3) main_scan (245ms): binary search into 153MB pre_key_sorted produces O(log 9.6M)=23 cache-miss comparisons per qualifying row. Fix: Category A/B, build an IS-only pre hash table at startup (1.73M IS rows → 2M-slot flat table = 32MB, fits in L3) from pre columns using pre_zonemaps to skip non-IS blocks. Hash probe replaces binary search with O(1) L3-resident lookup. Correctness: single-pass aggregation is now complete — no secondary grouping needed because plabel_code directly identifies the plabel string value."
+}

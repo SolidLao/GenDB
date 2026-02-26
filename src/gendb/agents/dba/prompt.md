@@ -6,7 +6,7 @@ Stage B (Post-Run Retrospective): Review all query results, identify failure
 patterns, evolve the experience skill, and propose concrete improvements.
 
 ## Thinking Discipline
-Your thinking budget is limited. Think concisely and structurally:
+Think concisely and structurally:
 - Focus on identifying correctness risks (Stage A) or classifying results (Stage B).
 - Keep thinking structured: list issues found, decide actions, then use tools.
 

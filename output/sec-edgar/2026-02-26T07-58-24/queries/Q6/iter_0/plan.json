@@ -1,0 +1,69 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["build_sub_filter", "scan_num_zonemaps", "filter_num_rows", "probe_pre_key_sorted", "aggregate_local", "merge_aggregate", "topk_decode"],
+  "join_order": [
+    {
+      "build": "sub(fy=2023) → fy2023_bool_array[adsh_code]",
+      "probe": "num(uom=USD, value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 16219,
+      "notes": "Load sub/fy.bin once; build flat bool array fy2023[86135] indexed by adsh_code (84KB, fits in L3). Also stage sub/name.bin as flat int32 array for name_code lookup. Applied per-row during num scan: fy2023[n.adsh_code]."
+    },
+    {
+      "build": "pre_key_sorted (pre-built sorted index, 153MB, loaded once shared read-only)",
+      "probe": "num rows passing sub-filter (~6.5M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "For each qualifying num row, std::lower_bound on pre_key_sorted entries by (adsh_code, tag_code, ver_code). Walk forward while keys match; for each matching entry check pre/stmt.bin[row_id] == is_code. Yields ~1 matching pre IS row per qualifying num row on average."
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.87, "notes": "Load usd_code from shared/uom.dict at runtime; use num_zonemaps to skip non-USD blocks"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.99, "notes": "std::isnan(value) sentinel; checked per-row during scan"},
+    {"table": "sub",  "predicate": "fy = 2023",   "selectivity": 0.19, "notes": "Applied as direct array lookup fy2023[adsh_code] during num scan; ~16,219 qualifying adsh codes"},
+    {"table": "pre",  "predicate": "stmt = 'IS'",  "selectivity": 0.18, "notes": "Load is_code from shared/stmt.dict at runtime; checked after pre_key_sorted lookup via pre/stmt.bin[row_id]"}
+  ],
+  "data_structures": {
+    "sub_fy_filter":    "flat_bool_array[86135] — direct index by adsh_code; 84KB; fits in L3 cache",
+    "sub_name_lookup":  "flat_int32_array[86135] — direct index by adsh_code; loaded from sub/name.bin",
+    "pre_stmt_column":  "flat_int8_array[9600799] — pre/stmt.bin loaded into RAM; O(1) check after index lookup",
+    "pre_index":        "pre_key_sorted — mmap or fully loaded sorted PreKeyEntry[9600799] (153MB); shared read-only across threads",
+    "aggregation":      "compact_hash_map(pre_sized ~100K groups) per thread — key: (name_code:int32, stmt_code:int8, tag_code:int32, pre_row_id:int32); value: (sum_value:double, count:int64); thread-local to avoid contention; merged after scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Partition the USD block range from num_zonemaps across 64 threads in 100K-row morsels. Each thread independently scans its morsels, probes fy2023 array, binary-searches pre_key_sorted (read-only, no contention), and accumulates into a thread-local hash map. After all morsels complete, merge thread-local maps into global result."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks — scan num_zonemaps.bin to find first block where uom_min <= usd_code <= uom_max; skip all blocks where uom_max < usd_code or uom_min > usd_code; reduces scan range to contiguous USD-containing blocks"
+    },
+    {
+      "index": "pre_key_sorted",
+      "purpose": "join_lookup — O(log N) binary search per qualifying num row on sorted (adsh, tag, ver) composite key; walk forward for multi-match; avoids hash-building 9.6M pre rows"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "group_key": {
+    "fields": ["name_code:int32", "stmt_code:int8", "tag_code:int32", "pre_row_id:int32"],
+    "estimated_groups": 100000,
+    "notes": "pre_row_id used as plabel identity proxy — unique per (adsh,tag,ver) tuple in pre. Varlen plabel decoded only for top-200 rows at output time via pre/plabel.offsets + pre/plabel.data."
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "sort_strategy": "partial_sort or min-heap of size 200 over ~100K groups",
+    "decode_at_output": [
+      "name_code  → sub/name.dict",
+      "tag_code   → shared/tag_numpre.dict",
+      "stmt_code  → shared/stmt.dict",
+      "pre_row_id → pre/plabel.offsets + pre/plabel.data (varlen span)"
+    ]
+  },
+  "execution_target": "cpp"
+}

@@ -27,3 +27,13 @@ export function getDataDir(benchmark, scaleFactor) {
 export function getGendbDir(benchmark, scaleFactor) {
   return resolve(BENCHMARKS_DIR, benchmark, "gendb", `sf${scaleFactor}.gendb`);
 }
+
+/** Resolve the schema path for a given benchmark. */
+export function getSchemaPath(benchmark) {
+  return resolve(BENCHMARKS_DIR, benchmark, "schema.sql");
+}
+
+/** Resolve the queries path for a given benchmark. */
+export function getQueriesPath(benchmark) {
+  return resolve(BENCHMARKS_DIR, benchmark, "queries.sql");
+}

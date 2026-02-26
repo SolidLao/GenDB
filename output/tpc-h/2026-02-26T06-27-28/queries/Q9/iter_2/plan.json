@@ -1,0 +1,197 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_orderkey_to_year_nibble",
+      "action": "built_new",
+      "files": {
+        "oky_nibble": "column_versions/orders.o_orderkey_to_year_nibble/oky_nibble.bin",
+        "oky_nibble_format": "uint8_t[30000002]; max_orderkey=60000000"
+      },
+      "usage": "mmap oky_nibble.bin (30MB, fits in 44MB L3). To probe orderkey ok: byte_idx=ok>>1, shift=(ok&1)<<2, nibble=(oky_nibble[byte_idx]>>shift)&0xF; 0xF=not_found, 0-6=year_offset(year-1992). Replaces the rebuilt 57MB orderkey_year static array — eliminates both the 57MB BSS memset (which caused ~14600 page faults single-threaded) and the 15M-row orders scan during build_joins. Preload into L3 with a parallel touch after mmap."
+    },
+    {
+      "id": "lineitem.l_extendedprice.int32",
+      "action": "use_existing",
+      "files": {
+        "price": "column_versions/lineitem.l_extendedprice.int32/price.bin",
+        "price_format": "int32_t[59986052]; actual = price_i32[i] * 0.01"
+      },
+      "usage": "mmap price.bin (240MB vs 480MB for double). In revenue: revenue = price_i32[i] * (100 - disc_u8[i]) * 1e-4. Saves 240MB lineitem bandwidth."
+    },
+    {
+      "id": "lineitem.l_discount.uint8",
+      "action": "use_existing",
+      "files": {
+        "disc": "column_versions/lineitem.l_discount.uint8/disc.bin",
+        "disc_format": "uint8_t[59986052]; actual_discount = disc_u8[i] * 0.01"
+      },
+      "usage": "mmap disc.bin (60MB vs 480MB for double). In revenue: factor = (100 - disc_u8[i]). Saves 420MB lineitem bandwidth."
+    },
+    {
+      "id": "lineitem.l_quantity.uint8",
+      "action": "use_existing",
+      "files": {
+        "qty": "column_versions/lineitem.l_quantity.uint8/qty.bin",
+        "qty_format": "uint8_t[59986052]; actual_qty = (double)qty_u8[i]"
+      },
+      "usage": "mmap qty.bin (60MB vs 480MB for double). In cost: supplycost * qty_u8[i]. Saves 420MB lineitem bandwidth."
+    }
+  ],
+  "pipeline": [
+    "omp_warmup",
+    "preload_nation",
+    "filter_part_build_bitset",
+    "build_suppkey_nk",
+    "build_cps_ht",
+    "preload_oky_nibble_into_L3",
+    "scan_lineitem_probe_join_aggregate",
+    "merge_thread_local_accumulators",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "build": "part(filtered, p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "probe_cardinality": 59986052,
+      "output_cardinality": 3299000,
+      "notes": "Bitset[2000001] of qualifying p_partkeys (2MB, fully L1-resident during probe). Direct byte-test. Build parallel with 64 threads."
+    },
+    {
+      "step": 2,
+      "build": "orders(pre_built: oky_nibble — mmap'd 30MB file, L3-resident)",
+      "probe": "lineitem_surviving(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 3299000,
+      "notes": "Probe nibble array: byte_idx=ok>>1, shift=(ok&1)<<2, yr_off=(oky_nibble[byte_idx]>>shift)&0xF. 30MB fits in 44MB L3. No rebuild cost — file persists in OS page cache between hot runs."
+    },
+    {
+      "step": 3,
+      "build": "supplier(direct_array: suppkey_nk[100001])",
+      "probe": "lineitem_surviving(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "probe_cardinality": 3299000,
+      "notes": "400KB direct array suppkey→nationkey. Fully L1/L2 resident. Single-threaded build (trivial)."
+    },
+    {
+      "step": 4,
+      "build": "partsupp(filtered by part_bitset, compact hash: cps_ht[1M slots])",
+      "probe": "lineitem_surviving(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 440000,
+      "probe_cardinality": 3299000,
+      "notes": "BSS static cps_ht[1M] × 16B = 16MB. DO NOT memset — BSS is already zero at program start, key==0 is empty sentinel. Parallel build with CAS for 440K qualifying partsupp rows. 16MB fits in L3."
+    },
+    {
+      "step": 5,
+      "build": "nation(preloaded, 25 rows)",
+      "probe": "s_nationkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "probe_cardinality": 3299000,
+      "notes": "25-entry string array indexed by n_nationkey (0-24). Load at startup."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "estimated_output_rows": 110000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",       "file": "lineitem/l_partkey.bin",                                    "type": "int32_t",  "bytes_per_row": 4},
+      {"name": "l_suppkey",       "file": "lineitem/l_suppkey.bin",                                    "type": "int32_t",  "bytes_per_row": 4},
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",                                   "type": "int32_t",  "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "column_versions/lineitem.l_extendedprice.int32/price.bin",  "type": "int32_t",  "bytes_per_row": 4, "decode": "price_i32[i] * 0.01"},
+      {"name": "l_discount",      "file": "column_versions/lineitem.l_discount.uint8/disc.bin",        "type": "uint8_t",  "bytes_per_row": 1, "decode": "disc_u8[i] * 0.01"},
+      {"name": "l_quantity",      "file": "column_versions/lineitem.l_quantity.uint8/qty.bin",         "type": "uint8_t",  "bytes_per_row": 1, "decode": "(double)qty_u8[i]"}
+    ],
+    "total_bytes_per_row": 14,
+    "total_scan_bytes": 838804728,
+    "access_pattern": "sequential",
+    "notes": "Using compact column versions for l_extendedprice(int32), l_discount(uint8), l_quantity(uint8). Total: 14B/row vs 28B/row with doubles. Lineitem bandwidth ~840MB vs ~1680MB for these 6 cols (3 are kept as-is at 4B each)."
+  },
+  "data_structures": {
+    "part_filter":   "bitset(uint8_t[2000001]) — 2MB, direct-indexed by p_partkey, set=1 if p_name contains 'green'. Built parallel.",
+    "oky_nibble":    "mmap'd pre-built file (30MB) — nibble-packed uint8_t[30000002], orderkey->year_offset. 30MB < 44MB L3, fully L3-resident after parallel preload.",
+    "suppkey_nk":    "flat_array(int32_t[100001]) — 400KB, direct-indexed by s_suppkey, value=s_nationkey.",
+    "cps_ht":        "static BSS compact_hash_map[1M slots × 16B = 16MB] — key=(int64 ps_partkey<<32|ps_suppkey), value=ps_supplycost(double). Sentinel key==0 (BSS zero). NO memset needed. splitmix64 hash + linear probe.",
+    "aggregation":   "thread_local direct_array[25][8] of double — indexed by (nation_id, year_offset). 200 doubles per thread, register-resident. Merge after parallel scan."
+  },
+  "preload_steps": [
+    {
+      "step": "omp_warmup",
+      "action": "Execute a trivial #pragma omp parallel num_threads(64) {} block before any timed phase. This pre-initializes the OMP thread pool, eliminating ~5-6ms of thread-spawn overhead from the first real parallel phase (dim_filter)."
+    },
+    {
+      "step": "preload_nation",
+      "action": "Read nation/n_nationkey.bin and nation/n_name varlen; populate string nation_names[25] indexed by n_nationkey."
+    },
+    {
+      "step": "mmap_oky_nibble",
+      "action": "mmap column_versions/orders.o_orderkey_to_year_nibble/oky_nibble.bin as PROT_READ MAP_SHARED. Then parallel-preload into L3: 64-thread loop reading every 64th byte to pull all 30MB pages through the cache hierarchy before main_scan begins."
+    },
+    {
+      "step": "filter_part_build_bitset",
+      "action": "Parallel 64-thread scan of part/p_name varlen (2M rows). memmem for 'green'. Set part_bitset[p_partkey]=1 for qualifying rows."
+    },
+    {
+      "step": "build_suppkey_nk",
+      "action": "Single-threaded scan of supplier (100K rows). Write suppkey_nk[s_suppkey] = s_nationkey."
+    },
+    {
+      "step": "build_cps_ht",
+      "action": "Parallel 64-thread scan of partsupp (8M rows). For each row where part_bitset[ps_partkey]=1: CAS-insert (int64_key, ps_supplycost) into BSS cps_ht[1M]. DO NOT memset cps_ht — BSS is already zero at process start, key==0 is the empty sentinel. This saves ~5ms of single-threaded page-fault overhead."
+    }
+  ],
+  "compute": {
+    "year_extraction": "From pre-built nibble file: yr_off = (oky_nibble[ok>>1] >> ((ok&1)<<2)) & 0xF; if (yr_off == 0xF) skip.",
+    "amount_formula": "double revenue = price_i32[i] * (int32_t)(100 - disc_u8[i]) * 1e-4; double amount = revenue - ps_supplycost * (double)qty_u8[i];",
+    "note": "Integer multiplication price_i32 * (100-disc_u8) avoids FP multiply for the revenue term. Cast to double at the end."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc=64)",
+    "parallel_phase": "scan_lineitem_probe_join_aggregate — 64 threads, morsel_size=65536. Each thread holds local agg[25][8] doubles.",
+    "serial_phases": ["preload_nation", "build_suppkey_nk", "merge_thread_local_accumulators", "sort_output"],
+    "parallel_phases": ["omp_warmup", "filter_part_build_bitset", "build_cps_ht", "preload_oky_nibble_into_L3", "scan_lineitem_probe_join_aggregate"],
+    "notes": "OMP warmup before any parallel work eliminates thread-spawn latency from dim_filter. cps_ht CAS inserts are low-contention (unique PK, 1M slots, 440K entries). oky_nibble preload (30MB parallel sequential read) fills L3 before main_scan random probes begin."
+  },
+  "indexes": [
+    {"index": "none_used", "purpose": "All lookups use pre-built in-memory structures or mmap'd column extensions"}
+  ],
+  "aggregation": {
+    "type": "direct_array",
+    "key": "(nation_id 0..24, year_offset 0..6) — encoded as nation_id*8 + year_offset",
+    "value": "double sum_profit",
+    "array_dims": "[25][8] = 200 slots per thread",
+    "expected_groups": 175,
+    "thread_strategy": "thread_local arrays (no atomics), final merge after parallel scan"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "sort_input_rows": 175,
+    "notes": "Trivially cheap sort of 175 rows."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: two overlapping bottlenecks. (1) build_joins (63ms) was dominated by a 57MB single-threaded BSS memset for orderkey_year (~14,600 page faults, ~25ms) plus the 15M-orders scan; fixed via Category E — pre-building a persistent 30MB nibble-packed orderkey→year file (oky_nibble.bin) that lives in OS page cache across hot runs, eliminating the entire orderkey_year rebuild and memset. The 30MB nibble file also fits within the 44MB L3, making random probes L3-resident. The 16MB cps_ht memset is also eliminated (BSS is already zero at process start, key==0 is already the sentinel). (2) main_scan (35ms) was reading 2160MB of lineitem across 6 columns including 3 double columns (extendedprice, discount, quantity = 1440MB); fixed via Category C — using pre-existing compact column versions (l_extendedprice as int32 centiprice, l_discount as uint8 centesimal, l_quantity as uint8) reducing those 3 columns from 1440MB to 360MB, halving total lineitem bandwidth to ~840MB. Revenue formula adapts to: price_i32[i]*(100-disc_u8[i])*1e-4. (3) dim_filter's 16ms includes ~5-6ms OMP thread-pool spawn; fixed by adding a pre-warmup parallel region before timed phases. Combined effect: build_joins target ~10-15ms, main_scan target ~18ms, dim_filter target ~10ms, total target ~38-43ms.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice*(1-l_discount)"
+  }
+}

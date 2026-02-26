@@ -1,0 +1,86 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["filter_customer", "scan_orders", "build_orderkey_map", "scan_lineitem", "aggregate_topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment=BUILDING)",
+      "probe": "orders(full sequential scan)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 300000,
+      "notes": "Scan customer sequentially -> set cust_qual[c_custkey]=true in bool array (1.5MB, fits L1); then scan all orders sequentially probing cust_qual[o_custkey] in O(1) - no index file needed"
+    },
+    {
+      "build": "orders(filtered, compact hash map orderkey->slot)",
+      "probe": "lineitem(sequential scan from first qualifying shipdate row)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "Build unordered_map<int32_t,int32_t> orderkey->slot_index (24MB, fits in LLC at 44MB); binary-search l_shipdate.bin to find start_row where l_shipdate[start_row] > 9204 (table is sorted ascending); scan l_orderkey/l_extendedprice/l_discount from start_row to end (~600MB), no l_shipdate needed in main loop since all rows >= start_row qualify on shipdate"
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == building_code",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "cust_qual[o_custkey] == true AND o_orderdate < 9204",
+      "selectivity": 0.098,
+      "output_cardinality": 1470000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "row_index >= start_row (l_shipdate sorted, all rows from start_row have l_shipdate > 9204)",
+      "selectivity": 0.51,
+      "output_cardinality": 30600000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 30600000,
+    "columns": [
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential_from_start_row",
+    "notes": "l_shipdate.bin is mmapped briefly for binary search to find start_row; then only l_orderkey/l_extendedprice/l_discount are scanned from start_row to end. Saves loading ~30M * 4B = 120MB of l_shipdate plus ~600MB of data before start_row across other columns."
+  },
+  "data_structures": {
+    "customer_filter": "bool cust_qual[1500001] zero-initialized (1.5MB total, fits in L1 per core); indexed directly by c_custkey value (custkeys are 1..1500000); set cust_qual[custkey] = true for rows passing mktsegment filter",
+    "orders_hashmap": "std::unordered_map<int32_t, int32_t> orderkey_to_slot pre-reserved to 2000000 buckets (~24MB, fits in LLC); maps qualifying o_orderkey -> compact slot index [0..N_qual-1]; parallel scan with thread-local qualifying vectors merged before map build",
+    "qualifying_orders_arrays": "three flat arrays: int32_t okeys[N_qual], odate[N_qual], ospri[N_qual] holding data for qualifying orders in slot order",
+    "revenue_array": "double revenue[N_qual] zero-initialized (~12MB for N_qual~1.47M, fits in LLC); updated via #pragma omp atomic during lineitem scan; no thread-local copies needed"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_details": [
+      "customer scan: parallel over 1.5M rows, thread-local qualifying custkey collection -> merge into cust_qual bool array",
+      "orders scan: parallel over 15M rows, thread-local vectors of qualifying (orderkey,odate,ospri) tuples -> single-threaded merge and hash map build",
+      "lineitem scan: parallel over rows [start_row..59986051], morsel-driven; each thread probes shared orderkey_to_slot (read-only), accumulates via #pragma omp atomic to shared revenue[]",
+      "final: single thread iterates N_qual slots -> collect results with revenue>0 -> partial_sort top-10"
+    ]
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "find first_qual_block = first block with max_val > 9204; start binary search for start_row from first_qual_block*100000; reduces binary search range from 60M to ~100K rows"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "partial_sort over N_qual result structs (revenue > 0 entries); N_qual ~ 1.47M, top-10 partial_sort is O(N log 10) ~ 4ms"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: (A) logical plan uses two large FK index files (orders_custkey_sorted 120MB + lineitem_orderkey_sorted 480MB) loaded via MAP_POPULATE, contributing ~27ms of the 90ms data_loading cost and requiring 1.47M binary searches (26 random hops each) into a 480MB cache-exceeding structure during main_scan. Strategy Category A (plan restructuring): replace both index-nested-loop joins with hash-join + sequential scans. Customer filter builds a 1.5MB bool direct-array (fits L1) eliminating the orders index; sequential orders scan (240MB) probes this array in O(1). A compact orderkey->slot hash map (24MB, fits LLC) built from qualifying orders replaces the lineitem index; lineitem is scanned sequentially from start_row (found via binary search on sorted l_shipdate, confirmed by zone map for block offset) so only ~30M rows x 3 cols = 600MB of sequential data is read versus 480MB of randomly-accessed index plus 70MB of scattered payload. Revenue is accumulated into a 12MB shared double[] array via OMP atomic, eliminating thread-local aggregation maps and their merge overhead. No MAP_POPULATE is used; MADV_SEQUENTIAL is set for all scan files. Total data touched drops from ~2GB to ~850MB, all sequential.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice * (1 - l_discount)"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "query_id": "Q1",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_quantity.uint8",
+      "action": "built_new",
+      "files": {
+        "qty": "column_versions/lineitem.l_quantity.uint8/qty.bin",
+        "qty_format": "uint8_t[59986052]"
+      },
+      "usage": "mmap qty.bin as uint8_t*; replace col_quantity (double*). In inner loop: qty_u8[i] is the integer quantity (1..50). sum_qty_i += qty_u8[i] (int64_t). Output: sum_qty = (double)sum_qty_i."
+    },
+    {
+      "id": "lineitem.l_discount.uint8",
+      "action": "built_new",
+      "files": {
+        "disc": "column_versions/lineitem.l_discount.uint8/disc.bin",
+        "disc_format": "uint8_t[59986052]"
+      },
+      "usage": "mmap disc.bin as uint8_t*; replace col_discount (double*). disc_u8[i] = discount×100 (0..10). Decode: (100 - disc_u8[i]) = integer (1-discount)×100. sum_disc_i += disc_u8[i] (int64_t). Output: sum_disc = (double)sum_disc_i × 0.01, avg_disc = (double)sum_disc_i × 0.01 / cnt."
+    },
+    {
+      "id": "lineitem.l_tax.uint8",
+      "action": "built_new",
+      "files": {
+        "tax": "column_versions/lineitem.l_tax.uint8/tax.bin",
+        "tax_format": "uint8_t[59986052]"
+      },
+      "usage": "mmap tax.bin as uint8_t*; replace col_tax (double*). tax_u8[i] = tax×100 (0..8). Decode: (100 + tax_u8[i]) = integer (1+tax)×100. Used only in sum_charge_i computation."
+    },
+    {
+      "id": "lineitem.l_extendedprice.int32",
+      "action": "built_new",
+      "files": {
+        "price": "column_versions/lineitem.l_extendedprice.int32/price.bin",
+        "price_format": "int32_t[59986052]"
+      },
+      "usage": "mmap price.bin as int32_t*; replace col_price (double*). price_i32[i] = extendedprice×100 (90091..10494950). All multiplications use int64_t casts. Output: sum_base = (double)sum_price_i × 0.01."
+    }
+  ],
+  "pipeline": ["zone_map_classify", "parallel_scan_filter_integer", "merge_accumulators", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.97,
+      "notes": "Only needed for MIXED blocks (~3 of 600). For ALL_PASS blocks (597/600), no filter is applied. l_shipdate column is still mmapped for MIXED block fallback."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "columns": [
+      {"name": "l_shipdate",     "file": "lineitem/l_shipdate.bin",     "type": "int32_t", "bytes_per_row": 4, "note": "MIXED blocks only (~3 blocks)"},
+      {"name": "l_returnflag",   "file": "lineitem/l_returnflag.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_linestatus",   "file": "lineitem/l_linestatus.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",     "file": "column_versions/lineitem.l_quantity.uint8/qty.bin",          "type": "uint8_t",  "bytes_per_row": 1, "note": "compact: was 8B double"},
+      {"name": "l_extendedprice","file": "column_versions/lineitem.l_extendedprice.int32/price.bin",   "type": "int32_t",  "bytes_per_row": 4, "note": "compact centiprice: was 8B double"},
+      {"name": "l_discount",     "file": "column_versions/lineitem.l_discount.uint8/disc.bin",         "type": "uint8_t",  "bytes_per_row": 1, "note": "compact centesimal: was 8B double"},
+      {"name": "l_tax",          "file": "column_versions/lineitem.l_tax.uint8/tax.bin",               "type": "uint8_t",  "bytes_per_row": 1, "note": "compact centesimal: was 8B double"}
+    ],
+    "bytes_per_row_compact": 9,
+    "bytes_per_row_original": 34,
+    "total_dram_reads_compact_mb": 540,
+    "total_dram_reads_original_mb": 2040,
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "block_classification": "uint8_t block_type[600] — 0=ALL_PASS (max_val<=10471), 1=MIXED (min<=10471<max), 2=SKIP. Built once from zone map.",
+    "aggregation": "struct alignas(64) Accum { int64_t cnt, sum_qty_i, sum_disc_i, sum_price_i, sum_disc_price_i, sum_charge_i; }. Pure int64_t — no floating point in the hot loop. 6 entries per thread. Thread-local then merged. Key = rflag_code*2 + lstatus_code in [0..5].",
+    "integer_arithmetic": {
+      "sum_qty_i": "sum_qty_i += qty_u8[i]",
+      "sum_disc_i": "sum_disc_i += disc_u8[i]",
+      "sum_price_i": "sum_price_i += (int64_t)price_i32[i]",
+      "sum_disc_price_i": "sum_disc_price_i += (int64_t)price_i32[i] * (int64_t)(100 - disc_u8[i])",
+      "sum_charge_i": "const int64_t p64 = price_i32[i]; const int64_t omd = 100 - disc_u8[i]; const int64_t opt = 100 + tax_u8[i]; sum_charge_i += p64 * omd * opt;",
+      "overflow_verification": "Max sum_charge_i per row = 10494950 × 100 × 108 = 1.13e11; over 58M rows = 6.55e18 < INT64_MAX(9.22e18). Safe."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "schedule": "dynamic(4)",
+    "notes": "Keep dynamic(4) — proven stable, handles MIXED-block imbalance."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "Three-way block classification SKIP/ALL_PASS/MIXED using the existing zone map binary format (uint64_t n_blocks; then n_blocks × {int32_t min, int32_t max}). ALL_PASS = max <= 10471. Early-terminate on ascending order."
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_detail": {
+    "accumulator_struct": "struct alignas(64) Accum { int64_t cnt=0, sum_qty_i=0, sum_disc_i=0, sum_price_i=0, sum_disc_price_i=0, sum_charge_i=0; }",
+    "inner_loop_all_pass": "int k = (uint8_t)rf[i]*2 + (uint8_t)ls[i]; Accum& a=local[k]; const int64_t p64=pr[i]; const int64_t omd=100-dis[i]; const int64_t opt=100+tx[i]; a.cnt++; a.sum_qty_i+=qty[i]; a.sum_disc_i+=dis[i]; a.sum_price_i+=p64; a.sum_disc_price_i+=p64*omd; a.sum_charge_i+=p64*omd*opt;",
+    "inner_loop_mixed": "Same as ALL_PASS but guarded by: if (sd[i] > 10471) continue; (sd is l_shipdate int32_t*)",
+    "output_conversion": "sum_qty=(double)a.sum_qty_i; sum_base=(double)a.sum_price_i*0.01; sum_disc_price=(long double)a.sum_disc_price_i*0.0001L; sum_charge=(long double)a.sum_charge_i*1e-6L; sum_disc=(double)a.sum_disc_i*0.01; avg_qty=(double)a.sum_qty_i/a.cnt; avg_price=(double)a.sum_price_i*0.01/a.cnt; avg_disc=(double)a.sum_disc_i*0.01/a.cnt;",
+    "output_format": "%.2f for sum_qty/sum_base/avg_qty/avg_price/avg_disc; %.4Lf for sum_disc_price (long double); %.6Lf for sum_charge (long double); %ld for cnt",
+    "note": "Long double is ONLY used for the final output conversion of 6 groups — NOT in the hot inner loop. This preserves precision for %.4f/%.6f output while keeping the scan loop integer-only."
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "sort_cardinality": 6,
+    "sort_strategy": "std::sort on up to 6 result rows by (rflag_code ASC, lstatus_code ASC)",
+    "dict_files": ["lineitem/l_returnflag.dict", "lineitem/l_linestatus.dict"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category E + B): Two compounding inefficiencies. First, l_quantity, l_discount, l_tax, and l_extendedprice are stored as double (8 bytes each) despite having integer semantics — qty is 1-50, discount is 0.00-0.10 in 0.01 steps, tax is 0.00-0.08 in 0.01 steps. This wastes 3.7× DRAM bandwidth (2.04GB scan vs 0.54GB with compact encodings). Second, the Accum struct uses long double for sum_disc_price, forcing x87 FPU in the inner loop and preventing SIMD. Fix (Category E): Build uint8_t compact versions of qty/discount/tax and int32_t centiprice for extendedprice — all rows, built in 0.8s. Fix (Category B): Replace all floating-point accumulators with pure int64_t using integer-scaled arithmetic: sum_disc_price_i += price_i32 × (100 - disc_u8), sum_charge_i += price_i32 × (100 - disc_u8) × (100 + tax_u8). Integer arithmetic eliminates x87 entirely, shortens dependency chains to 3-5 cycles, and allows the compiler to use integer SIMD. Long double is kept only for the final 6-row output conversion (sum_disc_price_i × 0.0001L, sum_charge_i × 1e-6L), preserving %.4f/%.6f output precision without affecting the hot path. Expected improvement: main_scan from 34ms to ~5-9ms from 3.7× bandwidth reduction and elimination of x87 from the inner loop.",
+  "correctness_anchors": {
+    "date_cutoff_days": 10471,
+    "date_cutoff_meaning": "1998-09-02 = DATE '1998-12-01' - INTERVAL '90' DAY, encoded as days_from_civil(1998,9,2)",
+    "predicate": "l_shipdate <= 10471",
+    "rflag_encoding": "A=0, N=1, R=2",
+    "lstatus_encoding": "F=0, O=1",
+    "group_key": "rflag_code * 2 + lstatus_code in [0..5]",
+    "output_sort": "by (rflag_code ASC, lstatus_code ASC) — dict code order matches string alphabetical order",
+    "integer_encoding": {
+      "qty_u8": "uint8_t = round(l_quantity), exact integer 1..50",
+      "disc_u8": "uint8_t = round(l_discount × 100), range 0..10",
+      "tax_u8": "uint8_t = round(l_tax × 100), range 0..8",
+      "price_i32": "int32_t = round(l_extendedprice × 100), range 90091..10494950",
+      "sum_disc_price_formula": "sum_disc_price_i += price_i32 × (100 - disc_u8); output: sum_disc_price_i × 0.0001L",
+      "sum_charge_formula": "sum_charge_i += price_i32 × (100 - disc_u8) × (100 + tax_u8); output: sum_charge_i × 1e-6L"
+    }
+  }
+}

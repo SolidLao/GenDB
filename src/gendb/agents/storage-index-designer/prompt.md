@@ -7,13 +7,10 @@ Data ingestion and index construction must be highly efficient — parallel tabl
 column writes, and parallel index construction.
 
 ## Thinking Discipline
-Your thinking budget is limited. Think concisely and structurally:
+Think concisely and structurally:
 - Make decisions, don't deliberate endlessly. Pick an approach and execute via tools.
 - NEVER draft C++ code in your thinking. Use Write/Edit tools to write code.
 - NEVER hand-compute arithmetic in thinking. Write a small program or use known formulas.
-
-## Domain Skills
-Domain skills (gendb-storage-format, indexing, data loading, etc.) are available and will be loaded automatically when relevant. The experience skill contains critical correctness rules — always check it.
 
 ## Workflow
 1. Detect hardware: `nproc`, `lscpu | grep -E "cache|Flags"`, `lsblk -d -o name,rota`, `free -h`
@@ -31,6 +28,64 @@ Domain skills (gendb-storage-format, indexing, data loading, etc.) are available
 3. `generated_ingest/build_indexes.cpp` — index building from binary data
 4. `generated_ingest/Makefile`
 5. `query_guides/<Qi>_guide.md` — per-query guide for all Phase 2 agents
+
+## Physical Design Reasoning
+
+Your encoding and index choices determine the performance ceiling for all downstream query
+execution. Every design decision creates constraints and opportunities for the Query Planner,
+Code Generator, and Query Optimizer. Reason about end-to-end cost, not just storage cost.
+
+### Step 1: Column Role Classification
+For EACH column in the schema, determine its role across ALL queries in the workload:
+- **Computational columns**: appear in JOIN ON, WHERE, GROUP BY, or ORDER BY in any query.
+  Code will repeatedly compare, hash, or aggregate these values — potentially billions of
+  operations per query execution.
+- **Payload columns**: appear only in SELECT output (not in joins, filters, grouping, or
+  ordering). Code reads these only for final result rows after all filtering and aggregation.
+- A column can be computational in one query and payload in another — classify by its
+  MOST demanding role across the workload.
+
+### Step 2: Encoding Cost Analysis
+For each computational column, reason about total runtime cost under different encodings:
+1. **Access frequency**: How many times per query execution will this column be accessed?
+   (e.g., once per row in a 39M-row scan = 39M accesses)
+2. **Operation type**: What operations will be performed per access? (equality comparison,
+   hashing for join or grouping, range comparison, sorting)
+3. **Per-access cost by encoding**: Fixed-size representations enable O(1) comparison and
+   compact hash keys. Variable-length representations require per-element length-dependent
+   work and produce variable-size keys that are less cache-friendly.
+4. **Total cost**: accesses × cost_per_access, summed across all queries that use this column.
+5. **Downstream aggregation cost**: For columns appearing in GROUP BY or as join keys used in
+   aggregation: how will the encoding affect the aggregation data structures downstream?
+   Fixed-size integer codes (dict-encoding) allow the aggregation key to directly represent
+   group identity — the code generator can build a single hash map keyed by integer tuples.
+   Variable-length encodings (varlen strings) force a two-phase strategy: first aggregate by
+   a proxy key (e.g., row ID), then decode strings and re-aggregate by actual values. Estimate
+   the two-phase overhead: `N_intermediate_groups × (decode_cost + rehash_cost)`. For columns
+   with moderate cardinality (up to low millions of unique values), dict-encoding is almost
+   always net-positive because the one-time ingestion cost is amortized across all queries.
+
+Choose the encoding that minimizes total cost across the workload. For payload-only columns,
+optimize for storage compactness since access count is small (just final result rows).
+
+### Step 3: Index Investment Analysis
+For each join and filter pattern in the workload:
+1. **Without an index**: What data structure would query code need to build at runtime?
+   Estimate: construction_cost = N_rows × per_row_insert_cost.
+2. **With a standard index** (hash, sorted, zone map): Building at ingestion time is a
+   one-time cost. At query time, lookups become O(1). Runtime savings = construction cost
+   per query × number of query executions.
+3. **Enabling decisions**: Some indexes require the table to be sorted in a specific order
+   (e.g., a composite key index that stores the first matching row requires contiguous rows
+   for the same key). Plan sort orders before ingestion to enable your indexes.
+4. **Workload sharing**: If multiple queries share the same join/filter pattern, the same
+   index serves all of them — higher return on the one-time construction cost.
+
+### Step 4: Design Consistency Verification
+- Do encoding choices for related columns (FK ↔ PK, shared dictionaries) use compatible
+  representations?
+- Do table sort orders support the indexes you've planned?
+- Are type sizes appropriate for the actual value ranges?
 
 ## storage_design.json Contract
 ```json

@@ -1,0 +1,76 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_classify", "parallel_scan_filter", "aggregate", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.97,
+      "notes": "1998-09-02 = days_from_civil(1998,9,2) = 10471. Table sorted ascending by l_shipdate so tail blocks pruned by zone map with early-terminate."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "columns": [
+      {"name": "l_shipdate",     "file": "lineitem/l_shipdate.bin",     "type": "int32_t", "bytes_per_row": 4, "note": "loaded ONLY for MIXED blocks; skipped for ALL_PASS blocks"},
+      {"name": "l_returnflag",   "file": "lineitem/l_returnflag.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_linestatus",   "file": "lineitem/l_linestatus.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",     "file": "lineitem/l_quantity.bin",     "type": "double",  "bytes_per_row": 8},
+      {"name": "l_extendedprice","file": "lineitem/l_extendedprice.bin","type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",     "file": "lineitem/l_discount.bin",     "type": "double",  "bytes_per_row": 8},
+      {"name": "l_tax",          "file": "lineitem/l_tax.bin",          "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "block_classification": "uint8_t block_type[600] — 0=SKIP, 1=ALL_PASS (max_val<=10471), 2=MIXED (min<=10471<max). Built once from zone map before parallel scan.",
+    "aggregation": "double Acc[6] per accumulator field, thread-local Acc[6] arrays merged after scan. Key = rflag_code*2 + lstatus_code in 0..5."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "schedule": "dynamic(4)",
+    "notes": "Keep dynamic(4) from iter_0 — proven stable. Static schedule hurt iter_1 due to MIXED-block imbalance. No madvise calls — hot data is already in OS page cache; madvise(HUGEPAGE/WILLNEED) caused the iter_1 regression by triggering kernel THP remapping overhead."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "Three-way block classification: SKIP (min_val > 10471), ALL_PASS (max_val <= 10471), MIXED (min<=10471<max). Early-terminate once min_val > 10471 (ascending sort order). Eliminates l_shipdate reads for ~597 of 600 blocks."
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_detail": {
+    "strategy": "array_direct",
+    "accumulator_type": "double (NOT long double — long double forces x87 FPU which serializes FP dependency chains to ~40 cycles, suppressing CPU's ability to keep DRAM requests in flight and capping effective bandwidth at ~31 GB/s instead of 150+ GB/s)",
+    "key_expression": "rflag_code * 2 + lstatus_code",
+    "key_range": "0..5",
+    "struct": "struct alignas(64) Acc { int64_t cnt=0; double sum_qty=0, sum_base=0, sum_disc_price=0, sum_charge=0, sum_disc=0; }",
+    "inner_loop_all_pass": "No sd[] load, no branch — direct accumulate: d=dis[i]; p=pr[i]; omd=1.0-d; idx=rf[i]*2+ls[i]; agg[idx].sum_qty+=qty[i]; agg[idx].sum_base+=p; agg[idx].sum_disc_price+=p*omd; agg[idx].sum_charge+=p*omd*(1.0+tax[i]); agg[idx].sum_disc+=d; agg[idx].cnt++;",
+    "inner_loop_mixed": "Same as ALL_PASS but guarded by: if (sd[i] > 10471) continue;",
+    "merge": "Sum thread-local Acc[6] element-wise after parallel region — O(6 * nthreads)"
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "sort_cardinality": 6,
+    "sort_strategy": "std::sort on up to 6 result rows keyed by (rflag_code, lstatus_code) — dict code order matches string alphabetical order",
+    "dict_files": ["lineitem/l_returnflag.dict", "lineitem/l_linestatus.dict"],
+    "format": "%.2f for sum_qty/sum_base; %.4f for sum_disc_price; %.6f for sum_charge; %.2f for avg_qty/avg_price/avg_disc; %ld for cnt. Use double format specifiers (%f not %Lf) throughout.",
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A + B): iter_0's inner loop uses long double for sum_disc_price and sum_charge, forcing x87 FPU execution. X87 serializes computation into ~40-cycle dependency chains (1.0L-ld -> lp*omd -> lp*omd*(1+tax)), blocking the CPU's reorder buffer from seeing future memory loads and suppressing hardware prefetch. This limits effective DRAM bandwidth to ~31 GB/s (observed: 2.28 GB / 73ms) versus the hardware's 150+ GB/s capability. Fix (Category B): replace all long double accumulators with double throughout — eliminates x87, enables SSE2/AVX2 for FP operations, shortens dependency chains to ~4-8 cycles, and allows many more concurrent DRAM prefetch requests. Fix (Category A): extend zone map reading to produce a three-way block classification (ALL_PASS/MIXED/SKIP). For ALL_PASS blocks (597 of 600), skip the l_shipdate column load entirely — saves 597*100000*4 = 238.8 MB of DRAM reads and removes the per-row branch, giving the compiler a straight-line inner loop to optimize. For MIXED blocks (~3 of 600), load l_shipdate and apply the per-row predicate as before. Critically excluded: no madvise(WILLNEED/HUGEPAGE) calls — these caused iter_1's regression from 81ms to 112ms by triggering kernel THP remapping and prefetch overhead on already page-cached hot data. Schedule stays dynamic(4) as in iter_0.",
+  "correctness_anchors": {
+    "date_cutoff_days": 10471,
+    "date_cutoff_meaning": "1998-09-02 = DATE '1998-12-01' - INTERVAL '90' DAY, encoded as days_from_civil(1998,9,2)",
+    "predicate": "l_shipdate <= 10471",
+    "rflag_encoding": "A=0, N=1, R=2",
+    "lstatus_encoding": "F=0, O=1",
+    "group_key": "rflag_code * 2 + lstatus_code in [0..5]",
+    "output_sort": "by (rflag_code ASC, lstatus_code ASC) — dict code order matches string alphabetical order"
+  }
+}

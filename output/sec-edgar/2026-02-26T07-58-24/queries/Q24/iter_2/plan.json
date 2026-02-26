@@ -1,0 +1,104 @@
+{
+  "query_id": "Q24",
+  "pipeline": ["zonemap_prune", "scan_filter_num", "antijoin_probe_prefetch", "thread_local_aggregate", "parallel_tree_merge", "having_filter", "topk"],
+  "join_order": [
+    {
+      "build": "pre_existence_hash(pre-built index)",
+      "probe": "num(filtered: uom=USD, ddate BETWEEN 20230101 AND 20231231, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "pre_built_index",
+      "build_cardinality": 9600799,
+      "notes": "pre_existence_hash mmapped read-only (402MB, capacity=33554432, load_factor=0.286). Software prefetch with P=16: for each qualifying row i, issue __builtin_prefetch(&pre_slots[hash3i(adsh[i+16], tag[i+16], ver[i+16]) & pmask], 0, 0) before processing row i. P=16 yields ~160ns head start (16 rows × ~10ns compute each), fully covering 70-100ns DRAM latency with margin vs P=8 which gave only 80ns coverage."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "method": "USD is pre-seeded at index 0 in shared/uom.dict; hardcode usd_code=0, skip dict scan at runtime"
+    },
+    {
+      "table": "num",
+      "predicate": "ddate >= 20230101 AND ddate <= 20231231",
+      "selectivity": 0.46,
+      "method": "int32 range comparison on num/ddate.bin"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "std::isnan(value) check on num/value.bin"
+    }
+  ],
+  "combined_filter_selectivity": 0.40,
+  "pre_antijoin_cardinality": 15700000,
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",     "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "ddate",   "file": "num/ddate.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",   "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",    "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",     "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version", "file": "num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential (zone-map pruned to ~40% of blocks)"
+  },
+  "data_structures": {
+    "zonemap": "flat_array(395 blocks × 10 bytes = 3.9KB, fits in L1; layout: [n_blocks:int32][uom_min:int8, uom_max:int8, ddate_min:int32, ddate_max:int32] per block)",
+    "antijoin_lookup": "pre_built_index(indexes/pre_existence_hash.bin, mmap 402MB, Robin Hood hash, capacity=33554432, load_factor=0.286, linear probe, empty=INT32_MIN); use MADV_RANDOM; software prefetch distance P=16",
+    "aggregation": "compact_hash_map(key=uint64_t packed (tag_code<<32|ver_code), value=(count:int64, sum:double), capacity=65536 per thread-local map, ~20K expected groups, sentinel=UINT64_MAX)",
+    "dict_store": "flat_buffer DictStore: struct { vector<char> data; vector<uint32_t> offsets; vector<uint16_t> lengths; } — replaces vector<string>. Eliminates 184K separate malloc() calls (93% of 198K tag strings are 47-byte avg, exceeding SSO threshold of ~22 bytes). Uses 3 large allocations total. Access: data.data()+offsets[i] for ptr, lengths[i] for len. Build: single sequential pass through dict file, reserve(total_bytes) once, then push_back each string's bytes."
+  },
+  "zonemap_usage": {
+    "index_file": "indexes/num_zonemaps.bin",
+    "block_size": 100000,
+    "n_blocks": 395,
+    "filter_dimensions": [
+      "uom: skip block if uom_max < usd_code OR uom_min > usd_code",
+      "ddate: skip block if ddate_max < 20230101 OR ddate_min > 20231231"
+    ]
+  },
+  "parallelism": {
+    "strategy": "morsel_driven scan + parallel_tree_merge",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "scan_parallelism": "std::atomic<int32_t> block_cursor; threads steal blocks; each thread owns its thread-local HM",
+    "antijoin_parallelism": "pre_existence_hash is read-only; all threads probe concurrently, no synchronization needed",
+    "merge_strategy": "parallel_tree_reduction — log2(nthreads) rounds inside OMP parallel region with barrier between rounds (unchanged from iter_1)"
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "file": "indexes/num_zonemaps.bin",
+      "purpose": "skip_blocks on (uom, ddate); eliminates non-USD and out-of-2023 blocks before any column read"
+    },
+    {
+      "index": "pre_existence_hash",
+      "file": "indexes/pre_existence_hash.bin",
+      "purpose": "anti_join_lookup; replaces full pre table scan; O(1) average probe per num row with software prefetch P=16"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "aggregation_keys": ["tag_code:int32", "ver_code:int32"],
+  "aggregation_accumulators": ["count:int64", "sum_value:double"],
+  "having": "count > 10",
+  "output": {
+    "decode": [
+      "tag_code -> string via DictStore(shared/tag_numpre.dict): data.data()+offsets[tag_code], lengths[tag_code]",
+      "ver_code -> string via DictStore(shared/version_numpre.dict): data.data()+offsets[ver_code], lengths[ver_code]"
+    ],
+    "order_by": ["cnt DESC"],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two root causes addressed. (1) data_loading=23ms is dominated by 184K heap malloc() calls in load_dict for tag_numpre.dict: 93.1% of 198,311 tag strings average 47 bytes, well above the ~22-byte SSO threshold, so each triggers a separate heap allocation at ~100-150ns each = 18-25ms wasted. Fix (Category C): replace vector<string> with a flat DictStore — pre-reserve a single large buffer for all string bytes, store offsets and lengths as plain int arrays. This collapses 184K mallocs into 3 large allocations, cutting dict loading to ~1ms and data_loading from 23ms to ~3-5ms. Version strings (avg 20 bytes, 100% SSO-eligible) are fast and need no change. (2) main_scan prefetch P=8 gives only ~80ns head start against 70-100ns DRAM latency for probes into the 402MB pre_existence_hash — barely covering latency with no margin. Increasing to P=16 gives ~160ns head start, fully hiding DRAM latency and reducing probe stalls. Expected new total: ~58-62ms.",
+  "correctness_anchors": {
+    "ddate_lo": 20230101,
+    "ddate_hi": 20231231,
+    "having_threshold": 10,
+    "usd_preseeded_code": 0
+  }
+}

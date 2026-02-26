@@ -1,4 +1,4 @@
-# Task: Optimize C++ code for {{query_id}} (iteration {{iteration}})
+# Task: Optimize execution plan for {{query_id}} (iteration {{iteration}})
 
 {{#if stall_section}}
 {{stall_section}}
@@ -14,7 +14,7 @@
 
 {{#if plan_path_exists}}
 ## Current Execution Plan
-You may modify the plan for architectural changes: {{plan_path}}
+Read the current plan for reference: {{plan_path}}
 {{/if}}
 
 {{#if query_guide}}
@@ -53,15 +53,19 @@ You may modify the plan for architectural changes: {{plan_path}}
 ## GenDB Storage Directory
 {{gendb_dir}}
 
-## Query Code
-Read and modify: {{cpp_path}}
+{{#if column_versions}}
+{{column_versions}}
+{{/if}}
+
+## Current Implementation (read for analysis)
+Read the current code to understand what was implemented: {{cpp_path}}
 
 ## Original SQL
 ```sql
 {{query_sql}}
 ```
 
-## Compilation
-Compile (do NOT run — Executor handles validation):
-  {{compile_command}}
-Ensure the code compiles successfully (up to 3 fix attempts).
+## Output
+Write your revised execution plan to: {{revised_plan_path}}
+Follow the Plan JSON Structure from your system prompt exactly. "optimization_notes" must be
+a plain text string (not a dict). Include "correctness_anchors" if anchors are provided above.

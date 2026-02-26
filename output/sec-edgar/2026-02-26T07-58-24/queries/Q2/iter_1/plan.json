@@ -1,0 +1,95 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "load_uom_dict",
+    "mmap_dicts_deferred",
+    "zone_map_scan",
+    "build_m_hash_agg_singlethread",
+    "probe_m_filter_sub_singlethread",
+    "decode_topk"
+  ],
+  "join_order": [
+    {
+      "build": "num(uom=pure, value IS NOT NULL) → GROUP BY (adsh_code, tag_code) → MAX(value)",
+      "probe": "num(uom=pure, value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 118000,
+      "notes": "Phase 1: single-threaded zone-map-guided scan builds one global max_map directly. No thread-local maps. No merge step. ~118k rows, 2 qualifying blocks — parallelism overhead (merge cost 12ms) exceeds benefit (saves ~1ms in build). Phase 2: single-threaded probe of max_map + fy direct-array lookup."
+    },
+    {
+      "build": "sub/fy.bin (86135 rows, mmap'd array)",
+      "probe": "num rows surviving m-probe (~118k rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row_id by encoding contract; check sub/fy.bin[adsh_code] == (int16_t)2022 as O(1) direct array index. ~21% selectivity reduces survivors to ~24.8k rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == pure_code",
+      "selectivity": 0.003,
+      "notes": "pure_code resolved at runtime from shared/uom.dict; expected value 2 but MUST load from dict"
+    },
+    {
+      "table": "num",
+      "predicate": "!isnan(value)",
+      "selectivity": 0.999
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == (int16_t)2022",
+      "selectivity": 0.21,
+      "notes": "applied as direct_array lookup sub/fy.bin[adsh_code] during Phase 2 probe"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",   "file": "num/uom.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value", "file": "num/value.bin",  "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",  "file": "num/adsh.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",   "file": "num/tag.bin",    "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "zone_map_skip: only ~2 qualifying blocks scanned (~200k rows)"
+  },
+  "data_structures": {
+    "uom_dict": "load shared/uom.dict via load_binary_dict (tiny: 201 entries, 1.6KB); scan entries to find 'pure' code; store as pure_code (int8_t)",
+    "tag_raw_dict": "mmap shared/tag_numpre.dict (9.7MB, 198,311 entries); parse header once to build uint32_t offsets[198312] + uint16_t lengths[198311] arrays (single malloc each); string access = pointer into mmap buffer; NO per-string heap allocation; used only in output sort comparator and CSV decode",
+    "name_raw_dict": "mmap sub/name.dict (233KB, 86,135 entries); same offset+length approach; single malloc for offsets array; used only in output sort comparator and CSV decode",
+    "m_hash_agg": "single global compact_hash_map, capacity=262144 (next_pow2(118000*2)), allocated with malloc+memset (avoids mmap page-fault overhead); key=uint64_t packed(adsh_code<<32|tag_code); value=double max_value; empty sentinel key=UINT64_MAX; built single-threaded in Phase 1 directly — no thread-local maps, no merge phase",
+    "sub_fy_array": "mmap sub/fy.bin as int16_t[86135]; O(1) lookup by adsh_code",
+    "sub_name_array": "mmap sub/name.bin as int32_t[86135]; lookup name_code at probe time for survivors only",
+    "output_candidates": "std::vector<Candidate> collected single-threaded in Phase 2; partial_sort to get top 100"
+  },
+  "parallelism": {
+    "strategy": "single_threaded",
+    "threads": 1,
+    "notes": "With only ~2 qualifying blocks (~118k qualifying rows), OMP parallelism overhead (thread wakeup, thread-local map alloc, merge) costs 12ms+ while saving <2ms in scan time. Run both Phase 1 and Phase 2 single-threaded. This eliminates: 2x mmap(4MB) page-fault overhead for thread maps, the 12ms merge loop, and OMP thread synchronization overhead."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks",
+      "notes": "Read indexes/num_zonemaps.bin; per-block check uom_min <= pure_code <= uom_max; skip block if pure_code out of range. Reduces 395 blocks to ~2 qualifying blocks. Same logic as iter_0."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["n.value DESC", "s.name ASC", "n.tag ASC"],
+    "limit": 100,
+    "decode_at_output": [
+      "s.name: sub_name_array[adsh_code] -> int32 name_code -> name_raw_dict pointer+length",
+      "n.tag: tag_code -> tag_raw_dict pointer+length",
+      "sort comparator uses std::string_view (pointer+length) for name and tag comparison — no extra allocation"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is two Category-A plan inefficiencies: (1) data_loading wastes ~12-15ms on per-string heap allocations while loading tag_numpre.dict (198,311 entries, 9.7MB) using fread+vector<string> — each of the ~198k entries with average length ~47 bytes (above SSO threshold) triggers a separate heap allocation; fix is to mmap the dict file and build a uint32_t offsets array + uint16_t lengths array (2 mallocs total), with string data accessed directly as char* pointers into the mmap buffer; (2) the dim_filter/merge phase wastes 12ms because building 2 thread-local hash maps (4MB each) and then merging them costs more than it saves — with only ~2 qualifying blocks and ~118k pure rows, single-threaded Phase 1 takes ~3ms and eliminates the 12ms merge entirely, also removing mmap(MAP_ANONYMOUS) page-fault overhead for the thread-local maps. Expected new total: ~30-35ms vs 58ms current.",
+  "correctness_anchors": {
+    "threshold_constant": 118000
+  }
+}

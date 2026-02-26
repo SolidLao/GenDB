@@ -1,0 +1,78 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zonemap_prune", "parallel_scan_filter", "thread_local_aggregate", "merge_aggregate", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != -1",
+      "selectivity": 0.99,
+      "notes": "~1% of rows have NULL stmt; zone map skips leading null-stmt blocks entirely (stmt_max == -1)"
+    }
+  ],
+  "scans": [
+    {
+      "table": "pre",
+      "columns": ["stmt", "rfile", "adsh", "line"],
+      "files": [
+        "pre/stmt.bin",
+        "pre/rfile.bin",
+        "pre/adsh.bin",
+        "pre/line.bin"
+      ],
+      "total_rows": 9600799,
+      "rows_after_filter": 9504791,
+      "block_size": 100000,
+      "total_blocks": 97,
+      "index_pruning": {
+        "index": "pre_zonemaps",
+        "file": "indexes/pre_zonemaps.bin",
+        "skip_condition": "stmt_max == -1",
+        "notes": "Skip all leading blocks where every row has NULL stmt. Once stmt_min > -1, all remaining blocks pass. Blocks with stmt_min == -1 but stmt_max > -1 require row-level filtering."
+      }
+    }
+  ],
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_keys": ["stmt_code (int8_t)", "rfile_code (int8_t)"],
+    "array_layout": "direct_array[256 * 256] indexed by (uint8_t)stmt_code * 256 + (uint8_t)rfile_code",
+    "estimated_groups": 50,
+    "fits_in_cache": true,
+    "accumulators_per_group": [
+      {"name": "cnt",         "type": "int64_t",          "operation": "COUNT(*)"},
+      {"name": "adsh_set",    "type": "hash_set<int32_t>","operation": "COUNT(DISTINCT adsh)", "notes": "small per-group set; merge by union across threads"},
+      {"name": "sum_line",    "type": "int64_t",          "operation": "SUM(line) for AVG"},
+      {"name": "count_line",  "type": "int64_t",          "operation": "COUNT(line) for AVG"}
+    ],
+    "thread_local": true,
+    "merge_strategy": "reduce thread-local direct_arrays; union adsh_sets per group; trivial with ~50 groups"
+  },
+  "data_structures": {
+    "group_aggregation": "direct_array[65536] (256×256 int8 keys); only ~50 slots active; fits in L1 cache",
+    "distinct_adsh": "hash_set<int32_t> per group (thread-local); merge by union",
+    "output_buffer": "flat_array(≤50 rows)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_unit": "block (100,000 rows)",
+    "total_morsels": 97,
+    "notes": "Each thread processes assigned blocks; maintains thread-local direct_array aggregation. Final merge is O(50 groups × nthreads) — negligible."
+  },
+  "indexes": [
+    {
+      "index": "pre_zonemaps",
+      "file": "indexes/pre_zonemaps.bin",
+      "purpose": "skip_blocks",
+      "notes": "Skip blocks with stmt_max == -1 before any I/O on data columns"
+    }
+  ],
+  "output": {
+    "decode": ["stmt_code → shared/stmt.dict", "rfile_code → shared/rfile.dict"],
+    "compute_avg": "(double)sum_line / count_line per group",
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "sort_cost": "trivial (≤50 rows)"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,88 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_usd_code_from_dict",
+    "load_name_dict_upfront",
+    "mmap_num_columns_sequential",
+    "mmap_sub_columns_random_access",
+    "zone_map_precompute_usd_block_range",
+    "precompute_compact_adsh_index_fy2022",
+    "scan_num_parallel_compact_array_accumulation",
+    "parallel_merge_compact_sum_array",
+    "post_merge_aggregate_cik_and_nc",
+    "compute_threshold_avg_cik_sums",
+    "having_filter_name_cik_map",
+    "topk_sort_limit_100"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2022 qualifying adsh codes — compact index, 16890 entries)",
+      "probe": "num(filtered: uom=USD, !isnan(value))",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 16890,
+      "notes": "Pre-build int16_t adsh_compact_idx[86135]: maps adsh_code to compact_index 0..16889 (or -1 if fy!=2022). During scan, single array lookup replaces fy check + cik/name lookup + 2 hash inserts. Sub columns only needed for building compact index and post-merge aggregation — not in hot scan loop."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "notes": "Load usd_code at runtime from shared/uom.dict by matching string 'USD'. Never hardcode."
+    },
+    {
+      "table": "num",
+      "predicate": "!std::isnan(value)",
+      "selectivity": 0.99,
+      "notes": "IEEE 754 NaN sentinel for NULL. Applied together with uom filter."
+    },
+    {
+      "table": "sub (pre-computed)",
+      "predicate": "adsh_compact_idx[adsh_code] >= 0",
+      "selectivity": 0.21,
+      "notes": "fy=2022 filter is encoded in adsh_compact_idx at pre-processing time. No sub_fy array lookup in hot scan loop — just a single int16_t array read."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",   "file": "num/uom.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value", "file": "num/value.bin",  "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",  "file": "num/adsh.bin",   "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "adsh_compact_idx": "int16_t[86135] shared read-only array — 172KB, L2-resident in each core. Maps adsh_code -> compact_index (0..16889) or -1. Built once pre-scan from sub/fy.bin scan.",
+    "compact_cik":  "int32_t[16890] — cik for each qualifying adsh code (built at pre-processing)",
+    "compact_name": "int32_t[16890] — name_code for each qualifying adsh code (built at pre-processing)",
+    "thread_local_compact_sum": "double[16890] per thread — 131KB per thread, FITS IN L2 (256KB). 64 threads x 131KB = 8.4MB total, well within L3 (44MB). Zero-initialized. Replaces both cik_ht and nc_ht.",
+    "post_merge_cik_map": "compact_hash_map(int32_t cik -> double sum), pre-sized 16384 slots — built after merge over only 16890 entries",
+    "post_merge_nc_map": "compact_hash_map(int64_t (name_code<<32|cik) -> double sum), pre-sized 32768 slots — built after merge over only 16890 entries",
+    "name_dict": "std::vector<std::string> loaded upfront during data_loading — eliminates separate decode_name_codes phase"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_unit_rows": 100000,
+    "thread_local_state": "each thread owns independent double[16890] compact_sum array (131KB); direct indexed write, no hash computation, no probing, no synchronization during scan",
+    "merge_phase": "parallel reduction: #pragma omp parallel for over compact_index 0..16889; each thread sums tl_compact_sum[t][ci] across all nthreads into global_compact_sum[ci]. Total merge data: 8.6MB (vs 72MB in iter_0). Post-merge: single sequential loop over 16890 entries builds small cik and nc hash maps."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks",
+      "notes": "Read indexes/num_zonemaps.bin. Pre-compute first and last USD block indices before the parallel scan. Skip blocks where uom_min > usd_code OR uom_max < usd_code. Reduces scan range to USD segment only."
+    }
+  ],
+  "aggregation": "two_phase: (1) parallel flat-array accumulation by compact adsh_code (L2-resident, no hashing); (2) sequential post-merge hash_group_by over 16890 entries for cik and (name,cik) keys",
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "decode_step": "name_dict already loaded upfront during data_loading; index directly by name_code for surviving groups"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category B (algorithm change): the thread-local hash maps in iter_0 use long double slots (24 bytes each), making the combined thread-local working set 64 x (393KB + 786KB) = 72MB — far exceeding L3 (44MB). This causes the merge phase to scan 72MB of cache-cold data (observed: 27.5ms). Fix: replace both hash maps with a single thread-local flat array double[16890] per thread (131KB), indexed by a pre-built compact adsh_code index that encodes the fy=2022 filter. This reduces per-thread working set to 131KB (fits in L2 per core), total merge data to 8.6MB (fits easily in L3), and eliminates hash computation + probing from the hot scan path. The scan loop simplifies to: one int16_t array lookup + one double array write per qualifying row (vs fy lookup + cik/name lookup + 2 hash inserts). Post-merge aggregation into cik and (name,cik) hash maps is trivial (16890 entries). Additionally, sub/name.dict is loaded upfront during data_loading to eliminate the separate 6.7ms decode_name_codes phase."
+}

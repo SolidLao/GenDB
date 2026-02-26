@@ -1,0 +1,43 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 207.93333333333337,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 207.93333333333337,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 90.06,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 52.59,
+        "output": 4.2,
+        "total": 200.9
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 48.22666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 48.22666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: (A) logical plan uses two large FK index files (orders_custkey_sorted 120MB + lineitem_orderkey_sorted 480MB) loaded via MAP_POPULATE, contributing ~27ms of the 90ms data_loading cost and requiring 1.47M binary searches (26 random hops each) into a 480MB cache-exceeding structure during main_scan. Strategy Category A (plan restructuring): replace both index-nested-loop joins with hash-join + sequential scans. Customer filter builds a 1.5MB bool direct-array (fits L1) eliminating the orders index; sequential orders scan (240MB) probes this array in O(1). A compact orderkey->slot hash map (24MB, fits LLC) built from qualifying orders replaces the lineitem index; lineitem is scanned sequentially from start_row (found via binary search on sorted l_shipdate, confirmed by zone map for block offset) so only ~30M rows x 3 cols = 600MB of sequential data is read versus 480MB of randomly-accessed index plus 70MB of scattered payload. Revenue is accumulated into a 12MB shared double[] array via OMP atomic, eliminating thread-local aggregation maps and their merge overhead. No MAP_POPULATE is used; MADV_SEQUENTIAL is set for all scan files. Total data touched drops from ~2GB to ~850MB, all sequential.",
+      "operation_timings": {
+        "data_loading": 0.08,
+        "dim_filter": 2.49,
+        "build_joins": 18.68,
+        "main_scan": 19.06,
+        "output": 11.04,
+        "total": 57.3
+      }
+    }
+  ]
+}

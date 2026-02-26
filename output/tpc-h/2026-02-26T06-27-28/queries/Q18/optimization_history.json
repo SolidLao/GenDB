@@ -1,0 +1,43 @@
+{
+  "query_id": "Q18",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 12146.93,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 12146.93,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.13,
+        "dim_filter": 11626.22,
+        "build_joins": 67.25,
+        "main_scan": 0.13,
+        "output": 0.94,
+        "total": 12044.39
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 74.45333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 74.45333333333333,
+      "validation": "pass",
+      "strategy": "Root cause (Category B — Algorithm change): Phase 1 (dim_filter) consumed 11626ms of 12147ms total. The iter_0 plan used per-thread std::unordered_map<int32_t,double> with reserve(1<<20) per thread — this causes 64×8MB=512MB of bucket arrays far exceeding the 44MB L3 cache, ~16M heap-allocated linked-list nodes (one per row processed), a single-threaded merge into a 128MB global hash table, and 16M free() calls during swap(). The fix is to eliminate the hash table entirely by using the pre-built lineitem_orderkey_sorted index for Phase 1: since pairs are already sorted by l_orderkey, groups are contiguous and a sequential scan with a running sum replaces the hash aggregation. Each of the 64 threads advances its chunk boundaries to complete group edges (pairs[start].key != pairs[start-1].key), processes contiguous groups sequentially with random l_quantity[row_id] accesses, and emits hot keys to a thread-local vector — no hash table, no heap allocation, no merge step. Expected Phase 1 runtime: ~480MB sequential index read at 50GB/s + ~480MB random l_quantity reads at 10GB/s with 64 threads = ~55ms total, down from 11626ms. Phase 2 (point lookups for ~3000 hot keys) is unchanged.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "dim_filter": 28.66,
+        "build_joins": 1.57,
+        "main_scan": 0.09,
+        "output": 1.53,
+        "total": 69.88
+      }
+    }
+  ]
+}

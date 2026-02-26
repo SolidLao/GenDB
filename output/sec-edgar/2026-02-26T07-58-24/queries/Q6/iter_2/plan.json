@@ -1,0 +1,118 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[row_count=9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[unique_values+1=698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; at IS HT build time, for each qualifying IS+fy2023 pre row i: plabel_code = plabel_codes[i]. Store plabel_code in IS HT value. Use plabel_code as integer group-by key component. At output decode: dict_offsets[plabel_code]..dict_offsets[plabel_code+1] gives byte span in dict_data."
+    }
+  ],
+  "pipeline": [
+    "parallel_preinit",
+    "build_sub_filter",
+    "build_is_pre_hashtable",
+    "scan_num_zonemaps",
+    "parallel_scan_probe_aggregate",
+    "parallel_merge_aggregate",
+    "topk_decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023) → fy2023_bool_array[adsh_code]",
+      "probe": "num(uom=USD, value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 16219,
+      "notes": "Flat bool array fy2023[86135] indexed by adsh_code; 84KB, L1-resident."
+    },
+    {
+      "build": "pre(stmt=IS, adsh in fy2023) → flat open-addressing hash table keyed by packed(adsh,tag,ver)",
+      "probe": "num rows passing fy2023 filter (~6.5M rows)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 325000,
+      "notes": "KEY CHANGE from iter_1: apply fy2023 filter during IS HT build. Only IS pre rows where fy2023[pre_adsh_col[i]]==1 are inserted (~325K rows instead of 1.73M). IS HT: IS_HT_SIZE=2^20=1048576 slots x 16 bytes = 16MB. Load factor = 325K/1048576 = 31%. Average successful probe = 1.5 (vs 3.28 at 82%). 16MB fits comfortably in L3 alongside per-thread TL maps, reducing probe cost from DRAM (~50ns) to L3 (~12ns) during parallel scan."
+    }
+  ],
+  "filters": [
+    {"table": "num",  "predicate": "uom = 'USD'",         "selectivity": 0.87},
+    {"table": "num",  "predicate": "value IS NOT NULL",   "selectivity": 0.99},
+    {"table": "sub",  "predicate": "fy = 2023",           "selectivity": 0.19},
+    {"table": "pre",  "predicate": "stmt = 'IS'",         "selectivity": 0.18},
+    {"table": "pre",  "predicate": "adsh in fy2023_set",  "selectivity": 0.19, "notes": "Applied during IS HT build to eliminate 81% of IS rows that will never be probed"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom",     "file": "num/uom.bin",     "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "value",   "file": "num/value.bin",   "type": "double",  "bytes_per_row": 8},
+      {"name": "adsh",    "file": "num/adsh.bin",    "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tag",     "file": "num/tag.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "version", "file": "num/version.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential with num_zonemaps block skipping; software prefetch for IS HT probe slot"
+  },
+  "data_structures": {
+    "sub_fy_filter":    "flat_bool_array[86135]; 84KB; L1-resident",
+    "sub_name_lookup":  "flat_int32_array[86135]; direct index by adsh_code",
+    "is_pre_hashtable": "flat open-addressing HT; IS_HT_SIZE=2^20=1048576 slots x 16 bytes = 16MB; key=uint64_t packed(adsh:17b|tag:18b|ver:17b); value=uint64_t packed(mult:16b|row_id:24b|plabel_code:20b); built from ~325K fy2023+IS pre rows; 31% load; L3-resident during scan. CHANGE: IS_HT_SIZE halved from 2^21 to 2^20 due to fy2023 filter reducing entries 5.3x.",
+    "tl_raw_alloc":     "SINGLE contiguous allocation: new AggSlot[(size_t)nthreads * TL_SIZE]; TL_SIZE=2^18=262144; each thread uses tl_raw + (size_t)tid*TL_SIZE as its private 6.3MB TL map. CRITICAL: initialized in parallel (each thread fills its own slice) to eliminate ~163ms of single-threaded page faults.",
+    "tl_compact":       "per-thread std::vector<AggEntry> allocated and filled inside parallel region; ~41K entries per thread; 24 bytes each",
+    "parallel_merge_sub_hts": "per-thread sub-HT for parallel merge: SUB_HT_SIZE=2^11=2048 slots x 24 bytes = 48KB per thread; L2-resident; thread t owns entries where hash64(key) % nthreads == t",
+    "plabel_codes":     "mmap column_versions/pre.plabel.dict/codes.bin; uint32_t[9600799]; read sequentially during IS HT build"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "nthreads = omp_get_max_threads(); cap at 64 if hyperthreading doubles count",
+    "morsel_size": 100000,
+    "notes": "Three parallel regions: (1) parallel_preinit — each thread initializes tl_raw slice (6.3MB/thread) and IS HT slice (16MB/nthreads) to avoid single-threaded page fault bottleneck; (2) parallel_scan_probe_aggregate — morsel-driven USD block scan with IS HT probe + aggregation into thread-local maps; (3) parallel_merge_aggregate — partitioned merge where thread t handles hash(key) % nthreads == t, inserts into L2-resident 48KB sub-HT, no contention."
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "purpose": "skip_blocks — identify USD-containing blocks in num; distribute block morsels to threads"
+    },
+    {
+      "index": "pre_zonemaps",
+      "purpose": "skip_blocks — during IS HT build, skip non-IS stmt blocks (IS rows contiguous since pre sorted by stmt,adsh)"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "group_key": {
+    "fields": ["name_code:int32 (14b)", "tag_code:int32 (18b)", "plabel_code:uint32 (20b)"],
+    "packed_as": "uint64_t = (name_code << 38) | (tag_code << 20) | plabel_code",
+    "estimated_groups": 100000
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "sort_strategy": "std::partial_sort over all groups (top 200); collect from all nthreads sub-HTs",
+    "decode_at_output": [
+      "name_code  → sub/name.dict",
+      "tag_code   → shared/tag_numpre.dict",
+      "plabel_code → column_versions/pre.plabel.dict/dict.offsets + dict.data",
+      "stmt is always IS (constant)"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Three root causes identified from execution_results.json: (1) 256ms untracked within the total phase timer (named phases only sum to 194ms), dominated by single-threaded initialization of 64x6.3MB=403MB thread-local aggregation maps BEFORE the parallel_scan phase timer starts — each std::vector fill triggers ~100K page faults on the main thread (~163ms alone). Fix: Category B — allocate tl_maps as ONE contiguous array and initialize in a parallel pre-init OMP region so each thread faults and fills only its own 6.3MB slice (~2ms wall vs ~163ms serial). Same treatment for is_ht and gm. (2) build_is_pre_hashtable (79ms): currently inserts ALL 1.73M IS pre rows, but only ~325K have adsh codes in the fy2023 set — the other 81% will NEVER be probed since num rows are already filtered by fy2023 before probing the IS HT. Fix: Category C — add fy2023[pre_adsh_col[i]] check during IS HT build. IS HT shrinks to 2^20=16MB at 31% load (avg 1.5 probes), fits cleanly in L3, and build is 5.3x faster with lower probe lengths. (3) parallel_scan_probe_aggregate (81ms): 64 threads accessing 32MB IS HT + individual TL maps creates total working set 160MB >> 44MB L3, pushing IS HT probes to DRAM latency (~50ns per probe). Smaller IS HT (16MB, fy2023-filtered) fits in L3 alongside thread working sets, cutting probe cost to L3 latency (~12ns). Additionally, merge_aggregate (25ms) is a serial 2.6M-entry merge — replaced with a partitioned parallel merge where thread t scans all compact lists keeping only hash(key)%nthreads==t entries and inserts into its own L2-resident 48KB sub-HT (zero contention, ~8ms wall). Combined projected savings: ~305ms reduction, from 472ms to ~167ms, beating the 171ms target.",
+  "correctness_anchors": {
+    "usd_code": "loaded at runtime from shared/uom.dict (pre-seeded index 0)",
+    "is_code": "loaded at runtime from shared/stmt.dict (pre-seeded index 1)",
+    "fy2023_value": 2023,
+    "group_key_packing": "(name_code:14b << 38) | (tag_code:18b << 20) | plabel_code:20b",
+    "is_ht_key_packing": "(adsh:17b << 35) | (tag:18b << 17) | ver:17b",
+    "is_ht_value_packing": "(mult:16b << 44) | (row_id:24b << 20) | plabel_code:20b",
+    "plabel_dict_unique_values": 698148,
+    "stmt_output": "IS (constant string, no decode needed)"
+  }
+}

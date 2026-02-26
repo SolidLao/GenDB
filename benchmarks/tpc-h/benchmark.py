@@ -1763,6 +1763,227 @@ SYSTEM_COLORS = {
     "MonetDB": "#A65628",
 }
 
+# Primary key columns per table (indexes on these are redundant)
+TPCH_PK_COLUMNS = {
+    "nation": ("n_nationkey",),
+    "region": ("r_regionkey",),
+    "supplier": ("s_suppkey",),
+    "part": ("p_partkey",),
+    "partsupp": ("ps_partkey", "ps_suppkey"),
+    "customer": ("c_custkey",),
+    "orders": ("o_orderkey",),
+    "lineitem": ("l_orderkey", "l_linenumber"),
+}
+
+
+def parse_gendb_indexes(storage_design_path: Path) -> list:
+    """Parse GenDB storage_design.json to extract index definitions for SQL systems.
+
+    Returns list of {table, columns, name} for non-PK indexes.
+    """
+    with open(storage_design_path) as f:
+        design = json.load(f)
+    indexes = []
+    for table_name, table_info in design.get("tables", {}).items():
+        for idx in table_info.get("indexes", []):
+            columns = tuple(idx.get("columns", []))
+            if not columns:
+                continue
+            # Skip if this matches the table's PK
+            if columns == TPCH_PK_COLUMNS.get(table_name, ()):
+                continue
+            indexes.append({
+                "table": table_name,
+                "columns": list(columns),
+                "name": idx.get("name", f"idx_{table_name}_{'_'.join(columns)}"),
+            })
+    return indexes
+
+
+def create_indexes_pg(scale_factor: int, indexes: list):
+    """Create indexes on PostgreSQL and run ANALYZE."""
+    conn = psycopg2.connect(**get_pg_conn_params(scale_factor))
+    conn.autocommit = True
+    cur = conn.cursor()
+    for idx in indexes:
+        cols = ", ".join(idx["columns"])
+        sql = f"CREATE INDEX IF NOT EXISTS {idx['name']} ON {idx['table']}({cols})"
+        print(f"    {idx['name']} ON {idx['table']}({cols})")
+        cur.execute(sql)
+    print("    Running ANALYZE...")
+    cur.execute("ANALYZE")
+    cur.close()
+    conn.close()
+
+
+def create_indexes_duckdb(scale_factor: int, indexes: list):
+    """Create indexes on DuckDB (ART indexes)."""
+    duckdb_dir = Path(__file__).parent / "duckdb"
+    db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
+    conn = duckdb.connect(str(db_path))
+    for idx in indexes:
+        cols = ", ".join(idx["columns"])
+        try:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {idx['name']} ON {idx['table']}({cols})")
+            print(f"    {idx['name']} ON {idx['table']}({cols})")
+        except Exception as e:
+            print(f"    Warning: could not create {idx['name']}: {e}")
+    conn.close()
+
+
+def create_indexes_clickhouse(indexes: list):
+    """Create skipping indexes on ClickHouse (minmax type)."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    binary = ch_dir / "clickhouse"
+    for idx in indexes:
+        cols = ", ".join(idx["columns"])
+        sql = (f"ALTER TABLE {idx['table']} ADD INDEX IF NOT EXISTS "
+               f"{idx['name']} ({cols}) TYPE minmax GRANULARITY 1")
+        try:
+            subprocess.run(
+                [str(binary), "client", "--port", "9000", "-q", sql],
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+            print(f"    {idx['name']} ON {idx['table']}({cols})")
+        except Exception as e:
+            print(f"    Warning: could not create {idx['name']}: {e}")
+    # Materialize indexes
+    try:
+        subprocess.run(
+            [str(binary), "client", "--port", "9000", "-q",
+             "OPTIMIZE TABLE lineitem FINAL; OPTIMIZE TABLE orders FINAL"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except Exception:
+        pass
+
+
+def create_indexes_umbra(indexes: list):
+    """Create indexes on Umbra (PostgreSQL-compatible)."""
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+        password="postgres", dbname="postgres",
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    for idx in indexes:
+        cols = ", ".join(idx["columns"])
+        sql = f"CREATE INDEX IF NOT EXISTS {idx['name']} ON {idx['table']}({cols})"
+        try:
+            cur.execute(sql)
+            print(f"    {idx['name']} ON {idx['table']}({cols})")
+        except Exception as e:
+            conn.rollback()
+            print(f"    Warning: could not create {idx['name']}: {e}")
+    cur.close()
+    conn.close()
+
+
+def create_indexes_monetdb(scale_factor: int, indexes: list):
+    """Create indexes on MonetDB."""
+    try:
+        import pymonetdb
+    except ImportError:
+        print("    pymonetdb not installed, skipping indexes.")
+        return
+    dbname = f"tpch_sf{scale_factor}"
+    conn = pymonetdb.connect(database=dbname, hostname="localhost",
+                             port=50000, username="monetdb", password="monetdb")
+    cur = conn.cursor()
+    for idx in indexes:
+        cols = ", ".join(idx["columns"])
+        try:
+            cur.execute(f"CREATE INDEX {idx['name']} ON {idx['table']}({cols})")
+            conn.commit()
+            print(f"    {idx['name']} ON {idx['table']}({cols})")
+        except Exception as e:
+            conn.rollback()
+            # Index may already exist
+            if "already exists" not in str(e).lower():
+                print(f"    Warning: could not create {idx['name']}: {e}")
+    cur.close()
+    conn.close()
+
+
+def drop_indexes_pg(scale_factor: int, indexes: list):
+    """Drop previously created indexes on PostgreSQL."""
+    conn = psycopg2.connect(**get_pg_conn_params(scale_factor))
+    conn.autocommit = True
+    cur = conn.cursor()
+    for idx in indexes:
+        try:
+            cur.execute(f"DROP INDEX IF EXISTS {idx['name']}")
+        except Exception:
+            pass
+    cur.execute("ANALYZE")
+    cur.close()
+    conn.close()
+
+
+def drop_indexes_duckdb(scale_factor: int, indexes: list):
+    """Drop previously created indexes on DuckDB."""
+    duckdb_dir = Path(__file__).parent / "duckdb"
+    db_path = duckdb_dir / f"tpch_sf{scale_factor}.duckdb"
+    conn = duckdb.connect(str(db_path))
+    for idx in indexes:
+        try:
+            conn.execute(f"DROP INDEX IF EXISTS {idx['name']}")
+        except Exception:
+            pass
+    conn.close()
+
+
+def drop_indexes_clickhouse(indexes: list):
+    """Drop skipping indexes on ClickHouse."""
+    ch_dir = Path(__file__).parent / "clickhouse"
+    binary = ch_dir / "clickhouse"
+    for idx in indexes:
+        try:
+            sql = f"ALTER TABLE {idx['table']} DROP INDEX IF EXISTS {idx['name']}"
+            subprocess.run(
+                [str(binary), "client", "--port", "9000", "-q", sql],
+                capture_output=True, text=True, timeout=60,
+            )
+        except Exception:
+            pass
+
+
+def drop_indexes_umbra(indexes: list):
+    """Drop previously created indexes on Umbra."""
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+        password="postgres", dbname="postgres",
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    for idx in indexes:
+        try:
+            cur.execute(f"DROP INDEX IF EXISTS {idx['name']}")
+        except Exception:
+            pass
+    cur.close()
+    conn.close()
+
+
+def drop_indexes_monetdb(scale_factor: int, indexes: list):
+    """Drop previously created indexes on MonetDB."""
+    try:
+        import pymonetdb
+    except ImportError:
+        return
+    dbname = f"tpch_sf{scale_factor}"
+    conn = pymonetdb.connect(database=dbname, hostname="localhost",
+                             port=50000, username="monetdb", password="monetdb")
+    cur = conn.cursor()
+    for idx in indexes:
+        try:
+            cur.execute(f"DROP INDEX {idx['name']}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    cur.close()
+    conn.close()
+
 
 def _compute_best_so_far(data: dict, query_ids: list, num_iters: int) -> dict:
     """For each query, compute the running best (minimum) valid timing up to each iteration.
@@ -1900,11 +2121,14 @@ def plot_gendb_iterations(history: dict, output_path: Path, scale_factor: str = 
 
 def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
                  timeout_ms: float = 300000, all_query_ids: list = None,
-                 gendb_history: dict = None):
+                 gendb_history: dict = None, indexed_results: dict = None):
     """Create a single 4-panel figure (figure* for SIGMOD two-column layout).
 
     Panels: (a) per-query time, (b) total time, (c) GenDB iteration total,
             (d) GenDB iteration per-query.
+
+    If indexed_results is provided, baseline systems show stacked bars:
+      bottom (solid) = with-indexes time, top (hatched) = without-indexes overhead.
     """
     import matplotlib
     import matplotlib.ticker as ticker
@@ -1961,6 +2185,31 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
     data = {s: [data_all[s][j] for j in common_idx] for s in systems}
     totals = {s: sum(data[s]) for s in systems}
 
+    # Build indexed data (same structure) if available
+    idx_data = {}
+    idx_totals = {}
+    has_indexed = indexed_results is not None and len(indexed_results) > 0
+    if has_indexed:
+        for system in systems:
+            if system in indexed_results:
+                idx_data_all = []
+                for q in all_qs:
+                    times = indexed_results[system].get(q, [])
+                    if times:
+                        idx_data_all.append(sum(times) / len(times))
+                    else:
+                        idx_data_all.append(None)
+                idx_data[system] = [idx_data_all[j] if idx_data_all[j] is not None
+                                    else data[system][ci]
+                                    for ci, j in enumerate(common_idx)]
+                idx_totals[system] = sum(idx_data[system])
+    # Determine which systems benefit from indexes (>3% total speedup)
+    idx_benefit = set()
+    if has_indexed:
+        for system in idx_totals:
+            if system != "GenDB" and idx_totals[system] < totals[system] * 0.97:
+                idx_benefit.add(system)
+
     # --- Figure layout ---
     has_iter = gendb_history and gendb_history["num_iters"] > 0
 
@@ -1996,9 +2245,22 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
     width = 0.92 / max(len(systems), 1)
     offsets = [(i - len(systems) / 2 + 0.5) * width for i in range(len(systems))]
     for i, system in enumerate(systems):
-        ax.bar(x + offsets[i], data[system], width,
-               label=system, color=SYSTEM_COLORS.get(system, "#999999"),
-               edgecolor="white", linewidth=0.2, zorder=3)
+        color = SYSTEM_COLORS.get(system, "#999999")
+        if system in idx_benefit:
+            # Stacked bar: bottom = with-indexes, top = no-index overhead
+            idx_vals = idx_data[system]
+            no_idx_vals = data[system]
+            ax.bar(x + offsets[i], idx_vals, width,
+                   label=system, color=color,
+                   edgecolor="white", linewidth=0.2, zorder=3)
+            overhead = [max(0, n - w) for n, w in zip(no_idx_vals, idx_vals)]
+            ax.bar(x + offsets[i], overhead, width, bottom=idx_vals,
+                   label="_nolegend_", color=color, alpha=0.3, hatch="//",
+                   edgecolor="white", linewidth=0.2, zorder=3)
+        else:
+            ax.bar(x + offsets[i], data[system], width,
+                   label=system, color=color,
+                   edgecolor="white", linewidth=0.2, zorder=3)
     ax.set_ylabel("Time (ms)", fontsize=13)
     ax.set_title(f"(a) Per-Query Time (SF={scale_factor})", fontweight="bold", fontsize=13)
     ax.set_xticks(x)
@@ -2012,21 +2274,66 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
     y_pos = np.arange(len(systems))
     bar_vals = [totals[s] for s in systems]
     max_val = max(bar_vals)
-    hbars = ax2.barh(y_pos, bar_vals, height=0.6,
-                     color=[SYSTEM_COLORS.get(s, "#999999") for s in systems],
-                     edgecolor="white", linewidth=0.2, zorder=3)
-    for bar, system in zip(hbars, systems):
-        val = totals[system]
-        bw = bar.get_width()
-        cy = bar.get_y() + bar.get_height() / 2
-        if bw > max_val * 0.15:
-            ax2.text(bw * 0.85, cy, f"{val:,.0f}",
-                     ha="right", va="center", fontsize=12,
-                     fontweight="bold", color="white", zorder=4)
-        else:
-            ax2.text(bw * 1.15, cy, f"{val:,.0f}",
-                     ha="left", va="center", fontsize=12,
-                     fontweight="bold", color="black", zorder=4)
+    if has_indexed and idx_benefit:
+        # For systems that benefit from indexes: stacked horizontal bars
+        idx_bar_vals = []
+        overhead_vals = []
+        for s in systems:
+            if s in idx_benefit:
+                idx_bar_vals.append(idx_totals[s])
+                overhead_vals.append(max(0, totals[s] - idx_totals[s]))
+            else:
+                idx_bar_vals.append(totals[s])
+                overhead_vals.append(0)
+        hbars = ax2.barh(y_pos, idx_bar_vals, height=0.6,
+                         color=[SYSTEM_COLORS.get(s, "#999999") for s in systems],
+                         edgecolor="white", linewidth=0.2, zorder=3)
+        ax2.barh(y_pos, overhead_vals, height=0.6, left=idx_bar_vals,
+                 color=[SYSTEM_COLORS.get(s, "#999999") for s in systems],
+                 alpha=0.3, hatch="//",
+                 edgecolor="white", linewidth=0.2, zorder=3)
+        for bar, system in zip(hbars, systems):
+            total_val = totals[system]
+            cy = bar.get_y() + bar.get_height() / 2
+            if system in idx_benefit:
+                # Place label inside the w/ index (solid) portion
+                idx_val = idx_totals[system]
+                label = f"{idx_val:,.0f}/{total_val:,.0f}"
+                if idx_val > max_val * 0.15:
+                    ax2.text(idx_val * 0.85, cy, label,
+                             ha="right", va="center", fontsize=11,
+                             fontweight="bold", color="white", zorder=4)
+                else:
+                    ax2.text(idx_val * 1.15, cy, label,
+                             ha="left", va="center", fontsize=11,
+                             fontweight="bold", color="black", zorder=4)
+            else:
+                label = f"{total_val:,.0f}"
+                bw = total_val
+                if bw > max_val * 0.15:
+                    ax2.text(bw * 0.85, cy, label,
+                             ha="right", va="center", fontsize=11,
+                             fontweight="bold", color="white", zorder=4)
+                else:
+                    ax2.text(bw * 1.15, cy, label,
+                             ha="left", va="center", fontsize=11,
+                             fontweight="bold", color="black", zorder=4)
+    else:
+        hbars = ax2.barh(y_pos, bar_vals, height=0.6,
+                         color=[SYSTEM_COLORS.get(s, "#999999") for s in systems],
+                         edgecolor="white", linewidth=0.2, zorder=3)
+        for bar, system in zip(hbars, systems):
+            val = totals[system]
+            bw = bar.get_width()
+            cy = bar.get_y() + bar.get_height() / 2
+            if bw > max_val * 0.15:
+                ax2.text(bw * 0.85, cy, f"{val:,.0f}",
+                         ha="right", va="center", fontsize=12,
+                         fontweight="bold", color="white", zorder=4)
+            else:
+                ax2.text(bw * 1.15, cy, f"{val:,.0f}",
+                         ha="left", va="center", fontsize=12,
+                         fontweight="bold", color="black", zorder=4)
     ax2.set_xlabel("(ms)", labelpad=6, fontsize=13)
     ax2.xaxis.set_label_coords(1.0, -0.12)
     ax2.xaxis.label.set_ha("right")
@@ -2147,10 +2454,24 @@ def plot_results(all_results: dict, output_path: Path, scale_factor: str = "?",
                    handlelength=1.2, handletextpad=0.3, borderpad=0.15,
                    labelspacing=0.15, ncol=3)
 
-    # System legend
-    handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(systems),
-               bbox_to_anchor=(0.5, 1.08), frameon=True, fontsize=13,
+    # Two legends on the same row: system names (left-center) + index (right)
+    from matplotlib.patches import Patch
+    system_handles = [Patch(facecolor=SYSTEM_COLORS.get(s, "#999999"), label=s)
+                      for s in systems]
+    all_handles = list(system_handles)
+    all_labels = list(systems)
+    if idx_benefit:
+        # Invisible spacer to create gap between system and index legends
+        all_handles.append(Patch(facecolor="none", edgecolor="none"))
+        all_labels.append("    ")
+        all_handles.append(Patch(facecolor="#888888", label="w/ index"))
+        all_labels.append("w/ index")
+        all_handles.append(Patch(facecolor="#888888", alpha=0.3, hatch="//",
+                                 label="w/o index"))
+        all_labels.append("w/o index")
+    fig.legend(all_handles, all_labels, loc="upper center",
+               ncol=len(all_labels),
+               bbox_to_anchor=(0.46, 1.08), frameon=True, fontsize=13,
                columnspacing=1.0, handletextpad=0.4, handlelength=1.0,
                edgecolor="#CCCCCC", fancybox=False, framealpha=1.0)
 
@@ -2193,6 +2514,8 @@ def main():
                         help="Per-query timeout in seconds (default: 300)")
     parser.add_argument("--plot-only", action="store_true",
                         help="Skip all benchmarks; read existing metrics JSON and re-plot figures")
+    parser.add_argument("--with-indexes", action="store_true",
+                        help="Also benchmark baseline systems with GenDB-equivalent indexes")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent.parent
@@ -2314,6 +2637,32 @@ def main():
     elif not args.plot_only:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 
+    # Parse indexes for cleanup (drop before normal runs, create for --with-indexes)
+    _cleanup_indexes = []
+    if args.gendb_run:
+        sd_path = args.gendb_run / "storage_design.json"
+        if sd_path and sd_path.exists():
+            _cleanup_indexes = parse_gendb_indexes(sd_path)
+
+    # Drop any previously created indexes to ensure clean baseline runs
+    if not args.plot_only and not args.gendb_only and _cleanup_indexes:
+        print("\n=== Dropping previously created indexes (if any) ===")
+        try:
+            drop_indexes_pg(args.sf, _cleanup_indexes)
+            print("  PostgreSQL: done")
+        except Exception:
+            pass
+        try:
+            drop_indexes_duckdb(args.sf, _cleanup_indexes)
+            print("  DuckDB: done")
+        except Exception:
+            pass
+        try:
+            drop_indexes_clickhouse(_cleanup_indexes)
+            print("  ClickHouse: done")
+        except Exception:
+            pass
+
     if not args.plot_only and not args.gendb_only:
         # --- PostgreSQL ---
         print("\n=== PostgreSQL Setup ===")
@@ -2391,6 +2740,12 @@ def main():
                         except Exception:
                             pass
                     print("  Umbra container restarted (buffer pool cleared).")
+                    if _cleanup_indexes:
+                        try:
+                            drop_indexes_umbra(_cleanup_indexes)
+                            print("  Umbra: indexes dropped.")
+                        except Exception:
+                            pass
                     print(f"\n=== Umbra Benchmark ({args.mode} mode) ===")
                     all_results["Umbra"] = umbra_benchmark(
                         args.sf, args.mode, gendb_query_ids, queries, args.timeout)
@@ -2417,6 +2772,12 @@ def main():
                     time.sleep(2)
                     monetdb_farm = monetdb_server_start(args.sf)
                     print("  MonetDB restarted (internal caches cleared).")
+                    if _cleanup_indexes:
+                        try:
+                            drop_indexes_monetdb(args.sf, _cleanup_indexes)
+                            print("  MonetDB: indexes dropped.")
+                        except Exception:
+                            pass
                     print(f"\n=== MonetDB Benchmark ({args.mode} mode) ===")
                     all_results["MonetDB"] = monetdb_benchmark(
                         args.sf, args.mode, gendb_query_ids, queries, args.timeout)
@@ -2428,6 +2789,134 @@ def main():
                 if monetdb_farm:
                     monetdb_server_stop(monetdb_farm)
 
+    # --- With-indexes benchmark ---
+    indexed_results = {}
+    if not args.plot_only and args.with_indexes and not args.gendb_only:
+        # Find storage_design.json
+        sd_path = None
+        if args.gendb_run:
+            sd_path = args.gendb_run / "storage_design.json"
+        if sd_path and sd_path.exists():
+            print(f"\n{'=' * 60}")
+            print("WITH-INDEXES BENCHMARK")
+            print(f"  Reading indexes from: {sd_path}")
+            gendb_indexes = parse_gendb_indexes(sd_path)
+            if gendb_indexes:
+                print(f"  Found {len(gendb_indexes)} non-PK indexes:")
+                for idx in gendb_indexes:
+                    print(f"    {idx['table']}({', '.join(idx['columns'])})")
+
+                # PostgreSQL with indexes
+                if "PostgreSQL" in all_results:
+                    print(f"\n=== PostgreSQL + Indexes ===")
+                    try:
+                        create_indexes_pg(args.sf, gendb_indexes)
+                        restart_postgresql()
+                        print(f"  Running benchmark with indexes ({args.mode} mode)...")
+                        indexed_results["PostgreSQL"] = pg_benchmark(
+                            args.sf, args.mode, gendb_query_ids, queries, args.timeout)
+                    except Exception as e:
+                        print(f"  PostgreSQL indexed error: {e}")
+
+                # DuckDB with indexes
+                if "DuckDB" in all_results:
+                    print(f"\n=== DuckDB + Indexes ===")
+                    try:
+                        create_indexes_duckdb(args.sf, gendb_indexes)
+                        print(f"  Running benchmark with indexes ({args.mode} mode)...")
+                        indexed_results["DuckDB"] = duckdb_benchmark(
+                            args.sf, args.mode, gendb_query_ids, queries, args.timeout)
+                    except Exception as e:
+                        print(f"  DuckDB indexed error: {e}")
+
+                # ClickHouse with indexes
+                if "ClickHouse" in all_results:
+                    ch_proc = None
+                    try:
+                        ch_proc = clickhouse_server_start(args.sf)
+                        print(f"\n=== ClickHouse + Indexes ===")
+                        create_indexes_clickhouse(gendb_indexes)
+                        ch_dir = Path(__file__).parent / "clickhouse"
+                        subprocess.run(
+                            [str(ch_dir / "clickhouse"), "client", "--port", "9000",
+                             "-q", "SYSTEM DROP CACHE"],
+                            capture_output=True, timeout=10,
+                        )
+                        print(f"  Running benchmark with indexes ({args.mode} mode)...")
+                        indexed_results["ClickHouse"] = clickhouse_benchmark(
+                            args.sf, args.mode, gendb_query_ids, queries, args.timeout)
+                    except Exception as e:
+                        print(f"  ClickHouse indexed error: {e}")
+                    finally:
+                        if ch_proc:
+                            clickhouse_server_stop(ch_proc)
+
+                # Umbra with indexes
+                if "Umbra" in all_results:
+                    umbra_container = None
+                    try:
+                        umbra_container = umbra_start(data_dir, args.sf)
+                        print(f"\n=== Umbra + Indexes ===")
+                        create_indexes_umbra(gendb_indexes)
+                        subprocess.run(
+                            ["docker", "restart", umbra_container],
+                            capture_output=True, timeout=30,
+                        )
+                        for _ in range(60):
+                            time.sleep(1)
+                            try:
+                                c = psycopg2.connect(
+                                    host="127.0.0.1", port=UMBRA_HOST_PORT, user="postgres",
+                                    password="postgres", dbname="postgres", connect_timeout=3)
+                                c.close()
+                                break
+                            except Exception:
+                                pass
+                        print(f"  Running benchmark with indexes ({args.mode} mode)...")
+                        indexed_results["Umbra"] = umbra_benchmark(
+                            args.sf, args.mode, gendb_query_ids, queries, args.timeout)
+                    except Exception as e:
+                        print(f"  Umbra indexed error: {e}")
+                    finally:
+                        if umbra_container:
+                            umbra_stop(umbra_container)
+
+                # MonetDB with indexes
+                if "MonetDB" in all_results:
+                    monetdb_farm = None
+                    try:
+                        monetdb_farm = monetdb_server_start(args.sf)
+                        print(f"\n=== MonetDB + Indexes ===")
+                        create_indexes_monetdb(args.sf, gendb_indexes)
+                        monetdb_server_stop(monetdb_farm)
+                        time.sleep(2)
+                        monetdb_farm = monetdb_server_start(args.sf)
+                        print(f"  Running benchmark with indexes ({args.mode} mode)...")
+                        indexed_results["MonetDB"] = monetdb_benchmark(
+                            args.sf, args.mode, gendb_query_ids, queries, args.timeout)
+                    except Exception as e:
+                        print(f"  MonetDB indexed error: {e}")
+                    finally:
+                        if monetdb_farm:
+                            monetdb_server_stop(monetdb_farm)
+            else:
+                print("  No non-PK indexes found in storage_design.json.")
+        else:
+            print("\n  Warning: --with-indexes requires --gendb-run with storage_design.json")
+
+    # Load indexed results from JSON in plot-only mode
+    if args.plot_only:
+        metrics_dir = benchmark_root / "results" / f"sf{args.sf}" / "metrics"
+        idx_json_path = metrics_dir / "benchmark_indexed_results.json"
+        if idx_json_path.exists():
+            with open(idx_json_path) as f:
+                saved_idx = json.load(f)
+            for system, system_data in saved_idx.items():
+                indexed_results[system] = {}
+                for qid, qdata in system_data.items():
+                    indexed_results[system][qid] = qdata["all_ms"]
+            print(f"Loaded indexed results from: {idx_json_path}")
+
     # --- Results summary ---
     print("\n" + "=" * 60)
     mode_label = "hot avg of 3" if args.mode == "hot" else "cold single run"
@@ -2438,6 +2927,8 @@ def main():
         key=lambda q: int(q[1:]),
     )
     header = f"{'Query':<8}" + "".join(f"{s:<15}" for s in all_results.keys())
+    if indexed_results:
+        header += " | " + "".join(f"{s + ' (idx)':<18}" for s in indexed_results.keys())
     print(header)
     print("-" * len(header))
     for q in all_queries:
@@ -2448,6 +2939,14 @@ def main():
                 row += f"{sum(times) / len(times):<15.2f}"
             else:
                 row += f"{'N/A':<15}"
+        if indexed_results:
+            row += " | "
+            for system in indexed_results:
+                times = indexed_results[system].get(q, [])
+                if times:
+                    row += f"{sum(times) / len(times):<18.2f}"
+                else:
+                    row += f"{'N/A':<18}"
         print(row)
     print("-" * len(header))
     row = f"{'Total':<8}"
@@ -2457,6 +2956,14 @@ def main():
             for q in all_queries
         )
         row += f"{total:<15.2f}"
+    if indexed_results:
+        row += " | "
+        for system in indexed_results:
+            total = sum(
+                sum(indexed_results[system].get(q, [0])) / max(len(indexed_results[system].get(q, [1])), 1)
+                for q in all_queries
+            )
+            row += f"{total:<18.2f}"
     print(row)
     print()
 
@@ -2480,6 +2987,24 @@ def main():
             json.dump(json_data, f, indent=2)
         print(f"Results saved to: {json_path}")
 
+        # Save indexed results if any
+        if indexed_results:
+            idx_json_path = metrics_dir / "benchmark_indexed_results.json"
+            idx_json_data = {}
+            for system, results in indexed_results.items():
+                idx_json_data[system] = {
+                    q: {
+                        "all_ms": times,
+                        "average_ms": sum(times) / len(times) if times else 0,
+                        "min_ms": min(times) if times else 0,
+                        "max_ms": max(times) if times else 0,
+                    }
+                    for q, times in results.items()
+                }
+            with open(idx_json_path, "w") as f:
+                json.dump(idx_json_data, f, indent=2)
+            print(f"Indexed results saved to: {idx_json_path}")
+
     # --- Plots ---
     min_systems = 1 if args.plot_only else 2
     all_query_ids = sorted(queries.keys(), key=lambda q: int(q[1:]))
@@ -2487,7 +3012,8 @@ def main():
         print()
         plot_results(all_results, args.output, scale_factor=str(args.sf),
                      timeout_ms=args.timeout * 1000, all_query_ids=all_query_ids,
-                     gendb_history=gendb_history)
+                     gendb_history=gendb_history,
+                     indexed_results=indexed_results if indexed_results else None)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,93 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["filter_customer", "index_join_orders", "index_join_lineitem", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment=BUILDING)",
+      "probe": "orders via orders_custkey_sorted",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300000,
+      "notes": "For each of ~300K qualifying custkeys, binary-search orders_custkey_sorted then iterate matching order rows; apply o_orderdate < 9204 inline"
+    },
+    {
+      "build": "orders(filtered o_orderdate<9204)",
+      "probe": "lineitem via lineitem_orderkey_sorted",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1470000,
+      "notes": "For each of ~1.47M qualifying orderkeys, binary-search lineitem_orderkey_sorted then iterate matching lineitem rows; apply l_shipdate > 9204 inline"
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == building_code",
+      "selectivity": 0.20,
+      "output_cardinality": 300000,
+      "notes": "Load building_code at runtime from customer/c_mktsegment.dict; scan c_mktsegment.bin sequentially, collect qualifying row indices, then gather c_custkey values"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.49,
+      "output_cardinality": 1470000,
+      "notes": "Applied inline during orders index traversal per custkey"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.51,
+      "output_cardinality": 2998800,
+      "notes": "Applied inline during lineitem index traversal per orderkey"
+    }
+  ],
+  "data_structures": {
+    "customer_qualifying_keys": "flat_array(int32_t, ~300K) — collected in parallel per thread partition, custkeys of rows passing mktsegment filter",
+    "orders_index": "pre_built_index(orders_custkey_sorted) — mmap'd sorted pairs, binary search per custkey",
+    "lineitem_index": "pre_built_index(lineitem_orderkey_sorted) — mmap'd sorted pairs, binary search per orderkey",
+    "aggregation": "thread_local compact_hash_map<GroupKey{orderkey,orderdate,shippriority}, double> — pre_sized ~500K buckets per thread; merged via reduction at end"
+  },
+  "indexes": [
+    {
+      "index": "orders_custkey_sorted",
+      "purpose": "join_lookup — binary search for each qualifying c_custkey → iterate matching order row_ids"
+    },
+    {
+      "index": "lineitem_orderkey_sorted",
+      "purpose": "join_lookup — binary search for each qualifying o_orderkey → iterate matching lineitem row_ids"
+    },
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip_blocks — optional early pruning if scanning orders directly (not primary path here)"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks — optional early pruning if scanning lineitem directly (not primary path here)"
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partition_dimension": "customer rows — divide 1,500,000 customer rows into ~64 morsels (~23,437 rows each); each thread independently scans its morsel, performs index lookups on orders and lineitem, and accumulates into a thread-local aggregation map",
+    "merge_phase": "reduce thread-local hash maps into single global map; then partial_sort top-10"
+  },
+  "columns_accessed": {
+    "customer": ["c_mktsegment.bin", "c_custkey.bin"],
+    "orders": ["o_orderdate.bin", "o_orderkey.bin", "o_shippriority.bin"],
+    "lineitem": ["l_shipdate.bin", "l_extendedprice.bin", "l_discount.bin"]
+  },
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "key": ["l_orderkey (int32_t)", "o_orderdate (int32_t)", "o_shippriority (int32_t)"],
+    "accumulator": "SUM(l_extendedprice * (1.0 - l_discount)) as revenue (double)",
+    "expected_groups": 1470000,
+    "note": "Thread-local maps reduce contention; merge is O(groups) per thread"
+  },
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "partial_sort or priority_queue over merged aggregation map"
+  },
+  "execution_target": "cpp"
+}

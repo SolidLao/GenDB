@@ -9,5 +9,6 @@ export const config = {
   configKey: "query_planner",
   promptPath: resolve(__dirname, "prompt.md"),
   allowedTools: ["Read", "Write", "Glob", "Grep", "Bash", "Skill"],
+  domainSkillsPrompt: "## Domain Skills\nDomain skills (join optimization, scan optimization, aggregation, hash tables, parallelism, research papers, etc.) are available and will be loaded automatically when relevant. The experience skill contains critical correctness rules — always check it.",
   model: "sonnet",
 };

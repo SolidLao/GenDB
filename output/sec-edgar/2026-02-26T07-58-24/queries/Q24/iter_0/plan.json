@@ -1,0 +1,86 @@
+{
+  "query_id": "Q24",
+  "pipeline": ["zonemap_prune", "scan_filter_num", "antijoin_probe", "thread_local_aggregate", "merge_aggregate", "having_filter", "topk"],
+  "join_order": [
+    {
+      "build": "pre_existence_hash(pre-built index)",
+      "probe": "num(filtered: uom=USD, ddate BETWEEN 20230101 AND 20231231, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "pre_built_index",
+      "build_cardinality": 9600799,
+      "probe_cardinality": 15700000,
+      "notes": "pre_existence_hash is pre-built at index time; no pre column scan needed. Load index/pre_existence_hash.bin (402 MB, capacity=33554432 slots, 12 bytes/slot). For each qualifying num row, compute hash3i(adsh_code, tag_code, ver_code) and probe linearly. Row passes anti-join if empty slot (adsh==INT32_MIN) reached before key match."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "method": "load uom dict from shared/uom.dict at runtime; resolve 'USD' -> usd_code; compare int8_t column"
+    },
+    {
+      "table": "num",
+      "predicate": "ddate >= 20230101 AND ddate <= 20231231",
+      "selectivity": 0.46,
+      "method": "int32 range comparison on num/ddate.bin"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "std::isnan(value) check on num/value.bin; skip NaN rows"
+    }
+  ],
+  "combined_filter_selectivity": 0.40,
+  "pre_antijoin_cardinality": 15700000,
+  "data_structures": {
+    "zonemap": "flat_array(395 entries, loaded into L3 cache; layout: [n_blocks:int32][uom_min:int8,uom_max:int8,ddate_min:int32,ddate_max:int32] per block)",
+    "antijoin_lookup": "pre_built_index(indexes/pre_existence_hash.bin, mmap or preload 402MB, Robin Hood hash, capacity=33554432, load_factor=0.286, linear probe, empty=INT32_MIN)",
+    "aggregation": "compact_hash_map(key=(tag_code:int32, ver_code:int32), value=(count:int64, sum_value:double), pre_sized ~20000 groups, thread_local then merge)"
+  },
+  "zonemap_usage": {
+    "index_file": "indexes/num_zonemaps.bin",
+    "block_size": 100000,
+    "n_blocks": 395,
+    "filter_dimensions": [
+      "uom: skip block if uom_max < usd_code OR uom_min > usd_code",
+      "ddate: skip block if ddate_max < 20230101 OR ddate_min > 20231231"
+    ],
+    "expected_blocks_surviving": "tight contiguous range due to (uom,ddate) sort order; near-perfect pruning to ~40% of blocks"
+  },
+  "columns_read": {
+    "num": ["num/uom.bin", "num/ddate.bin", "num/value.bin", "num/adsh.bin", "num/tag.bin", "num/version.bin"],
+    "pre": []
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "scan_parallelism": "parallel across surviving blocks after zonemap pruning",
+    "aggregation_parallelism": "thread_local hash maps (~20K groups each, minimal memory), merged single-threaded after scan",
+    "antijoin_parallelism": "pre_existence_hash is read-only; all threads probe concurrently with no synchronization"
+  },
+  "indexes": [
+    {
+      "index": "num_zonemaps",
+      "file": "indexes/num_zonemaps.bin",
+      "purpose": "skip_blocks on (uom, ddate); eliminates non-USD and out-of-2023 blocks before any column read"
+    },
+    {
+      "index": "pre_existence_hash",
+      "file": "indexes/pre_existence_hash.bin",
+      "purpose": "anti_join_lookup; replaces full pre table scan; O(1) average probe per num row"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "aggregation_keys": ["tag_code:int32", "ver_code:int32"],
+  "aggregation_accumulators": ["count:int64", "sum_value:double"],
+  "having": "count > 10",
+  "output": {
+    "decode": ["tag_code -> string via shared/tag_numpre.dict", "ver_code -> string via shared/version_numpre.dict"],
+    "order_by": ["cnt DESC"],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}
