@@ -1,0 +1,333 @@
+{
+  "workload": "tpc-h",
+  "mode": "hot",
+  "results": {
+    "Multi-Agent": {
+      "Q1": [
+        40.94,
+        42.94,
+        41.7
+      ],
+      "Q3": [
+        73.53999999999999,
+        77.47,
+        79.84
+      ],
+      "Q6": [
+        17.65,
+        17.59,
+        17.759999999999998
+      ],
+      "Q9": [
+        94.79,
+        94.38,
+        98.04
+      ],
+      "Q18": [
+        76.98,
+        83.88,
+        75.04
+      ]
+    },
+    "Single-Agent\n(High-Level)": {
+      "Q1": [
+        34.07,
+        36.5,
+        31.99
+      ],
+      "Q3": [
+        104.3,
+        102.73,
+        109.8
+      ],
+      "Q6": [
+        14.65,
+        14.42,
+        14.88
+      ],
+      "Q9": [
+        144.92999999999998,
+        148.65,
+        151.94
+      ],
+      "Q18": [
+        44.940000000000005,
+        44.18,
+        41.92
+      ]
+    },
+    "Single-Agent\n(Guided)": {
+      "Q1": [
+        35.65,
+        33.82,
+        34.88
+      ],
+      "Q3": [
+        360.43,
+        360.8,
+        352.90000000000003
+      ],
+      "Q6": [
+        7.8100000000000005,
+        6.8,
+        7.43
+      ],
+      "Q9": [
+        35.260000000000005,
+        32.59,
+        32.31
+      ],
+      "Q18": [
+        22.25,
+        23.73,
+        23.84
+      ]
+    }
+  },
+  "telemetry": {
+    "Multi-Agent": {
+      "total_wall_clock_ms": 5455390,
+      "total_tokens": {
+        "input": 302,
+        "output": 478375,
+        "cache_read": 12031509,
+        "cache_creation": 897741
+      },
+      "total_cost_usd": 14.15251245,
+      "phases": {
+        "phase1": {
+          "total_ms": 1873829,
+          "agents": {
+            "workload_analyzer": {
+              "duration_ms": 430173,
+              "tokens": {
+                "input": 9,
+                "output": 8468,
+                "cache_read": 182962,
+                "cache_creation": 16936
+              },
+              "cost_usd": 0.24544559999999999
+            },
+            "storage_designer": {
+              "duration_ms": 1096507,
+              "tokens": {
+                "input": 15,
+                "output": 71769,
+                "cache_read": 1058658,
+                "cache_creation": 83070
+              },
+              "cost_usd": 1.7056899
+            },
+            "storage_designer_pass2": {
+              "duration_ms": 347149,
+              "tokens": {
+                "input": 9,
+                "output": 17547,
+                "cache_read": 224129,
+                "cache_creation": 45895
+              },
+              "cost_usd": 0.50257695
+            }
+          }
+        },
+        "query_Q1": {
+          "total_ms": 2664830,
+          "agents": {
+            "query_planner": {
+              "duration_ms": 32059,
+              "tokens": {
+                "input": 3,
+                "output": 1905,
+                "cache_read": 36322,
+                "cache_creation": 5917
+              },
+              "cost_usd": 0.06166935
+            },
+            "code_generator": {
+              "duration_ms": 1046065,
+              "tokens": {
+                "input": 90,
+                "output": 62992,
+                "cache_read": 3560349,
+                "cache_creation": 156585
+              },
+              "cost_usd": 2.6004484499999996
+            },
+            "query_optimizer": {
+              "duration_ms": 1586706,
+              "tokens": {
+                "input": 29,
+                "output": 84152,
+                "cache_read": 1291502,
+                "cache_creation": 127595
+              },
+              "cost_usd": 2.12829885
+            }
+          }
+        },
+        "query_Q6": {
+          "total_ms": 134057,
+          "agents": {
+            "query_planner": {
+              "duration_ms": 38015,
+              "tokens": {
+                "input": 3,
+                "output": 2185,
+                "cache_read": 35711,
+                "cache_creation": 5501
+              },
+              "cost_usd": 0.06412605
+            },
+            "code_generator": {
+              "duration_ms": 96042,
+              "tokens": {
+                "input": 14,
+                "output": 5397,
+                "cache_read": 384476,
+                "cache_creation": 21027
+              },
+              "cost_usd": 0.27519105
+            }
+          }
+        },
+        "query_Q18": {
+          "total_ms": 931668,
+          "agents": {
+            "query_planner": {
+              "duration_ms": 50671,
+              "tokens": {
+                "input": 3,
+                "output": 3294,
+                "cache_read": 36871,
+                "cache_creation": 7777
+              },
+              "cost_usd": 0.08964405
+            },
+            "code_generator": {
+              "duration_ms": 511328,
+              "tokens": {
+                "input": 29,
+                "output": 28328,
+                "cache_read": 922447,
+                "cache_creation": 60209
+              },
+              "cost_usd": 0.92752485
+            },
+            "query_optimizer": {
+              "duration_ms": 369669,
+              "tokens": {
+                "input": 5,
+                "output": 22059,
+                "cache_read": 123125,
+                "cache_creation": 32495
+              },
+              "cost_usd": 0.48969375
+            }
+          }
+        },
+        "query_Q3": {
+          "total_ms": 1264483,
+          "agents": {
+            "query_planner": {
+              "duration_ms": 51585,
+              "tokens": {
+                "input": 3,
+                "output": 3041,
+                "cache_read": 37168,
+                "cache_creation": 7869
+              },
+              "cost_usd": 0.08628315
+            },
+            "code_generator": {
+              "duration_ms": 585481,
+              "tokens": {
+                "input": 29,
+                "output": 34684,
+                "cache_read": 1208445,
+                "cache_creation": 97160
+              },
+              "cost_usd": 1.2472305000000001
+            },
+            "query_optimizer": {
+              "duration_ms": 627417,
+              "tokens": {
+                "input": 8,
+                "output": 30628,
+                "cache_read": 291936,
+                "cache_creation": 42246
+              },
+              "cost_usd": 0.7054473
+            }
+          }
+        },
+        "query_Q9": {
+          "total_ms": 1773325,
+          "agents": {
+            "query_planner": {
+              "duration_ms": 65189,
+              "tokens": {
+                "input": 3,
+                "output": 3922,
+                "cache_read": 37995,
+                "cache_creation": 9565
+              },
+              "cost_usd": 0.10610625000000001
+            },
+            "code_generator": {
+              "duration_ms": 856057,
+              "tokens": {
+                "input": 36,
+                "output": 52207,
+                "cache_read": 1771344,
+                "cache_creation": 115129
+              },
+              "cost_usd": 1.74634995
+            },
+            "query_optimizer": {
+              "duration_ms": 852079,
+              "tokens": {
+                "input": 14,
+                "output": 45797,
+                "cache_read": 828069,
+                "cache_creation": 62765
+              },
+              "cost_usd": 1.1707864499999998
+            }
+          }
+        }
+      }
+    },
+    "Single-Agent\n(High-Level)": {
+      "mode": "single-agent",
+      "prompt_variant": "high-level",
+      "model": "sonnet",
+      "status": "timeout",
+      "total_wall_clock_ms": 7196972,
+      "agent_duration_ms": 7196972,
+      "tokens": {
+        "input": 361,
+        "output": 358724,
+        "cache_read": 26072280,
+        "cache_creation": 1157249
+      },
+      "cost_usd": 17.54,
+      "source": "recovered from session JSONL files"
+    },
+    "Single-Agent\n(Guided)": {
+      "mode": "single-agent",
+      "prompt_variant": "guided",
+      "model": "sonnet",
+      "status": "timeout",
+      "total_wall_clock_ms": 6786853,
+      "agent_duration_ms": 6786853,
+      "tokens": {
+        "input": 298,
+        "output": 370392,
+        "cache_read": 19789155,
+        "cache_creation": 695205
+      },
+      "cost_usd": 14.1,
+      "source": "recovered from session JSONL files"
+    }
+  }
+}

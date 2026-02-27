@@ -41,4 +41,11 @@ export const defaults = {
   },
   useSkills: false,
   useDba: false,
+  singleAgent: {
+    model: "sonnet",
+    effortLevel: "medium",
+    timeoutMs: 120 * 60 * 1000,  // 2 hours
+    promptVariant: "high-level",      // "high-level" or "guided"
+    maxOptimizationIterations: 5,
+  },
 };

@@ -1826,13 +1826,13 @@ def plot_results(all_results: dict, output_path: Path, years: str = "?",
     all_labels = list(systems)
     if idx_benefit:
         # Invisible spacer to create gap between system and index legends
-        all_handles.append(Patch(facecolor="none", edgecolor="none"))
-        all_labels.append("    ")
+        # all_handles.append(Patch(facecolor="none", edgecolor="none"))
+        # all_labels.append("    ")
         all_handles.append(Patch(facecolor="#888888", label="w/ index"))
-        all_labels.append("w/ index")
+        all_labels.append("default + GenDB index")
         all_handles.append(Patch(facecolor="#888888", alpha=0.3, hatch="//",
                                  label="w/o index"))
-        all_labels.append("w/o index")
+        all_labels.append("default index")
     fig.legend(all_handles, all_labels, loc="upper center",
                ncol=len(all_labels),
                bbox_to_anchor=(0.46, 1.08), frameon=True, fontsize=13,

@@ -1,29 +1,52 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ORCH="$SCRIPT_DIR/src/gendb/orchestrator.mjs"
-BENCH_DIR="$SCRIPT_DIR/benchmarks"
+SINGLE="$SCRIPT_DIR/src/gendb/single.mjs"
+
+# ============================================================
+# Single-Agent Mode — High-Level Prompt
+# ============================================================
 
 echo "============================================"
-echo "  Run 1: TPC-H (SF=10)"
+echo "  [Single / high-level] Run 1: TPC-H (SF=10)"
 echo "============================================"
-node "$ORCH" \
-  --benchmark tpc-h \
-  --schema "$BENCH_DIR/tpc-h/schema.sql" \
-  --queries "$BENCH_DIR/tpc-h/queries.sql" \
-  --data-dir "$BENCH_DIR/tpc-h/data/sf10" \
-  --gendb-dir "$BENCH_DIR/tpc-h/gendb/sf10.gendb" \
-  --sf 10
+node "$SINGLE" --benchmark tpc-h --sf 10 --single-agent-prompt high-level || true
 
 echo ""
 echo "============================================"
-echo "  Run 2: SEC-EDGAR (SF=3)"
+echo "  [Single / high-level] Run 2: SEC-EDGAR (SF=3)"
 echo "============================================"
-node "$ORCH" \
-  --benchmark sec-edgar \
-  --schema "$BENCH_DIR/sec-edgar/schema.sql" \
-  --queries "$BENCH_DIR/sec-edgar/queries.sql" \
-  --data-dir "$BENCH_DIR/sec-edgar/data/sf3" \
-  --gendb-dir "$BENCH_DIR/sec-edgar/gendb/sf3.gendb" \
-  --sf 3
+node "$SINGLE" --benchmark sec-edgar --sf 3 --single-agent-prompt high-level || true
+
+# ============================================================
+# Single-Agent Mode — Guided Prompt
+# ============================================================
+
+echo ""
+echo "============================================"
+echo "  [Single / guided] Run 3: TPC-H (SF=10)"
+echo "============================================"
+node "$SINGLE" --benchmark tpc-h --sf 10 --single-agent-prompt guided || true
+
+echo ""
+echo "============================================"
+echo "  [Single / guided] Run 4: SEC-EDGAR (SF=3)"
+echo "============================================"
+node "$SINGLE" --benchmark sec-edgar --sf 3 --single-agent-prompt guided || true
+
+# ============================================================
+# Multi-Agent Mode
+# ============================================================
+
+echo ""
+echo "============================================"
+echo "  [Multi-Agent] Run 5: TPC-H (SF=10)"
+echo "============================================"
+node "$ORCH" --benchmark tpc-h --sf 10 || true
+
+echo ""
+echo "============================================"
+echo "  [Multi-Agent] Run 6: SEC-EDGAR (SF=3)"
+echo "============================================"
+node "$ORCH" --benchmark sec-edgar --sf 3 || true

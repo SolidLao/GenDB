@@ -1,6 +1,6 @@
 # GenDB: Generative Database System
 
-A multi-agent LLM system that generates customized database execution code for user-provided SQL workloads — no pre-built DBMS required.
+An LLM-powered agentic system that generates customized database execution code for user-provided SQL workloads — no pre-built DBMS required.
 
 ## Overview
 
@@ -9,7 +9,7 @@ GenDB takes a different approach to query execution: instead of routing queries 
 ## Key Ideas
 
 - **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
-- **Two operating modes** — default mode (5-agent, no skills) relies on LLM reasoning alone; skills mode (7-agent, `--use-skills`) adds domain skills and Code Inspector
+- **Three operating modes** — multi-agent default (5-agent), multi-agent skills (7-agent, `--use-skills`), and single-agent (one LLM handles the entire pipeline end-to-end)
 - **Adaptive thinking** — each agent has structured thinking discipline (concise, phase-based reasoning) with configurable effort levels and model escalation (Sonnet → Opus) on correctness failures
 - **Plan-first pipeline** — Query Planner designs lean JSON execution plans, Code Generator implements them, Optimizer can modify both plan and code
 - **MVCC-style column versions** — optimizer can build derived column representations at storage level, breaking optimization ceilings caused by initial encoding choices
@@ -46,15 +46,41 @@ Each agent gets a 4-layer prompt: (1) identity prompt, (2) experience skill (alw
 
 Enable with: `--use-skills` (and optionally `--dba-stage-a` for DBA Stage A).
 
+### Single-Agent Mode
+
+A single LLM agent handles the entire pipeline — analysis, storage design, code generation, and optimization — in one session. This enables comparing multi-agent vs single-agent performance.
+
+```
+Single Agent: Analyze → Data Preparation → Implement Queries → Optimize
+```
+
+Two prompt variants:
+- **high-level** — minimal guidance: just I/O contracts and hard constraints, full freedom in approach
+- **guided** — adds a suggested 4-phase workflow (Analyze → Data Prep → Implement → Optimize)
+
+Key constraints:
+- Sandbox rule: agent may only access explicitly provided paths (no reuse of prior runs)
+- No precomputed results: gendb storage may only contain data-level transformations (encoding, indexes, sorting), not query-specific intermediates
+- Per-iteration recording: `execution_results.json` with `timing_ms` and `validation.status`
+- Real-time progress monitoring via Claude Agent SDK streaming
+
 ## Performance
 
-### TPC-H SF10
+### GenDB vs Baselines
 
-![TPC-H SF10 Benchmark Results](benchmarks/tpc-h/results/sf10/figures/benchmark_results_combined.png)
+#### TPC-H SF10
 
-### SEC-EDGAR (3 Years, 5GB)
+![TPC-H SF10 Benchmark Results](benchmarks/tpc-h/results/sf10/figures/paper_version/benchmark_results_combined.png)
 
-![SEC-EDGAR SF3 Benchmark Results](benchmarks/sec-edgar/results/sf3/figures/benchmark_results_combined.png)
+#### SEC-EDGAR (3 Years, 5GB)
+
+![SEC-EDGAR SF3 Benchmark Results](benchmarks/sec-edgar/results/sf3/figures/paper_version/benchmark_results_combined.png)
+
+### GenDB Version Comparison
+
+<img src="benchmarks/compare_versions/results/figures/gendb_version_summary.png" width="600">
+
+<img src="benchmarks/compare_versions/results/figures/gendb_version_perquery.png" width="600">
 
 ## Agents
 
@@ -93,10 +119,12 @@ Domain skills (`.claude/skills/`) are loaded selectively per query and agent:
 
 ```
 src/gendb/
-  orchestrator.mjs          # Main pipeline orchestration
+  orchestrator.mjs          # Multi-agent pipeline orchestration
+  single.mjs                # Single-agent mode entry point
+  shared.mjs                # Shared utilities (runAgent via Agent SDK, template rendering, etc.)
   config.mjs                # Configuration loader
   gendb.config.mjs          # Hyperparameters (models, timeouts, effort levels)
-  agents/                   # 7 agents (prompt.md + index.mjs + user-prompt.md each)
+  agents/                   # 7 multi-agent + 1 single-agent (prompt.md + index.mjs each)
   utils/                    # System utilities (date_utils.h, timing_utils.h, paths.mjs)
   tools/                    # compare_results.py and other tooling
 
@@ -112,15 +140,23 @@ output/<workload>/<timestamp>/  # Per-run output with iteration history
 ## Usage
 
 ```bash
-# Default mode (5-agent, no skills)
+# Multi-agent default mode (5-agent, no skills)
 node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10
 
-# Skills mode (7-agent, with domain skills + Code Inspector + DBA)
+# Multi-agent skills mode (7-agent, with domain skills + Code Inspector + DBA)
 node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
+
+# Single-agent mode (high-level prompt)
+node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt high-level
+
+# Single-agent mode (guided prompt)
+node src/gendb/single.mjs --benchmark sec-edgar --sf 3 --single-agent-prompt guided
+
+# Run all benchmarks (single-agent + multi-agent)
+bash run_benchmarks.sh
 
 # Hot optimization (default), cold optimization
 node src/gendb/orchestrator.mjs --benchmark tpc-h --optimization-target hot
-node src/gendb/orchestrator.mjs --benchmark tpc-h --optimization-target cold
 
 # Control optimization iterations and concurrency
 node src/gendb/orchestrator.mjs --max-iterations 5 --stall-threshold 5 --max-concurrent 22

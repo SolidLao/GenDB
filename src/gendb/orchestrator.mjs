@@ -31,7 +31,6 @@ import {
   DEFAULT_QUERIES,
   BENCHMARKS_DIR,
   getDataDir,
-  getGendbDir,
   getSchemaPath,
   getQueriesPath,
 } from "./config.mjs";
@@ -56,28 +55,15 @@ import {
   updateLatestSymlink,
   createQueryDir,
 } from "./utils/paths.mjs";
-
-/**
- * Simple template rendering: replace {{key}} with values, handle {{#if key}}...{{/if}} blocks.
- */
-function renderTemplate(template, vars) {
-  // Handle {{#if key}}...{{/if}} blocks
-  let result = template.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (match, key, content) => {
-    const val = vars[key];
-    if (val && val !== '' && val !== false && val !== null && val !== undefined) {
-      return content;
-    }
-    return '';
-  });
-  // Replace {{key}} placeholders
-  result = result.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-    const val = vars[key];
-    return val !== undefined && val !== null ? String(val) : '';
-  });
-  // Clean up excessive blank lines
-  result = result.replace(/\n{4,}/g, '\n\n\n');
-  return result;
-}
+import {
+  renderTemplate,
+  runAgent,
+  parseQueryFile,
+  MODEL_PRICING,
+  estimateCost,
+  readJSON,
+  formatDuration,
+} from "./shared.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,9 +115,8 @@ function parseArgs(argv) {
   if (!args.dataDir) {
     args.dataDir = getDataDir(args.targetBenchmark, args.scaleFactor);
   }
-  if (!args.gendbDir) {
-    args.gendbDir = getGendbDir(args.targetBenchmark, args.scaleFactor);
-  }
+  // gendbDir resolved later (after runDir creation) to place inside run directory.
+  // Explicit --gendb-dir overrides this.
   return args;
 }
 
@@ -160,24 +145,7 @@ async function updateRunMeta(runDir, updater) {
   return runMeta;
 }
 
-// ---------------------------------------------------------------------------
-// Model pricing (per million tokens)
-// ---------------------------------------------------------------------------
-
-const MODEL_PRICING = {
-  sonnet: { input: 3, output: 15, cache_read: 0.30, cache_creation: 3.75 },
-  haiku: { input: 0.80, output: 4, cache_read: 0.08, cache_creation: 1 },
-  opus: { input: 15, output: 75, cache_read: 1.50, cache_creation: 18.75 },
-};
-
-function estimateCost(model, tokens) {
-  const pricing = MODEL_PRICING[model] || MODEL_PRICING.sonnet;
-  const perM = 1_000_000;
-  return (tokens.input * pricing.input) / perM
-    + (tokens.output * pricing.output) / perM
-    + ((tokens.cache_read || 0) * pricing.cache_read) / perM
-    + ((tokens.cache_creation || 0) * pricing.cache_creation) / perM;
-}
+// MODEL_PRICING, estimateCost imported from shared.mjs
 
 // ---------------------------------------------------------------------------
 // Telemetry tracking
@@ -216,126 +184,7 @@ function recordAgentTelemetry(phase, agentName, durationMs, tokens, costUsd) {
   telemetryData.total_cost_usd += costUsd;
 }
 
-function formatDuration(ms) {
-  const totalSec = Math.floor(ms / 1000);
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
-}
-
-/**
- * Invoke a Claude Code subprocess with the given system prompt and user prompt.
- * Returns { result, durationMs, tokens, costUsd }.
- */
-function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName, useSkills, domainSkillsPrompt }) {
-  // Filter Skill from allowedTools if skills disabled
-  const effectiveTools = useSkills === false
-    ? allowedTools.filter(t => t !== "Skill")
-    : allowedTools;
-
-  // Inject domain skills section into system prompt if enabled
-  const effectivePrompt = (useSkills !== false && domainSkillsPrompt)
-    ? systemPrompt + "\n\n" + domainSkillsPrompt
-    : systemPrompt;
-
-  const timeout = timeoutMs || defaults.agentTimeoutMs;
-  return new Promise((resolveP, rejectP) => {
-    const args = [
-      "--print",
-      "--system-prompt", effectivePrompt,
-      "--output-format", "json",
-      "--permission-mode", "bypassPermissions",
-      "--allowedTools", effectiveTools.join(","),
-    ];
-    if (model) args.push("--model", model);
-    args.push(userPrompt);
-
-    const effortLevel = configName && defaults.agentEffortLevels[configName];
-    console.log(`\n[${"=".repeat(60)}]`);
-    console.log(`[Orchestrator] Spawning agent: ${name} (timeout: ${formatDuration(timeout)}${effortLevel ? `, effort: ${effortLevel}` : ''})`);
-    console.log(`[${"=".repeat(60)}]\n`);
-
-    const startTime = Date.now();
-    let killed = false;
-    let killReason = "";
-
-    const child = spawn("claude", args, {
-      cwd,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000",
-        ...(effortLevel
-          ? { CLAUDE_CODE_EFFORT_LEVEL: effortLevel }
-          : {}),
-      },
-    });
-
-    const killAgent = (reason) => {
-      if (killed) return;
-      killed = true;
-      killReason = reason;
-      console.error(`\n[Orchestrator] ${reason}`);
-      try { process.kill(-child.pid, "SIGTERM"); } catch {}
-      setTimeout(() => {
-        try { process.kill(-child.pid, "SIGKILL"); } catch {}
-      }, 5000);
-    };
-
-    const timer = setTimeout(() => {
-      killAgent(`Agent "${name}" timed out after ${formatDuration(timeout)}, killing...`);
-    }, timeout);
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      // Defense-in-depth: ensure entire process group is dead
-      try { process.kill(-child.pid, "SIGKILL"); } catch {}
-      const durationMs = Date.now() - startTime;
-      if (killed) {
-        rejectP(new Error(killReason));
-      } else if (code !== 0) {
-        const exitInfo = signal ? `signal ${signal}` : `exit ${code}`;
-        console.error(`\n[Orchestrator] Agent "${name}" exited with ${exitInfo} (${formatDuration(durationMs)})`);
-        if (stderr) console.error(`[stderr] ${stderr}`);
-        rejectP(new Error(`Agent "${name}" failed (${exitInfo}): ${stderr}`));
-      } else {
-        let resultText = stdout;
-        let tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
-        let costUsd = 0;
-        try {
-          const parsed = JSON.parse(stdout);
-          resultText = parsed.result || "";
-          const usage = parsed.usage || {};
-          tokens = {
-            input: usage.input_tokens || 0,
-            output: usage.output_tokens || 0,
-            cache_read: usage.cache_read_input_tokens || 0,
-            cache_creation: usage.cache_creation_input_tokens || 0,
-          };
-          costUsd = estimateCost(model || defaults.model, tokens);
-        } catch {
-          resultText = stdout;
-        }
-
-        console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
-
-        resolveP({ result: resultText, durationMs, tokens, costUsd });
-      }
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      rejectP(new Error(`Failed to spawn agent "${name}": ${err.message}`));
-    });
-  });
-}
+// formatDuration, runAgent imported from shared.mjs
 
 /** Trim validation details: limit to 2 columns, 2 sample rows each. */
 function trimValidationDetails(details) {
@@ -359,14 +208,7 @@ function trimValidationDetails(details) {
   return trimmed;
 }
 
-/** Safely read and parse a JSON file, returning null on failure. */
-async function readJSON(path) {
-  try {
-    return JSON.parse(await readFile(path, "utf-8"));
-  } catch {
-    return null;
-  }
-}
+// readJSON imported from shared.mjs
 
 /** Read column_versions/registry.json from the gendb data directory. Returns formatted string for agent prompts. */
 async function getColumnVersionsContext(gendbDir) {
@@ -476,33 +318,7 @@ function formatPerQueryBenchmarkContext(benchmarkResults, queryId, coldMs, hotMs
   return lines.join("\n");
 }
 
-/** Parse queries.sql into individual queries with IDs. */
-function parseQueryFile(queriesText) {
-  const queries = [];
-  // Split on query separators: lines starting with "-- Q" or numbered query comments
-  const parts = queriesText.split(/(?=--\s*(?:Q|Query)\s*\d)/i);
-  let queryNum = 1;
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed || !trimmed.includes("SELECT")) continue;
-
-    // Try to extract query ID from comment
-    const idMatch = trimmed.match(/--\s*(?:Q|Query)\s*(\d+)/i);
-    const id = idMatch ? `Q${idMatch[1]}` : `Q${queryNum}`;
-    queries.push({ id, sql: trimmed });
-    queryNum++;
-  }
-
-  // Fallback: if no queries found via comments, split by semicolons
-  if (queries.length === 0) {
-    const stmts = queriesText.split(";").filter(s => s.trim().toUpperCase().includes("SELECT"));
-    for (let i = 0; i < stmts.length; i++) {
-      queries.push({ id: `Q${i + 1}`, sql: stmts[i].trim() + ";" });
-    }
-  }
-
-  return queries;
-}
+// parseQueryFile imported from shared.mjs
 
 // ---------------------------------------------------------------------------
 // ExecutionQueue: notification-based serial execution (replaces Semaphore)
@@ -618,7 +434,7 @@ function shouldContinue(queryId, history, benchmarkResults, execResults, iterati
   // Already competitive with baseline
   if (benchmarkResults && timing) {
     const best = getBestBaselineTime(benchmarkResults, queryId);
-    if (best && timing < best / 1.2) return { action: 'stop', reason: `Competitive with baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
+    if (best && timing < best / 1.5) return { action: 'stop', reason: `Competitive with baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
   }
 
   // Adaptive: stop after stallThreshold consecutive non-improvements
@@ -769,12 +585,6 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     };
   });
 
-  // Clear gendb storage from previous runs
-  if (existsSync(args.gendbDir)) {
-    rmSync(args.gendbDir, { recursive: true, force: true });
-    console.log(`[Orchestrator] Cleared previous gendb storage at ${args.gendbDir}`);
-  }
-
   // --- Step 1: Workload Analysis ---
   console.log("\n[Orchestrator] === Step 1: Workload Analysis ===");
   await updateRunMeta(runDir, (meta) => {
@@ -805,6 +615,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     domainSkillsPrompt: workloadAnalyzerConfig.domainSkillsPrompt,
   });
   recordAgentTelemetry("phase1", "workload_analyzer", waResult.durationMs, waResult.tokens, waResult.costUsd);
+  if (waResult.error) throw new Error(`Workload Analyzer failed: ${waResult.error}`);
 
   const analysis = await readJSON(workloadAnalysisPath);
   if (!analysis) {
@@ -868,6 +679,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     domainSkillsPrompt: storageDesignerConfig.domainSkillsPrompt,
   });
   recordAgentTelemetry("phase1", "storage_designer", sdResult.durationMs, sdResult.tokens, sdResult.costUsd);
+  if (sdResult.error) throw new Error(`Storage Designer failed: ${sdResult.error}`);
 
   const design = await readJSON(storageDesignPath);
   if (!design) {
@@ -920,6 +732,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     domainSkillsPrompt: storageDesignerConfig.domainSkillsPrompt,
   });
   recordAgentTelemetry("phase1", "storage_designer_pass2", sdResult2.durationMs, sdResult2.tokens, sdResult2.costUsd);
+  if (sdResult2.error) throw new Error(`Storage Designer pass 2 failed: ${sdResult2.error}`);
   console.log("[Orchestrator] Storage designer pass 2 (query guides) completed.");
 
   // --- Phase 1 Step 3: DBA Stage A (predict risks, extend utilities) --- OPTIONAL
@@ -941,21 +754,21 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
       experience_path: EXPERIENCE_PATH,
     });
 
-    try {
-      const dbaResult = await runAgent(dbaConfig.name, {
-        systemPrompt: dbaSystemPrompt,
-        userPrompt: dbaStageAPrompt,
-        allowedTools: dbaConfig.allowedTools,
-        model: getAgentModel("dba", args),
-        configName: "dba",
-        cwd: runDir,
-        useSkills: args.useSkills,
-        domainSkillsPrompt: dbaConfig.domainSkillsPrompt,
-      });
-      recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+    const dbaResult = await runAgent(dbaConfig.name, {
+      systemPrompt: dbaSystemPrompt,
+      userPrompt: dbaStageAPrompt,
+      allowedTools: dbaConfig.allowedTools,
+      model: getAgentModel("dba", args),
+      configName: "dba",
+      cwd: runDir,
+      useSkills: args.useSkills,
+      domainSkillsPrompt: dbaConfig.domainSkillsPrompt,
+    });
+    recordAgentTelemetry("phase1", "dba_stage_a", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+    if (dbaResult.error) {
+      console.error(`[Orchestrator] DBA Stage A failed (non-fatal): ${dbaResult.error}`);
+    } else {
       console.log("[Orchestrator] DBA Stage A completed.");
-    } catch (err) {
-      console.error(`[Orchestrator] DBA Stage A failed (non-fatal): ${err.message}`);
     }
 
     await updateRunMeta(runDir, (meta) => {
@@ -1140,6 +953,7 @@ async function runCodeInspection(queryId, cppPath, args, queryPhase, previousPas
     domainSkillsPrompt: codeInspectorConfig.domainSkillsPrompt,
   });
   recordAgentTelemetry(queryPhase, "code_inspector", result.durationMs, result.tokens, result.costUsd);
+  if (result.error) return { verdict: "PASS", issues: [] };
 
   // Parse inspection result
   try {
@@ -1239,6 +1053,7 @@ async function runQueryFullPipeline(
       domainSkillsPrompt: queryPlannerConfig.domainSkillsPrompt,
     });
     recordAgentTelemetry(queryPhase, "query_planner", qpResult.durationMs, qpResult.tokens, qpResult.costUsd);
+    if (qpResult.error) throw new Error(`Query Planner failed for ${queryId}: ${qpResult.error}`);
   } finally {
     semaphore.release();
   }
@@ -1289,27 +1104,20 @@ async function runQueryFullPipeline(
     });
 
     // Run code generator — resilient to timeout (still try executeQuery on whatever .cpp exists)
-    let cgTimedOut = false;
-    try {
-      const cgResult = await runAgent(codeGeneratorConfig.name, {
-        systemPrompt: cgSystemPrompt,
-        userPrompt: cgUserPrompt,
-        allowedTools: codeGeneratorConfig.allowedTools,
-        model: getAgentModel("code_generator", args),
-        configName: "code_generator",
-        cwd: iterDir,
-        useSkills: args.useSkills,
-        domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
-      });
-      recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
-    } catch (err) {
-      if (err.message.includes("timed out")) {
-        console.log(`[Orchestrator] [${queryId}] Code Generator timed out — will try executeQuery on existing .cpp`);
-        cgTimedOut = true;
-      } else {
-        throw err;
-      }
-    }
+    const cgResult = await runAgent(codeGeneratorConfig.name, {
+      systemPrompt: cgSystemPrompt,
+      userPrompt: cgUserPrompt,
+      allowedTools: codeGeneratorConfig.allowedTools,
+      model: getAgentModel("code_generator", args),
+      configName: "code_generator",
+      cwd: iterDir,
+      useSkills: args.useSkills,
+      domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
+    });
+    recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
+    const cgTimedOut = cgResult.error?.includes("timed out");
+    if (cgResult.error && !cgTimedOut) throw new Error(cgResult.error);
+    if (cgTimedOut) console.log(`[Orchestrator] [${queryId}] Code Generator timed out — will try executeQuery on existing .cpp`);
 
     if (!existsSync(iterCppPath)) {
       throw new Error(`Code Generator failed to produce ${iterCppPath}`);
@@ -1348,6 +1156,7 @@ async function runQueryFullPipeline(
           domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
         });
         recordAgentTelemetry(queryPhase, "code_generator_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
+        if (fixResult.error) console.error(`[Orchestrator] [${queryId}] Fix agent failed (non-fatal): ${fixResult.error}`);
       } finally {
         semaphore.release();
       }
@@ -1499,6 +1308,7 @@ async function runQueryFullPipeline(
         });
         defaults.agentEffortLevels.code_generator = savedEffort;
         recordAgentTelemetry(queryPhase, "code_generator_escalation", escalationResult.durationMs, escalationResult.tokens, escalationResult.costUsd);
+        if (escalationResult.error) console.error(`[Orchestrator] [${queryId}] Escalation failed (non-fatal): ${escalationResult.error}`);
       } finally {
         semaphore.release();
       }
@@ -1786,6 +1596,7 @@ async function runQueryFullPipeline(
         domainSkillsPrompt: queryOptimizerConfig.domainSkillsPrompt,
       });
       recordAgentTelemetry(queryPhase, "query_optimizer", qoResult.durationMs, qoResult.tokens, qoResult.costUsd);
+      if (qoResult.error) throw new Error(`Query Optimizer failed for ${queryId}: ${qoResult.error}`);
     } finally {
       semaphore.release();
     }
@@ -1847,27 +1658,20 @@ async function runQueryFullPipeline(
           compare_tool: COMPARE_TOOL_PATH,
         });
 
-        let cgTimedOut = false;
-        try {
-          const cgResult = await runAgent(codeGeneratorConfig.name, {
-            systemPrompt: cgSystemPrompt,
-            userPrompt: optCgUserPrompt,
-            allowedTools: codeGeneratorConfig.allowedTools,
-            model: getAgentModel("code_generator", args),
-            configName: "code_generator",
-            cwd: optIterDir,
-            useSkills: args.useSkills,
-            domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
-          });
-          recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
-        } catch (err) {
-          if (err.message.includes("timed out")) {
-            console.log(`[Orchestrator] [${queryId}] Code Generator timed out in iteration ${iteration} — will try executeQuery on existing .cpp`);
-            cgTimedOut = true;
-          } else {
-            throw err;
-          }
-        }
+        const cgResult = await runAgent(codeGeneratorConfig.name, {
+          systemPrompt: cgSystemPrompt,
+          userPrompt: optCgUserPrompt,
+          allowedTools: codeGeneratorConfig.allowedTools,
+          model: getAgentModel("code_generator", args),
+          configName: "code_generator",
+          cwd: optIterDir,
+          useSkills: args.useSkills,
+          domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
+        });
+        recordAgentTelemetry(queryPhase, "code_generator", cgResult.durationMs, cgResult.tokens, cgResult.costUsd);
+        const cgTimedOut = cgResult.error?.includes("timed out");
+        if (cgResult.error && !cgTimedOut) throw new Error(cgResult.error);
+        if (cgTimedOut) console.log(`[Orchestrator] [${queryId}] Code Generator timed out in iteration ${iteration} — will try executeQuery on existing .cpp`);
       } finally {
         semaphore.release();
       }
@@ -1906,6 +1710,7 @@ async function runQueryFullPipeline(
             domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
           });
           recordAgentTelemetry(queryPhase, "code_generator_fix", fixResult.durationMs, fixResult.tokens, fixResult.costUsd);
+          if (fixResult.error) console.error(`[Orchestrator] [${queryId}] Fix agent failed (non-fatal): ${fixResult.error}`);
         } finally {
           semaphore.release();
         }
@@ -2635,6 +2440,13 @@ async function main() {
   const runId = createRunId();
   const runDir = await createRunDir(workload, runId);
 
+  // Resolve gendb dir: place inside run directory for isolation unless explicitly overridden.
+  // benchmark.py reads gendbDir from run.json, so this works without benchmark changes.
+  if (!args.gendbDir) {
+    args.gendbDir = resolve(runDir, "gendb");
+  }
+  await mkdir(args.gendbDir, { recursive: true });
+
   // Try to load benchmark comparison results
   const benchmarkResultsPath = resolve(
     BENCHMARKS_DIR, args.targetBenchmark,
@@ -2671,76 +2483,97 @@ async function main() {
     checkCacheClearCapability();
   }
 
-  // Phase 1: Offline Data Storage Optimization
-  const { workloadAnalysisPath, storageDesignPath } = await runOfflineStorageOptimization(args, runDir, schema, queries);
+  let pipelineError = null;
+  try {
+    // Phase 1: Offline Data Storage Optimization
+    const { workloadAnalysisPath, storageDesignPath } = await runOfflineStorageOptimization(args, runDir, schema, queries);
 
-  // Phase 2: Online Per-Query Parallel Optimization
-  await runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath);
+    // Phase 2: Online Per-Query Parallel Optimization
+    await runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath);
 
-  // Phase 3: DBA Stage B (Post-Run Retrospective)
-  if (args.useDba) {
-    console.log("\n[Orchestrator] ========== PHASE 3: DBA RETROSPECTIVE ==========\n");
-    const retroDir = resolve(runDir, "retrospective");
-    await mkdir(retroDir, { recursive: true });
+    // Phase 3: DBA Stage B (Post-Run Retrospective)
+    if (args.useDba) {
+      console.log("\n[Orchestrator] ========== PHASE 3: DBA RETROSPECTIVE ==========\n");
+      const retroDir = resolve(runDir, "retrospective");
+      await mkdir(retroDir, { recursive: true });
 
-    try {
-      const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
-      const dbaBTemplatePath = resolve(__dirname, "agents/dba/user-prompt.md");
-      const dbaBTemplate = readFileSync(dbaBTemplatePath, 'utf-8');
-      const dbaStageBPrompt = renderTemplate(dbaBTemplate, {
-        stage_b: true,
-        run_dir: runDir,
-        retro_dir: retroDir,
-        queries_dir: resolve(runDir, "queries"),
-        retro_summary_path: resolve(retroDir, "summary.md"),
-        retro_proposals_path: resolve(retroDir, "proposals.json"),
-        experience_path: EXPERIENCE_PATH,
-      });
+      try {
+        const dbaSystemPrompt = await readFile(dbaConfig.promptPath, "utf-8");
+        const dbaBTemplatePath = resolve(__dirname, "agents/dba/user-prompt.md");
+        const dbaBTemplate = readFileSync(dbaBTemplatePath, 'utf-8');
+        const dbaStageBPrompt = renderTemplate(dbaBTemplate, {
+          stage_b: true,
+          run_dir: runDir,
+          retro_dir: retroDir,
+          queries_dir: resolve(runDir, "queries"),
+          retro_summary_path: resolve(retroDir, "summary.md"),
+          retro_proposals_path: resolve(retroDir, "proposals.json"),
+          experience_path: EXPERIENCE_PATH,
+        });
 
-      const dbaResult = await runAgent(dbaConfig.name, {
-        systemPrompt: dbaSystemPrompt,
-        userPrompt: dbaStageBPrompt,
-        allowedTools: dbaConfig.allowedTools,
-        model: getAgentModel("dba", args),
-        configName: "dba",
-        cwd: runDir,
-        useSkills: args.useSkills,
-        domainSkillsPrompt: dbaConfig.domainSkillsPrompt,
-      });
-      recordAgentTelemetry("phase3", "dba_stage_b", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
-      console.log("[Orchestrator] DBA Stage B (Retrospective) completed.");
-    } catch (err) {
-      console.error(`[Orchestrator] DBA Stage B failed (non-fatal): ${err.message}`);
+        const dbaResult = await runAgent(dbaConfig.name, {
+          systemPrompt: dbaSystemPrompt,
+          userPrompt: dbaStageBPrompt,
+          allowedTools: dbaConfig.allowedTools,
+          model: getAgentModel("dba", args),
+          configName: "dba",
+          cwd: runDir,
+          useSkills: args.useSkills,
+          domainSkillsPrompt: dbaConfig.domainSkillsPrompt,
+        });
+        recordAgentTelemetry("phase3", "dba_stage_b", dbaResult.durationMs, dbaResult.tokens, dbaResult.costUsd);
+        if (dbaResult.error) {
+          console.error(`[Orchestrator] DBA Stage B failed (non-fatal): ${dbaResult.error}`);
+        } else {
+          console.log("[Orchestrator] DBA Stage B (Retrospective) completed.");
+        }
+      } catch (err) {
+        console.error(`[Orchestrator] DBA Stage B unexpected error (non-fatal): ${err.message}`);
+      }
+    } else {
+      console.log("\n[Orchestrator] ========== PHASE 3: DBA RETROSPECTIVE SKIPPED (--no-dba) ==========\n");
     }
-  } else {
-    console.log("\n[Orchestrator] ========== PHASE 3: DBA RETROSPECTIVE SKIPPED (--no-dba) ==========\n");
+
+    // Finalize on success
+    await updateRunMeta(runDir, (meta) => {
+      meta.status = "completed";
+      meta.completedAt = new Date().toISOString();
+    });
+  } catch (err) {
+    pipelineError = err;
+    console.error(`\n[Orchestrator] Pipeline failed: ${err.message}`);
+    try {
+      await updateRunMeta(runDir, (meta) => {
+        meta.status = "failed";
+        meta.completedAt = new Date().toISOString();
+        meta.error = err.message;
+      });
+    } catch {}
   }
 
-  // Finalize
-  await updateRunMeta(runDir, (meta) => {
-    meta.status = "completed";
-    meta.completedAt = new Date().toISOString();
-  });
-
+  // Always write telemetry (even on failure — cost data is always preserved)
   await updateLatestSymlink(workload, runId);
 
-  // Print per-query summary table
   const parsedQueries = parseQueryFile(queries);
   await printPerQuerySummary(runDir, parsedQueries);
 
-  // Write telemetry
   telemetryData.total_wall_clock_ms = Date.now() - runStartTime;
+  telemetryData.status = pipelineError ? "failed" : "completed";
+  if (pipelineError) telemetryData.error = pipelineError.message;
   const telemetryPath = resolve(runDir, "telemetry.json");
   await writeFile(telemetryPath, JSON.stringify(telemetryData, null, 2));
 
   // Print cost summary
   console.log(`\n[Orchestrator] === Run Summary ===`);
+  if (pipelineError) {
+    console.log(`[Orchestrator] Status: FAILED — ${pipelineError.message}`);
+  }
   console.log(`[Orchestrator] Total time: ${formatDuration(telemetryData.total_wall_clock_ms)}`);
   console.log(`[Orchestrator] Total tokens: ${Math.round(telemetryData.total_tokens.input / 1000)}K input, ${Math.round(telemetryData.total_tokens.output / 1000)}K output`);
   if (telemetryData.total_tokens.cache_read > 0) {
     console.log(`[Orchestrator] Cache tokens: ${Math.round(telemetryData.total_tokens.cache_read / 1000)}K cache_read, ${Math.round(telemetryData.total_tokens.cache_creation / 1000)}K cache_creation`);
   }
-  console.log(`[Orchestrator] Estimated cost: $${telemetryData.total_cost_usd.toFixed(2)} (cache-aware pricing)`);
+  console.log(`[Orchestrator] Cost: $${telemetryData.total_cost_usd.toFixed(2)}`);
 
   const phaseSummaries = [];
   for (const [phaseName, phase] of Object.entries(telemetryData.phases)) {
@@ -2764,9 +2597,11 @@ async function main() {
     console.log(`[Orchestrator] Most expensive agent: ${maxAgent.name} (${pct}% of total cost)`);
   }
 
-  console.log("\n[Orchestrator] Pipeline complete.");
+  console.log(`\n[Orchestrator] Pipeline ${pipelineError ? 'failed' : 'complete'}.`);
   console.log(`[Orchestrator] Run Dir:  ${runDir}`);
   console.log(`[Orchestrator] Latest symlink: output/${workload}/latest → ${runId}`);
+
+  if (pipelineError) process.exit(1);
 }
 
 main().catch((err) => {
