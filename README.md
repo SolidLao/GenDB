@@ -78,9 +78,9 @@ Key constraints:
 
 ### GenDB Version Comparison
 
-<img src="benchmarks/compare_versions/results/figures/gendb_version_summary.png" width="600">
+<img src="benchmarks/compare_versions/results/figures/gendb_version_summary.png" width="450">
 
-<img src="benchmarks/compare_versions/results/figures/gendb_version_perquery.png" width="600">
+<img src="benchmarks/compare_versions/results/figures/gendb_version_perquery.png" width="450">
 
 ## Agents
 
