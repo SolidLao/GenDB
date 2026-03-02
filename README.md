@@ -22,9 +22,18 @@ Each extension is [difficult](https://www.vldb.org/pvldb/vol18/p1962-kim.pdf) an
 - **Extensibility** — Integrating new techniques requires *prompting*, not re-engineering a complex codebase.
 - **Economics** — In production, [80% of queries repeat in 50% of clusters](https://www.vldb.org/pvldb/vol17/p3694-saxena.pdf), and long-running queries almost always recur as they correspond to regular transformation or analytical tasks. Generation cost is amortized over many executions.
 
+## Current Landscape
+
+Currently, GenDB is implemented with Claude Code Agent as the underlying component in the multi-agent system, and evaluated on OLAP workloads (TPC-H, SEC-EDGAR). For developers, it automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
+
 **When to use GenDB today.** GenDB is well suited for recurring workloads where upfront generation cost pays off over many executions. For ad-hoc queries, GenDB can be combined with a traditional DBMS in a hybrid architecture: the traditional system handles one-off queries, while GenDB accelerates frequent ones. As LLMs become faster and cheaper, we expect the generation overhead to shrink — the long-term target is per-query generation in seconds at minimal cost, making the hybrid boundary increasingly irrelevant.
 
-**Who is GenDB for.** For developers, GenDB automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
+**What's next.** We are actively developing and will continually update GenDB with support for more scenarios:
+
+- **Semantic queries** — Generate code for multimodal data (images, audio, text) with AI-powered operators, moving beyond SQL's relational model
+- **GPU-native generation** — Generate CUDA/GPU code targeting libcudf and cost-efficient GPU analytics, not just CPU
+- **Self-evolving system** — Learn from past runs, accumulate optimization experience, improve generation quality over time
+- **Reusable generation** — Share operators across queries, generate for query templates, reduce per-query generation cost
 
 ## Results
 
@@ -90,15 +99,6 @@ atomic_add_double(&oa_rev[slot], revenue);  // 64 threads, lock-free CAS
 ```
 
 This is just one dimension of instance optimization. GenDB similarly adapts join strategies, scan/filter techniques, storage layouts, index selection, and parallelism patterns based on the specific data and hardware characteristics of each query.
-
-## Vision
-
-GenDB currently supports OLAP workloads (TPC-H, SEC-EDGAR). We are actively developing and will continually update it with support for more scenarios and experimental results:
-
-- **Semantic queries** — Generate code for multimodal data (images, audio, text) with AI-powered operators, moving beyond SQL's relational model
-- **GPU-native generation** — Generate CUDA/GPU code targeting libcudf and cost-efficient GPU analytics, not just CPU
-- **Self-evolving system** — Learn from past runs, accumulate optimization experience, improve generation quality over time
-- **Reusable generation** — Share operators across queries, generate for query templates, reduce per-query generation cost
 
 ## Quick Start
 
