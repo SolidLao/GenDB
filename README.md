@@ -1,119 +1,129 @@
-# GenDB: Generative Database System
+# GenDB: An LLM-Powered Generative Query Engine Built for the Future
 
-An LLM-powered agentic system that generates customized database execution code for user-provided SQL workloads — no pre-built DBMS required.
+**Instance-optimized and customized query execution code generation tailored to your specific data, workloads, and hardware resources.**
 
-## Overview
+> **2.8x** faster than DuckDB and Umbra on TPC-H &nbsp;|&nbsp; **5.0x** faster than DuckDB on real-world financial data &nbsp;|&nbsp; **Beats every baseline on every query**
 
-GenDB takes a different approach to query execution: instead of routing queries through a general-purpose DBMS, it uses a team of LLM agents to analyze your specific SQL workload and database, then generates tailored C++ execution code optimized for that exact use case. The input is a SQL workload and dataset; the output is a standalone, high-performance execution engine specialized to your needs.
+<p align="center">
+  <img src="assets/GenDB.png" width="700" alt="GenDB System Overview">
+</p>
 
-## Key Ideas
+**Input:** database schema, SQL queries, data files, hardware specs, and user configurations (optimization targets, iteration budgets). **Pipeline:** five specialized LLM agents — Workload Analyzer, Storage/Index Designer, Query Planner, Code Generator, and Query Optimizer — each equipped with tools for file I/O, terminal access, and web search, collaborating through structured JSON. **Output:** optimized storage structures, indexes, and one standalone executable per query — all tailored to the specific data, workload, and hardware.
 
-- **Workload-specific code generation** — generate execution code tuned to the actual queries and data, not a one-size-fits-all engine
-- **Three operating modes** — multi-agent default (5-agent), multi-agent skills (7-agent, `--use-skills`), and single-agent (one LLM handles the entire pipeline end-to-end)
-- **Adaptive thinking** — each agent has structured thinking discipline (concise, phase-based reasoning) with configurable effort levels and model escalation (Sonnet → Opus) on correctness failures
-- **Plan-first pipeline** — Query Planner designs lean JSON execution plans, Code Generator implements them, Optimizer can modify both plan and code
-- **MVCC-style column versions** — optimizer can build derived column representations at storage level, breaking optimization ceilings caused by initial encoding choices
-- **Multi-run execution** — each query runs 3 times per iteration in either hot mode (all cached) or cold mode (OS cache cleared before each run)
-- **Adaptive iteration budget** — stall detection, correctness caps, competitive baseline checks, and model escalation drive when to stop or intensify optimization
-- **True per-query pipelining** — each query flows independently through its pipeline stages, gated by semaphore for LLM calls and serialized for execution
+## Why Generate?
 
-## Operating Modes
+Consider PostgreSQL. Since its origins as an OLTP database, the community has built extensions for nearly every emerging use case: PostGIS for geospatial, TimescaleDB for time-series, pgvector for embeddings, Citus for distributed analytics, pg_duckdb for OLAP, AGE for graph queries, and [hundreds more](https://pigsty.io/blog/pg/pg-eat-db-world/). In parallel, entirely new systems were purpose-built for each domain: DuckDB, ClickHouse, and Umbra for OLAP; Milvus and Pinecone for vector search; InfluxDB for time-series; Neo4j for graph; Snowflake and BigQuery for cloud analytics.
 
-### Default Mode (no skills, 5 agents)
+Each extension fights the host system's architectural constraints :weary:. Each new system requires years of engineering :wrench: and significant monetary costs :moneybag:. And with every emerging technique — multimodal AI operators, GPU-native analytics, learned indexes — the cycle repeats :tired_face:.
 
-The default mode (`useSkills: false`, `useDba: false`) uses a lean 5-agent pipeline. Agents rely solely on their identity prompts, query guides, and LLM reasoning — no external skills or knowledge base.
+**But actually there is a third option:** use LLMs to **generate per-query execution code**.
 
-```
-Phase 1: Workload Analyzer → Storage/Index Designer → Per-Query Guides (Qi_guide.md)
-Phase 2: Query Planner → Code Generator → Execute → [Optimizer → Execute]*
-```
+- **Performance** — Instance-optimized code exploits exact data distributions, group cardinalities, join selectivities, and cache topology. No general-purpose engine can match this.
+- **Extensibility** — Integrating new techniques requires *prompting*, not re-engineering a complex codebase.
+- **Economics** — In production, [80% of queries repeat in 50% of clusters](https://www.vldb.org/pvldb/vol17/p3694-saxena.pdf), and long-running queries almost always recur as they correspond to regular transformation or analytical tasks. Generation cost is amortized over many executions.
 
-Agents in default mode: Workload Analyzer, Storage Designer, Query Planner, Code Generator, Query Optimizer.
+**When to use GenDB today.** GenDB is well suited for recurring workloads where upfront generation cost pays off over many executions. For ad-hoc queries, GenDB can be combined with a traditional DBMS in a hybrid architecture: the traditional system handles one-off queries, while GenDB accelerates frequent ones. As LLMs become faster and cheaper, we expect the generation overhead to shrink — the long-term target is per-query generation in seconds at minimal cost, making the hybrid boundary increasingly irrelevant.
 
-Code Inspector and DBA are **skipped**. The `Skill` tool is removed from agents' allowed tools.
+**Who is GenDB for.** For developers, GenDB automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
 
-### Skills Mode (`--use-skills`, 7 agents)
+## Results
 
-Skills mode adds the Code Inspector and DBA agents, and loads domain skills via the Claude Code skill system.
+We evaluate on two benchmarks: **TPC-H**, a widely-used OLAP benchmark whose queries and optimization strategies are well-represented in LLM training data, and **SEC-EDGAR**, a new benchmark we constructed from real-world SEC financial filings. SEC-EDGAR serves as an unseen workload — its schemas and query patterns have rarely appeared in training corpora — to test whether GenDB generalizes beyond memorized optimizations.
 
-```
-Phase 1: Workload Analyzer → Storage/Index Designer → [DBA Stage A] → Per-Query Guides
-Phase 2: Query Planner → Code Generator → Inspector → Execute → [Optimizer → Inspector → Execute]*
-Phase 3: DBA Stage B → Retrospective + experience evolution
-```
+GenDB outperforms all baselines on every query in both benchmarks.
 
-Each agent gets a 4-layer prompt: (1) identity prompt, (2) experience skill (always loaded), (3) domain skills (loaded on demand), (4) user prompt (task context via templates).
+| | GenDB | DuckDB | Umbra | ClickHouse | MonetDB | PostgreSQL |
+|---|---|---|---|---|---|---|
+| **TPC-H** | **214 ms** | 594 ms | 590 ms | 2,393 ms | 1,370 ms | 5,625 ms |
+| **SEC-EDGAR** | **328 ms** | 1,632 ms | 1,284 ms | 3,810 ms | 2,544 ms | 6,752 ms |
 
-Enable with: `--use-skills` (and optionally `--dba-stage-a` for DBA Stage A).
+**TPC-H (SF10):** 2.8x faster than DuckDB/Umbra. Up to 6.1x on complex multi-way joins (Q9). 11.2x faster than ClickHouse.
 
-### Single-Agent Mode
-
-A single LLM agent handles the entire pipeline — analysis, storage design, code generation, and optimization — in one session. This enables comparing multi-agent vs single-agent performance.
-
-```
-Single Agent: Analyze → Data Preparation → Implement Queries → Optimize
-```
-
-Two prompt variants:
-- **high-level** — minimal guidance: just I/O contracts and hard constraints, full freedom in approach
-- **guided** — adds a suggested 4-phase workflow (Analyze → Data Prep → Implement → Optimize)
-
-Key constraints:
-- Sandbox rule: agent may only access explicitly provided paths (no reuse of prior runs)
-- No precomputed results: gendb storage may only contain data-level transformations (encoding, indexes, sorting), not query-specific intermediates
-- Per-iteration recording: `execution_results.json` with `timing_ms` and `validation.status`
-- Real-time progress monitoring via Claude Agent SDK streaming
-
-## Performance
-
-### GenDB vs Baselines
+**SEC-EDGAR (5GB financial data):** 5.0x faster than DuckDB, 3.9x faster than Umbra. The performance gap widens on this unseen benchmark, confirming that GenDB's advantage comes from instance-level optimization rather than memorized strategies.
 
 #### TPC-H SF10
-
 ![TPC-H SF10 Benchmark Results](benchmarks/figures/tpc-h/benchmark_results_combined.png)
 
 #### SEC-EDGAR (3 Years, 5GB)
+![SEC-EDGAR Benchmark Results](benchmarks/figures/sec-edgar/benchmark_results_combined.png)
 
-![SEC-EDGAR SF3 Benchmark Results](benchmarks/figures/sec-edgar/benchmark_results_combined.png)
+#### Ablation: Multi-Agent vs Single-Agent
 
-### GenDB Version Comparison
+| | Multi-Agent | Single (Guided) | Single (High-Level) |
+|---|---|---|---|
+| **TPC-H** | **236 ms** | 281 ms (1.2x slower) | 308 ms (1.3x slower) |
+| **SEC-EDGAR** | **328 ms** | 752 ms (2.3x slower) | 1,325 ms (4.1x slower) |
 
-<img src="benchmarks/figures/gendb_compare_versions/gendb_version_summary.png" width="450">
+The gap widens on unseen workloads (SEC-EDGAR), where structured multi-agent decomposition generalizes better. Multi-agent also costs less ($14.15 vs $17.54 on TPC-H).
 
-<img src="benchmarks/figures/gendb_compare_versions/gendb_version_perquery.png" width="450">
+<img src="benchmarks/figures/gendb_compare_versions/gendb_version_summary.png" width="500">
 
-## Agents
+## How It Works
 
-| Agent | Default Mode | Skills Mode | Role |
-|-------|-------------|-------------|------|
-| **Workload Analyzer** | Yes | Yes | Parse SQL workload, detect hardware, sample data |
-| **Storage Designer** | Yes | Yes | Design storage/indexes, generate + run ingestion, per-query guides |
-| **DBA** | No | Yes | Pre-gen risk analysis (Stage A), post-run retrospective + experience evolution (Stage B) |
-| **Query Planner** | Yes | Yes | Design lean JSON execution plan |
-| **Code Generator** | Yes | Yes | Implement plan in C++, compile + run + validate |
-| **Code Inspector** | No | Yes | Review code against experience skill + Query Guide |
-| **Query Optimizer** | Yes | Yes | Targeted edits to plan/code; can build derived column versions |
+Five specialized LLM agents collaborate through a structured pipeline:
 
-All agents use Sonnet by default. On repeated correctness failures, the orchestrator escalates to Opus.
+1. **Workload Analyzer** — Profiles hardware (cache hierarchy, cores, SIMD), samples data, extracts workload characteristics (join patterns, selectivity, group cardinalities)
+2. **Storage/Index Designer** — Designs and builds optimized storage layouts with encoding, compression, and indexes (zone maps, hash indexes, bloom filters)
+3. **Query Planner** — Generates resource-aware execution plans adapted to data and hardware
+4. **Code Generator** — Implements the plan as optimized native code with system-level optimizations (memory-mapped I/O, SIMD, parallelism)
+5. **Query Optimizer** — Iteratively refines code using runtime feedback (TPC-H Q18: 12s to 74ms in one iteration — **163x**)
 
-## Skills (Skills Mode Only)
+**Instance-optimized code in action** — As one example of many possible optimizations, consider how GenDB adapts aggregation strategy based on group cardinality and cache topology. A general-purpose engine uses the same hash aggregation for every query. GenDB reasons about the specific workload and hardware (in this case: 32KB L1 / 1MB L2 / 44MB shared L3, 64 cores) to generate fundamentally different code:
 
-Domain skills (`.claude/skills/`) are loaded selectively per query and agent:
+**TPC-H Q1 — 6 groups (fits in L1):** The query aggregates `lineitem` by `returnflag` and `linestatus`, producing only 6 groups. GenDB skips hashing entirely — each thread uses a direct array of 6 accumulators (384 bytes), fitting comfortably in the 32KB L1 cache.
+```cpp
+// TPC-H Q1: 6 groups × 64B = 384B per thread → fits in 32KB L1
+struct alignas(64) Accum { int64_t cnt, sum_qty, sum_price, ...; };
+std::array<Accum, 6> local;  // per-thread, no hashing needed
+int g = returnflag[i] * 2 + linestatus[i];  // direct index
+local[g].cnt++;
+local[g].sum_price += price[i];
+```
 
-| Skill | Purpose |
-|-------|---------|
-| `experience` | Always loaded. Correctness + performance rules with frequency/severity. |
-| `data-structures` | When to use hash tables vs bloom filters vs direct arrays vs sorted arrays |
-| `join-optimization` | Join strategies, pre-built index usage, sampling |
-| `scan-optimization` | Predicate pushdown, late materialization, zone maps |
-| `aggregation-optimization` | Hash/sorted/parallel aggregation patterns |
-| `hash-tables` | Open-addressing, Robin Hood, bounded probing templates |
-| `data-loading` | mmap, madvise, cold/hot I/O tradeoffs |
-| `indexing` | Zone maps, hash indexes, construction guidelines |
-| `parallelism` | Morsel-driven, OpenMP, SIMD, thread-local patterns |
-| `gendb-storage-format` | Binary column format, type mappings, encodings |
-| `gendb-code-patterns` | File structure, GENDB_PHASE, mmap pattern, compilation |
-| `research-papers` | 30+ seminal paper references by topic |
+**TPC-H Q3 — 4M groups (needs L3-aware design):** The query joins `customer`, `orders`, and `lineitem` and groups by `orderkey` — producing ~4M distinct groups. Per-thread hash tables would consume ~3GB across 64 threads, far exceeding the 44MB shared L3. GenDB uses a single shared hash table with column-separated layout: keys (16MB) and values (32MB) in separate arrays so probes only touch keys (L3 hit). Lock-free CAS eliminates both locks and a merge phase.
+```cpp
+// TPC-H Q3: 4M groups, shared table — keys and values separated
+int32_t oa_keys[4194304];  // 4M × 4B = 16MB → fits in 44MB L3
+double  oa_rev[4194304];   // 4M × 8B = 32MB
+uint64_t slot = oa_probe(oa_keys, orderkey);
+atomic_add_double(&oa_rev[slot], revenue);  // 64 threads, lock-free CAS
+```
+
+This is just one dimension of instance optimization. GenDB similarly adapts join strategies, scan/filter techniques, storage layouts, index selection, and parallelism patterns based on the specific data and hardware characteristics of each query.
+
+## Vision
+
+GenDB currently supports OLAP workloads (TPC-H, SEC-EDGAR). We are actively developing and will continually update it with support for more scenarios and experimental results:
+
+- **Semantic queries** — Generate code for multimodal data (images, audio, text) with AI-powered operators, moving beyond SQL's relational model
+- **GPU-native generation** — Generate CUDA/GPU code targeting libcudf and cost-efficient GPU analytics, not just CPU
+- **Self-evolving system** — Learn from past runs, accumulate optimization experience, improve generation quality over time
+- **Reusable generation** — Share operators across queries, generate for query templates, reduce per-query generation cost
+
+## Quick Start
+
+GenDB supports four operating modes:
+
+- **Multi-Agent (5 agents)** — Five specialized agents collaborate through a structured pipeline with JSON-based inter-agent communication. Default and best-performing mode. *This is the version used in paper experiments.*
+- **Multi-Agent with Skills (7 agents)** — Extends the pipeline with a Code Inspector and DBA agent, each loading curated domain knowledge (join optimization, parallelism patterns, hash table design).
+- **Single-Agent Guided** — One agent handles everything end-to-end, with a suggested 4-phase workflow and domain hints.
+- **Single-Agent High-Level** — Minimal guidance: only I/O contracts and hard constraints, full freedom in approach.
+
+All modes support `--optimization-target hot` (optimize for cached/warm runs, default) or `--optimization-target cold` (optimize for cold runs with OS cache cleared before each execution).
+
+```bash
+# Multi-agent (5 agents, default)
+node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10
+
+# Multi-agent with domain skills (7 agents)
+node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
+
+# Single-agent guided
+node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt guided
+
+# Run all benchmarks
+bash run_benchmarks.sh
+```
 
 ## Project Structure
 
@@ -121,43 +131,27 @@ Domain skills (`.claude/skills/`) are loaded selectively per query and agent:
 src/gendb/
   orchestrator.mjs          # Multi-agent pipeline orchestration
   single.mjs                # Single-agent mode entry point
-  shared.mjs                # Shared utilities (runAgent via Agent SDK, template rendering, etc.)
-  config.mjs                # Configuration loader
-  gendb.config.mjs          # Hyperparameters (models, timeouts, effort levels)
-  agents/                   # 7 multi-agent + 1 single-agent (prompt.md + index.mjs each)
-  utils/                    # System utilities (date_utils.h, timing_utils.h, paths.mjs)
-  tools/                    # compare_results.py and other tooling
-
-.claude/skills/             # Domain skills (used in skills mode)
+  shared.mjs                # Shared utilities (runAgent, templates, Agent SDK)
+  gendb.config.mjs          # Configuration (models, timeouts, iteration limits)
+  agents/                   # Agent prompts and logic
+    workload-analyzer/      #   Workload & hardware profiling
+    storage-index-designer/ #   Storage layout & index design
+    query-planner/          #   Execution plan generation
+    code-generator/         #   Native code generation
+    query-optimizer/        #   Iterative optimization
+    code-inspector/         #   Code review (skills mode)
+    dba/                    #   DBA analysis (skills mode)
+    single-agent/           #   Single-agent prompts
+  tools/                    # Result comparison utilities
+  utils/                    # C++ utility headers (mmap, hashing, timing, dates)
 
 benchmarks/
-  tpc-h/                    # TPC-H benchmark (queries, results, ground truth)
-  sec-edgar/                # SEC-EDGAR financial statements benchmark
+  tpc-h/                    # TPC-H benchmark (queries, data, ground truth, baselines)
+  sec-edgar/                # SEC-EDGAR benchmark (queries, data, ground truth, baselines)
+  lib/                      # Benchmark runner, plotting, system configs
+  figures/                  # Generated benchmark result figures
 
-output/<workload>/<timestamp>/  # Per-run output with iteration history
-```
-
-## Usage
-
-```bash
-# Multi-agent default mode (5-agent, no skills)
-node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10
-
-# Multi-agent skills mode (7-agent, with domain skills + Code Inspector + DBA)
-node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
-
-# Single-agent mode (high-level prompt)
-node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt high-level
-
-# Single-agent mode (guided prompt)
-node src/gendb/single.mjs --benchmark sec-edgar --sf 3 --single-agent-prompt guided
-
-# Run all benchmarks (single-agent + multi-agent)
-bash run_benchmarks.sh
-
-# Hot optimization (default), cold optimization
-node src/gendb/orchestrator.mjs --benchmark tpc-h --optimization-target hot
-
-# Control optimization iterations and concurrency
-node src/gendb/orchestrator.mjs --max-iterations 5 --stall-threshold 5 --max-concurrent 22
+.claude/skills/             # Domain skills (12 skills: join optimization, parallelism, etc.)
+assets/                     # Project figures
+output/                     # GenDB run outputs (per benchmark, per timestamp)
 ```
