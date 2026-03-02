@@ -1,6 +1,6 @@
 # GenDB: An LLM-Powered Generative Query Engine
 
-**Instance-optimized query execution code generation tailored to your specific data, workloads, and hardware resources.**
+**Instance-optimized query execution code generation tailored to your specific data, workloads, and hardware.**
 
 > **2.8x** faster than DuckDB and Umbra on TPC-H &nbsp;|&nbsp; **5.0x** faster than DuckDB on real-world financial data &nbsp;
 
@@ -34,8 +34,8 @@ GenDB outperforms all baselines on every query in both benchmarks.
 
 | | GenDB | DuckDB | Umbra | ClickHouse | MonetDB | PostgreSQL |
 |---|---|---|---|---|---|---|
-| **TPC-H** | **214 ms** | 594 ms | 590 ms | 2,393 ms | 1,370 ms | 5,625 ms |
-| **SEC-EDGAR** | **328 ms** | 1,632 ms | 1,284 ms | 3,810 ms | 2,544 ms | 6,752 ms |
+| **TPC-H** | **214 ms** | 594 ms | 590 ms | 2,289 ms | 1,416 ms | 52,473 ms |
+| **SEC-EDGAR** | **328 ms** | 1,549 ms | 1,280 ms | 2,047 ms | 28,096 ms | 41,634 ms |
 
 **TPC-H (SF10):** 2.8x faster than DuckDB/Umbra. Up to 6.1x on complex multi-way joins (Q9). 11.2x faster than ClickHouse.
 
@@ -51,8 +51,8 @@ GenDB outperforms all baselines on every query in both benchmarks.
 
 | | Multi-Agent | Single (Guided) | Single (High-Level) |
 |---|---|---|---|
-| **TPC-H** | **236 ms** | 281 ms (1.2x slower) | 308 ms (1.3x slower) |
-| **SEC-EDGAR** | **328 ms** | 752 ms (2.3x slower) | 1,325 ms (4.1x slower) |
+| **TPC-H** | **236 ms** | 456 ms (1.9x slower) | 281 ms (1.2x slower) |
+| **SEC-EDGAR** | **320 ms** | 752 ms (2.3x slower) | 1,325 ms (4.1x slower) |
 
 The gap widens on unseen workloads (SEC-EDGAR), where structured multi-agent decomposition generalizes better. Multi-agent also costs less ($14.15 vs $17.54 on TPC-H).
 
