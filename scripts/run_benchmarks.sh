@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ORCH="$SCRIPT_DIR/src/gendb/orchestrator.mjs"
-SINGLE="$SCRIPT_DIR/src/gendb/single.mjs"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ORCH="$REPO_DIR/src/gendb/orchestrator.mjs"
+SINGLE="$REPO_DIR/src/gendb/single.mjs"
 
 # ============================================================
 # Single-Agent Mode — High-Level Prompt

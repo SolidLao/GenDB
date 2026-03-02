@@ -102,6 +102,31 @@ This is just one dimension of instance optimization. GenDB similarly adapts join
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js 18+** and npm
+- **g++** with C++17 and OpenMP support (`sudo apt-get install build-essential`)
+- **Claude access** — either `export ANTHROPIC_API_KEY=your_key`, or log in to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with a Pro/Max/Team/Enterprise subscription plan
+
+### Setup
+
+```bash
+# One-command setup: checks prerequisites, installs dependencies, downloads data
+bash scripts/setup.sh
+
+# Or customize data scale:
+bash scripts/setup.sh --sf 10 --years 3    # TPC-H SF10 (~10GB) + SEC-EDGAR 3 years (~5GB)
+bash scripts/setup.sh --skip-data           # Dependencies only, download data later
+```
+
+To download data separately:
+```bash
+bash benchmarks/tpc-h/setup_data.sh 10       # TPC-H at scale factor 10
+bash benchmarks/sec-edgar/setup_data.sh 3     # SEC-EDGAR, 3 years (2022-2024)
+```
+
+### Operating Modes
+
 GenDB supports four operating modes:
 
 - **Multi-Agent (5 agents)** — Five specialized agents collaborate through a structured pipeline with JSON-based inter-agent communication. Default and best-performing mode. *This is the version used in paper experiments.*
@@ -122,7 +147,7 @@ node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
 node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt guided
 
 # Run all benchmarks
-bash run_benchmarks.sh
+bash scripts/run_benchmarks.sh
 ```
 
 ## Project Structure
@@ -150,6 +175,10 @@ benchmarks/
   sec-edgar/                # SEC-EDGAR benchmark (queries, data, ground truth, baselines)
   lib/                      # Benchmark runner, plotting, system configs
   figures/                  # Generated benchmark result figures
+
+scripts/
+  setup.sh                  # Environment setup (prerequisites, dependencies, data)
+  run_benchmarks.sh         # Run all benchmark configurations
 
 .claude/skills/             # Domain skills (12 skills: join optimization, parallelism, etc.)
 assets/                     # Project figures
