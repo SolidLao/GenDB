@@ -37,11 +37,11 @@ TPCH_VERSIONS = {
     "Multi-Agent": {
         "run_dir": "output/tpc-h/2026-02-26T06-27-28",
     },
-    "Single-Agent\n(High-Level)": {
-        "run_dir": "output/tpc-h/2026-02-27T07-32-41",
-    },
     "Single-Agent\n(Guided)": {
         "run_dir": "output/tpc-h/2026-02-27T11-32-42",
+    },
+    "Single-Agent\n(High-Level)": {
+        "run_dir": "output/tpc-h/2026-02-27T07-32-41",
     },
 }
 
@@ -49,18 +49,18 @@ EDGAR_VERSIONS = {
     "Multi-Agent": {
         "run_dir": "output/sec-edgar/2026-02-26T07-58-24",
     },
-    "Single-Agent\n(High-Level)": {
-        "run_dir": "output/sec-edgar/2026-02-27T09-32-42",
-    },
     "Single-Agent\n(Guided)": {
         "run_dir": "output/sec-edgar/2026-02-27T13-32-42",
+    },
+    "Single-Agent\n(High-Level)": {
+        "run_dir": "output/sec-edgar/2026-02-27T09-32-42",
     },
 }
 
 VERSION_COLORS = {
     "Multi-Agent": "#E41A1C",
-    "Single-Agent\n(High-Level)": "#377EB8",
     "Single-Agent\n(Guided)": "#4DAF4A",
+    "Single-Agent\n(High-Level)": "#377EB8",
 }
 
 GREEN = "\033[32m"
@@ -249,7 +249,10 @@ def setup_matplotlib():
 
 def _prepare_workload_data(all_results: dict):
     """Compute per-query averages and totals from raw results."""
-    versions = list(all_results.keys())
+    # Use VERSION_COLORS order for consistent plotting order
+    ordered = list(VERSION_COLORS.keys())
+    versions = [v for v in ordered if v in all_results] + \
+               [v for v in all_results if v not in ordered]
     all_qs = sorted(
         set(q for res in all_results.values() for q in res if res[q]),
         key=lambda q: int(q[1:])
@@ -397,7 +400,10 @@ def plot_summary(workloads_data: dict, output_dir: Path):
     })
 
     wl_keys = list(workloads_data.keys())
-    versions = list(workloads_data[wl_keys[0]]["results"].keys())
+    raw_versions = list(workloads_data[wl_keys[0]]["results"].keys())
+    ordered = list(VERSION_COLORS.keys())
+    versions = [v for v in ordered if v in raw_versions] + \
+               [v for v in raw_versions if v not in ordered]
     n_ver = len(versions)
     n_wl = len(wl_keys)
 
@@ -677,7 +683,7 @@ def main():
                         help="Workload to compare")
     parser.add_argument("--mode", default="hot", choices=["hot", "cold"])
     parser.add_argument("--plot-only", action="store_true")
-    parser.add_argument("--output-dir", default="benchmarks/compare_versions/results")
+    parser.add_argument("--output-dir", default="benchmarks/figures/gendb_compare_versions")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -701,10 +707,9 @@ def main():
         return
 
     # Plot combined figures
-    fig_dir = output_dir / "figures"
     print(f"\n{BOLD}Generating combined figures...{RESET}")
-    plot_perquery(all_wl_data, fig_dir)
-    plot_summary(all_wl_data, fig_dir)
+    plot_perquery(all_wl_data, output_dir)
+    plot_summary(all_wl_data, output_dir)
 
 
 if __name__ == "__main__":

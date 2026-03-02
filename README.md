@@ -70,17 +70,17 @@ Key constraints:
 
 #### TPC-H SF10
 
-![TPC-H SF10 Benchmark Results](benchmarks/tpc-h/results/sf10/figures/paper_version/benchmark_results_combined.png)
+![TPC-H SF10 Benchmark Results](benchmarks/figures/tpc-h/benchmark_results_combined.png)
 
 #### SEC-EDGAR (3 Years, 5GB)
 
-![SEC-EDGAR SF3 Benchmark Results](benchmarks/sec-edgar/results/sf3/figures/paper_version/benchmark_results_combined.png)
+![SEC-EDGAR SF3 Benchmark Results](benchmarks/figures/sec-edgar/benchmark_results_combined.png)
 
 ### GenDB Version Comparison
 
-<img src="benchmarks/compare_versions/results/figures/gendb_version_summary.png" width="450">
+<img src="benchmarks/figures/gendb_compare_versions/gendb_version_summary.png" width="450">
 
-<img src="benchmarks/compare_versions/results/figures/gendb_version_perquery.png" width="450">
+<img src="benchmarks/figures/gendb_compare_versions/gendb_version_perquery.png" width="450">
 
 ## Agents
 
