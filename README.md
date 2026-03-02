@@ -1,8 +1,8 @@
-# GenDB: An LLM-Powered Generative Query Engine Built for the Future
+# GenDB: An LLM-Powered Generative Query Engine
 
-**Instance-optimized and customized query execution code generation tailored to your specific data, workloads, and hardware resources.**
+**Instance-optimized query execution code generation tailored to your specific data, workloads, and hardware resources.**
 
-> **2.8x** faster than DuckDB and Umbra on TPC-H &nbsp;|&nbsp; **5.0x** faster than DuckDB on real-world financial data &nbsp;|&nbsp; **Beats every baseline on every query**
+> **2.8x** faster than DuckDB and Umbra on TPC-H &nbsp;|&nbsp; **5.0x** faster than DuckDB on real-world financial data &nbsp;
 
 <p align="center">
   <img src="assets/GenDB.png" width="700" alt="GenDB System Overview">
@@ -14,7 +14,7 @@
 
 Consider PostgreSQL. Since its origins as an OLTP database, the community has built extensions for nearly every emerging use case: PostGIS for geospatial, TimescaleDB for time-series, pgvector for embeddings, Citus for distributed analytics, pg_duckdb for OLAP, AGE for graph queries, and [hundreds more](https://pigsty.io/blog/pg/pg-eat-db-world/). In parallel, entirely new systems were purpose-built for each domain: DuckDB, ClickHouse, and Umbra for OLAP; Milvus and Pinecone for vector search; InfluxDB for time-series; Neo4j for graph; Snowflake and BigQuery for cloud analytics.
 
-Each extension fights the host system's architectural constraints :weary:. Each new system requires years of engineering :wrench: and significant monetary costs :moneybag:. And with every emerging technique — multimodal AI operators, GPU-native analytics, learned indexes — the cycle repeats :tired_face:.
+Each extension is [difficult](https://www.vldb.org/pvldb/vol18/p1962-kim.pdf) and fights the host system's architectural constraints :weary:. Each new system requires years of engineering :wrench: and significant monetary costs :moneybag:. And with every emerging technique — multimodal AI operators, GPU-native analytics, learned indexes — the cycle repeats :tired_face:.
 
 **But actually there is a third option:** use LLMs to **generate per-query execution code**.
 
