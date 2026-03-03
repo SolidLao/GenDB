@@ -39,7 +39,7 @@ Currently, GenDB is implemented with Claude Code Agent as the underlying compone
 
 We evaluate on two benchmarks: **TPC-H**, a widely-used OLAP benchmark whose queries and optimization strategies are well-represented in LLM training data, and **SEC-EDGAR**, a new benchmark we constructed from real-world SEC financial filings. SEC-EDGAR serves as an unseen workload — its schemas and query patterns have rarely appeared in training corpora — to test whether GenDB generalizes beyond memorized optimizations.
 
-GenDB outperforms all baselines on every query in both benchmarks.
+**All engines are configured to use comparable hardware resources, and parallelism is fully enabled to ensure each system can fully demonstrate its performance. To ensure fair comparison, result or intermediate result caching, or pre-computed derived columns, are not allowed in GenDB.** GenDB outperforms all baselines on every query in both benchmarks.
 
 | | GenDB | DuckDB | Umbra | ClickHouse | MonetDB | PostgreSQL |
 |---|---|---|---|---|---|---|
@@ -183,4 +183,18 @@ scripts/
 .claude/skills/             # Domain skills (12 skills: join optimization, parallelism, etc.)
 assets/                     # Project figures
 output/                     # GenDB run outputs (per benchmark, per timestamp)
+```
+
+## Citation
+
+```bibtex
+@misc{lao2026gendbgenerationqueryprocessing,
+      title={GenDB: The Next Generation of Query Processing -- Synthesized, Not Engineered}, 
+      author={Jiale Lao and Immanuel Trummer},
+      year={2026},
+      eprint={2603.02081},
+      archivePrefix={arXiv},
+      primaryClass={cs.DB},
+      url={https://arxiv.org/abs/2603.02081}, 
+}
 ```
