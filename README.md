@@ -24,6 +24,8 @@ Each extension is [difficult](https://www.vldb.org/pvldb/vol18/p1962-kim.pdf) an
 
 ## Current Landscape
 
+[Paper](https://arxiv.org/pdf/2603.02081)
+
 Currently, GenDB is implemented with Claude Code Agent as the underlying component in the multi-agent system, and evaluated on OLAP workloads (TPC-H, SEC-EDGAR). For developers, it automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
 
 **When to use GenDB today.** GenDB is well suited for recurring workloads where upfront generation cost pays off over many executions. For ad-hoc queries, GenDB can be combined with a traditional DBMS in a hybrid architecture: the traditional system handles one-off queries, while GenDB accelerates frequent ones. As LLMs become faster and cheaper, we expect the generation overhead to shrink — the long-term target is per-query generation in seconds at minimal cost, making the hybrid boundary increasingly irrelevant.
