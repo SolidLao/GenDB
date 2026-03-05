@@ -41,6 +41,12 @@ Currently, GenDB is implemented with Claude Code Agent as the underlying compone
 
 We evaluate on two benchmarks: **TPC-H**, a widely-used OLAP benchmark whose queries and optimization strategies are well-represented in LLM training data, and **SEC-EDGAR**, a new benchmark we constructed from real-world SEC financial filings. SEC-EDGAR serves as an unseen workload — its schemas and query patterns have rarely appeared in training corpora — to test whether GenDB generalizes beyond memorized optimizations.
 
+**Main experiment runs:**
+- **TPC-H:** `output/tpc-h/2026-02-26T06-27-28`
+- **SEC-EDGAR:** `output/sec-edgar/2026-02-26T07-58-24`
+
+> **Note:** The `gendb/` data storage folders within each run directory are excluded from this repository due to their large size (12GB for TPC-H, 3.3GB for SEC-EDGAR). As a result, the output runs cannot be directly executed from a fresh clone. To reproduce or re-run, download the storage folders from [Google Drive](https://drive.google.com/drive/folders/14FICOHv5MnEf_qedsvyGfj64ay8mMTnv?usp=sharing) and place them in the corresponding run directories (e.g., `output/tpc-h/2026-02-26T06-27-28/gendb/`).
+
 **All engines are configured to use comparable hardware resources, and parallelism is fully enabled to ensure each system can fully demonstrate its performance. To ensure fair comparison, result or intermediate result caching, or pre-computed derived columns, are not allowed in GenDB.** GenDB outperforms all baselines on every query in both benchmarks.
 
 | | GenDB | DuckDB | Umbra | ClickHouse | MonetDB | PostgreSQL |
@@ -148,8 +154,11 @@ node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
 # Single-agent guided
 node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt guided
 
-# Run all benchmarks
-bash scripts/run_benchmarks.sh
+# Run all GenDB version configurations (multi-agent, single-agent guided/high-level)
+bash scripts/ablation.sh
+
+# Benchmark GenDB against baseline systems (DuckDB, Umbra, ClickHouse, etc.)
+python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --gendb-run output/tpc-h/<run-dir>
 ```
 
 ## Project Structure
@@ -173,6 +182,7 @@ src/gendb/
   utils/                    # C++ utility headers (mmap, hashing, timing, dates)
 
 benchmarks/
+  benchmark.py              # Benchmark GenDB against baseline systems
   tpc-h/                    # TPC-H benchmark (queries, data, ground truth, baselines)
   sec-edgar/                # SEC-EDGAR benchmark (queries, data, ground truth, baselines)
   lib/                      # Benchmark runner, plotting, system configs
@@ -180,7 +190,7 @@ benchmarks/
 
 scripts/
   setup.sh                  # Environment setup (prerequisites, dependencies, data)
-  run_benchmarks.sh         # Run all benchmark configurations
+  ablation.sh               # Execute GenDB in all version configurations
 
 .claude/skills/             # Domain skills (12 skills: join optimization, parallelism, etc.)
 assets/                     # Project figures
