@@ -434,7 +434,7 @@ function shouldContinue(queryId, history, benchmarkResults, execResults, iterati
   // Already competitive with baseline
   if (benchmarkResults && timing) {
     const best = getBestBaselineTime(benchmarkResults, queryId);
-    if (best && timing < best / 1.5) return { action: 'stop', reason: `Competitive with baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
+    if (best && timing < best / 1.2) return { action: 'stop', reason: `Competitive with baseline (${timing.toFixed(1)}ms vs ${best.toFixed(1)}ms)` };
   }
 
   // Adaptive: stop after stallThreshold consecutive non-improvements
