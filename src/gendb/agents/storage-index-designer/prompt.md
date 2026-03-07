@@ -105,6 +105,9 @@ For each join and filter pattern in the workload:
 }
 ```
 
+## No Precomputed Query Results
+The gendb storage directory may only contain **data-level** transformations: columnar encoding, type narrowing, sorting, indexes (hash indexes, zone maps, bloom filters), dense FK-lookup arrays, and dictionary encoding. You MUST NOT precompute query-specific intermediate results, partial aggregations (e.g., precomputed SUM/COUNT/AVG grouped by a key), filtered subsets, or materialized views. Each query binary must compute its answer from the stored data at runtime.
+
 ## Per-Query Guide Format (~100-150 lines)
 ```markdown
 # <QUERY_ID> Guide

@@ -40,7 +40,7 @@ const __dirname = dirname(__filename);
 const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
 const UTILS_PATH = resolve(__dirname, "utils");
 let EXPERIENCE_PATH = resolve(__dirname, "../../.claude/skills/experience/SKILL.md");
-import { defaults } from "./gendb.config.mjs";
+import { defaults, getProviderConfig } from "./gendb.config.mjs";
 import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
 import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
 import { config as queryOptimizerConfig } from "./agents/query-optimizer/index.mjs";
@@ -63,6 +63,8 @@ import {
   estimateCost,
   readJSON,
   formatDuration,
+  setAgentProvider,
+  getAgentProviderName,
 } from "./shared.mjs";
 
 // ---------------------------------------------------------------------------
@@ -80,10 +82,11 @@ function parseArgs(argv) {
     scaleFactor: defaults.scaleFactor,
     maxIterations: defaults.maxOptimizationIterations,
     stallThreshold: defaults.stallThreshold,
-    model: defaults.model,
+    model: null, // resolved after provider is set
     modelOverride: null,
     optimizationTarget: defaults.optimizationTarget,  // "hot", "cold", or legacy "execution_time"
     maxConcurrent: defaults.maxConcurrentQueries,
+    agentProvider: defaults.agentProvider,
     dbaStageA: false,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -99,6 +102,7 @@ function parseArgs(argv) {
     if (argv[i] === "--model-override" && argv[i + 1]) args.modelOverride = argv[++i];
     if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
     if (argv[i] === "--max-concurrent" && argv[i + 1]) args.maxConcurrent = parseInt(argv[++i], 10);
+    if (argv[i] === "--agent-provider" && argv[i + 1]) args.agentProvider = argv[++i];
     if (argv[i] === "--dba-stage-a") args.dbaStageA = true;
     if (argv[i] === "--no-skills") args.useSkills = false;
     if (argv[i] === "--no-dba") args.useDba = false;
@@ -127,7 +131,8 @@ function parseArgs(argv) {
  */
 function getAgentModel(agentConfigName, args) {
   if (args.modelOverride) return args.modelOverride;
-  return defaults.agentModels[agentConfigName] || args.model;
+  const providerCfg = getProviderConfig(args.agentProvider);
+  return providerCfg.agentModels[agentConfigName] || args.model || providerCfg.model;
 }
 
 function getAgentTimeout(agentConfigName) {
@@ -424,7 +429,10 @@ function shouldContinue(queryId, history, benchmarkResults, execResults, iterati
     const consecutiveFails = history.iterations.filter(i => i.validation === 'fail').length;
     const cap = defaults.correctnessFailureCap || 3;
     if (consecutiveFails >= cap * 2) return { action: 'stop', reason: 'Too many correctness failures even after escalation — needs manual review' };
-    if (consecutiveFails >= cap) return { action: 'escalate', reason: `${consecutiveFails} correctness failures — escalating to ${defaults.escalationModel || 'opus'} Code Generator` };
+    if (consecutiveFails >= cap) {
+      const providerCfg = getProviderConfig();
+      return { action: 'escalate', reason: `${consecutiveFails} correctness failures — escalating to ${providerCfg.escalationModel} Code Generator` };
+    }
     return { action: 'continue', reason: 'Fix correctness first' };
   }
 
@@ -573,6 +581,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     meta.scaleFactor = args.scaleFactor;
     meta.maxIterations = args.maxIterations;
     meta.model = args.model;
+    meta.agentProvider = args.agentProvider;
     meta.optimizationTarget = args.optimizationTarget;
     meta.phase1 = {
       status: "running",
@@ -1233,8 +1242,9 @@ async function runQueryFullPipeline(
     // --- Model escalation: re-invoke Code Generator with stronger model on repeated correctness failures ---
     if (continueDecision.action === 'escalate') {
       console.log(`[Orchestrator] [${queryId}] ESCALATING: ${continueDecision.reason}`);
-      const escalationModel = defaults.escalationModel || "opus";
-      const escalationEffort = defaults.escalationEffortLevel || "high";
+      const providerCfg = getProviderConfig(args.agentProvider);
+      const escalationModel = providerCfg.escalationModel;
+      const escalationEffort = providerCfg.escalationEffortLevel;
 
       // Build accumulated error context from all failed iterations
       const failedIters = optimizationHistory.iterations.filter(i => i.validation === 'fail');
@@ -1294,8 +1304,8 @@ async function runQueryFullPipeline(
 
       await semaphore.acquire();
       try {
-        const savedEffort = defaults.agentEffortLevels.code_generator;
-        defaults.agentEffortLevels.code_generator = escalationEffort;
+        const savedEffort = providerCfg.agentEffortLevels.code_generator;
+        providerCfg.agentEffortLevels.code_generator = escalationEffort;
         const escalationResult = await runAgent(codeGeneratorConfig.name, {
           systemPrompt: cgSystemPrompt,
           userPrompt: escalationPrompt,
@@ -1306,7 +1316,7 @@ async function runQueryFullPipeline(
           useSkills: args.useSkills,
           domainSkillsPrompt: codeGeneratorConfig.domainSkillsPrompt,
         });
-        defaults.agentEffortLevels.code_generator = savedEffort;
+        providerCfg.agentEffortLevels.code_generator = savedEffort;
         recordAgentTelemetry(queryPhase, "code_generator_escalation", escalationResult.durationMs, escalationResult.tokens, escalationResult.costUsd);
         if (escalationResult.error) console.error(`[Orchestrator] [${queryId}] Escalation failed (non-fatal): ${escalationResult.error}`);
       } finally {
@@ -2422,6 +2432,10 @@ async function main() {
 
   const args = parseArgs(process.argv);
 
+  // Initialize agent provider and resolve default model
+  setAgentProvider(args.agentProvider);
+  if (!args.model) args.model = getProviderConfig(args.agentProvider).model;
+
   // Conditionally disable experience skill path when skills are off
   if (!args.useSkills) {
     EXPERIENCE_PATH = "";
@@ -2469,8 +2483,10 @@ async function main() {
   console.log(`[Orchestrator] Max Concurrent:      ${args.maxConcurrent}`);
   console.log(`[Orchestrator] Default Model:       ${args.model}`);
   console.log(`[Orchestrator] Model Override:      ${args.modelOverride || "(none)"}`);
-  console.log(`[Orchestrator] Agent Models:        ${JSON.stringify(defaults.agentModels)}`);
-  console.log(`[Orchestrator] Effort Levels:       ${JSON.stringify(defaults.agentEffortLevels)}`);
+  const activeProviderCfg = getProviderConfig(args.agentProvider);
+  console.log(`[Orchestrator] Agent Provider:      ${args.agentProvider}`);
+  console.log(`[Orchestrator] Agent Models:        ${JSON.stringify(activeProviderCfg.agentModels)}`);
+  console.log(`[Orchestrator] Effort Levels:       ${JSON.stringify(activeProviderCfg.agentEffortLevels)}`);
   console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
   const runLabel = args.optimizationTarget === 'hot' ? `${defaults.optimizationRuns} hot` : `${defaults.optimizationRuns} cold`;
   console.log(`[Orchestrator] Optimization Runs:   ${runLabel}`);

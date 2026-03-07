@@ -28,7 +28,7 @@ Each extension is [difficult](https://www.vldb.org/pvldb/vol18/p1962-kim.pdf) an
 
 [Paper](https://arxiv.org/pdf/2603.02081)
 
-Currently, GenDB is implemented with Claude Code Agent as the underlying component in the multi-agent system, and evaluated on OLAP workloads (TPC-H, SEC-EDGAR). For developers, it automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
+GenDB supports multiple LLM agent providers — currently **Claude** (via `@anthropic-ai/claude-agent-sdk`) and **OpenAI Codex** (via `@openai/codex-sdk`) — and is designed for easy extension to additional providers. It is evaluated on OLAP workloads (TPC-H, SEC-EDGAR). For developers, it automatically generates instance-optimized execution code whose correctness can be verified by manual inspection. For users without an SQL background, GenDB can be extended with a natural language interface, similar to conversational analytics services already deployed in production.
 
 **When to use GenDB today.** GenDB is well suited for recurring workloads where upfront generation cost pays off over many executions. For ad-hoc queries, GenDB can be combined with a traditional DBMS in a hybrid architecture: the traditional system handles one-off queries, while GenDB accelerates frequent ones. As LLMs become faster and cheaper, we expect the generation overhead to shrink — the long-term target is per-query generation in seconds at minimal cost, making the hybrid boundary increasingly irrelevant.
 
@@ -116,7 +116,9 @@ This is just one dimension of instance optimization. GenDB similarly adapts join
 
 - **Node.js 18+** and npm
 - **g++** with C++17 and OpenMP support (`sudo apt-get install build-essential`)
-- **Claude access** — either `export ANTHROPIC_API_KEY=your_key`, or log in to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with a Pro/Max/Team/Enterprise subscription plan
+- **LLM agent access** (one of):
+  - **Claude** — `export ANTHROPIC_API_KEY=your_key`, or log in to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with a Pro/Max/Team/Enterprise subscription plan
+  - **Codex** — `export CODEX_API_KEY=your_key` (or `OPENAI_API_KEY`)
 
 ### Setup
 
@@ -146,15 +148,23 @@ GenDB supports four operating modes:
 
 All modes support `--optimization-target hot` (optimize for cached/warm runs, default) or `--optimization-target cold` (optimize for cold runs with OS cache cleared before each execution).
 
+All modes support `--agent-provider claude` (default) or `--agent-provider codex` to select the underlying LLM agent.
+
 ```bash
-# Multi-agent (5 agents, default)
+# Multi-agent (5 agents, default, Claude)
 node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10
+
+# Multi-agent with Codex agent
+node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --agent-provider codex --model gpt-5.3-codex
 
 # Multi-agent with domain skills (7 agents)
 node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --use-skills
 
 # Single-agent guided
 node src/gendb/single.mjs --benchmark tpc-h --sf 10 --single-agent-prompt guided
+
+# Single-agent with Codex
+node src/gendb/single.mjs --benchmark tpc-h --sf 10 --agent-provider codex --model gpt-5.3-codex
 
 # Run all GenDB version configurations (multi-agent, single-agent guided/high-level)
 bash scripts/ablation.sh
@@ -169,8 +179,12 @@ python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --gendb-run output/tpc
 src/gendb/
   orchestrator.mjs          # Multi-agent pipeline orchestration
   single.mjs                # Single-agent mode entry point
-  shared.mjs                # Shared utilities (runAgent, templates, Agent SDK)
-  gendb.config.mjs          # Configuration (models, timeouts, iteration limits)
+  shared.mjs                # Shared utilities (runAgent dispatcher, templates)
+  gendb.config.mjs          # Configuration (pipeline settings + per-provider config)
+  providers/                # Agent provider implementations (extensible)
+    index.mjs               #   Provider registry and lazy loader
+    claude.mjs              #   Claude provider (@anthropic-ai/claude-agent-sdk)
+    codex.mjs               #   Codex provider (@openai/codex-sdk)
   agents/                   # Agent prompts and logic
     workload-analyzer/      #   Workload & hardware profiling
     storage-index-designer/ #   Storage layout & index design

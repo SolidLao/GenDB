@@ -18,7 +18,7 @@ import {
   getSchemaPath,
   getQueriesPath,
 } from "./config.mjs";
-import { defaults } from "./gendb.config.mjs";
+import { defaults, getProviderConfig } from "./gendb.config.mjs";
 import {
   createRunId,
   getWorkloadName,
@@ -31,6 +31,8 @@ import {
   parseQueryFile,
   readJSON,
   formatDuration,
+  setAgentProvider,
+  getAgentProviderName,
 } from "./shared.mjs";
 import { config as singleAgentConfig } from "./agents/single-agent/index.mjs";
 
@@ -53,9 +55,10 @@ function parseArgsSingle(argv) {
     targetBenchmark: defaults.targetBenchmark,
     scaleFactor: defaults.scaleFactor,
     maxIterations: sa.maxOptimizationIterations,
-    model: sa.model,
+    model: null, // resolved after provider is set
     modelOverride: null,
     optimizationTarget: defaults.optimizationTarget,
+    agentProvider: defaults.agentProvider,
     promptVariant: sa.promptVariant,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -69,6 +72,7 @@ function parseArgsSingle(argv) {
     if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     if (argv[i] === "--model-override" && argv[i + 1]) args.modelOverride = argv[++i];
     if (argv[i] === "--optimization-target" && argv[i + 1]) args.optimizationTarget = argv[++i];
+    if (argv[i] === "--agent-provider" && argv[i + 1]) args.agentProvider = argv[++i];
     if (argv[i] === "--single-agent-prompt" && argv[i + 1]) args.promptVariant = argv[++i];
   }
   if (!args.schema) args.schema = getSchemaPath(args.targetBenchmark);
@@ -218,6 +222,14 @@ function formatBenchmarkContext(benchmarkResults) {
 async function main() {
   const startTime = Date.now();
   const args = parseArgsSingle(process.argv);
+
+  // Initialize agent provider
+  setAgentProvider(args.agentProvider);
+  console.log(`[Single] Agent provider: ${getAgentProviderName()}`);
+
+  // Resolve model from provider config if not set via CLI
+  const providerCfg = getProviderConfig(args.agentProvider);
+  if (!args.model) args.model = providerCfg.singleAgent.model;
   const effectiveModel = args.modelOverride || args.model;
 
   // Read schema and queries
@@ -289,6 +301,7 @@ async function main() {
     runId,
     workload,
     mode: "single-agent",
+    agentProvider: args.agentProvider,
     promptVariant,
     model: effectiveModel,
     gendbDir: args.gendbDir,

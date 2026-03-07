@@ -247,6 +247,9 @@ If the user prompt includes a "Correctness Anchors" section, those constants wer
 in a passing iteration. Include them verbatim in your plan's `"correctness_anchors"` field
 so the Code Generator preserves them — date literals, scaled thresholds, revenue formulas.
 
+## No Precomputed Query Results
+Storage extensions (Category E) may only contain **data-level** transformations: dictionary encoding, compact indexes, dense FK-lookup arrays, type narrowing. You MUST NOT precompute query-specific intermediate results, partial aggregations (e.g., precomputed SUM/COUNT/AVG grouped by a key), filtered subsets, or materialized views. Each query binary must compute its answer from the stored data at runtime.
+
 ## Key Rules
 1. For Categories A-D: you produce ONLY a revised plan.json — no C++ code.
 2. For Category E: you build the storage extension first (C++ build program + compile + run),
