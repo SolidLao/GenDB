@@ -1,0 +1,148 @@
+{
+  "query_id": "Q4",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version_stmt.count_hash",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.adsh_tag_version_stmt.count_hash/counts.bin",
+        "codes_format": "uint32_t[capacity]"
+      },
+      "usage": "mmap the persistent composite hash-index arrays for (adsh,tag,version,stmt)->count; in each scan morsel memoize probe results by (adsh,tag,version) so repeated num keys pay one hash probe, then reuse the cached pre_count for all duplicate rows in the morsel"
+    }
+  ],
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "filter_num_usd_blocks",
+    "scan_num_in_cache_sized_morsels",
+    "probe_sub_adsh_lookup",
+    "memoized_pre_stmt_count_probe",
+    "memoized_tag_version_probe",
+    "partition_qualifying_rows",
+    "aggregate_partitions",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = 'USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Keep the dense adsh lookup as the cheapest first filter on the sequential num scan."
+    },
+    {
+      "build": "pre(pre.adsh_tag_version_stmt.count_hash, filtered by stmt = 'EQ' in the probe key)",
+      "probe": "num(post sub filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 979282,
+      "notes": "Use the existing persistent count hash, but add a per-morsel memo table keyed by (adsh,tag,version) so duplicate num keys in the morsel reuse one pre lookup."
+    },
+    {
+      "build": "tag(tag_version_hash, abstract = 0)",
+      "probe": "num(post sub+pre filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Probe after sub and pre filtering, with a per-morsel memo table keyed by (tag,version) so repeated labels are fetched once per morsel."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sub/indexes/adsh_to_rowid.bin) with row-level reads of sub.sic and sub.cik",
+    "fact_join": "persistent compact_hash_map(pre.adsh_tag_version_stmt.count_hash) plus cache-sized per-morsel memo table for (adsh,tag,version)->pre_count, and pre-built tag_version_hash plus cache-sized per-morsel memo table for (tag,version)->{tag_row,tlabel}",
+    "aggregation": "scan-time radix/hash partition buffers on final group_key=(sic,tlabel) carrying {group_key,cik,scaled_value,pre_count}; then per-partition compact_hash_map for sums/counts plus per-partition distinct_pair_set(group_key,cik)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "direct adsh lookup before sic and cik reads"
+    },
+    {
+      "index": "column_versions/pre.adsh_tag_version_stmt.count_hash/*",
+      "purpose": "direct lookup of stmt='EQ' multiplicity for (adsh,tag,version), reused through per-morsel memoization"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "lookup tag rowid and tlabel only after sub and pre filtering, with repeated (tag,version) probes absorbed by the morsel-local cache"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the dominant hot-loop cost is repeated random join work on the same num keys, where many fact rows share an (adsh,tag,version) or (tag,version) combination but the current scan still re-probes pre and tag almost row by row; that makes work larger than the unique-key output the join logic actually depends on. Strategy category C: keep the proven sub->pre->tag join order, switch the pre path to the existing persistent stmt count hash, and process num in cache-sized morsels with local memo tables so each unique join key in a morsel pays at most one random pre probe and one random tag probe before the existing partitioned aggregation.",
+  "correctness_anchors": {}
+}

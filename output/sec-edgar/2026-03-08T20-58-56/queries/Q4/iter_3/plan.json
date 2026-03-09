@@ -1,0 +1,139 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub",
+    "filter_pre_stmt",
+    "build_tag_lookup_needed_only",
+    "probe_num_by_adsh_index",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "pre(stmt='EQ') stream",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Build dense adsh->(sic,cik) filter first; retain only pre triples whose adsh survives SIC predicate."
+    },
+    {
+      "build": "pre(filtered: stmt='EQ' AND adsh in filtered sub)",
+      "probe": "num rows from num_adsh_fk_hash postings for filtered adsh",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 88100,
+      "notes": "Compact triple hash set on (adsh,tag,version) after SIC pruning; avoids cache-exceeding num triple posting index."
+    },
+    {
+      "build": "tag(filtered: abstract=0 and key in needed pairs)",
+      "probe": "post-semi-join num stream",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 120000,
+      "notes": "Materialize (tag,version)->tlabel only for keys observed in retained pre triples."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_posting_on_filtered_adsh"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh->sub_rowid) + bitset(filtered_adsh) + compact_hash_map((tag,version)->tlabel for needed pairs)",
+    "fact_join": "compact_hash_set((adsh,tag,version) from pre stmt='EQ' intersect filtered_adsh)",
+    "aggregation": "compact_hash_map((sic,tlabel,stmt) -> {sum,count,distinct_cik_hash_set})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "tag_tag_version_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is wasted work and startup-heavy physical choices: the prior plan deserializes and probes cache-exceeding triple index structures before the selective SIC predicate is applied, so data_loading and build_joins dominate. Strategy Category C (work elimination) with plan restructuring applies sub SIC filtering first, intersects pre(stmt='EQ') with those adsh values to build a much smaller triple semi-join set, then probes num through num_adsh_fk_hash only for surviving filings; tag lookup is materialized only for needed (tag,version) keys. This removes most unnecessary startup parsing and reduces probe work to rows proportional to filtered adsh output.",
+  "correctness_anchors": {
+    "threshold_constant": [
+      4000,
+      4000,
+      100000
+    ]
+  }
+}

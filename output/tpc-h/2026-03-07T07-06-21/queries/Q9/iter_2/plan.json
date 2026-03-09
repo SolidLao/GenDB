@@ -1,0 +1,141 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "parallel_dim_filter",
+    "parallel_lineitem_scan",
+    "aggregate_reduce",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "notes": "mmap p_name.bin + p_partkey.bin. Build uint8_t green_part[2000001] using 64 threads in parallel: split 2M parts into 64 equal chunks, each thread scans its chunk with strstr('green') and writes green_part[p_partkey[i]]=1. Safe: p_partkey is PK so all write indices are unique. Eliminates single-threaded 107MB fread bottleneck."
+    },
+    {
+      "build": "orders(o_orderdate → year_by_orderrow, all 15M order rows)",
+      "probe": "lineitem(l_orderkey) [green-filtered] via orders_by_orderkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Build uint8_t year_by_orderrow[15000001] in parallel using 64 threads: each thread scans its chunk of o_orderdate (already mmap'd), computes year=extract_year(o_orderdate[row])-1992 as uint8_t, stores at year_by_orderrow[row]. Cost: scan 57MB o_orderdate (already mmap'd) in parallel — ~0.1ms wall-clock. Hot path: orow=orders_by_orderkey[l_orderkey[i]] (1 DRAM miss into 240MB), year_off=(int)year_by_orderrow[orow] (L3 hit: 15MB). Eliminates o_orderdate DRAM miss vs iter_0. Key difference from iter_1: indexed by ORDER ROW (15MB fits L3) not by orderkey (60MB exceeds 44MB LLC)."
+    },
+    {
+      "build": "supplier(s_suppkey → nationrow)",
+      "probe": "lineitem(l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Precompute int32_t suppkey_to_nationrow[100001]: load supplier_by_suppkey + s_nationkey + nation_by_nationkey + n_name. 400KB, always L3-resident. Built single-threaded (trivial size)."
+    },
+    {
+      "build": "partsupp(pre-built hash index)",
+      "probe": "lineitem(l_partkey, l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8000000,
+      "notes": "Use pre-built partsupp_hash_index (mmap, 256MB). No runtime build cost. Composite key = partkey*200001ULL+suppkey, FIB_CONST=11400714819323198485ULL, LOG2_CAP=24. Deliberately kept as pre-built to avoid iter_1 mistake of adding ~121MB build I/O overhead that cost more than it saved."
+    },
+    {
+      "build": "nation(n_nationkey → n_name)",
+      "probe": "supplier(s_nationkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "25-row nation table loaded at startup. Folded into suppkey_to_nationrow. Trivial cost."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "output_rows": 110000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",       "file": "lineitem/l_partkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey",       "file": "lineitem/l_suppkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "green_part_filter":    "uint8_t[2000001], 2MB, L3-resident; indexed by p_partkey; built in parallel via mmap",
+    "year_by_orderrow":     "uint8_t[15000001], 15MB, L3-resident; indexed by order row index (orow = orders_by_orderkey[l_orderkey]); stores (year-1992) as uint8_t; built in parallel from mmap'd o_orderdate; fits in 44MB L3 alongside other hot structures",
+    "orders_by_orderkey":   "mmap int32_t[60000001], 240MB; MADV_RANDOM; first-level lookup orow = orders_by_orderkey[l_orderkey[i]]",
+    "partsupp_ht":          "mmap pre-built partsupp_hash_index HTSlot[16777216], 256MB; MADV_RANDOM; no runtime build",
+    "ps_supplycost":        "mmap double[8000000], 61MB; MADV_RANDOM; fetched via partsupp_ht row_idx",
+    "suppkey_to_nationrow": "int32_t[100001], 400KB, L3-resident",
+    "nation_names":         "char[25][26], 650 bytes, L3-resident",
+    "aggregation":          "double profits[25][10] per thread in alignas(64) struct; reduced single-threaded after parallel phase",
+    "l3_hot_budget":        "green_part(2MB) + year_by_orderrow(15MB) + suppkey_to_nationrow(0.4MB) = 17.4MB total hot structures, within 44MB LLC"
+  },
+  "parallelism": {
+    "strategy":   "morsel_driven",
+    "threads":    "auto(nproc)",
+    "morsel_size": 100000,
+    "parallel_phase_1": "dim_filter: launch nthreads threads; each scans chunk of p_name (for green_part build) and chunk of o_orderdate (for year_by_orderrow build); use std::barrier or join+relaunch for phase synchronization",
+    "parallel_phase_2": "main_scan: morsel-driven over 60M lineitem rows with atomic morsel counter",
+    "thread_local_state": "double profits[25][10] per thread in alignas(64) struct",
+    "reduction": "single-threaded sum of thread_profits after parallel scan"
+  },
+  "indexes": [
+    {
+      "index": "green_part uint8_t[2000001]",
+      "purpose": "O(1) filter lineitem by l_partkey; 2MB L3-resident; built in parallel"
+    },
+    {
+      "index": "year_by_orderrow uint8_t[15000001]",
+      "purpose": "O(1) orow → year_offset (0-6); 15MB L3-resident; replaces o_orderdate DRAM miss with L3 hit"
+    },
+    {
+      "index": "orders/orders_by_orderkey.bin (dense_array, mmap)",
+      "purpose": "O(1) l_orderkey → orow; 240MB; 1 DRAM miss per qualifying row (unavoidable first-level lookup)"
+    },
+    {
+      "index": "partsupp/partsupp_hash_index.bin (pre-built open-addressing hash, mmap)",
+      "purpose": "O(1) avg (l_partkey, l_suppkey) → ps_supplycost row; 256MB; DRAM random access; kept pre-built to avoid build overhead"
+    },
+    {
+      "index": "suppkey_to_nationrow int32_t[100001]",
+      "purpose": "O(1) l_suppkey → nation row; 400KB L3-resident"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_detail": {
+    "groups": 175,
+    "structure": "double profits[25][10] indexed by [nationrow][year-1992], in alignas(64) ThreadProfits struct per thread",
+    "finalize": "iterate 25x10, collect non-zero (n_name, year, sum) tuples, sort by (nation ASC, year DESC)"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "hot_path_per_qualifying_lineitem_row": [
+    "if (!green_part[l_partkey[i]]) continue;  // L3 hit, 2MB",
+    "__builtin_prefetch(&orders_by_orderkey[l_orderkey[i+20]], 0, 0);  // software prefetch ~20 rows ahead",
+    "int32_t nrow = suppkey_to_nationrow[l_suppkey[i]];  // L3 hit, 0.4MB",
+    "int32_t orow = orders_by_orderkey[l_orderkey[i]];  // 1 DRAM miss into 240MB (prefetched)",
+    "int year_off = (int)year_by_orderrow[orow];  // L3 hit into 15MB (was: DRAM miss into 57MB + compute)",
+    "if ((unsigned)year_off >= 7u) continue;",
+    "double sc = lookup_supplycost(l_partkey[i], l_suppkey[i], ps_ht, ps_supplycost);  // DRAM (256MB + 61MB)",
+    "double amount = l_extendedprice[i]*(1.0-l_discount[i]*0.01) - sc*(double)(uint8_t)l_quantity[i];",
+    "profits[nrow][year_off] += amount;"
+  ],
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: two bottlenecks identified. (1) Category A — plan restructuring: the dim_filter phase in iter_0 runs entirely single-threaded, doing a 107MB fread of p_name.bin followed by a serial strstr scan of 2M parts while all 64 worker threads sit idle; this costs ~13ms of sequential preprocessing. Fix: use mmap for p_name.bin and p_partkey.bin, then launch all nthreads threads to scan p_name in parallel (safe since p_partkey is a PK, all write indices to green_part[] are unique). Also build year_by_orderrow in parallel during the same phase. (2) Category C — work elimination: the orders lookup chain has a two-level DRAM access (orders_by_orderkey[l_orderkey[i]] -> o_orderdate[orow] -> extract_year), costing 2 DRAM misses per qualifying row. Fix: precompute uint8_t year_by_orderrow[15000001] indexed by order row — 15MB fits in 44MB LLC (unlike iter_1's 60MB okey_yearoff indexed by orderkey which exceeded LLC). Total L3 hot budget: green_part(2MB)+year_by_orderrow(15MB)+suppkey_to_nationrow(0.4MB)=17.4MB, well within 44MB. The pre-built partsupp_hash_index is kept as-is (no runtime build) to avoid iter_1's mistake of adding ~121MB build I/O overhead that exceeded the savings. Software prefetch for orders_by_orderkey added to hide the one remaining DRAM latency chain.",
+  "correctness_anchors": {
+    "threshold_constant": 2000000,
+    "threshold_constant_2": 100000
+  }
+}

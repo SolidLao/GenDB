@@ -1,0 +1,75 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["load_dictionaries", "scan_aggregate", "finalize_output"],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt IS NOT NULL",
+      "selectivity": 0.9999,
+      "implementation": "Use stmt_offsets index to skip the row range for the empty-string dict code entirely, avoiding per-row predicate checks"
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "total_rows": 9600799,
+    "columns": ["stmt_code", "rfile_code", "sub_fk", "line"],
+    "strategy": "Use stmt_offsets to iterate only over non-null stmt_code ranges. For each valid stmt_code, scan the contiguous row range [start, end) and read rfile_code, sub_fk, line columns at those offsets."
+  },
+  "data_structures": {
+    "aggregation": "direct_2d_array[9][2] of AggState structs per thread",
+    "agg_state_fields": {
+      "count": "uint64_t",
+      "sum_line": "int64_t",
+      "distinct_sub_fk": "bitset(86135)"
+    },
+    "notes": "18 groups max (9 stmt codes × 2 rfile codes). Each thread has a thread-local 2D array of AggState. Bitset for COUNT(DISTINCT sub_fk): 86135 bits ≈ 10.5 KB per group, 18 groups ≈ 189 KB per thread. With 64 threads ≈ 12 MB total — fits comfortably in L3 cache (44 MB)."
+  },
+  "aggregation": {
+    "strategy": "array_direct",
+    "group_key": "(stmt_code, rfile_code)",
+    "group_key_types": "(uint8_t, uint8_t)",
+    "max_groups": 18,
+    "aggregates": [
+      {"name": "cnt", "function": "COUNT(*)"},
+      {"name": "num_filings", "function": "COUNT(DISTINCT sub_fk)", "distinct_method": "bitset(86135)"},
+      {"name": "avg_line_num", "function": "AVG(line)", "method": "sum_and_count"}
+    ],
+    "merge": "OR bitsets across threads for distinct count; SUM counts and sum_line across threads"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Partition row ranges across threads. Each thread maintains thread-local AggState[9][2]. Merge all thread-local states after scan completes."
+  },
+  "indexes": [
+    {
+      "index": "stmt_offsets",
+      "file": "pre/stmt_offsets.bin",
+      "purpose": "skip_null_rows — identify and skip the row range for the empty-string stmt_code, iterate only non-null code ranges"
+    }
+  ],
+  "dictionary_decoding": [
+    {
+      "column": "stmt_code",
+      "offsets_file": "pre/stmt_dict_offsets.bin",
+      "data_file": "pre/stmt_dict_data.bin",
+      "num_entries": 9,
+      "purpose": "Decode stmt_code to string for output; identify empty-string code for IS NOT NULL filter"
+    },
+    {
+      "column": "rfile_code",
+      "offsets_file": "pre/rfile_dict_offsets.bin",
+      "data_file": "pre/rfile_dict_data.bin",
+      "num_entries": 2,
+      "purpose": "Decode rfile_code to string for output"
+    }
+  ],
+  "output": {
+    "columns": ["stmt", "rfile", "cnt", "num_filings", "avg_line_num"],
+    "order_by": ["cnt DESC"],
+    "expected_rows": 14,
+    "sort_strategy": "std::sort on ~18 result tuples"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,80 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "filter_sub_fy",
+    "build_pre_is_hash",
+    "scan_num_filter_uom_join_sub",
+    "join_pre_and_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub.adsh_to_rowid(fy=2023,name)",
+      "probe": "num(uom='USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612
+    },
+    {
+      "build": "pre(stmt='IS') keyed by (adsh,tag,version) -> plabel[]",
+      "probe": "num(uom='USD') joined with sub(fy=2023)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1767049
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.844
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.184
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_id->sub_rowid) with fy/name side arrays",
+    "fact_join": "compact_hash_map(pre_sized) keyed by (adsh,tag,version) with contiguous plabel payloads",
+    "aggregation": "compact_hash_map(pre_sized)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre/indexes/stmt.zone_map.bin",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp"
+}

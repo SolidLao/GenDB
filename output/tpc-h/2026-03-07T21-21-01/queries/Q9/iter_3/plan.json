@@ -1,0 +1,134 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "filter_dim",
+    "build_green_partsupp_direct",
+    "join_fact_stream_orders",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "partsupp",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 108782,
+      "notes": "Build the green-part bitset and a dense partkey->green-slot array once so later joins touch only qualifying part keys."
+    },
+    {
+      "build": "partsupp(filtered by green parts)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 435128,
+      "notes": "Scan partsupp sequentially once, keep only green rows, and materialize a compact green-slot -> up-to-4 (suppkey,supplycost) payload so the lineitem hot path avoids random posting probes."
+    },
+    {
+      "build": "supplier(pk dense) -> nation(pk dense)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Keep supplier-to-nation as a small dense lookup keyed by s_suppkey."
+    },
+    {
+      "build": "orders(sorted by o_orderkey)",
+      "probe": "lineitem(sorted by l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Exploit the shared key order to advance a sequential orders cursor during the lineitem scan and derive o_year on demand instead of precomputing orderkey->year."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "partsupp",
+      "predicate": "ps_partkey IN green_part_filter",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_partkey IN green_part_filter",
+      "selectivity": 0.054386796769068234
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_partkey",
+        "file": "lineitem/l_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_suppkey",
+        "file": "lineitem/l_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(2000001) + direct_array(partkey_to_green_slot)",
+    "fact_join": "direct_array(green_slot_to_4x(suppkey,supplycost)) + direct_array(supplier_to_nation_code) + sequential_orders_cursor",
+    "aggregation": "compact_hash_map(pre_sized_256)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the stalled plans spent too much time either walking cache-exceeding partsupp posting payloads from the lineitem hot path or prebuilding large helper arrays, especially orderkey->year, that do not fit the hardware budget. Strategy category A/B/C: keep the green-part filter, build the partsupp join state with one sequential scan into an LLC-resident direct structure keyed by green part slot, and fuse the orders join into the lineitem scan by exploiting that both tables are sorted by order key so o_year is produced by a streaming cursor rather than a 15M-row precompute.",
+  "correctness_anchors": {}
+}

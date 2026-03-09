@@ -1,0 +1,119 @@
+{
+  "query_id": "Q24",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version.partitioned_exact_p19",
+      "action": "built_new",
+      "files": {
+        "offsets": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/offsets.bin",
+        "offsets_format": "uint64_t[524289]",
+        "keys": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/keys.bin",
+        "keys_format": "TripleKey[row_count] where TripleKey={uint32_t a, uint32_t b, uint32_t c}"
+      },
+      "usage": "mmap offsets.bin and keys.bin; compute partition = hash_triple(adsh, tag, version) >> 45, then linearly scan keys[offsets[partition] .. offsets[partition + 1]) for an exact anti-join existence check instead of probing pre_adsh_tag_version_groups.hash.bin"
+    }
+  ],
+  "pipeline": [
+    "date_postings_range",
+    "uom_postings_membership",
+    "value_non_null_filter",
+    "anti_probe_pre_partitioned_exact_index",
+    "hash_aggregate_tag_version",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version partitioned exact index)",
+      "probe": "num(filtered: ddate range, uom=USD, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Use the new exact partitioned-membership index over pre triples: 524288 hash partitions over 8631890 unique keys, so each probe touches a 4.1 MB offsets directory plus a tiny contiguous key slice (avg 16.5 triples, max 37) instead of random-walking the 33554432-bucket open-addressed hash table."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 9026731,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "postings-driven candidate enumeration with random gathers into num columns; anti-join probe becomes one hash computation, one directory lookup, and a short contiguous exact-key scan"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(39401761) for num_uom_postings membership; drive from num_ddate_postings range rowids",
+    "fact_join": "pre_built_index(hash_partitioned_exact_triples_p19) using uint64_t partition offsets plus contiguous TripleKey slices",
+    "aggregation": "compact_hash_map(thread_local, pre_sized) keyed by packed(tag,version) -> {count_rows,sum_value}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidate rowids via postings range scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "apply USD membership before anti-join probes"
+    },
+    {
+      "index": "pre.adsh_tag_version.partitioned_exact_p19",
+      "purpose": "exact anti-join existence lookup on (adsh, tag, version) with cache-friendly partitioned slices"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC",
+      "tag ASC",
+      "version ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the anti-join probes a 33554432-bucket open-addressed pre hash table whose 24-byte buckets occupy about 805 MB, far beyond the 88 MB LLC, so roughly 9.0M filtered num candidates pay random cache-miss latency in the hot path. Strategy category E: build and use a new exact partitioned-membership storage extension from the persisted unique pre triples, with 524288 hash partitions, a 4.1 MB offsets directory, and contiguous per-partition key slices averaging 16.5 triples (max 37). The revised plan keeps the postings-driven num filtering and direct (tag,version) aggregation, but replaces each cache-thrashing anti-probe with a directory lookup plus a tiny sequential exact-key scan."
+,
+  "correctness_anchors": {}
+}

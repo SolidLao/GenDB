@@ -1,0 +1,123 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_building_dict_code",
+    "build_customer_membership_bitset",
+    "scan_orders_with_orderdate_zone_pruning",
+    "probe_lineitem_group_runs_in_orderkey_order",
+    "aggregate_revenue_per_order",
+    "topk_10_by_revenue"
+  ],
+  "join_order": [
+    {
+      "build": "customer(BUILDING bitset)",
+      "probe": "orders(sequential scan with orderdate pruning)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 300276,
+      "notes": "Populate a dense customer-membership bitset from customer_mktsegment_postings, then test customer_bitset[o_custkey] during a sequential orders scan after zone-map pruning on o_orderdate."
+    },
+    {
+      "build": "orders(filtered by customer and orderdate, in o_orderkey order)",
+      "probe": "lineitem_orderkey_groups",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1478979,
+      "notes": "Use the qualifying order row id to read lineitem_orderkey_groups row_starts/row_counts directly and aggregate each order's contiguous lineitem run immediately, without materializing large qualifying-order payload arrays."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.487702
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.511
+    }
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_starts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_starts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_counts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_counts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001) populated from customer_mktsegment_postings",
+    "fact_join": "direct_array(customer membership on o_custkey during sequential orders scan; row-aligned lookup into lineitem_orderkey_groups)",
+    "aggregation": "array_direct(per-order scalar revenue accumulation with thread-local topk heaps)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_postings",
+      "purpose": "build dense customer-membership bitset for BUILDING"
+    },
+    {
+      "index": "orders_orderdate_zone_map",
+      "purpose": "skip and fast-accept order blocks during sequential orders scan"
+    },
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "direct row-aligned access to contiguous lineitem runs per qualifying order"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan spends almost all time in build_joins because it drives orders through orders_custkey_postings from qualifying customers, creating many random probes into orders metadata and materializing large intermediate qualifying-order arrays before scanning lineitem. Strategy category A (plan restructuring): build a tiny dense customer-membership bitset from the customer postings, then scan orders sequentially with orders_orderdate_zone_map pruning, test customer membership inline, and immediately probe the row-aligned lineitem_orderkey_groups to aggregate revenue per qualifying order in o_orderkey order. This replaces random index-nested-loop behavior with cache-friendly sequential access and fuses join plus aggregation to eliminate the expensive intermediate buffers.",
+  "correctness_anchors": {}
+}

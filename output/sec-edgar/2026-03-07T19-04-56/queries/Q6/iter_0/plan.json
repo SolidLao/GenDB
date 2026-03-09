@@ -1,0 +1,102 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_sub_fy2023",
+    "build_name_id_map",
+    "find_dict_codes",
+    "build_pre_hash_map_for_IS",
+    "scan_num_usd_range",
+    "aggregate",
+    "topk"
+  ],
+  "filters": [
+    {"table": "sub", "column": "fy", "predicate": "fy == 2023", "selectivity": 0.188, "result_rows": 16200},
+    {"table": "num", "column": "uom_code", "predicate": "uom = 'USD'", "selectivity": 0.844, "result_rows": 33250000, "method": "uom_offsets_range"},
+    {"table": "num", "column": "value", "predicate": "!isnan(value)", "selectivity": 0.95},
+    {"table": "pre", "column": "stmt_code", "predicate": "stmt = 'IS'", "selectivity": 0.11, "result_rows": 1060000, "method": "stmt_offsets_range"}
+  ],
+  "steps": [
+    {
+      "id": "filter_sub",
+      "operation": "Load sub/fy.bin (86,135 rows). Build bitset fy2023_mask[sub_row] where fy == 2023."
+    },
+    {
+      "id": "build_name_id_map",
+      "operation": "Load sub/name_offsets.bin + name_data.bin. Build name_string → name_id map. Then build sub_fk_to_name_id[sub_row] = name_id array. This merges sub rows with identical names into the same group key."
+    },
+    {
+      "id": "find_dict_codes",
+      "operation": "Load uom_dict to find usdCode. Load stmt_dict to find isCode."
+    },
+    {
+      "id": "build_pre_hash_map",
+      "operation": "Use stmt_offsets to get IS row range in pre. For each pre row in IS range, read (sub_fk, tag_code, version_code, pre_row_idx). Build hash map: key=(sub_fk, tag_code, version_code) → value=pre_row_idx. This is a multi-value map since multiple pre rows can match same key. Only ~1.06M entries."
+    },
+    {
+      "id": "load_pre_plabel",
+      "operation": "Load pre/plabel_offsets.bin + plabel_data.bin. Needed to resolve plabel for matching pre rows during aggregation."
+    },
+    {
+      "id": "scan_num_aggregate",
+      "operation": "Use uom_offsets to get USD contiguous range (~33.2M rows). Load num/sub_fk.bin, num/tag_code.bin, num/version_code.bin, num/value.bin for that range. For each row: (1) check !isnan(value), (2) check fy2023_mask[sub_fk], (3) probe pre hash map with (sub_fk, tag_code, version_code), (4) for each matching pre_row: aggregate into group. Effective rows reaching probe: ~6.2M."
+    },
+    {
+      "id": "aggregate_and_output",
+      "operation": "Aggregate SUM(value) and COUNT(*) per group key. Decode tag from tag_dict, resolve plabel from pre table, resolve name from name_id. Sort by total_value DESC, LIMIT 200."
+    }
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered by fy=2023)",
+      "probe": "num(USD range)",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 16200,
+      "notes": "Bitset indexed by sub_fk for O(1) filter during num scan"
+    },
+    {
+      "build": "pre(filtered by stmt='IS')",
+      "probe": "num(USD range, fy2023-filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1060000,
+      "notes": "Build hash map from IS-filtered pre rows keyed on (sub_fk, tag_code, version_code). Multi-value: one key may map to multiple pre rows. Probe from num scan."
+    }
+  ],
+  "data_structures": {
+    "fy2023_mask": "bitset(86135)",
+    "sub_fk_to_name_id": "direct_array(uint32_t, 86135)",
+    "name_id_map": "hash_map<string, uint32_t> for deduplicating sub names",
+    "pre_hash_map": "compact_hash_multimap<(sub_fk,tag_code,version_code) → pre_row_idx>, pre-sized ~1.06M entries, use same hashKey3 function as pre_by_adsh_tag_ver index",
+    "aggregation": "compact_hash_map<(name_id:u32, tag_code:u32, plabel_offset:u64) → (sum:double, count:uint64_t)>, estimated ~200K groups"
+  },
+  "group_key": {
+    "design": "(name_id, tag_code, plabel_offset)",
+    "rationale_name_id": "Multiple sub_fk can share the same s.name; name_id deduplicates via string identity",
+    "rationale_plabel_offset": "Use plabel varlen offset pair (start,end) as plabel identity proxy to avoid string hashing in hot loop",
+    "stmt_handling": "p.stmt is constant 'IS' for all output rows — excluded from group key, hardcoded in output"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "scan_target": "num USD range partitioned into morsels of 100000 rows",
+    "threads": "auto(nproc)",
+    "thread_local_aggregation": true,
+    "merge_strategy": "merge thread-local hash maps after scan completes"
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "Get contiguous USD row range in num to avoid scanning non-USD rows"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "Get contiguous IS row range in pre to build filtered pre hash map"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name", "p.stmt(constant 'IS')", "n.tag(decoded from tag_dict)", "p.plabel", "total_value(SUM)", "cnt(COUNT)"],
+    "order_by": ["total_value DESC"],
+    "limit": 200
+  },
+  "memory_layout": {
+    "mmap_columns": ["num/sub_fk.bin", "num/tag_code.bin", "num/version_code.bin", "num/value.bin", "num/uom_code.bin"],
+    "preload_columns": ["sub/fy.bin", "sub/name_offsets.bin", "sub/name_data.bin", "pre/stmt_code.bin", "pre/sub_fk.bin", "pre/tag_code.bin", "pre/version_code.bin", "pre/plabel_offsets.bin", "pre/plabel_data.bin"],
+    "notes": "Sub and pre columns are small enough to fully preload. Num columns mmap'd and accessed sequentially within USD range."
+  },
+  "execution_target": "cpp"
+}

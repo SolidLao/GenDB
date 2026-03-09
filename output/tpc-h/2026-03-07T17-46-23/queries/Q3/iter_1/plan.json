@@ -1,0 +1,65 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["build_customer_bitset", "parallel_scan_orders_probe_lineitem_aggregate", "parallel_topk_extract"],
+  "join_order": [
+    {
+      "build": "customer(filtered by BUILDING)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 314000,
+      "notes": "custkeys dense 1..1500000, bitset ~187KB fits in cache"
+    },
+    {
+      "build": "orders(filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1530000,
+      "notes": "use lineitem_orderkey_index for contiguous range lookups"
+    }
+  ],
+  "filters": [
+    {"table": "customer", "predicate": "c_mktsegment = 'BUILDING'", "selectivity": 0.2098},
+    {"table": "orders", "predicate": "o_orderdate < 9204", "selectivity": 0.486},
+    {"table": "lineitem", "predicate": "l_shipdate > 9204", "selectivity": 0.539}
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {"name": "o_orderdate", "file": "orders/o_orderdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_custkey", "file": "orders/o_custkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderkey", "file": "orders/o_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_shippriority", "file": "orders/o_shippriority.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "customer_filter": "bitset(1500001)",
+    "aggregation": "thread_local_compact_hash_map(capacity=32768_slots, key=int32_t(l_orderkey), value=struct{double revenue, int32_t o_orderdate, int32_t o_shippriority})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_orders": {
+      "partition_by": "row_range",
+      "morsel_size": 100000
+    },
+    "merge": "NO MERGE NEEDED: orders is sorted by o_orderkey (= GROUP BY key), so morsel-driven scan produces disjoint orderkey ranges per thread. Each thread's map contains complete, non-overlapping groups. Extract local top-10 from each thread map independently (parallelizable), then merge 64 local top-10 lists into global top-10."
+  },
+  "indexes": [
+    {"index": "customer_custkey_lookup", "purpose": "not needed — build bitset directly from c_custkey + c_mktsegment arrays"},
+    {"index": "lineitem_orderkey_index", "purpose": "contiguous range lookup for lineitem rows per qualifying orderkey"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A — Plan restructuring. Root cause: the merge phase (89ms, 46% of total) was sequentially merging 64 thread-local hash maps into one, then scanning for top-10. This is completely unnecessary because orders is sorted by o_orderkey (the GROUP BY key), so morsel-driven scan naturally partitions orderkeys across threads — each thread's map is already disjoint. Fix: (1) eliminate the merge entirely — each thread extracts its own local top-10 from its map, then merge 64×10=640 candidates into the global top-10; (2) right-size thread-local maps from 256K slots (6.3MB each, 403MB total — 9× LLC) down to 32K slots (768KB each, 48MB total — fits near LLC), since each thread only has ~15K groups; (3) the scan+probe phase should also benefit from reduced cache pressure on the aggregation maps. Expected improvement: merge drops from 89ms to <1ms, scan drops from 55ms to ~35ms due to better cache utilization.",
+  "correctness_anchors": {
+    "date_19950315": 9204
+  }
+}

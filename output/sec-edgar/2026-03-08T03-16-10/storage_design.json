@@ -1,0 +1,106 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "gendb" },
+  "tables": {
+    "sub": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(adsh)", "encoding": "dictionary_shared" },
+        { "name": "cik", "cpp_type": "int32_t", "semantic_type": "cik", "encoding": "plain" },
+        { "name": "name", "cpp_type": "uint32_t", "semantic_type": "registrant_name", "encoding": "dictionary_local" },
+        { "name": "sic", "cpp_type": "int32_t", "semantic_type": "sic", "encoding": "plain" },
+        { "name": "countryba", "cpp_type": "uint32_t", "semantic_type": "country_code", "encoding": "dictionary_local" },
+        { "name": "stprba", "cpp_type": "uint32_t", "semantic_type": "state_code", "encoding": "dictionary_local" },
+        { "name": "cityba", "cpp_type": "uint32_t", "semantic_type": "city", "encoding": "dictionary_local" },
+        { "name": "countryinc", "cpp_type": "uint32_t", "semantic_type": "country_code", "encoding": "dictionary_local" },
+        { "name": "form", "cpp_type": "uint32_t", "semantic_type": "sec_form", "encoding": "dictionary_local" },
+        { "name": "fy", "cpp_type": "int32_t", "semantic_type": "fiscal_year", "encoding": "plain" },
+        { "name": "period", "cpp_type": "int32_t", "semantic_type": "date", "encoding": "days_since_epoch_1970" },
+        { "name": "fp", "cpp_type": "uint32_t", "semantic_type": "fiscal_period", "encoding": "dictionary_local" },
+        { "name": "filed", "cpp_type": "int32_t", "semantic_type": "date", "encoding": "days_since_epoch_1970" },
+        { "name": "accepted", "cpp_type": "int64_t", "semantic_type": "timestamp_seconds", "encoding": "plain" },
+        { "name": "prevrpt", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" },
+        { "name": "nciks", "cpp_type": "int32_t", "semantic_type": "count", "encoding": "plain" },
+        { "name": "afs", "cpp_type": "uint32_t", "semantic_type": "accelerated_filer_status", "encoding": "dictionary_local" },
+        { "name": "wksi", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" },
+        { "name": "fye", "cpp_type": "uint32_t", "semantic_type": "fiscal_year_end_mmdd", "encoding": "dictionary_local" },
+        { "name": "instance", "cpp_type": "uint32_t", "semantic_type": "instance_document", "encoding": "dictionary_local" }
+      ],
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh", "cik", "name", "sic", "countryba", "stprba", "cityba", "countryinc", "form", "period", "fy", "fp", "filed", "accepted", "prevrpt", "nciks", "afs", "wksi", "fye", "instance"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "86135",
+      "indexes": [
+        { "name": "adsh_to_rowid", "type": "hash", "columns": ["adsh"] },
+        { "name": "fy_zone_map", "type": "zone_map", "columns": ["fy"] },
+        { "name": "sic_zone_map", "type": "zone_map", "columns": ["sic"] }
+      ]
+    },
+    "num": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(adsh)", "encoding": "dictionary_shared" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(tag)", "encoding": "dictionary_shared" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(version)", "encoding": "dictionary_shared" },
+        { "name": "ddate", "cpp_type": "int32_t", "semantic_type": "date", "encoding": "days_since_epoch_1970" },
+        { "name": "qtrs", "cpp_type": "int32_t", "semantic_type": "quarters", "encoding": "plain" },
+        { "name": "uom", "cpp_type": "uint16_t", "semantic_type": "unit_of_measure", "encoding": "dictionary_local" },
+        { "name": "coreg", "cpp_type": "uint32_t", "semantic_type": "coregistrant", "encoding": "dictionary_local_nullable" },
+        { "name": "value", "cpp_type": "double", "semantic_type": "numeric_fact", "encoding": "plain" },
+        { "name": "footnote", "cpp_type": "varlen_utf8", "semantic_type": "footnote_text", "encoding": "offsets_plus_blob" }
+      ],
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh", "tag", "version", "ddate", "qtrs", "uom", "coreg", "value", "footnote"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "39401761",
+      "indexes": [
+        { "name": "adsh_tag_version_sorted", "type": "sorted", "columns": ["adsh", "tag", "version"] },
+        { "name": "uom_zone_map", "type": "zone_map", "columns": ["uom"] },
+        { "name": "ddate_zone_map", "type": "zone_map", "columns": ["ddate"] }
+      ]
+    },
+    "tag": {
+      "columns": [
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(tag)", "encoding": "dictionary_shared" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(version)", "encoding": "dictionary_shared" },
+        { "name": "custom", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" },
+        { "name": "abstract", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" },
+        { "name": "datatype", "cpp_type": "uint16_t", "semantic_type": "datatype", "encoding": "dictionary_local" },
+        { "name": "iord", "cpp_type": "uint32_t", "semantic_type": "instant_or_duration", "encoding": "dictionary_local" },
+        { "name": "crdr", "cpp_type": "uint32_t", "semantic_type": "credit_or_debit", "encoding": "dictionary_local" },
+        { "name": "tlabel", "cpp_type": "uint32_t", "semantic_type": "tag_label", "encoding": "dictionary_local" },
+        { "name": "doc", "cpp_type": "varlen_utf8", "semantic_type": "documentation", "encoding": "offsets_plus_blob" }
+      ],
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag", "version", "custom", "abstract", "datatype", "iord", "crdr", "tlabel", "doc"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "1070662",
+      "indexes": [
+        { "name": "tag_version_hash", "type": "hash", "columns": ["tag", "version"] },
+        { "name": "abstract_zone_map", "type": "zone_map", "columns": ["abstract"] }
+      ]
+    },
+    "pre": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(adsh)", "encoding": "dictionary_shared" },
+        { "name": "report", "cpp_type": "int32_t", "semantic_type": "report_number", "encoding": "plain" },
+        { "name": "line", "cpp_type": "int32_t", "semantic_type": "line_number", "encoding": "plain" },
+        { "name": "stmt", "cpp_type": "uint8_t", "semantic_type": "statement_type", "encoding": "dictionary_local" },
+        { "name": "inpth", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" },
+        { "name": "rfile", "cpp_type": "uint8_t", "semantic_type": "render_source", "encoding": "dictionary_local" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(tag)", "encoding": "dictionary_shared" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "shared_dict_id(version)", "encoding": "dictionary_shared" },
+        { "name": "plabel", "cpp_type": "uint32_t", "semantic_type": "presentation_label", "encoding": "dictionary_local" },
+        { "name": "negating", "cpp_type": "uint8_t", "semantic_type": "boolean", "encoding": "plain" }
+      ],
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh", "report", "line", "stmt", "inpth", "rfile", "tag", "version", "plabel", "negating"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "9600799",
+      "indexes": [
+        { "name": "adsh_tag_version_sorted", "type": "sorted", "columns": ["adsh", "tag", "version"] },
+        { "name": "stmt_zone_map", "type": "zone_map", "columns": ["stmt"] }
+      ]
+    }
+  },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t" },
+  "date_encoding": "days_since_epoch_1970",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "88", "disk_type": "hdd", "total_memory_gb": "376" }
+}

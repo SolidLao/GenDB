@@ -1,0 +1,97 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "candidate_density_precheck",
+    "tile_scan_shipdate_discount_quantity",
+    "late_materialize_extendedprice_from_tile_selection",
+    "output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.161
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7 AND l_quantity < 2400",
+      "selectivity": 0.149
+    },
+    {
+      "table": "lineitem",
+      "predicate": "(l_shipdate >= 8766 AND l_shipdate < 9131) AND (l_discount >= 5 AND l_discount <= 7) AND l_quantity < 2400",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential cache-sized tiles"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600) candidate-density precheck only",
+    "fact_join": "selection_vector(tile-local uint16_t row offsets for survivors after shipdate+discount+quantity); no join",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc) with static contiguous 8192-row tiles per thread"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "precheck candidate density; bypass pruning path when all 600 blocks overlap"
+    },
+    {
+      "index": "lineitem_discount_zone_map",
+      "purpose": "precheck candidate density; bypass pruning path when all 600 blocks overlap"
+    },
+    {
+      "index": "lineitem_quantity_zone_map",
+      "purpose": "precheck candidate density; bypass pruning path when all 600 blocks overlap"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current hot loop is still a cache-mismatched sparse-probe plan, not a true lockstep stream; after reading shipdate it conditionally jumps into 457 MiB discount, quantity, and extendedprice columns, so the working set far exceeds the 88 MiB LLC and the dependent loads become latency-bound instead of bandwidth-bound. Strategy Category B/C: switch to a cache-sized tiled scan with 8192-row tiles so the four-column tile footprint is about 224 KiB and fits in L2, stream shipdate/discount/quantity sequentially to build a tiny tile-local survivor selection vector, then late-materialize extendedprice only for those survivors while the tile slice is still cache-resident; keep the existing 600-block zone maps only as a cheap density precheck and use static contiguous tile partitioning across all cores.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 5,
+    "discount_hi": 7,
+    "quantity_hi": 2400,
+    "revenue_formula": "SUM(l_extendedprice * l_discount)",
+    "revenue_scale_divisor": 10000.0
+  }
+}

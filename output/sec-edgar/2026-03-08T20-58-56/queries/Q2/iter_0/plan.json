@@ -1,0 +1,89 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "filter_sub_fy",
+    "fetch_num_pure_rowids",
+    "build_group_max",
+    "select_eq_max",
+    "join_sub",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "m=(num[uom='pure' AND value IS NOT NULL] GROUP BY (adsh,tag) -> max(value))",
+      "probe": "num n[uom='pure' AND value IS NOT NULL]",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 320000,
+      "notes": "hash key (adsh,tag), residual compare n.value=max_value"
+    },
+    {
+      "build": "sub[fy=2022]",
+      "probe": "(n join m eq_max)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 17572,
+      "notes": "build on adsh; use zonemap pruning before fy predicate"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.0354
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.996
+    },
+    {
+      "table": "n_join_m",
+      "predicate": "n.value = m.max_value",
+      "selectivity": 0.434
+    },
+    {
+      "table": "post_join",
+      "predicate": "adsh IN sub_fy2022",
+      "selectivity": 0.106
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(adsh->sub_rowid) from sub_adsh_pk_hash + fy2022 bitset",
+    "fact_join": "compact_hash_map(pre_sized) keyed by (adsh,tag) storing max_value",
+    "aggregation": "compact_hash_map(pre_sized)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_uom_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "value DESC",
+      "name ASC",
+      "tag ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

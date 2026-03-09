@@ -1,0 +1,104 @@
+{
+  "query_id": "Q18",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_orderkey_qty.sorted",
+      "action": "built_new",
+      "files": {
+        "sorted_orderkey": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_orderkey.bin",
+        "sorted_orderkey_format": "int32_t[59986052], sorted ascending by l_orderkey",
+        "sorted_quantity": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_quantity.bin",
+        "sorted_quantity_format": "int8_t[59986052], quantities aligned to sorted_orderkey"
+      },
+      "usage": "mmap both files; 64 threads each scan a contiguous row range of these sorted arrays; accumulate sum per orderkey using register variables (cur_key, cur_sum); disjoint key ranges per thread means no accumulator array and no merge phase; handle ~64 boundary keys in post-processing"
+    }
+  ],
+  "pipeline": [
+    "pass1_sorted_scan_aggregate",
+    "boundary_key_merge",
+    "collect_qualifying_keys",
+    "direct_index_lookup_orders",
+    "join_orders_to_customer",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(vector<pair<int32_t,int32_t>>, ~2520 entries)",
+      "probe": "orders_by_orderkey(dense_array_index, 240MB)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 2520,
+      "notes": "Direct O(1) index lookup for each of the ~2520 qualifying orderkeys. orders_by_orderkey[okey] = row index into orders column files. 2520 DRAM-latency accesses (~252 us) into page-cached index."
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index, 5.7MB, L3-resident)",
+      "probe": "qualifying_orders(o_custkey, ~2520 rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Dense array 5.7MB fully L3-resident; only ~2520 lookups total — negligible cost."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "sorted_orderkey", "file": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "sorted_quantity",  "file": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_quantity.bin",  "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000042,
+      "notes": "Applied during sorted scan: key transitions signal group end; emit qualifying keys in the same pass. ~2520 qualifying orderkeys from 15M distinct."
+    }
+  ],
+  "data_structures": {
+    "pass1_accumulator": "register_variables(cur_key: int32_t, cur_sum: int32_t) per thread — no array, no hash table; O(1) memory per thread; key transitions detected by sorted order",
+    "boundary_keys": "std::pair<int32_t,int32_t>[64] per thread for first and last key partial sums; post-merged in O(64) after all threads finish",
+    "qualifying_keys_with_sums": "std::vector<std::pair<int32_t,int32_t>>(~2520 entries) of (orderkey, sum_qty) pairs where sum > 300; built by each thread for its interior keys plus boundary merge",
+    "orders_direct_lookup": "orders_by_orderkey dense_array(int32_t[60000001], 240MB, mmap O_RDONLY + MADV_RANDOM)",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_sorted_scan": "64 threads, each processes a contiguous row range [lo, hi) of the sorted arrays; within each chunk all rows for the same orderkey are contiguous (since sorted); thread emits interior qualifying (key, sum) pairs immediately; stores partial sums for first_key and last_key of its chunk for boundary reconciliation after thread join",
+    "boundary_merge": "sequential post-processing of 64 boundary pairs after all threads join; for each adjacent pair (thread t last_key == thread t+1 first_key): combine sums, check > 300; trivial cost",
+    "pass2_direct_lookup": "sequential over ~2520 qualifying keys; no parallelism needed"
+  },
+  "indexes": [
+    {
+      "index": "orders_by_orderkey",
+      "purpose": "join_lookup",
+      "notes": "File: orders/orders_by_orderkey.bin. Layout: int32_t[60000001], array[okey] = row index into orders column files, sentinel -1. 240MB file; MADV_RANDOM; 2520 cache-miss accesses into page cache."
+    },
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "File: customer/customer_by_custkey.bin. Layout: int32_t[1500001], array[ckey] = row index into customer column files, sentinel -1. 5.7MB, fully L3-resident."
+    }
+  ],
+  "aggregation": "streaming_group_by_on_sorted_input",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries; trivial"
+  },
+  "result_struct": {
+    "fields": [
+      {"name": "c_name",       "type": "char[26]",  "source": "customer/c_name.bin via customer_by_custkey[o_custkey[orders_by_orderkey[okey]]]"},
+      {"name": "c_custkey",    "type": "int32_t",   "source": "customer/c_custkey.bin via customer_by_custkey[...]"},
+      {"name": "o_orderkey",   "type": "int32_t",   "source": "qualifying_keys[i].first"},
+      {"name": "o_orderdate",  "type": "int32_t",   "source": "orders/o_orderdate.bin[orders_by_orderkey[okey]] (days_since_epoch; decode to YYYY-MM-DD for output only)"},
+      {"name": "o_totalprice", "type": "double",    "source": "orders/o_totalprice.bin[orders_by_orderkey[okey]]"},
+      {"name": "sum_qty",      "type": "int32_t",   "source": "qualifying_keys[i].second (accumulated during sorted scan)"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a storage-level constraint (Category E): lineitem is physically sorted by l_shipdate, so l_orderkey values appear in random order during any sequential scan. Every approach that uses an accumulator array indexed by l_orderkey (iter_0's 64 × 229MB thread-local arrays, iter_1's shared atomic array, iter_2's int16_t arrays) suffers random-write cache misses into a structure much larger than the 44MB LLC, and must either pay the merge cost (73ms at 200 GB/s) or atomic contention. The fix is a sorted copy of (l_orderkey, l_quantity) ordered by l_orderkey, built once and stored persistently. With sorted input, Pass 1 becomes a streaming group-by: each thread scans its contiguous row range sequentially with only two register variables (cur_key, cur_sum) — no accumulator array, no merge phase. Sequential access at 286MB / 200 GB/s ≈ 1.4ms. The ~64 boundary keys (one per thread boundary, since max 7 lineitems per order) are reconciled in O(1) post-processing. Pass 2 uses the pre-built orders_by_orderkey index for 2520 direct O(1) lookups instead of a 15M-row orders scan, matching the approach attempted in iter_2 but now viable since the dominant merge cost is eliminated. Total expected hot time: ~2-4ms versus 66ms baseline.",
+  "correctness_anchors": {}
+}

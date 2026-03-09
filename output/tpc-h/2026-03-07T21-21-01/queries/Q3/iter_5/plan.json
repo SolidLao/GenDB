@@ -1,0 +1,128 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "decode_segment_dictionary",
+    "enumerate_building_customers",
+    "expand_orders_postings_partitioned",
+    "process_lineitem_partitions",
+    "merge_topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment='BUILDING')",
+      "probe": "orders(via orders_cust_postings, filtered by o_orderdate < 1995-03-15)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Use customer_segment_postings to enumerate only BUILDING customers, then traverse orders_cust_postings per customer and apply o_orderdate immediately so only qualifying orders are materialized."
+    },
+    {
+      "build": "orders(filtered by segment and o_orderdate, range-partitioned by o_orderkey)",
+      "probe": "lineitem(via contiguous slices of lineitem_order_postings per orderkey partition)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1459230,
+      "notes": "Partition qualifying orders into cache-sized orderkey ranges, then process each partition against the matching contiguous offsets, rowids, and payload spans from lineitem_order_postings to avoid cache-miss-heavy random probes."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.485963
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.547105
+    }
+  ],
+  "scan": {
+    "table": "customer(filtered via postings) -> orders(postings expansion) -> lineitem(cache-sized orderkey partitions)",
+    "rows": 1459230,
+    "columns": [
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "random on customer and orders postings during selective expansion, then partition-local contiguous access on lineitem_order_postings offsets, rowids, and payload columns"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(customer rowids from customer_segment_postings)",
+    "fact_join": "compact_hash_map(pre_sized per orderkey partition) over qualifying orders + pre_built_index(orders_cust_postings,lineitem_order_postings)",
+    "aggregation": "sorted_group_by with register accumulator per qualifying order and fixed_min_heap(10) per thread"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_segment_postings",
+      "purpose": "enumerate BUILDING customer rowids without scanning customer"
+    },
+    {
+      "index": "orders_cust_postings",
+      "purpose": "expand qualifying customers to orders without scanning all 15M orders"
+    },
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "read contiguous lineitem slices for each orderkey partition instead of random per-order probes across the full postings structure"
+    }
+  ],
+  "aggregation": "sorted_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B physical implementation mismatch. The surviving plan already removed most logical waste, but its hot path still performs about 1.46M probes into the cache-exceeding lineitem_order_postings structures (~480 MB offsets plus ~480 MB rowids) and then fetches lineitem payloads with poor locality. Replace the full orders scan and global order sort with a selective postings-driven pipeline: enumerate BUILDING customers from customer_segment_postings, expand through orders_cust_postings, apply o_orderdate immediately, and partition the ~1.46M surviving orders by orderkey range so each partition's offsets, rowids, and payload slice stays within LLC. Process partitions independently with thread-local top-k merge, avoiding the dense 15M-key state from iteration 3 and the expensive global sort/materialization from iteration 4.",
+  "correctness_anchors": {}
+}

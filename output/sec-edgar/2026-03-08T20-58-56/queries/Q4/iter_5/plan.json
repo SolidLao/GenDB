@@ -1,0 +1,135 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub",
+    "filter_pre_stmt",
+    "probe_num_by_adsh_index",
+    "aggregate_local_by_adsh_tag_version",
+    "resolve_tag_tlabel_sequential",
+    "final_aggregate_having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "pre(stmt='EQ')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Build dense adsh filter and retain only EQ triples whose adsh passes SIC predicate."
+    },
+    {
+      "build": "pre(filtered: stmt='EQ' AND adsh in filtered sub)",
+      "probe": "num rows from num_adsh_fk_hash postings for filtered adsh",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 88100,
+      "notes": "Use compact triple multiplicity map on (adsh,tag,version); within each adsh, accumulate USD non-null num rows by (tag,version) before probing pre multiplicity."
+    },
+    {
+      "build": "aggregated distinct (tag,version) keys",
+      "probe": "tag full sequential scan",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 70000,
+      "notes": "Resolve tlabel with sequential scan over tag(tag,version,abstract,tlabel) to avoid random rowid access from serialized PK map."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_posting_on_filtered_adsh_with_adsh_local_consolidation"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh->sub_rowid) + bitset(filtered_adsh)",
+    "fact_join": "compact_hash_map((adsh,tag,version)->pre_eq_multiplicity) + adsh_local_compact_hash_map((tag,version)->{sum,count})",
+    "aggregation": "two_phase_hash_group_by: local compact_hash_map((sic,tag,version,stmt)->{sum,count}) + local compact_hash_set((sic,tag,version,stmt,cik) inserted once per adsh-group), then final hash merge to (sic,tlabel,stmt)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a combined physical/work mismatch: the current hot path still does per-row hash work in main_scan and resolves tag labels through a serialized PK map that causes random rowid accesses and cache-miss-heavy probes. Strategy Category B/C changes the plan to consolidate qualifying num rows per adsh into a compact (tag,version) map before pre multiplicity probes, reducing repeated hash lookups and DISTINCT insert attempts, then resolves tlabel by scanning tag columns sequentially for only needed keys to replace random-access PK-map probing. This keeps selective sub+pre pruning while shifting the remaining heavy work to sequential, cache-friendlier passes proportional to surviving groups.",
+  "correctness_anchors": {
+    "threshold_constant": [
+      4000,
+      4000,
+      100000
+    ]
+  }
+}

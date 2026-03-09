@@ -1,0 +1,173 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_scan_lineitem_build_qty_sums",
+    "pass1_merge_and_build_qualifying_set",
+    "pass2_scan_lineitem_filter_join_aggregate",
+    "pass2_merge_groups",
+    "sort_topk"
+  ],
+  "passes": [
+    {
+      "pass": 1,
+      "description": "Subquery: build per-orderkey quantity sums, emit qualifying orderkey set",
+      "scan": {
+        "table": "lineitem",
+        "columns": ["l_orderkey", "l_quantity"],
+        "rows": 59986052,
+        "parallelism": "morsel_driven",
+        "threads": "auto(nproc)",
+        "morsels": "row_range_partitioned"
+      },
+      "aggregation": {
+        "strategy": "thread_local_hash_maps_then_merge",
+        "key": "l_orderkey",
+        "accumulator": "sum(l_quantity)",
+        "data_structure": "compact_hash_map(pre_sized:16777216)",
+        "merge": "single_threaded_reduce"
+      },
+      "filter": {
+        "predicate": "sum_qty > 300.0",
+        "estimated_qualifying_orderkeys": 300
+      },
+      "output": "qualifying_set(hash_set<int32_t>, capacity:1024)"
+    },
+    {
+      "pass": 2,
+      "description": "Main query: scan lineitem, filter to qualifying set, probe indexes, group-aggregate",
+      "scan": {
+        "table": "lineitem",
+        "columns": ["l_orderkey", "l_quantity"],
+        "rows": 59986052,
+        "parallelism": "morsel_driven",
+        "threads": "auto(nproc)",
+        "morsels": "row_range_partitioned"
+      },
+      "filter": {
+        "predicate": "qualifying_set.contains(l_orderkey)",
+        "selectivity": 0.000005,
+        "notes": "~300 qualifying orderkeys out of 15M unique; check is O(1) hash lookup, negligible cost"
+      },
+      "joins": [
+        {
+          "build": "qualifying_set (hash_set<int32_t>)",
+          "probe": "lineitem.l_orderkey",
+          "type": "semi",
+          "strategy": "hash_join",
+          "build_cardinality": 300,
+          "notes": "Semi-join filter against tiny qualifying set; effectively a hash_set membership check per lineitem row"
+        },
+        {
+          "build": "o_orderkey_hash (pre_built_index)",
+          "probe": "qualifying lineitem rows via l_orderkey",
+          "type": "inner",
+          "strategy": "index_nested_loop",
+          "build_cardinality": 15000000,
+          "notes": "Only ~few thousand lookups for qualifying rows; fetch o_custkey, o_orderdate, o_totalprice, orders_row"
+        },
+        {
+          "build": "c_custkey_hash (pre_built_index)",
+          "probe": "o_custkey from qualifying orders rows",
+          "type": "inner",
+          "strategy": "index_nested_loop",
+          "build_cardinality": 1500000,
+          "notes": "Only ~300 unique customer lookups; fetch c_name, cust_row"
+        }
+      ],
+      "aggregation": {
+        "strategy": "thread_local_hash_maps_then_merge",
+        "key": "l_orderkey",
+        "accumulators": ["sum(l_quantity)"],
+        "payload_per_group": ["orders_row", "cust_row"],
+        "data_structure": "compact_hash_map(pre_sized:1024)",
+        "merge": "single_threaded_reduce",
+        "notes": "Group key is effectively l_orderkey since each order has exactly one (c_name, c_custkey, o_orderdate, o_totalprice); resolve other GROUP BY columns from stored orders_row/cust_row after merge"
+      }
+    }
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_set(pass1 output)",
+      "probe": "lineitem(pass2 scan)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 300,
+      "notes": "Bloom filter not needed; set is tiny and fits in L1 cache"
+    },
+    {
+      "build": "o_orderkey_hash(pre_built_index)",
+      "probe": "lineitem(qualifying rows only)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 15000000,
+      "notes": "Pre-built open-addressing hash index; ~300-500 total probes; mmap the 256MB index file"
+    },
+    {
+      "build": "c_custkey_hash(pre_built_index)",
+      "probe": "o_custkey(qualifying orders)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Pre-built open-addressing hash index; ~300 unique probes; mmap the 32MB index file"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem (pass 2)",
+      "predicate": "qualifying_set.contains(l_orderkey)",
+      "selectivity": 0.000005,
+      "notes": "Extremely selective; eliminates ~99.9995% of lineitem rows after pass 1"
+    }
+  ],
+  "data_structures": {
+    "pass1_qty_sum_map": "compact_hash_map(pre_sized:16777216) — thread-local per worker, keyed int32_t → double",
+    "qualifying_set": "hash_set<int32_t>(capacity:1024) — built after pass 1 merge; fits entirely in L1/L2 cache",
+    "pass2_group_map": "compact_hash_map(pre_sized:1024) — thread-local per worker, keyed int32_t → {sum_qty:double, orders_row:int32, cust_row:int32}",
+    "orders_index": "mmap(o_orderkey_hash.bin) — open-addressing int32→int32, capacity 33554432",
+    "customer_index": "mmap(c_custkey_hash.bin) — open-addressing int32→int32, capacity 4194304",
+    "output_buffer": "flat_array<Result>(capacity:1024) — filled after pass 2 merge"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_parallel": true,
+    "pass2_parallel": true,
+    "merge_strategy": "single_threaded after parallel accumulation",
+    "notes": "Each thread owns its row range for both passes; thread-local maps avoid contention; merge is cheap given tiny qualifying set"
+  },
+  "indexes": [
+    {
+      "index": "o_orderkey_hash",
+      "file": "orders/o_orderkey_hash.bin",
+      "purpose": "join_lookup: l_orderkey → orders row index",
+      "access": "mmap, random probes only for qualifying rows (~few thousand total)"
+    },
+    {
+      "index": "c_custkey_hash",
+      "file": "customer/c_custkey_hash.bin",
+      "purpose": "join_lookup: o_custkey → customer row index",
+      "access": "mmap, random probes only for qualifying orders (~300 total)"
+    }
+  ],
+  "column_reads": {
+    "pass1": ["lineitem/l_orderkey.bin", "lineitem/l_quantity.bin"],
+    "pass2": ["lineitem/l_orderkey.bin", "lineitem/l_quantity.bin"],
+    "on_demand_after_join": [
+      "orders/o_custkey.bin",
+      "orders/o_orderdate.bin",
+      "orders/o_totalprice.bin",
+      "customer/c_name.bin"
+    ],
+    "notes": "orders and customer columns read only for qualifying rows (~300-500 rows); negligible I/O"
+  },
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::sort on ~300-500 result structs — trivially fast",
+    "date_decode": "convert o_orderdate (int32 days since 1970-01-01) to YYYY-MM-DD for output only (100 rows)",
+    "c_name_access": "c_name_buf + cust_row * 26 — fixed-stride 26-byte slots"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,129 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "prune_num_blocks_by_ddate",
+    "fast_empty_output",
+    "resolve_usd_code",
+    "intersect_uom_blocks",
+    "scan_num_filtered",
+    "anti_join_pre",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version sorted index)",
+      "probe": "num(filtered surviving blocks only)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "First prune with num/indexes/ddate.zone_map.bin alone; if no block overlaps [19358,19722], return empty output without opening num base columns, num uom dictionary, num uom zone map, or pre. Only if ddate-surviving blocks exist, resolve USD, intersect with num/indexes/uom.zone_map.bin, then probe pre for rows that survive both block filters and row-level predicates."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.0
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.1
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "ddate_zone",
+        "file": "num/indexes/ddate.zone_map.bin",
+        "type": "ZoneRecord<int32_t>",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "uom_zone",
+        "file": "num/indexes/uom.zone_map.bin",
+        "type": "ZoneRecord<uint16_t>",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(395)",
+    "fact_join": "pre_built_index",
+    "aggregation": "compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/ddate.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: iteration 3 still performs unnecessary work before the empty-result fast path by opening and prefetching num base columns even though the 2023 date predicate has zero selectivity and the tiny ddate zone map alone can prove that no block qualifies. Strategy category A/C: reorder filters so execution first scans only num/indexes/ddate.zone_map.bin, exits immediately with header-only output when that scan finds no overlap with [19358,19722], and delays USD dictionary resolution, uom zone-map access, num column mmaps, pre index access, and aggregation until after at least one date-qualified block exists.",
+  "correctness_anchors": {}
+}

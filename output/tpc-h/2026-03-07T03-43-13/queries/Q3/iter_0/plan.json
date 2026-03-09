@@ -1,0 +1,94 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_building_dict_code",
+    "scan_customer_segment_postings",
+    "lookup_orders_by_custkey",
+    "apply_orderdate_zone_pruning",
+    "materialize_qualifying_orders",
+    "probe_lineitem_group_runs",
+    "scan_grouped_lineitems_and_accumulate",
+    "topk_10_by_revenue"
+  ],
+  "join_order": [
+    {
+      "build": "customer_mktsegment_postings(BUILDING)",
+      "probe": "orders_custkey_postings",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Resolve BUILDING at runtime from the dictionary, fetch qualifying c_custkey values, then use dense custkey postings to enumerate candidate orders. Precompute per-order block states from orders_orderdate_zone_map for skip/accept/fallback."
+    },
+    {
+      "build": "orders(filtered by customer and orderdate)",
+      "probe": "lineitem_orderkey_groups",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1478979,
+      "notes": "Use qualifying orders to jump directly to contiguous lineitem runs via lineitem_orderkey_groups row_starts/row_counts; aggregate one revenue slot per qualifying order and emit only orders with non-zero post-shipdate revenue."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184,
+      "index": "customer_mktsegment_postings"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.487702,
+      "index": "orders_orderdate_zone_map",
+      "block_logic": {
+        "skip_when": "mins[block] >= 9204",
+        "accept_when": "maxs[block] < 9204",
+        "fallback": "row_check o_orderdate[row] < 9204"
+      }
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204 within qualifying order runs",
+      "selectivity": 0.051318
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(customer row_ids from customer_mktsegment_postings, then c_custkey values)",
+    "fact_join": "pre_built_index(orders_custkey_postings,lineitem_orderkey_groups)",
+    "aggregation": "direct_array(one revenue accumulator per qualifying order slot) with parallel payload arrays(orderkey,orderdate,shippriority)",
+    "topk": "fixed_min_heap(10) on (revenue DESC, o_orderdate ASC)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)=64",
+    "partition_unit": "chunks of qualifying customer keys, then chunks of qualifying order slots",
+    "local_state": "thread-local candidate-order buffers, revenue arrays, and topk heaps"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_postings",
+      "purpose": "filter_lookup"
+    },
+    {
+      "index": "orders_custkey_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_orderdate_zone_map",
+      "purpose": "skip_blocks_and_fast_accept_for_orderdate"
+    },
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "grouped_run_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp"
+}

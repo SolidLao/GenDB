@@ -1,0 +1,159 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh.triple_ranges",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.adsh.triple_ranges/ranges.bin",
+        "codes_format": "uint64_t n; struct { uint32_t adsh; uint64_t lo; uint64_t hi; }[n]"
+      },
+      "usage": "mmap ranges.bin; resolve pre triple-entry [lo,hi) for each adsh without binary search over full pre triple index"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "probe_num_by_adsh",
+    "match_pre_local",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "num(num_adsh_fk_hash postings)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 26612,
+      "notes": "Drive the pipeline from fy-filtered adsh keys and scan only num rowids belonging to those keys."
+    },
+    {
+      "build": "pre_adsh_tag_version_hash(adsh-local range, stmt='IS')",
+      "probe": "num rows for same adsh using (tag,version)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 575000,
+      "notes": "For each adsh, materialize a small local sorted (tag,version)->plabel list from pre range and probe it from num rows to avoid global hash build and random global probes."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.308975445
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num_driven_adsh_local_join",
+    "rows": 12200000,
+    "columns": [
+      {
+        "name": "num adsh postings rowids",
+        "file": "num/indexes/num_adsh_fk_hash.bin",
+        "type": "Entry+rowids",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "pre adsh-tag-version postings",
+        "file": "pre/indexes/pre_adsh_tag_version_hash.bin",
+        "type": "TripleKey+posting",
+        "bytes_per_row": 24
+      },
+      {
+        "name": "pre.stmt",
+        "file": "pre/stmt.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "pre.plabel",
+        "file": "pre/plabel.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "sub.name",
+        "file": "sub/name.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(max_adsh+1) + direct_array(adsh->name_code)",
+    "fact_join": "pre_built_index(num_adsh_fk_hash + pre_adsh_tag_version_hash + pre.adsh.triple_ranges) + per_adsh_sorted_vector<(tag,version,plabel)>",
+    "aggregation": "thread_local_compact_hash_map<key(name_code,stmt_code,tag_code,plabel_code), agg(sum_f64,count_u64)>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a plan/implementation mismatch (Category A/B): the previous stable plan still spends most hot time in a dual large-triple-index merge path, while the regressed plan moved too much work into a cache-unfriendly global runtime hash build. This revision drives from fy-filtered sub adsh keys, probes num through num_adsh postings (single pass over relevant num rows), and performs adsh-local pre matching with cache-resident per-adsh vectors derived from pre triple ranges and stmt filtering, eliminating global pre-hash construction and reducing random global index probes.",
+  "correctness_anchors": {}
+}

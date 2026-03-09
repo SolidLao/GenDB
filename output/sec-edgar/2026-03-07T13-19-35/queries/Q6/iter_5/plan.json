@@ -1,0 +1,128 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_fy_build_fy2023_bitmap",
+    "parallel_scan_pre_partition_into_buffers",
+    "parallel_merge_partitions_build_is_parts",
+    "parallel_scan_num_zone_maps",
+    "merge_thread_local_agg",
+    "hash_reaggregate_fnv64_decode_topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(direct_array, all rows)",
+      "probe": "num via adsh_code index",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "Load sub/fy.bin as flat int16_t[86135] (172KB, L1-resident). Build DenseBitmap(86135) marking adsh_codes where fy==2023. 26612 qualifying adsh_codes (~31%)."
+    },
+    {
+      "build": "pre(filtered: stmt='IS' AND adsh in fy2023_bitmap), partitioned into N_PARTS=64 sub-maps",
+      "probe": "num, using partitioned is_map",
+      "type": "inner",
+      "strategy": "partitioned_hash_join",
+      "build_cardinality": 550374,
+      "notes": "Three-phase build eliminates serial merge bottleneck: Phase A (parallel): 64 threads scan pre disjoint ranges, emit (key,pre_row) into thread-local per-partition buffers Buffers[tid][part] — zero contention. Phase B (parallel): thread p merges Buffers[0..63][p] into partition_map[p] in thread-ascending order (preserving min pre_row per key). Result: 64 CompactHashMaps, each ~8594 expected entries, 262KB each, 16.8MB total — fits in L3. Probe in main_scan: compute part=(fibonacci_hash(key) >> 58) & 63, find in partition_map[part]. Each partition stays L3-resident during probe phase."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "method": "zone_map_block_skip + per_row_check"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL (std::isnan check)",
+      "selectivity": 0.999
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2023",
+      "selectivity": 0.309,
+      "notes": "Empirically: 26612/86135 = 30.9% pass"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == is_code AND fy2023_bits.test(adsh_code)",
+      "selectivity": 0.058,
+      "notes": "~550K entries pass into partitioned is_map"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_fy_array":     "int16_t[86135] direct array (172KB, L1-resident) — indexed by adsh_code",
+    "fy2023_bitmap":    "DenseBitmap(86135) — 10.8KB, L1-resident",
+    "phase_a_buffers":  "std::vector<KeyRow>[n_threads][N_PARTS] where KeyRow={uint64_t key, uint32_t pre_row} — 2D buffer, thread t writes only to Buffers[t][*], zero contention. N_PARTS=64. Each Buffers[t][p] reserved for ~200 entries = 1.6KB. Total ~4.4MB.",
+    "partition_maps":   "CompactHashMap<uint64_t,uint32_t>[N_PARTS] — N_PARTS=64 sub-maps. Each sub-map: expected=10000, capacity=16384, size=16384×16B=262KB. Total=64×262KB=16.8MB fits in L3 (44MB). Partition function: part = (key * 0x9E3779B97F4A7C15ULL) >> 58 (top 6 bits = 64 partitions). Each partition holds first pre_row per (adsh_code,tagver_code) key for IS+fy2023 rows.",
+    "thread_local_agg": "CompactHashMap<uint64_t,AggEntry>(expected=8192) per thread — capacity=16384×28B=458KB/thread, 64×458KB=29MB total (L3-resident). Key=(adsh_code<<32|pre_row), value={double sum_value, int64_t cnt}.",
+    "merged_agg":       "CompactHashMap<uint64_t,AggEntry>(expected=600000) — capacity=1048576×28B=29MB, L3-resident.",
+    "final_reagg":      "CompactHashMap<uint64_t,ReAggEntry>(expected=250000) — keyed on FNV-64 of composite string (name||0x01||tag||0x01||plabel). No heap string allocs. ReAggEntry={double sum_value, int64_t cnt, uint32_t sample_adsh_code, uint32_t sample_pre_row}. Capacity=524288×36B=18.9MB, L3-resident."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pre_scan_phase_a": "PARALLEL OMP: 64 threads, schedule(static), each scans disjoint pre row range. Output: per-thread per-partition buffers Buffers[tid][part]. Zero cross-thread writes.",
+    "pre_merge_phase_b": "PARALLEL OMP: 64 threads, thread p merges columns Buffers[0..63][p] into partition_map[p]. Process threads in ascending order (t=0..63) to preserve min pre_row per key. Each thread merges ~8594 entries into its own 262KB sub-map — no synchronization needed.",
+    "num_scan_phase": "PARALLEL OMP: morsel-driven over 395 num blocks (100K rows each), atomic next_block counter. Each thread probes partitioned maps (partition_maps[part].find(key)).",
+    "shared_read_only": ["sub_fy_array", "fy2023_bitmap", "partition_maps (all 64)", "num columns", "pre columns (for fy2023_bitmap build and duplicate forward scan)"],
+    "thread_private": ["phase_a Buffers[tid][*]", "thread_local_agg[tid]"]
+  },
+  "build_phase_detail": {
+    "step1_setup": "Load sub/fy.bin (172KB). Build int16_t sub_fy[86135]. Build DenseBitmap fy2023_bits(86135). Load usd_code and is_code from dict files.",
+    "step2_phase_a_parallel_collect": "OMP parallel, schedule(static): thread t scans pre rows [t*chunk...(t+1)*chunk). For row i where pre_stmt[i]==is_code AND fy2023_bits.test(pre_adsh[i]): compute key=(adsh_code<<32|tagver_code), part=(key*0x9E3779B97F4A7C15ULL)>>58 (top 6 bits, giving 0..63). Push {key,(uint32_t)i} into Buffers[t][part]. Each thread only writes to its own row — no mutex, no atomic.",
+    "step3_phase_b_parallel_merge": "Allocate partition_maps[64] each CompactHashMap(10000). OMP parallel: thread p iterates t=0..63 in order; for each {key,pre_row} in Buffers[t][p]: if partition_maps[p].find(key)==nullptr then partition_maps[p].insert(key,pre_row). Processing t in ascending order guarantees first (smallest) pre_row is kept per key. Thread p owns partition_maps[p] exclusively — no contention.",
+    "duplicate_handling": "For the ~0.7% of keys with multiple IS+fy2023 pre rows: during main_scan, after finding first_pre_row via partition_maps, linearly scan forward in pre (pre_adsh[r]==adsh AND pre_tagver[r]==tagver AND pre_stmt[r]==is_code) to accumulate additional pre rows. Pre is sorted by (adsh_code,tagver_code), so duplicates are contiguous.",
+    "partition_map_sizes": "N_PARTS=64, total expected=550374, per partition expected=~8600, capacity per partition=16384 entries × 16B = 262KB. Total memory = 64×262KB = 16.8MB."
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "condition": "zm[b].min_uom > usd_code || zm[b].max_uom < usd_code",
+      "layout": "uint32_t n_blocks; then n_blocks x ZoneMap{int8_t min_uom, int8_t max_uom, int16_t _pad, int32_t min_ddate, int32_t max_ddate} = 12 bytes each"
+    }
+  ],
+  "aggregation": "two_phase_hash_group_by",
+  "aggregation_detail": {
+    "phase1_key": "uint64_t packed as (uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)pre_row",
+    "phase1_accumulators": ["double sum_value", "int64_t cnt"],
+    "phase1_estimated_groups": 600000,
+    "phase2_key": "FNV-64 hash of composite string: name_sv || 0x01 || tag_string || 0x01 || plabel_sv. CORRECTNESS: tag_string is decoded via tag_data[tag_offsets[tagver_code]..tag_offsets[tagver_code+1]] where tagver_code=pre_tagver[pre_row]. Different tagver_codes with same tag string (same tag, different version) must merge into same group. ReAggEntry stores sample_adsh_code and sample_pre_row for final string decode of top-200 rows only.",
+    "phase2_reagg_map": "CompactHashMap<uint64_t,ReAggEntry>(expected=250000) — FNV-64 keyed, no string heap allocs during reagg loop. Zero heap allocation during aggregation.",
+    "phase2_topk": "partial_sort top-200 by sum_value DESC on flat vector of all ReAggEntry items. Decode strings (name, tag, plabel) only for the final ≤200 output rows using stored sample_adsh_code and sample_pre_row."
+  },
+  "output": {
+    "decode": [
+      "name: sub_name_data[sub_name_offsets[sample_adsh_code]..sub_name_offsets[sample_adsh_code+1]]",
+      "stmt: fixed string 'IS'",
+      "tag: tag_data[tag_offsets[tagver_code]..tag_offsets[tagver_code+1]] where tagver_code=pre_tagver[sample_pre_row]",
+      "plabel: pre_plabel_data[pre_plabel_offsets[sample_pre_row]..pre_plabel_offsets[sample_pre_row+1]]"
+    ],
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "topk_strategy": "partial_sort on all reagg entries then resize to 200"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category B (algorithm change): the serial_merge_build_is_map phase (3654ms, 70% of total) uses a single thread to merge 550K entries from 64 per-thread vectors into a global CompactHashMap. After the 86MB parallel OMP pre scan evicts the map from L3, and with 3/4 of thread-local vector data on remote NUMA nodes, each serial merge step pays 150-300ns in NUMA-remote and DRAM-cold latency — making the overall merge dominated by latency rather than throughput. Iter_4 confirmed that even a single-threaded sequential pre scan takes a similar 3858ms, ruling out the collect phase as the fix. The solution is to eliminate the serial merge entirely via a three-phase partitioned build: (A) parallel collect into per-thread per-partition buffers Buffers[tid][part] — zero cross-thread writes; (B) parallel merge where thread p owns and builds partition_map[p] from Buffers[*][p] in thread-ascending order (guaranteeing minimum pre_row per key) — 64 fully independent merges; (C) probe using partition_maps[part] during main_scan. Each of 64 sub-maps is ~262KB (near L2 size), and all 64 together total 16.8MB which stays in the 44MB L3 throughout main_scan — cutting probe latency from ~100ns (DRAM) to ~10ns (L3). Additionally incorporates iter_4's proven improvements: thread_local_agg sized to CompactHashMap(8192) for 458KB/thread (L2-resident, 29MB total in L3) and FNV-64 keyed final reagg (no string heap allocations, decode strings only for top-200 rows) which together reduce the reagg+decode phase from 457ms to ~268ms.",
+  "correctness_anchors": {}
+}

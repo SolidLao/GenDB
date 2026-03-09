@@ -1,0 +1,39 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 55.086666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 55.086666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.07,
+        "main_scan": 22.26,
+        "output": 0.48,
+        "total": 54.71
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 18.87,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 18.87,
+      "validation": "pass",
+      "strategy": "Category B+C: The iter_0 inner loop at 22ms/9M rows across 64 cores indicates ~19 cycles/row — poor vectorization due to branching. Three changes: (1) Use branchless SIMD-friendly accumulation — compute all filter predicates as integer masks, combine with bitwise AND, convert to double mask (0.0 or 1.0), multiply into the accumulation expression so the compiler can auto-vectorize with no branch. The inner loop should be: int32_t m = (sd[i]>=DATE_LO) & (sd[i]<DATE_HI) & (disc[i]>=DISC_LO) & (disc[i]<=DISC_HI) & (qty[i]<QTY_THR); local_sum += m * ep[i] * disc[i]. (2) Call madvise(MADV_SEQUENTIAL) on each mmap'd column file before the scan to improve kernel readahead — the unmeasured 33ms gap (55ms total minus 22ms scan) likely includes page fault overhead for touching mmap'd pages; madvise reduces this. (3) Use static scheduling instead of dynamic(1) — with ~90 blocks and 64 threads the dynamic scheduling overhead is non-trivial relative to per-block work (~0.24ms/block). Also add __builtin_prefetch hints to prefetch the next block's data while processing the current block. Compile with -O3 -march=native -ffast-math to enable FMA and AVX vectorization of the branchless loop.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "main_scan": 18.38,
+        "output": 0.33,
+        "total": 18.77
+      }
+    }
+  ]
+}

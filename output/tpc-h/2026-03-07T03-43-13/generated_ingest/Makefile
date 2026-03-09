@@ -1,0 +1,13 @@
+CXX := g++
+CXXFLAGS := -O3 -std=c++20 -march=native -pthread -Wall -Wextra
+
+all: ingest build_indexes
+
+ingest: ingest.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+build_indexes: build_indexes.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $<
+
+clean:
+	rm -f ingest build_indexes

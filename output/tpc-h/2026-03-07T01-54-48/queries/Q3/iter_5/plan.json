@@ -1,0 +1,145 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders via orders_custkey_hash on o_custkey",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 330000,
+      "notes": "Scan customer columns to build BUILDING c_custkey bitset, then probe orders_custkey_hash only for those keys and apply o_orderdate < 9204 before materializing qualifying orders."
+    },
+    {
+      "build": "orders_after_customer_date(project: o_orderkey,o_orderdate,o_shippriority)",
+      "probe": "lineitem(filtered: l_shipdate > 9204)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 1461923,
+      "notes": "Create compact orderkey->group_id lookup and payload arrays for qualifying orders; lineitem stays sequential with zonemap pruning and accumulates only when lookup hits."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.535
+    },
+    {
+      "table": "lineitem JOIN qualifying_orders",
+      "predicate": "l_orderkey = o_orderkey",
+      "selectivity": 0.0969
+    }
+  ],
+  "scan": {
+    "table": "customer+orders(index)+lineitem",
+    "rows": 37400000,
+    "columns": [
+      {
+        "name": "c_mktsegment",
+        "file": "customer/c_mktsegment.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_lookup_for_orders_then_sequential_lineitem_scan"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "compact_hash_map(pre_sized orderkey->group_id)",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "orders_custkey_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a logical and work-efficiency mismatch (Category A/C): the current plan pays a large build_joins cost by scanning broad orders ranges and constructing a runtime orders hash table before lineitem probing. This revision uses the selective pre-built orders_custkey_hash to enumerate only orders belonging to BUILDING customers, applies the orderdate predicate before materialization, then switches to a compact orderkey lookup plus partitioned direct-array aggregation during a zonemap-pruned sequential lineitem pass to remove hash-build overhead and hot-path atomic contention.",
+  "correctness_anchors": {
+    "o_orderdate_cutoff_days_since_epoch": 9204,
+    "l_shipdate_cutoff_days_since_epoch": 9204,
+    "revenue_formula": "l_extendedprice * (1 - l_discount)",
+    "date_literal": "1995-03-15"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "build_suppkey_nation_code",
+    "build_green_partsupp",
+    "scan_lineitem_order_runs",
+    "aggregate_array",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part_name_green_bitset",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 96000,
+      "notes": "Test `part_name_green_bitset[l_partkey]` first and discard non-green rows before any expensive join work."
+    },
+    {
+      "build": "supplier+nation fused dense map",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Build a dense `suppkey -> nation_code` array once so the supplier and nation PK lookups disappear from the hot loop."
+    },
+    {
+      "build": "partsupp(filtered on green parts)",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 384000,
+      "notes": "Scan `partsupp` once, keep only rows whose `ps_partkey` is green, and store a compact `partkey -> up to 4 (suppkey,supplycost)` payload for cache-resident probes."
+    },
+    {
+      "build": "orders(sorted by o_orderkey)",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 15000000,
+      "notes": "Exploit that `lineitem` is sorted by `l_orderkey`: each thread scans a contiguous row range, seeds the first order row once, then reuses/advances the current order-year for subsequent rows in orderkey order."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%' via `part_name_green_bitset[l_partkey] != 0`",
+      "selectivity": 0.048
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_partkey",
+        "file": "lineitem/l_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_suppkey",
+        "file": "lineitem/l_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(2000001)",
+    "fact_join": "dense uint8_t `suppkey->nation_code` array + green-only direct array `partkey->offset` with compact `(suppkey, ps_supplycost)` payload",
+    "aggregation": "direct_array(25x7 per_thread)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "part_name_green_bitset",
+      "purpose": "skip non-green lineitems before any join work"
+    },
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "build the fused `suppkey -> nation_code` array once"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "decode supplier nation keys into stable `n_name` dictionary codes during the fused dense-map build"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "seed each thread's first `order_row` for orderkey-run processing"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The hot time is dominated by the main scan because the current plan probes a full 8M-row `partsupp` hash whose 192 MB key/row arrays exceed the 88 MB LLC, and it also performs repeated random `orders` lookups even though `lineitem` is already ordered by `l_orderkey`. This revision uses strategy category A: restructure the plan so the `p_name LIKE '%green%'` filter is pushed into the `partsupp` build side, creating a green-only cache-resident join structure for about 384k rows, fuse supplier+nation into a tiny dense `suppkey -> nation_code` map, and exploit lineitem orderkey runs with contiguous thread partitions so order-year lookup becomes a seeded streaming/cached operation instead of a per-row random lookup.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,83 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "aggregate_lineitem_parallel",
+    "semi_join_orders",
+    "join_customer",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300, with sum_qty carried)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 600,
+      "notes": "Probe orders_pk_hash for sparse qualifying keys; carry precomputed sum_qty to avoid re-reading lineitem"
+    },
+    {
+      "build": "customer(pk)",
+      "probe": "orders_filtered",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Probe customer_pk_hash to attach c_name/c_custkey payload"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "GROUP BY l_orderkey HAVING SUM(l_quantity) > 300",
+      "selectivity": 0.00004
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sum_qty_by_orderkey) + selection_vector(qualifying_orderkeys)",
+    "fact_join": "pre_built_index",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "orders_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a parallelism/plan mismatch: dim_filter dominates (222ms of ~310ms) due to a single-thread full scan over 59,986,052 lineitem rows (~720MB sequential read), while later phases are minor. Strategy categories D+A: parallelize the lineitem grouped reduction by partitioning scan work across threads with boundary-safe segment merge, and eliminate redundant work by reusing Phase-A per-order sum_qty in the final projection instead of a second lineitem join/probe pass.",
+  "correctness_anchors": {}
+}

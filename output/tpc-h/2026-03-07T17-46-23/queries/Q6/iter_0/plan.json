@@ -1,0 +1,65 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zonemap_filter", "block_scan", "aggregate"],
+  "filters": [
+    {"table": "lineitem", "column": "l_shipdate", "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131", "selectivity": 0.151, "apply_order": 1},
+    {"table": "lineitem", "column": "l_discount", "predicate": "l_discount >= 0.05 AND l_discount <= 0.07", "selectivity": 0.273, "apply_order": 2},
+    {"table": "lineitem", "column": "l_quantity", "predicate": "l_quantity < 24.0", "selectivity": 0.46, "apply_order": 3}
+  ],
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "columns": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+    "column_files": {
+      "l_shipdate": "lineitem/l_shipdate.bin",
+      "l_discount": "lineitem/l_discount.bin",
+      "l_quantity": "lineitem/l_quantity.bin",
+      "l_extendedprice": "lineitem/l_extendedprice.bin"
+    },
+    "column_types": {
+      "l_shipdate": "int32_t",
+      "l_discount": "double",
+      "l_quantity": "double",
+      "l_extendedprice": "double"
+    }
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "skip_condition": "zones[b].max_date < 8766 || zones[b].min_date >= 9131",
+      "estimated_qualifying_blocks": 90,
+      "estimated_qualifying_rows": 9000000
+    }
+  ],
+  "data_structures": {
+    "zonemap": "struct_array({int32_t min_date, int32_t max_date})",
+    "accumulator": "thread_local_double_sum"
+  },
+  "aggregation": {
+    "type": "scalar_sum",
+    "expression": "l_extendedprice * l_discount",
+    "output_column": "revenue",
+    "merge": "sum_of_partials"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "unit": "block",
+    "threads": "auto(nproc)",
+    "notes": "each thread claims qualifying blocks, accumulates local sum, final reduction via addition"
+  },
+  "constants": {
+    "date_19940101": 8766,
+    "date_19950101": 9131,
+    "discount_lo": 0.05,
+    "discount_hi": 0.07,
+    "quantity_threshold": 24.0
+  },
+  "output": {
+    "columns": ["revenue"],
+    "format": "single_scalar"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,82 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "resolve_usd_code",
+    "uom_offset_range",
+    "load_pre_index",
+    "build_bloom_filter",
+    "load_zonemap",
+    "mmap_columns",
+    "two_pass_scan_bloom_antijoin_aggregate",
+    "merge_having_topk",
+    "decode_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "method": "uom_offsets_range", "selectivity": 0.843},
+    {"table": "num", "predicate": "ddate BETWEEN 20230101 AND 20231231", "method": "zone_map + scalar", "selectivity": 0.272},
+    {"table": "num", "predicate": "value IS NOT NULL", "method": "!std::isnan(value)", "selectivity": 0.99}
+  ],
+  "join_order": [
+    {
+      "build": "bloom_filter from pre_by_adsh_tag_ver index entries",
+      "probe": "num(filtered by uom+ddate+value)",
+      "type": "anti",
+      "strategy": "bloom_filter",
+      "probe_cardinality": 9000000,
+      "notes": "Bloom filter (12MB, fits LLC) pre-screens anti-join. ~99% of probed rows have matches in pre → Bloom says 'in set' → skip immediately with no index probe. ~1% have no match → Bloom says 'not in set' → aggregate directly. Only ~0.8% false positives (~720 rows) need full index probe. Reduces 9M random probes to ~720."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "range": "uom_offsets[usdCode] → [usdStart, usdEnd)",
+    "estimated_rows_in_range": 33200000,
+    "rows": 33200000,
+    "zone_map": {
+      "index": "num_ddate_zonemap",
+      "block_size": 100000,
+      "block_index_formula": "global_row / blockSize",
+      "skip_condition": "zones[b].max_ddate < 20230101 || zones[b].min_ddate > 20231231"
+    },
+    "columns": [
+      {"name": "ddate", "file": "num/ddate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential within qualifying blocks, two-phase: filter then bloom+probe+aggregate"
+  },
+  "data_structures": {
+    "bloom_filter": "Blocked Bloom filter for anti-join pre-screening. Parameters: n=9,600,799 pre entries, m=96M bits (12MB), k=7 hash functions. Build by scanning pre index entries and inserting each (sub_fk, tag_code, version_code) tuple. Use the same hashKey3 function as seed, then derive k bit positions via double-hashing: h1=lower32 of hash, h2=upper32, bit_i = (h1 + i*h2) % m. Store as uint64_t array of size m/64 = 1,500,000. During probe: if ALL k bits are set → 'maybe in set' (need full index probe only for anti-join survivors); if ANY bit unset → 'definitely not in set' (passes anti-join, aggregate directly). CRITICAL: Bloom positive means row likely HAS a pre match → SKIP it (fails anti-join). Bloom negative means row has NO match → passes anti-join → aggregate.",
+    "uom_dict": "load dictionary to find USD code",
+    "uom_offsets": "offset_table for USD row range",
+    "zone_map": "num_ddate_zonemap for block skipping",
+    "pre_index": "mmap pre_by_adsh_tag_ver.idx with MADV_RANDOM — only used for ~720 false-positive Bloom probes",
+    "aggregation": "Custom FlatHashMap struct with: (1) keys array of uint64_t initialized to 0 as sentinel via MAP_ANONYMOUS, (2) parallel vals array of AggState {int64_t cnt; double total;}, (3) occupied_slots vector<uint32_t> tracking indices of written slots. Size = 131072 slots (power of 2). Key encoding: ((tag_code<<32)|version_code)+1 to avoid sentinel collision. Linear probing with multiplicative hash. On insert of NEW key, push slot index to occupied_slots.",
+    "selection_vector": "thread-local uint32_t sel[100000] holding qualifying row indices within each block"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc), capped at 32",
+    "morsel_size": 100000,
+    "aggregation_strategy": "Each thread owns one FlatHashMap with occupied_slots tracking. After scan, merge by iterating only occupied_slots of each thread-local map (total ~50K entries across all threads) instead of scanning all 131K×32 = 4.2M slots.",
+    "bloom_build": "Single-threaded build of Bloom filter during data_loading phase. 9.6M entries × 7 hash ops = ~67M bit-set operations, takes <5ms."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "purpose": "restrict scan to USD rows only"},
+    {"index": "num_ddate_zonemap", "purpose": "skip_blocks outside 2023 date range"},
+    {"index": "pre_by_adsh_tag_ver", "purpose": "anti_join_probe for Bloom false positives only"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": [
+      {"column": "tag", "from": "tag_code", "dict": "dicts/tag_dict_offsets.bin + dicts/tag_dict_data.bin"},
+      {"column": "version", "from": "version_code", "dict": "dicts/version_dict_offsets.bin + dicts/version_dict_data.bin"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category C (work elimination): Two root causes. (1) main_scan=28ms: 9M anti-join probes into the 153MB pre index (far exceeds 44MB LLC), but ~99% of probed rows have matches and are discarded. Fix: build a Bloom filter (12MB, fits LLC) from all pre (sub_fk, tag_code, version_code) tuples. Bloom negative = definitely no match = passes anti-join, aggregate directly. Bloom positive = likely has match = skip row immediately. Only ~0.8% false positives (~720 rows) need the expensive full index probe. This eliminates ~9M random cache-miss-heavy probes, replacing them with cache-resident Bloom checks. Expected main_scan reduction: 28ms → ~12-15ms. (2) merge_having_topk=8ms: merging 32 thread-local maps requires scanning 32×131K = 4.2M slots, but only ~50K groups exist. Fix: each FlatHashMap tracks occupied slot indices in a vector<uint32_t>. On new key insertion, push the slot index. Merge iterates only occupied slots (~50K total vs 4.2M). Expected merge reduction: 8ms → ~1-2ms. Total expected: ~45-50ms.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,85 @@
+{
+  "query_id": "Q9",
+  "pipeline": ["mmap_all_upfront", "load_nation_supplier", "parallel_filter_part", "prebuild_orders_year", "prebuild_partsupp_compact", "parallel_scan_lineitem_aggregate"],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 109600,
+      "probe_cardinality": 59986052,
+      "surviving_rows": 3287000,
+      "notes": "Bitset ~250KB indexed by partkey-1. Parallel filter with schedule(static)."
+    },
+    {
+      "build": "partsupp(pre-built compact array)",
+      "probe": "lineitem(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Pre-build flat array: struct{int32_t sk[4]; double cost[4];} per partkey. One cache line per lookup."
+    },
+    {
+      "build": "orders(pre-built year array)",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Pre-build uint8_t year_for_orderkey[max_orderkey+1]. Eliminates 240MB orders_orderkey_lookup, 57MB o_orderdate, and year_from_days in hot loop."
+    },
+    {
+      "build": "supplier + nation",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Dense array nationkey_for_supplier[suppkey] = s_nationkey[suppkey-1]"
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0548,
+      "method": "memmem on varlen_string offsets_plus_data. PARALLEL with schedule(static) to minimize OpenMP overhead (200 dynamic chunks was causing 10ms overhead)."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey", "file": "lineitem/l_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "nation_names": "std::string[25] indexed by n_nationkey",
+    "supplier_nationkey": "uint8_t[max_suppkey+1] — nationkey for each suppkey, direct index. suppkey 1-based contiguous so nationkey_for_supplier[sk] = s_nationkey[sk-1]. Use uint8_t since nationkey < 25.",
+    "part_filter": "bitset using uint64_t[(n_parts+63)/64]. partkeys are contiguous 1..n_parts. Parallel build with schedule(static). Use __atomic_or_fetch for thread-safe bit setting.",
+    "year_for_orderkey": "uint8_t[max_orderkey+1] dense array. Pre-built by scanning orders: for each order row r, year_for_orderkey[o_orderkey[r]] = year_from_days(o_orderdate[r]) - 1992. Requires mmap of orders/o_orderkey.bin (60MB, int32_t, 15M rows) and orders/o_orderdate.bin (60MB, int32_t, 15M rows). Build in parallel with schedule(static). Array size = 60M+1 bytes = 57MB. Access during main scan is semi-sequential since lineitem is sorted by l_orderkey. Eliminates orders_orderkey_lookup.bin (240MB) and year_from_days computation from hot loop.",
+    "partsupp_compact": "Flat array indexed by partkey: struct PSCompact { int32_t suppkey[4]; double supplycost[4]; } — 48 bytes per partkey. Array size = (max_partkey+1) * 48B = 2M * 48 = 91MB. Pre-built by scanning partsupp using partsupp_pk_index. For each partkey, read its partsupp entries (start, count from index), copy suppkeys and supplycosts into the compact struct. Build in parallel: partition partkeys across threads with schedule(static). During main scan: one cache line load gives all 4 (suppkey, supplycost) pairs for a partkey. Linear search 4 entries to find matching l_suppkey. Eliminates separate random access to ps_suppkey (30MB) and ps_supplycost (61MB) arrays.",
+    "aggregation": "thread-local double[25][8] direct 2D array (nation × year_offset). year_offset = year - 1992. Merge after parallel scan."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Phase ordering for I/O overlap: (1) mmap ALL files upfront at program start — all dimension files, all lineitem files, orders o_orderkey + o_orderdate, partsupp columns + index. Call prefetch() on lineitem columns immediately so OS readahead starts in background. (2) While readahead is running, do filter_part and pre-builds. (3) By main_scan time, lineitem pages are warm. filter_part: schedule(static) — uniform string lengths make static optimal, eliminates dynamic scheduling overhead (was 10ms, should be ~2ms). pre_build phases: schedule(static) over rows. main_scan: schedule(dynamic, 100000) for load balancing across qualifying rows. CRITICAL: do NOT call advise_random() on any column. All columns are either scanned sequentially during pre-build or accessed via pre-built structures during main scan."
+  },
+  "indexes": [
+    {"index": "partsupp_pk_index", "file": "indexes/partsupp_pk_index.bin", "purpose": "Used during pre-build of partsupp_compact structure. Provides (start, count) for each partkey's entries in the partsupp table."}
+  ],
+  "aggregation": "array_direct",
+  "output": {"order_by": ["nation ASC", "o_year DESC"], "limit": null},
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B+C. The 52ms unaccounted gap (53% of 98ms total) came from mmapping 2.4GB across 17 files between phases, with destructive madvise flips (MADV_SEQUENTIAL then MADV_RANDOM on 240MB orders_orderkey_lookup and 91MB partsupp columns). Fix: (1) Pre-build a dense year_for_orderkey[60M] uint8_t array by sequentially scanning o_orderkey + o_orderdate — eliminates the 240MB orders_orderkey_lookup.bin entirely plus the 57MB o_orderdate random access and per-row year_from_days computation; (2) Pre-build a compact partsupp_compact[2M] struct array (48B per partkey with 4 suppkeys+costs together) by sequentially scanning partsupp — replaces 3 separate random-access arrays (107MB) with 1 cache-line-aligned lookup; (3) Use schedule(static) for filter_part to eliminate OpenMP dynamic scheduling overhead (10ms → ~2ms); (4) mmap all files upfront and call prefetch() on lineitem columns to overlap OS readahead with pre-build computation. No madvise flip needed since all pre-build scans are sequential. Expected: mmap+prefetch(1ms) + filter(2ms) + prebuild(5ms) + main_scan(25ms) + output(2ms) = ~35ms.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice * (1 - l_discount)"
+  }
+}

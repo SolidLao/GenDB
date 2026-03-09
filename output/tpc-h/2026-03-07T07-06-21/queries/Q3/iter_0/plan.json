@@ -1,0 +1,107 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer_build_bitset",
+    "scan_orders_filter_build_hashmap",
+    "scan_lineitem_zone_skip_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(c_mktsegment='BUILDING')",
+      "probe": "orders(o_custkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 300000,
+      "notes": "Scan c_mktsegment + c_custkey; build dense bool bitset[1500001] over c_custkey. ~1.5 MB, fully L3-resident. Probe o_custkey via O(1) direct index. Customer scan is small enough (~7 MB total) to run single-threaded before parallel orders scan."
+    },
+    {
+      "build": "orders(o_custkey IN cust_bitset AND o_orderdate < 9204)",
+      "probe": "lineitem(l_shipdate > 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1461000,
+      "notes": "Filter orders: cust_bitset[o_custkey] AND o_orderdate < 9204 (~20% × 48.7% = ~9.74% selectivity, ~1.46M rows). Build two structures: (1) qualifying_orders_bitset[60000001] — 7.5 MB, L3-resident prefilter; (2) compact_hash_map<int32_t,OrderMeta> pre-sized to 1.46M entries with {orderdate, shippriority}. Lineitem probe uses zone map to skip blocks (max_date <= 9204), then shipdate filter, then bitset prefilter (~82% early reject), then hash map lookup for metadata."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == building_code (dict lookup at startup)",
+      "selectivity": 0.20,
+      "output_rows": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "cust_ok_bitset[o_custkey]",
+      "selectivity": 0.20,
+      "output_rows": 3000000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.487,
+      "output_rows": 1461000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "zone_map: skip blocks where zones[b].max_date <= 9204",
+      "selectivity": 0.545,
+      "notes": "lineitem sorted ASC by l_shipdate; ~273 of 600 blocks skipped entirely"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.545,
+      "output_rows": 32692398
+    },
+    {
+      "table": "lineitem",
+      "predicate": "qualifying_orders_bitset[l_orderkey]",
+      "selectivity": 0.179,
+      "output_rows": 5851839,
+      "notes": "~1.46M qualifying orders × avg 4 lineitems/order; bitset prefilter rejects ~82% cheaply before hash map lookup"
+    }
+  ],
+  "data_structures": {
+    "customer_filter": "bitset — bool cust_ok[1500001], zero-initialized, 1.5 MB, L3-resident",
+    "orders_prefilter": "bitset — bool qualifying_orders[60000001], zero-initialized, 60 MB allocated but only ~7.5 MB of actual bits used; L3-resident working set for probed keys",
+    "orders_metadata": "compact_hash_map(pre_sized=2000000) — unordered_map<int32_t, OrderMeta> where OrderMeta = {int32_t orderdate; int32_t shippriority}; keyed by o_orderkey",
+    "aggregation": "thread_local unordered_map<int32_t, AggState> pre_sized=500000 per thread — AggState = {double revenue; int32_t orderdate; int32_t shippriority}; keyed by l_orderkey (uniquely determines orderdate+shippriority post-join); parallel merge into global map after scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_breakdown": {
+      "phase1_customer": "single_threaded — 7 MB total I/O (c_mktsegment 1.4 MB + c_custkey 5.7 MB); sequential scan, build cust_ok bitset",
+      "phase2_orders": "parallel — 228 MB total I/O across 4 columns; each thread scans a row range, applies cust_ok + orderdate filters, appends to thread-local vector<OrderRow>; main thread merges into shared qualifying_orders bitset + hash map",
+      "phase3_lineitem": "morsel_driven parallel — zone-map block skipping applied per-thread; each thread processes morsels of ~100k rows (full block); thread-local agg hash maps; parallel reduce/merge at end"
+    }
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip lineitem blocks where zones[b].max_date <= 9204; eliminates ~273/600 blocks (~45.5% of lineitem data)"
+    },
+    {
+      "index": "orders_by_orderkey",
+      "purpose": "not_used — 240 MB random-access array avoided in favor of in-memory qualifying_orders bitset + hash map built from filtered orders; avoids random access penalty into 240 MB structure during hot lineitem scan"
+    },
+    {
+      "index": "customer_by_custkey",
+      "purpose": "not_used — direct customer column scan with bitset build is cheaper than join-index indirection for a pure filter step"
+    }
+  ],
+  "aggregation": "hash_group_by — keyed by l_orderkey only (l_orderkey uniquely identifies o_orderdate and o_shippriority after join); AggState stores {revenue (double), orderdate (int32_t), shippriority (int32_t)}; thread-local maps merged via lock-free partition or sequential merge",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "partial_sort (nth_element + sort on top-10 candidates from merged agg map)"
+  },
+  "date_constants": {
+    "DATE_1995_03_15": 9204,
+    "o_orderdate_predicate": "o_orderdate < 9204",
+    "l_shipdate_predicate": "l_shipdate > 9204"
+  },
+  "execution_target": "cpp"
+}

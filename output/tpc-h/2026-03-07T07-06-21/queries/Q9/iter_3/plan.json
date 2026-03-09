@@ -1,0 +1,132 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_year.nibble_by_orderkey",
+      "action": "built_new",
+      "files": {
+        "year_nibbles": "column_versions/orders.o_year.nibble_by_orderkey/year_nibbles.bin",
+        "year_nibbles_format": "uint8_t[30000001]; nibble at index orderkey encodes (year-1992); lower nibble for even orderkeys, upper nibble for odd orderkeys; 0xF = invalid",
+        "array_length_bytes": 30000001
+      },
+      "usage": "mmap year_nibbles.bin with MADV_RANDOM. Hot-path access: const uint8_t* yn = year_nibbles; int year_off = (yn[lorderkey>>1] >> ((lorderkey&1)<<2)) & 0xF; if (year_off > 6) continue; — single 1-byte access into 28.6MB L3-resident array, replaces two-level 297MB random lookup (orders_by_orderkey 240MB + o_orderdate 57MB). Eliminates 2 DRAM misses per qualifying lineitem row."
+    }
+  ],
+  "pipeline": [
+    "build_green_part_bitset",
+    "precompute_suppkey_to_nationrow",
+    "parallel_lineitem_scan",
+    "aggregate_reduce",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "notes": "Load p_partkey.bin (8MB) and p_name.bin (112MB) via fread. Build uint8_t green_part[2000001] — 2MB, L3-resident. Single-threaded; on hot run p_name is in page cache so cost is ~2ms."
+    },
+    {
+      "build": "supplier(s_suppkey -> nationrow)",
+      "probe": "lineitem(l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Precompute int32_t suppkey_to_nationrow[100001] from supplier_by_suppkey + s_nationkey + nation_by_nationkey. 400KB, always L3-resident."
+    },
+    {
+      "build": "nation(n_nationkey -> n_name)",
+      "probe": "supplier(s_nationkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "Load n_name (650 bytes). Fold into suppkey_to_nationrow precomputation."
+    },
+    {
+      "build": "orders.o_year.nibble_by_orderkey (pre-built storage extension)",
+      "probe": "lineitem(l_orderkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "mmap year_nibbles.bin (28.6MB). No runtime build cost. Hot path: year_off = (year_nibbles[l_orderkey>>1] >> ((l_orderkey&1)<<2)) & 0xF. Replaces orders_by_orderkey (240MB) + o_orderdate (57MB) two-level DRAM lookup — eliminates 2 random DRAM misses per qualifying row. 28.6MB fits in 44MB L3."
+    },
+    {
+      "build": "partsupp(pre-built hash index)",
+      "probe": "lineitem(l_partkey, l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8000000,
+      "notes": "mmap partsupp_hash_index (256MB). Composite key = partkey*200001ULL+suppkey. FIB_CONST=11400714819323198485ULL, LOG2_CAP=24, linear probe. 1 DRAM miss per qualifying row (unavoidable without runtime build)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "output_rows": 110000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",       "file": "lineitem/l_partkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey",       "file": "lineitem/l_suppkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "green_part_filter":    "uint8_t[2000001], 2MB, L3-resident; indexed by p_partkey",
+    "year_nibbles":         "mmap uint8_t[30000001], 28.6MB, L3-resident; nibble[orderkey] = year-1992; replaces orders_by_orderkey(240MB)+o_orderdate(57MB); access: (yn[key>>1]>>((key&1)<<2))&0xF",
+    "partsupp_ht":          "mmap pre-built HTSlot[16777216], 256MB; MADV_RANDOM; no runtime build",
+    "ps_supplycost":        "mmap double[8000000], 61MB; fetched via partsupp_ht row_idx",
+    "suppkey_to_nationrow": "int32_t[100001], 400KB, L3-resident",
+    "nation_names":         "char[25][26], 650 bytes, L3-resident",
+    "aggregation":          "double profits[25][10] per thread in alignas(64) ThreadProfits struct; reduced single-threaded after parallel phase",
+    "l3_hot_budget":        "green_part(2MB) + year_nibbles(28.6MB) + suppkey_to_nationrow(0.4MB) = 31MB total, within 44MB LLC"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "parallel_phase": "lineitem scan (60M rows split into ~600 morsels across 64 threads)",
+    "thread_local_state": "double profits[25][10] per thread, in alignas(64) struct to avoid false sharing",
+    "reduction": "single-threaded sum of per-thread profits[25][10] arrays after parallel phase"
+  },
+  "indexes": [
+    {
+      "index": "green_part uint8_t[2000001]",
+      "purpose": "O(1) filter lineitem by l_partkey; 2MB L3-resident"
+    },
+    {
+      "index": "year_nibbles uint8_t[30000001] (pre-built storage extension, 28.6MB)",
+      "purpose": "O(1) l_orderkey -> year_offset 0-6; single nibble access into 28.6MB L3-resident array; eliminates 2 DRAM misses per qualifying row vs two-level 297MB orders lookup"
+    },
+    {
+      "index": "partsupp/partsupp_hash_index.bin (pre-built, 256MB)",
+      "purpose": "O(1) avg (l_partkey, l_suppkey) -> ps_supplycost; 1 DRAM miss per qualifying row"
+    },
+    {
+      "index": "suppkey_to_nationrow int32_t[100001]",
+      "purpose": "O(1) l_suppkey -> nation row; 400KB L3-resident"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category E storage extension to eliminate the two-level orders DRAM bottleneck. Root cause (Q2): in iter_0's hot path, each of the ~3.3M qualifying lineitem rows incurs 2 DRAM random misses for orders (orders_by_orderkey[l_orderkey]->orow into 240MB, then o_orderdate[orow] into 57MB) plus 1 DRAM miss for partsupp (256MB hash). The 297MB orders structures cannot fit in the 44MB L3. Previous iterations failed because they tried to build replacement structures at query startup, adding cold-AND-hot overhead that exceeded the savings. Category E fixes this: the nibble-packed year_by_orderkey array (year_nibbles.bin, 28.6MB) is built ONCE offline and stored persistently, so hot-run cost is just mmap — zero startup computation. On the hot path, year_off = (year_nibbles[lorderkey>>1] >> ((lorderkey&1)<<2)) & 0xF replaces the two-level 297MB random lookup with a single 1-byte access into a 28.6MB array that fits in the 44MB L3 alongside green_part (2MB) and suppkey_to_nationrow (0.4MB) for a total L3 budget of 31MB. This eliminates 2 DRAM misses per qualifying row (6.6M total misses eliminated across 64 threads), saving an estimated ~6-8ms on the hot 38ms baseline. The dim_filter and partsupp lookup are unchanged from iter_0, preserving the simplicity that made iter_0 faster than iter_1 and iter_2.",
+  "correctness_anchors": {
+    "threshold_constant": 2000000,
+    "threshold_constant": 100000
+  }
+}

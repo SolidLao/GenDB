@@ -1,0 +1,160 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "supplier.s_suppkey.nation_code_u8",
+      "action": "built_new",
+      "files": {
+        "nation_code": "column_versions/supplier.s_suppkey.nation_code_u8/nation_code.bin",
+        "nation_code_format": "uint8_t[max_suppkey + 1]"
+      },
+      "usage": "mmap nation_code.bin; use nation_code[l_suppkey] as the aggregation nation key instead of rebuilding supplier+nation lookups at runtime"
+    },
+    {
+      "id": "orders.o_orderkey.year_idx_u8",
+      "action": "built_new",
+      "files": {
+        "year_idx": "column_versions/orders.o_orderkey.year_idx_u8/year_idx.bin",
+        "year_idx_format": "uint8_t[max_orderkey + 1]"
+      },
+      "usage": "mmap year_idx.bin; use year_idx[l_orderkey] as the precomputed o_year offset from 1992 and skip orders_pk_dense, o_orderkey, and o_orderdate lookups in the hot loop"
+    },
+    {
+      "id": "partsupp.ps_partkey.dense4_i32",
+      "action": "built_new",
+      "files": {
+        "suppkey": "column_versions/partsupp.ps_partkey.dense4_i32/suppkey.bin",
+        "suppkey_format": "int32_t[(max_partkey + 1) * 4]",
+        "supplycost": "column_versions/partsupp.ps_partkey.dense4_i32/supplycost.bin",
+        "supplycost_format": "int32_t[(max_partkey + 1) * 4]"
+      },
+      "usage": "mmap both files; probe slots [l_partkey * 4, l_partkey * 4 + 4) and match l_suppkey to fetch supplycost without rebuilding a green-only partsupp structure"
+    }
+  ],
+  "pipeline": [
+    "scan_lineitem",
+    "aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part_name_green_bitset",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 96000,
+      "notes": "Test part_name_green_bitset[l_partkey] first and discard non-green rows before any other lookup."
+    },
+    {
+      "build": "supplier.s_suppkey.nation_code_u8",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Use the prebuilt dense suppkey->nation_code array and remove runtime supplier+nation join setup."
+    },
+    {
+      "build": "partsupp.ps_partkey.dense4_i32",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Probe the four fixed slots for each partkey directly from the persistent dense payload instead of scanning partsupp or probing the 192 MB partsupp hash."
+    },
+    {
+      "build": "orders.o_orderkey.year_idx_u8",
+      "probe": "lineitem(green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use the prebuilt dense orderkey->year_idx array so order-year extraction is a single byte lookup."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%' via `part_name_green_bitset[l_partkey] != 0`",
+      "selectivity": 0.048
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_partkey",
+        "file": "lineitem/l_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_suppkey",
+        "file": "lineitem/l_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(2000001)",
+    "fact_join": "dense uint8_t `suppkey->nation_code` array + dense4 int32 `(suppkey, supplycost_scaled)` payload indexed by `partkey * 4` + dense uint8_t `orderkey->year_idx` array",
+    "aggregation": "direct_array(25x7 per_thread)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "part_name_green_bitset",
+      "purpose": "skip non-green lineitems before any other join work"
+    },
+    {
+      "index": "supplier.s_suppkey.nation_code_u8",
+      "purpose": "replace runtime supplier+nation join setup with a single dense byte lookup"
+    },
+    {
+      "index": "partsupp.ps_partkey.dense4_i32",
+      "purpose": "replace the cache-exceeding partsupp hash and the runtime green-partsupp build with four cache-shaped direct slots per partkey"
+    },
+    {
+      "index": "orders.o_orderkey.year_idx_u8",
+      "purpose": "replace orders PK and date lookups with a single dense year byte lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The remaining gap comes from a storage-level mismatch: iteration 1 cut main-scan cost, but it still spends 14 ms in dim_filter and 24 ms rebuilding cache-friendly join state because the available persistent structures do not match Q9's direct-lookup access pattern. This revision uses strategy category E: persist three all-rows dense lookup arrays—a `suppkey -> nation_code` byte map, an `orderkey -> year_idx` byte map, and a `partkey -> 4 x (suppkey, supplycost_i32)` payload—so execution becomes a single sequential lineitem scan with only direct-array probes and per-thread array aggregation, eliminating the runtime partsupp repack and dimension build phases while keeping the hot working set near LLC size.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,96 @@
+{
+  "query_id": "Q3",
+  "storage_extensions": [
+    {
+      "id": "num.adsh.triple_ranges",
+      "action": "use_existing",
+      "files": {
+        "ranges": "column_versions/num.adsh.triple_ranges/ranges.bin",
+        "ranges_format": "uint64_t n; struct { uint32_t adsh; uint64_t lo; uint64_t hi; }[n]"
+      },
+      "usage": "mmap ranges.bin; for each sub row with fy=2022, binary-search adsh and scan [lo,hi) fact rows directly to avoid global fact scan or posting-tail materialization"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "map_adsh_to_fact_ranges",
+    "scan_fact_ranges",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022)",
+      "probe": "num(fact ranges from num.adsh.triple_ranges)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 17572,
+      "notes": "Drive from filtered sub keys and touch only adsh-matching fact slices; apply n.uom='USD' and n.value IS NOT NULL in-range"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 8040000,
+    "columns": [
+      {
+        "name": "num.uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_code->filtered_sub_idx, sentinel=-1) + vector(filtered_sub_rows)",
+    "fact_join": "pre_built_index(sub_fy_zonemap) + mmap(sorted_ranges_u32_u64 num.adsh.triple_ranges)",
+    "aggregation": "thread_local direct_array(filtered_sub_cardinality) then compact_hash_map rollup for (name,cik) and cik"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num.adsh.triple_ranges",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is wasted work in the previous direction: build_joins became dominant by materializing USD rowids from a cache-exceeding posting tail before any selective join. Strategy Category A/C: reorder to filter sub by fy first, then use the existing num.adsh.triple_ranges representation to scan only fact ranges for matching adsh keys and apply uom/value predicates inside those ranges; keep aggregation as cache-friendly direct arrays with a small final rollup for HAVING and top-k.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,150 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_orderdate.year_dense_by_orderkey",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/orders.o_orderdate.year_dense_by_orderkey/codes.bin",
+        "codes_format": "int16_t[max_orderkey + 1] keyed by o_orderkey"
+      },
+      "usage": "mmap codes.bin; use year_codes[o_orderkey] for o_year lookup during aggregation"
+    },
+    {
+      "id": "part.p_name.has_green_by_partkey",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/part.p_name.has_green_by_partkey/codes.bin",
+        "codes_format": "uint8_t[max_partkey + 1] keyed by p_partkey; 1=contains 'green', 0=otherwise"
+      },
+      "usage": "mmap codes.bin; use has_green[p_partkey]==1 as the p_name LIKE '%green%' predicate"
+    },
+    {
+      "id": "lineitem.l_discount.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_discount*100)"
+      },
+      "usage": "mmap codes.bin; use int discount codes in amount computation to avoid per-row floating conversion"
+    },
+    {
+      "id": "lineitem.l_quantity.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_quantity*100)"
+      },
+      "usage": "mmap codes.bin; use int quantity codes in amount computation to avoid per-row floating conversion"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "part.has_green dense lookup",
+      "probe": "partsupp(sorted by ps_partkey)",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 108782,
+      "notes": "Enumerate green partkeys from dense lookup and fetch only matching ps_partkey ranges via lower_bound/upper_bound."
+    },
+    {
+      "build": "supplier+nation mappings",
+      "probe": "partsupp(filtered green)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Map ps_suppkey to nationkey once; carry nationkey with filtered partsupp rows."
+    },
+    {
+      "build": "partsupp(filtered green, key=(ps_partkey,ps_suppkey))",
+      "probe": "lineitem_partsupp_hash",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 435128,
+      "notes": "Materialize match records {lineitem_rowid, nationkey, ps_supplycost_scaled100} from index hits, then sort by lineitem_rowid for locality."
+    },
+    {
+      "build": "orders year dense lookup",
+      "probe": "lineitem(matches sorted by rowid)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 60000001,
+      "notes": "Use dense year lookup during aggregation of sorted matched lineitem rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "has_green[p_partkey] = 1",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "partsupp",
+      "predicate": "ps_partkey IN green_parts",
+      "selectivity": 0.054391
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount_scaled100",
+        "file": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_quantity_scaled100",
+        "file": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(part.has_green_by_partkey)",
+    "fact_join": "sorted_range_lookup(ps_partkey) + pre_built_index(lineitem_partsupp_hash) + rowid_payload_vector(sorted_by_rowid)",
+    "aggregation": "direct_array(25x7)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partsupp_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a combined Category B/C mismatch: iter2 touches a selective subset but reads lineitem measures through random rowid access and repeatedly executes expensive floating conversion/rounding per matched row, making main_scan latency and compute heavy. The revised plan keeps selective green-part and partsupp pruning, but materializes matched lineitem rowids with nation and scaled supplycost payload, sorts by rowid to turn lineitem measure access into locality-friendly sequential reads, and uses existing scaled int16 discount/quantity column versions to remove per-row floating conversion in the hot loop while preserving direct-array nation/year aggregation.",
+  "correctness_anchors": {}
+}

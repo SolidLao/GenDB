@@ -1,0 +1,125 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_sub",
+    "build_sub_lookup",
+    "probe_num_by_adsh_postings",
+    "probe_pre_triple_index",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "num via num_adsh_fk_hash postings",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 26612,
+      "notes": "Use fy-pruned sub.adsh as driver keys and fetch only matching num rowids from posting index; apply uom='USD' and value IS NOT NULL on fetched rows."
+    },
+    {
+      "build": "pre_stmt_filter(stmt='IS')",
+      "probe": "(num.adsh,num.tag,num.version) via pre_adsh_tag_version_hash",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1862555,
+      "notes": "Probe pre triple posting index per surviving num row; keep only pre rowids passing stmt='IS' marker and aggregate by plabel."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.308975445
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_driven"
+  },
+  "data_structures": {
+    "dim_filter": "compact_hash_map<uint32_t adsh, uint32_t name_code>",
+    "fact_join": "pre_built_index(num_adsh_fk_hash + pre_adsh_tag_version_hash) with bitset(pre_stmt_is)",
+    "aggregation": "thread_local_compact_hash_map<key(name_code,stmt_code,tag_code,plabel_code), agg(sum_f64,count_u64)>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is logical-plan mismatch (Category A): the current plan spends major time building and probing a large runtime pre triple hash map even though persistent posting indexes already provide direct lookup paths. The revised plan removes runtime pre join-build entirely, drives execution from selective sub.fy=2023 keys, fetches only matching num rows through num_adsh postings, probes pre triple postings directly, applies stmt='IS' through a compact pre-row marker, and keeps only final aggregation state as mutable runtime structure.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,41 @@
+{
+  "query_id": "Q2",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 89.62,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 89.62,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.17,
+        "build_joins": 1.62,
+        "main_scan": 3.67,
+        "output": 7.33,
+        "total": 93.52
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 17.02,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 17.02,
+      "validation": "pass",
+      "strategy": "Root cause: the iter_0 plan allocated 64 thread-local hash maps of 4MB each (256MB total anonymous mmap), triggering ~65,536 page faults during parallel initialization — this unaccounted overhead consumed ~80ms of the 90ms total, while actual scan work was only 5ms. Additionally, the two-pass design forced two sequential scans of the same ~100K-row block. Fix (Category A+D): collapse to a single-threaded single-pass design. One scan over the ~1 valid block simultaneously builds a 1MB global MAX map (65536 slots) keyed on (adsh_code, tagver_code) and collects candidates — both restricted to fy[adsh_code]==2022 rows, which is semantically equivalent to the full subquery because n.adsh=m.adsh pins each outer row to one adsh_code with fixed fy. Post-scan, candidates are post-filtered against the max map (expected ~500 pass), sorted, and top-100 decoded. Single-threaded eliminates all thread-init and merge overhead; 1MB map generates negligible page faults; one scan instead of two halves memory traffic.",
+      "operation_timings": {
+        "data_loading": 0.29,
+        "main_scan": 14.08,
+        "build_joins": 0.74,
+        "output": 4.7,
+        "total": 21.11
+      }
+    }
+  ]
+}

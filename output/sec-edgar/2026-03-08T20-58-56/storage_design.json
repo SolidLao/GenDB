@@ -1,0 +1,86 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "gendb" },
+  "tables": {
+    "sub": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id", "encoding": "dict_shared(adsh_dict)" },
+        { "name": "cik", "cpp_type": "int32_t", "semantic_type": "company_id", "encoding": "plain" },
+        { "name": "name", "cpp_type": "uint32_t", "semantic_type": "company_name", "encoding": "dictionary" },
+        { "name": "sic", "cpp_type": "int32_t", "semantic_type": "industry_code", "encoding": "plain" },
+        { "name": "fy", "cpp_type": "int32_t", "semantic_type": "fiscal_year", "encoding": "plain" }
+      ],
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "86135",
+      "indexes": [
+        { "name": "sub_adsh_pk_hash", "type": "hash", "columns": ["adsh"] },
+        { "name": "sub_fy_zonemap", "type": "zone_map", "columns": ["fy"] },
+        { "name": "sub_sic_zonemap", "type": "zone_map", "columns": ["sic"] }
+      ]
+    },
+    "num": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id_fk", "encoding": "dict_shared(adsh_dict)" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag", "encoding": "dict_shared(tag_dict)" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version", "encoding": "dict_shared(version_dict)" },
+        { "name": "ddate", "cpp_type": "int32_t", "semantic_type": "report_date_yyyymmdd", "encoding": "plain" },
+        { "name": "qtrs", "cpp_type": "int8_t", "semantic_type": "quarters", "encoding": "plain" },
+        { "name": "uom", "cpp_type": "uint16_t", "semantic_type": "unit", "encoding": "dict_shared(uom_dict)" },
+        { "name": "value", "cpp_type": "double", "semantic_type": "fact_value", "encoding": "plain_nan_null" }
+      ],
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "39401761",
+      "indexes": [
+        { "name": "num_adsh_fk_hash", "type": "hash", "columns": ["adsh"] },
+        { "name": "num_adsh_tag_version_hash", "type": "hash", "columns": ["adsh","tag","version"] },
+        { "name": "num_tag_version_uom_hash", "type": "hash", "columns": ["tag","version","uom"] },
+        { "name": "num_uom_hash", "type": "hash", "columns": ["uom"] },
+        { "name": "num_ddate_zonemap", "type": "zone_map", "columns": ["ddate"] }
+      ]
+    },
+    "tag": {
+      "columns": [
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag_pk", "encoding": "dict_shared(tag_dict)" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version_pk", "encoding": "dict_shared(version_dict)" },
+        { "name": "abstract", "cpp_type": "int8_t", "semantic_type": "abstract_flag", "encoding": "plain" },
+        { "name": "tlabel", "cpp_type": "uint32_t", "semantic_type": "tag_label", "encoding": "dictionary" }
+      ],
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "1070662",
+      "indexes": [
+        { "name": "tag_tag_version_pk_hash", "type": "hash", "columns": ["tag","version"] },
+        { "name": "tag_abstract_zonemap", "type": "zone_map", "columns": ["abstract"] }
+      ]
+    },
+    "pre": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id_fk", "encoding": "dict_shared(adsh_dict)" },
+        { "name": "report", "cpp_type": "int16_t", "semantic_type": "report_num", "encoding": "plain" },
+        { "name": "line", "cpp_type": "int16_t", "semantic_type": "line_num", "encoding": "plain" },
+        { "name": "stmt", "cpp_type": "uint8_t", "semantic_type": "statement_type", "encoding": "dict_shared(stmt_dict)" },
+        { "name": "rfile", "cpp_type": "uint8_t", "semantic_type": "render_source", "encoding": "dict_shared(rfile_dict)" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag_fk", "encoding": "dict_shared(tag_dict)" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version_fk", "encoding": "dict_shared(version_dict)" },
+        { "name": "plabel", "cpp_type": "uint32_t", "semantic_type": "presentation_label", "encoding": "dictionary" }
+      ],
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"] },
+      "sort_order": [],
+      "block_size": 100000,
+      "estimated_rows": "9600799",
+      "indexes": [
+        { "name": "pre_adsh_fk_hash", "type": "hash", "columns": ["adsh"] },
+        { "name": "pre_adsh_tag_version_hash", "type": "hash", "columns": ["adsh","tag","version"] },
+        { "name": "pre_stmt_hash", "type": "hash", "columns": ["stmt"] },
+        { "name": "pre_stmt_zonemap", "type": "zone_map", "columns": ["stmt"] }
+      ]
+    }
+  },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t" },
+  "date_encoding": "yyyymmdd_int32",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "88", "disk_type": "hdd", "total_memory_gb": "376" }
+}

@@ -1,0 +1,93 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "build_customer_bitset",
+    "build_qualifying_orders_map",
+    "parallel_scan_lineitem_aggregate",
+    "merge_thread_local_maps",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment == 1)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "notes": "TPC-H c_custkey is 1-based sequential [1..1500000]; build a bitset of size 1500001 indexed directly by custkey value (~188 KB, fits in L3). Probe with o_custkey: O(1) array lookup, no hashing."
+    },
+    {
+      "build": "orders(filtered: o_orderdate < 8015 AND o_custkey in customer_bitset)",
+      "probe": "lineitem(filtered: l_shipdate > 8015)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "Build compact open-addressing hash map: key=o_orderkey (int32), value=packed struct {int32 o_orderdate, int32 o_shippriority}. Capacity 4194304 (next power-of-2 above 1.47M/0.5). Total ~50 MB — fits in memory, partially in L3 (44 MB). Use same hash32 function. Probe from lineitem morsel workers."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == 1",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 8015",
+      "selectivity": 0.49,
+      "output_cardinality": 7350000,
+      "index": "o_orderdate_zone_map",
+      "index_note": "Break loop early when zone_min[b] >= 8015 (sorted ascending). ~74 of 150 blocks fully included; ~76 trailing blocks fully skipped."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 8015",
+      "selectivity": 0.51,
+      "output_cardinality": 30593000,
+      "index": "l_shipdate_zone_map",
+      "index_note": "Skip blocks where zone_max[b] <= 8015 (continue). ~294 of 600 leading blocks entirely skipped. For blocks where zone_min[b] > 8015, skip per-row shipdate check."
+    }
+  ],
+  "constants": {
+    "kBuilding": "derived from encode_mktsegment switch: case 'B' -> 1",
+    "kOrderDateMax": 8015,
+    "kShipdateMin": 8015
+  },
+  "data_structures": {
+    "customer_filter": "direct_array bitset — bool qualifying_cust[1500001], indexed by c_custkey value; ~1.5 MB; fully cache-resident",
+    "orders_build_map": "compact_hash_map(pre_sized, capacity=4194304) — open-addressing linear probing; key=int32 o_orderkey (sentinel=-1), value=packed int64 encoding {int32 o_orderdate | int32 o_shippriority}; ~50 MB total",
+    "aggregation": "thread_local unordered flat hash maps keyed by int32 l_orderkey -> {double revenue, int32 o_orderdate, int32 o_shippriority}; pre-sized per-thread to ~3M/nthreads entries; merged into single map after scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_1_customer_scan": "single-threaded (1.5M rows x 1 byte = 1.5 MB — trivially fast, avoids bitset write-contention)",
+    "phase_2_orders_scan": "single-threaded (build map serially; 15M orders, ~50% skipped by zone map; avoids concurrent hash-map insertion complexity)",
+    "phase_3_lineitem_scan": "parallel morsel-driven across all 64 threads; each thread owns a local aggregation hash map; no shared state during scan",
+    "phase_4_merge": "linear merge of 64 thread-local maps into final map; single-threaded or tree-reduce"
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "purpose": "skip_blocks — break early once zone_min[b] >= kOrderDateMax (sorted order)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip leading ~294/600 blocks where zone_max[b] <= kShipdateMin; omit per-row check for blocks where zone_min[b] > kShipdateMin"
+    }
+  ],
+  "aggregation": "hash_group_by — key=l_orderkey (int32, uniquely identifies group since each order has exactly one o_orderdate and o_shippriority); value={double revenue, int32 o_orderdate, int32 o_shippriority}; estimated ~3M groups total",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "partial_sort or min-heap of 10 over final merged map"
+  },
+  "memory_budget": {
+    "customer_bitset_MB": 1.5,
+    "orders_map_MB": 50,
+    "aggregation_maps_MB": "~64 x (3M/64 groups x 20 bytes) = ~60 MB total across threads",
+    "total_estimated_MB": 112
+  },
+  "execution_target": "cpp"
+}

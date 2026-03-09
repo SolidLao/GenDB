@@ -1,0 +1,92 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "aggregate"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 7576 AND l_shipdate < 7941",
+      "selectivity": 0.14,
+      "method": "zone_map_block_skip_then_per_row",
+      "notes": "Sorted column; zone map eliminates ~508/600 blocks outright. Full-block flag skips per-row date check for blocks with zm_min>=7576 && zm_max<7941."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "selectivity": 0.30,
+      "method": "branchless_simd"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.50,
+      "method": "branchless_simd"
+    }
+  ],
+  "predicate_order": ["l_shipdate", "l_discount", "l_quantity"],
+  "constants": {
+    "kShipdateLo": 7576,
+    "kShipdateHi": 7941,
+    "kDiscLo": 0.05,
+    "kDiscHi": 0.07,
+    "kQuantityMax": 24.0
+  },
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "total_blocks": 600,
+    "estimated_qualifying_blocks": 92,
+    "estimated_rows_after_zone_map": 8400000,
+    "estimated_rows_after_all_filters": 1140000,
+    "columns_read": [
+      {"col": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"col": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8},
+      {"col": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "double",  "bytes_per_row": 8},
+      {"col": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8}
+    ],
+    "estimated_qualifying_data_mb": 235
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "layout": "int32_t num_blocks, block_size, then min[600], max[600]",
+      "size_bytes": 4804,
+      "skip_condition": "zm_max[b] < kShipdateLo || zm_min[b] >= kShipdateHi",
+      "full_block_condition": "zm_min[b] >= kShipdateLo && zm_max[b] < kShipdateHi",
+      "notes": "Fits in L1 cache (~5KB). Load once before parallel dispatch. Sorted column allows early break when zm_min[b] >= kShipdateHi."
+    }
+  ],
+  "data_structures": {
+    "aggregation": "thread_local_double_accumulator",
+    "notes": "No hash table needed; single SUM over all passing rows. Each thread accumulates a local double; final reduction sums 64 locals."
+  },
+  "aggregation": {
+    "type": "global_sum",
+    "expression": "l_extendedprice * l_discount",
+    "output_alias": "revenue",
+    "output_type": "double",
+    "thread_reduction": "sum_of_thread_locals"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "unit": "block",
+    "threads": "auto(nproc)",
+    "work_distribution": "static_block_range_per_thread",
+    "notes": "Distribute qualifying blocks across 64 threads. Each thread scans its assigned blocks independently with a thread-local accumulator. Final reduction is a single O(threads) sum. Coarse block granularity (100K rows/block) makes dynamic scheduling unnecessary."
+  },
+  "simd": {
+    "target": "AVX-512",
+    "strategy": "branchless_masked_accumulate",
+    "notes": "Process 8 doubles per cycle. Compute combined predicate mask (discount range AND quantity bound), multiply l_extendedprice * l_discount under mask, accumulate with _mm512_mask_add_pd or fmadd. For partial date blocks, AND mask with per-row date predicate."
+  },
+  "output": {
+    "columns": [{"alias": "revenue", "type": "double"}],
+    "rows": 1,
+    "order_by": [],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

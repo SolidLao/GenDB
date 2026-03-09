@@ -1,0 +1,65 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "shipdate_zone_map_prune",
+    "scan_lineitem_columns",
+    "thread_local_partial_aggregate",
+    "final_merge_finalize",
+    "sort_output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988,
+      "index": "lineitem_shipdate_zone_map",
+      "block_logic": {
+        "skip_when": "mins[block] > 10471",
+        "accept_when": "maxs[block] <= 10471",
+        "fallback": "row_check l_shipdate[row] <= 10471"
+      }
+    }
+  ],
+  "data_structures": {
+    "block_pruning": "zone_map(mins,maxs) over 100000-row blocks",
+    "scan_columns": [
+      "l_returnflag",
+      "l_linestatus",
+      "l_quantity",
+      "l_extendedprice",
+      "l_discount",
+      "l_tax",
+      "l_shipdate"
+    ],
+    "aggregation": "thread_local direct_array(65536 slots keyed by ((uint16_t)l_returnflag << 8) | l_linestatus)",
+    "aggregate_payload": "per-slot accumulators: sum_qty,sum_base_price,sum_disc_price,sum_charge,sum_discount,count",
+    "merge": "reduce non-empty thread-local slots into one direct_array, then emit populated groups only"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)=64",
+    "partition_unit": "zone-map-aligned block ranges",
+    "local_state": "one aggregate array per worker"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "skip_blocks_and_fast_accept_fully_qualifying_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null,
+    "finalize": [
+      "avg_qty = sum_qty / count",
+      "avg_price = sum_base_price / count",
+      "avg_disc = sum_discount / count"
+    ]
+  },
+  "execution_target": "cpp"
+}

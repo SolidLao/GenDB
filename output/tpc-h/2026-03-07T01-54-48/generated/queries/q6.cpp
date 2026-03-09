@@ -1,0 +1,299 @@
+#include <algorithm>
+#include <bitset>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#include <fcntl.h>
+#include <omp.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "timing_utils.h"
+
+namespace {
+
+constexpr uint64_t kExpectedBlocks = 600;
+constexpr int32_t kShipdateLo = 8766;
+constexpr int32_t kShipdateHi = 9131;
+constexpr uint16_t kDiscountCodeLo = 5;
+constexpr uint16_t kDiscountCodeHi = 7;
+constexpr uint16_t kQuantityCodeHi = 2400;
+
+struct MMapFile {
+    void* data = nullptr;
+    size_t size = 0;
+
+    MMapFile() = default;
+    MMapFile(const MMapFile&) = delete;
+    MMapFile& operator=(const MMapFile&) = delete;
+
+    MMapFile(MMapFile&& other) noexcept : data(other.data), size(other.size) {
+        other.data = nullptr;
+        other.size = 0;
+    }
+
+    MMapFile& operator=(MMapFile&& other) noexcept {
+        if (this != &other) {
+            if (data != nullptr && data != MAP_FAILED) {
+                munmap(data, size);
+            }
+            data = other.data;
+            size = other.size;
+            other.data = nullptr;
+            other.size = 0;
+        }
+        return *this;
+    }
+
+    ~MMapFile() {
+        if (data != nullptr && data != MAP_FAILED) {
+            munmap(data, size);
+        }
+    }
+};
+
+[[noreturn]] void fail(const std::string& msg) {
+    std::fprintf(stderr, "%s\n", msg.c_str());
+    std::exit(1);
+}
+
+MMapFile mmap_readonly(const std::string& path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        std::perror(("open failed: " + path).c_str());
+        std::exit(1);
+    }
+
+    struct stat st {};
+    if (fstat(fd, &st) != 0) {
+        std::perror(("fstat failed: " + path).c_str());
+        close(fd);
+        std::exit(1);
+    }
+
+    MMapFile file;
+    file.size = static_cast<size_t>(st.st_size);
+    file.data = mmap(nullptr, file.size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (file.data == MAP_FAILED) {
+        std::perror(("mmap failed: " + path).c_str());
+        std::exit(1);
+    }
+
+    if (file.size > (1u << 20)) {
+        madvise(file.data, file.size, MADV_SEQUENTIAL);
+    }
+    return file;
+}
+
+template <typename T>
+struct ZoneMapView {
+    uint32_t block_size = 0;
+    uint64_t n = 0;
+    uint64_t blocks = 0;
+    const T* mins = nullptr;
+    const T* maxs = nullptr;
+};
+
+template <typename T>
+ZoneMapView<T> parse_zonemap(const MMapFile& zm_file, const char* name) {
+    constexpr size_t kHeaderBytes = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint64_t);
+    if (zm_file.size < kHeaderBytes) {
+        fail(std::string("Invalid zonemap ") + name + ": header too small");
+    }
+
+    const uint8_t* p = static_cast<const uint8_t*>(zm_file.data);
+    ZoneMapView<T> v;
+    v.block_size = *reinterpret_cast<const uint32_t*>(p);
+    p += sizeof(uint32_t);
+    v.n = *reinterpret_cast<const uint64_t*>(p);
+    p += sizeof(uint64_t);
+    v.blocks = *reinterpret_cast<const uint64_t*>(p);
+    p += sizeof(uint64_t);
+
+    const size_t arr_bytes = static_cast<size_t>(v.blocks) * sizeof(T);
+    const size_t needed = kHeaderBytes + arr_bytes + arr_bytes;
+    if (v.block_size == 0 || zm_file.size < needed) {
+        fail(std::string("Invalid zonemap ") + name + ": malformed body");
+    }
+
+    v.mins = reinterpret_cast<const T*>(p);
+    p += arr_bytes;
+    v.maxs = reinterpret_cast<const T*>(p);
+    return v;
+}
+
+struct alignas(64) PaddedDouble {
+    double value;
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::fprintf(stderr, "Usage: %s <gendb_dir> <results_dir>\n", argv[0]);
+        return 1;
+    }
+
+    const std::string gendb_dir = argv[1];
+    const std::string results_dir = argv[2];
+    std::filesystem::create_directories(results_dir);
+
+    const std::string shipdate_path = gendb_dir + "/lineitem/l_shipdate.bin";
+    const std::string discount_code_path =
+        gendb_dir + "/column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin";
+    const std::string quantity_code_path =
+        gendb_dir + "/column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin";
+    const std::string extendedprice_path = gendb_dir + "/lineitem/l_extendedprice.bin";
+
+    const std::string shipdate_zm_path = gendb_dir + "/lineitem/lineitem_shipdate_zonemap.idx";
+    const std::string discount_zm_path = gendb_dir + "/lineitem/lineitem_discount_zonemap.idx";
+    const std::string quantity_zm_path = gendb_dir + "/lineitem/lineitem_quantity_zonemap.idx";
+
+    GENDB_PHASE_MS("total", total_ms);
+
+    MMapFile shipdate_file;
+    MMapFile discount_code_file;
+    MMapFile quantity_code_file;
+    MMapFile extendedprice_file;
+    MMapFile shipdate_zm_file;
+    MMapFile discount_zm_file;
+    MMapFile quantity_zm_file;
+
+    {
+        GENDB_PHASE("data_loading");
+        shipdate_file = mmap_readonly(shipdate_path);
+        discount_code_file = mmap_readonly(discount_code_path);
+        quantity_code_file = mmap_readonly(quantity_code_path);
+        extendedprice_file = mmap_readonly(extendedprice_path);
+        shipdate_zm_file = mmap_readonly(shipdate_zm_path);
+        discount_zm_file = mmap_readonly(discount_zm_path);
+        quantity_zm_file = mmap_readonly(quantity_zm_path);
+    }
+
+    const auto* l_shipdate = static_cast<const int32_t*>(shipdate_file.data);
+    const auto* l_discount_code = static_cast<const uint16_t*>(discount_code_file.data);
+    const auto* l_quantity_code = static_cast<const uint16_t*>(quantity_code_file.data);
+    const auto* l_extendedprice = static_cast<const double*>(extendedprice_file.data);
+
+    const uint64_t n_rows = shipdate_file.size / sizeof(int32_t);
+    if (shipdate_file.size != n_rows * sizeof(int32_t) ||
+        discount_code_file.size != n_rows * sizeof(uint16_t) ||
+        quantity_code_file.size != n_rows * sizeof(uint16_t) ||
+        extendedprice_file.size != n_rows * sizeof(double)) {
+        fail("Column size mismatch");
+    }
+
+    const auto shipdate_zm = parse_zonemap<int32_t>(shipdate_zm_file, "lineitem_shipdate_zonemap.idx");
+    const auto discount_zm = parse_zonemap<double>(discount_zm_file, "lineitem_discount_zonemap.idx");
+    const auto quantity_zm = parse_zonemap<double>(quantity_zm_file, "lineitem_quantity_zonemap.idx");
+
+    if (shipdate_zm.n != n_rows || discount_zm.n != n_rows || quantity_zm.n != n_rows ||
+        shipdate_zm.block_size != discount_zm.block_size ||
+        shipdate_zm.block_size != quantity_zm.block_size ||
+        shipdate_zm.blocks != discount_zm.blocks ||
+        shipdate_zm.blocks != quantity_zm.blocks ||
+        shipdate_zm.blocks != kExpectedBlocks) {
+        fail("Unexpected zonemap metadata");
+    }
+
+    std::bitset<kExpectedBlocks> candidate_mask;
+    {
+        GENDB_PHASE("dim_filter");
+        candidate_mask.set();
+        for (uint64_t b = 0; b < shipdate_zm.blocks; ++b) {
+            const bool pass_shipdate =
+                (shipdate_zm.maxs[b] >= kShipdateLo) && (shipdate_zm.mins[b] < kShipdateHi);
+            const bool pass_discount = (discount_zm.maxs[b] >= 0.05) && (discount_zm.mins[b] <= 0.07);
+            const bool pass_quantity = quantity_zm.mins[b] < 24.0;
+            if (!(pass_shipdate && pass_discount && pass_quantity)) {
+                candidate_mask.reset(static_cast<size_t>(b));
+            }
+        }
+    }
+
+    std::vector<uint32_t> candidate_blocks;
+    {
+        GENDB_PHASE("build_joins");
+        candidate_blocks.reserve(shipdate_zm.blocks);
+        for (uint64_t b = 0; b < shipdate_zm.blocks; ++b) {
+            if (candidate_mask.test(static_cast<size_t>(b))) {
+                candidate_blocks.push_back(static_cast<uint32_t>(b));
+            }
+        }
+    }
+
+    double revenue = 0.0;
+    {
+        GENDB_PHASE("main_scan");
+        if (!candidate_blocks.empty()) {
+            const int threads = std::max(1, omp_get_max_threads());
+            std::vector<PaddedDouble> partial(static_cast<size_t>(threads));
+            for (auto& slot : partial) {
+                slot.value = 0.0;
+            }
+
+#pragma omp parallel num_threads(threads)
+            {
+                const int tid = omp_get_thread_num();
+                double local_sum = 0.0;
+
+#pragma omp for schedule(static)
+                for (size_t bi = 0; bi < candidate_blocks.size(); ++bi) {
+                    const uint64_t block_id = static_cast<uint64_t>(candidate_blocks[bi]);
+                    const uint64_t begin = block_id * static_cast<uint64_t>(shipdate_zm.block_size);
+                    const uint64_t end =
+                        std::min(begin + static_cast<uint64_t>(shipdate_zm.block_size), n_rows);
+
+                    for (uint64_t i = begin; i < end; ++i) {
+                        const int32_t shipdate = l_shipdate[i];
+                        if (shipdate < kShipdateLo || shipdate >= kShipdateHi) {
+                            continue;
+                        }
+
+                        const uint16_t discount_code = l_discount_code[i];
+                        if (discount_code < kDiscountCodeLo || discount_code > kDiscountCodeHi) {
+                            continue;
+                        }
+
+                        if (l_quantity_code[i] >= kQuantityCodeHi) {
+                            continue;
+                        }
+
+                        local_sum += l_extendedprice[i] * (static_cast<double>(discount_code) * 0.01);
+                    }
+                }
+
+                partial[static_cast<size_t>(tid)].value = local_sum;
+            }
+
+            for (const auto& slot : partial) {
+                revenue += slot.value;
+            }
+        }
+    }
+
+    {
+        GENDB_PHASE("output");
+        const std::string out_path = results_dir + "/Q6.csv";
+        std::ofstream out(out_path, std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "Failed to open output file: %s\n", out_path.c_str());
+            return 1;
+        }
+
+        out.setf(std::ios::fixed);
+        out.precision(2);
+        out << "revenue\n";
+        out << revenue << '\n';
+    }
+
+    (void)total_ms;
+    return 0;
+}

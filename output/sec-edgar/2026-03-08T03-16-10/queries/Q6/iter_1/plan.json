@@ -1,0 +1,125 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_dim",
+    "filter_pre_keys",
+    "probe_num_index",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub.adsh_to_rowid(fy=2023,name)",
+      "probe": "pre(stmt='IS')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612,
+      "notes": "Use the dense sub adsh lookup first so only pre rows whose adsh survives fy=2023 contribute downstream."
+    },
+    {
+      "build": "pre(stmt='IS' and sub.fy=2023) keyed by (adsh,tag,version) -> plabel[]",
+      "probe": "num via indexes/adsh_tag_version_sorted with row-level uom='USD' check",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 546000,
+      "notes": "Probe the existing num sorted triple index instead of scanning num; keep only matching runs and aggregate matching num rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "pre",
+      "predicate": "adsh IN sub(fy=2023)",
+      "selectivity": 0.309
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.844
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns": [
+      {
+        "name": "stmt",
+        "file": "pre/stmt.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "adsh",
+        "file": "pre/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "pre/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "pre/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "plabel",
+        "file": "pre/plabel.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_id->sub_rowid) with fy/name side arrays",
+    "fact_join": "compact_hash_map(pre_sized) keyed by filtered (adsh,tag,version) with contiguous plabel payloads; probe num pre_built_index",
+    "aggregation": "compact_hash_map sized to observed join cardinality, allocated lazily per worker and merged once"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre/indexes/stmt.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan does unnecessary work in the wrong order and uses cache-exceeding runtime structures, specifically a filtered-pre hash table larger than LLC and oversized thread-local aggregation maps while still scanning nearly all num rows. Strategy category A with work elimination: filter sub first, scan pre sequentially with stmt zone-map pruning and the sub adsh filter to build only the surviving triple->plabel payloads, then probe num through the existing sorted (adsh,tag,version) index instead of full-scanning num; aggregate with right-sized lazy worker maps so the working set stays closer to cache and the 904 ms main scan disappears.",
+  "correctness_anchors": {}
+}

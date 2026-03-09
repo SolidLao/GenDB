@@ -1,0 +1,96 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "lineitem.q6_shipdate_cover",
+      "action": "built_new",
+      "files": {
+        "offsets": "column_versions/lineitem.q6_shipdate_cover/offsets.bin",
+        "offsets_format": "uint64_t[2527]",
+        "discount_pct": "column_versions/lineitem.q6_shipdate_cover/discount_pct.bin",
+        "discount_pct_format": "uint8_t[row_count]",
+        "quantity_units": "column_versions/lineitem.q6_shipdate_cover/quantity_units.bin",
+        "quantity_units_format": "uint8_t[row_count]",
+        "extendedprice_cents": "column_versions/lineitem.q6_shipdate_cover/extendedprice_cents.bin",
+        "extendedprice_cents_format": "uint32_t[row_count]"
+      },
+      "usage": "mmap offsets and the compact payload arrays; use day_base=8036 and scan positions [offsets[8766-8036], offsets[9131-8036]) so Q6 reads only the 1994 shipdate slice, applies discount_pct in [5,7] and quantity_units < 24, and accumulates extendedprice_cents * discount_pct into an integer 1e-4 revenue sum before converting to decimal output"
+    }
+  ],
+  "pipeline": [
+    "shipdate_seek",
+    "covering_scan",
+    "aggregate"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem.q6_shipdate_cover",
+      "predicate": "shipdate positions from encoded day 8766 inclusive to 9131 exclusive",
+      "selectivity": 0.1516906543459267
+    },
+    {
+      "table": "lineitem.q6_shipdate_cover",
+      "predicate": "discount_pct >= 5 AND discount_pct <= 7",
+      "selectivity": 0.272727
+    },
+    {
+      "table": "lineitem.q6_shipdate_cover",
+      "predicate": "quantity_units < 24",
+      "selectivity": 0.27855
+    },
+    {
+      "table": "lineitem.q6_shipdate_cover",
+      "predicate": "combined row-level selectivity after all predicates",
+      "selectivity": 0.0189921
+    }
+  ],
+  "scan": {
+    "table": "lineitem.q6_shipdate_cover(1994 slice)",
+    "rows": 9099165,
+    "columns": [
+      {
+        "name": "discount_pct",
+        "file": "column_versions/lineitem.q6_shipdate_cover/discount_pct.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "quantity_units",
+        "file": "column_versions/lineitem.q6_shipdate_cover/quantity_units.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "extendedprice_cents",
+        "file": "column_versions/lineitem.q6_shipdate_cover/extendedprice_cents.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(offsets[2527])",
+    "fact_join": "none",
+    "aggregation": "direct_array(thread_local_int64_sum)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem.q6_shipdate_cover",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan is a full-table bandwidth-bound scan because the Q6 zone map does not prune any blocks, so even the best implementation still streams about 1.6 GB of base columns. Strategy category E: build and use a shipdate-ordered covering storage extension for all lineitem rows, with offsets by encoded shipdate and losslessly narrowed payload columns (discount as uint8 percent, quantity as uint8 units, extendedprice as uint32 cents). The revised plan seeks directly to the 1994 shipdate range, scans only 9,099,165 compact entries sequentially, and aggregates with exact integer arithmetic to minimize memory traffic and eliminate wasted base-column reads.",
+  "correctness_anchors": {}
+}

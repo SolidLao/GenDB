@@ -1,0 +1,91 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_lineitem_contiguous",
+    "filter_shipdate_inline",
+    "aggregate_by_returnflag_linestatus",
+    "sort_groups"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY",
+      "selectivity": 0.985939
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential contiguous row partitions; each worker scans one static range and applies the shipdate predicate inline in the fused aggregation loop"
+  },
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "per-thread uint8_t key_to_slot[65536] initialized to 0xFF plus compact AggState slots[8] and populated_keys[8]; packed uint16(returnflag, linestatus) key for O(1) direct slot lookup"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The root cause is a logical-plan and scheduling mismatch: the shipdate zonemap is completely non-selective for this dataset (all 458 blocks are mixed, with 0 full-pass and 0 skipped), so the classify-and-morsel path adds extra block-list construction, loop control, and dynamic scheduling without eliminating any payload work. Strategy category A/D: remove the zonemap phase entirely, return to one fused sequential scan over static contiguous row partitions, keep the cache-resident per-thread direct key-to-slot table for the tiny 6-group aggregation, and let each thread stream its own contiguous slice so hardware prefetch and bandwidth dominate instead of scheduler overhead.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(gendb::date_str_to_epoch_days(\"1998-12-01\"), -90)",
+    "revenue_formula": "disc_price * (1.0L + static_cast<long double>(tax)"
+  }
+}

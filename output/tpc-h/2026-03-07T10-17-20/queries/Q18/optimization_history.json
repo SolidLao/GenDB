@@ -1,0 +1,85 @@
+{
+  "query_id": "Q18",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 1119.6766666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 1119.6766666666665,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.24,
+        "pass1_merge_and_build_qualifying_set": 0.04,
+        "pass1_scan_lineitem_build_qty_sums": 1051.43,
+        "pass2_scan_lineitem_filter_join_aggregate": 22.88,
+        "pass2_merge_groups": 0.35,
+        "output": 0.24,
+        "sort_topk": 6.2,
+        "total": 1107.63
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 571.18,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 571.18,
+      "validation": "pass",
+      "strategy": "Root cause (Category A — Plan Restructuring): iter_0's scatter/gather Pass 1 used 4096 unreserved std::vector objects (64 threads × 64 partitions) that grew via push_back, causing ~57,344 malloc+memcpy+free calls with 64 threads simultaneously hammering the system allocator. Additionally, Phase A wrote 720MB of scatter data to 4096 scattered DRAM locations (poor write locality) and Phase B read it back (poor read locality), totalling ~1.44GB of extra cache-hostile traffic that explains the 1051ms. The fix eliminates all scatter buffers and replaces them with 64 pre-allocated thread-local QtyMaps (512K capacity each, 384MB total, allocated as two flat arrays outside the parallel region). Each thread aggregates directly into its own map during the sequential scan (no vectors, no malloc, sequential reads + local random writes). A second parallel phase then merges by key-space partition (each thread t handles keys where hash(key) & (nthreads-1) == t, scanning all 64 maps sequentially — ~6MB per thread, L3-resident reads). Pass 2 is unchanged (already 23ms).",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "pass1_serial_build_qualifying_set": 0.04,
+        "pass1_parallel_direct_aggregate": 508.45,
+        "pass2_scan_lineitem_filter_join_aggregate": 24.62,
+        "pass2_merge_groups": 0.32,
+        "output": 0.45,
+        "sort_topk": 6.48,
+        "total": 566.56
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 65.77,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 65.77,
+      "validation": "pass",
+      "strategy": "Root cause (Category E — Storage Extension): The iter_1 scatter/gather Pass 1 moves 1.6GB of data (64 threads × 64 partitions × 32768 slots × 12B) through DRAM-speed random writes during scatter (Phase A) and DRAM-speed reads during gather (Phase B), far exceeding the 44MB LLC. Each of the 60M scatter writes lands at a random strided location in a 24MB-per-thread address range, making every write a DRAM miss. The fix builds a one-time storage extension: lineitem sorted by l_orderkey (two files: sorted_l_orderkey.bin 240MB + sorted_l_quantity.bin 480MB, built with 2-pass LSD radix sort in 4.3s). With sorted data, Pass 1 becomes a single sequential read of 720MB with linear run-length aggregation: each thread scans a contiguous chunk, maintains a running (key, sum) accumulator, and emits qualifying keys with their start/end positions when the key changes — zero hash operations, zero scatter, zero DRAM-random writes. A tiny serial boundary merge handles keys split across thread chunk boundaries. Pass 2 also changes fundamentally: instead of re-scanning all 60M lineitem rows, it iterates over only ~624 qualifying keys, using the (start_pos, end_pos) positions recorded in Pass 1 to directly read the quantity ranges (no binary search needed), then performs the hash probes and customer lookup. This eliminates the entire 60M-row Pass 2 scan. Expected Pass 1: ~10-20ms (720MB sequential / 64 threads). Expected Pass 2: ~1-2ms (624 direct lookups). Total expected: ~15-25ms.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "main_scan": 20.44,
+        "dim_filter": 0.21,
+        "build_joins": 15.14,
+        "output": 0.4,
+        "sort_topk": 0.45,
+        "total": 63.71
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 49.79,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 49.79,
+      "validation": "pass",
+      "strategy": "Two root causes identified from iter_2's 66ms profile. (1) main_scan (20ms): Reading sorted_l_quantity.bin as double (8 bytes/row = 480MB) wastes 7x bandwidth — TPC-H l_quantity is always an integer in [1,50], fitting in uint8 (1 byte/row = 60MB). A new storage extension (sorted_l_qty_uint8.bin, 60MB) built via type-narrowing reduces Pass 1 data from 720MB to 300MB (sorted_l_orderkey 240MB + sorted_l_qty_uint8 60MB), targeting a proportional reduction in main_scan time (~8ms vs 20ms). (2) build_joins (15ms): The serial probe loop over 624 qualifying keys probed into large hash tables (o_orderkey_hash 256MB, c_custkey_hash 32MB) plus random-access into orders column files — all with pages NOT in the process's page table after the sequential scan evicts them from TLB. Each probe triggers a minor page fault (~5us from hot page cache). 624 probes x ~6 sequential page faults each = ~15ms serial overhead. Fix (Category B/C): two parallel prefault sweeps. First sweep (64 threads, 624 qualifying keys): touch each o_orderkey_hash key/value slot in parallel, mapping pages into the process page table in ~0.1ms total. Second sweep (after orow values known): touch o_custkey, o_orderdate, o_totalprice, and c_custkey_hash slots in parallel. Additionally, within Pass 1's parallel scan, each thread that finds an interior qualifying key immediately touches the corresponding hash table page — amortizing hash prefaults across the 20ms scan. Together these eliminate ~12ms of serial page-fault latency from build_joins.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "main_scan": 16.89,
+        "dim_filter": 0.16,
+        "output": 0.3,
+        "sort_topk": 0.35,
+        "build_joins": 15.04,
+        "total": 48.11
+      }
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_shipdate.postings_by_day",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/lineitem.l_shipdate.postings_by_day/row_ids.bin",
+        "codes_format": "uint32_t[row_count] grouped by shipdate day",
+        "offsets": "column_versions/lineitem.l_shipdate.postings_by_day/offsets.bin",
+        "offsets_format": "int32_t min_day, int32_t max_day, uint64_t offsets[(max_day-min_day)+2]"
+      },
+      "usage": "mmap offsets.bin and row_ids.bin; resolve [8766,9131) to postings slice and scan only listed lineitem row ids before evaluating discount/quantity and revenue accumulation"
+    }
+  ],
+  "pipeline": [
+    "range_lookup_shipdate",
+    "filter_fact",
+    "aggregate",
+    "output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.1667
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "selectivity": 0.2222
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.65
+    },
+    {
+      "table": "lineitem",
+      "predicate": "combined",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential over shipdate postings slices"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(offsets_by_day)",
+    "fact_join": "pre_built_index(postings_uint32_by_int32_day)",
+    "aggregation": "thread_local_double_sum"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem.l_shipdate.postings_by_day",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a storage-level access-path mismatch: prior plans still scanned nearly all 59.9M rows while only ~2.4% survive, so main_scan remained dominant despite loop-shape tuning; strategy category E builds and uses a persistent shipdate postings index to convert the date predicate into direct row-id range lookup, then evaluates discount/quantity only on candidate rows with late l_extendedprice access and thread-local sum reduction.",
+  "correctness_anchors": {}
+}

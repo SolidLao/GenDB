@@ -1,0 +1,155 @@
+{
+  "query_id": "Q4",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version_stmt.count_hash",
+      "action": "built_new",
+      "files": {
+        "key_adsh": "column_versions/pre.adsh_tag_version_stmt.count_hash/key_adsh.bin",
+        "key_adsh_format": "uint32_t[capacity]",
+        "key_tag": "column_versions/pre.adsh_tag_version_stmt.count_hash/key_tag.bin",
+        "key_tag_format": "uint32_t[capacity]",
+        "key_version": "column_versions/pre.adsh_tag_version_stmt.count_hash/key_version.bin",
+        "key_version_format": "uint32_t[capacity]",
+        "key_stmt": "column_versions/pre.adsh_tag_version_stmt.count_hash/key_stmt.bin",
+        "key_stmt_format": "uint16_t[capacity]",
+        "counts": "column_versions/pre.adsh_tag_version_stmt.count_hash/counts.bin",
+        "counts_format": "uint32_t[capacity]"
+      },
+      "usage": "mmap the five hash-index arrays; probe (num.adsh, num.tag, num.version, eq_code) with open addressing and read counts[slot] as pre_count, replacing the binary-search plus contiguous-run scan on pre/indexes/adsh_tag_version.rowids.bin"
+    }
+  ],
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "filter_num_usd_blocks",
+    "probe_sub_adsh_lookup",
+    "probe_pre_stmt_count_hash",
+    "probe_tag_version_hash",
+    "partition_qualifying_rows",
+    "aggregate_partitions",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = 'USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Keep adsh_to_rowid as the first cheap filter on the sequential num scan."
+    },
+    {
+      "build": "pre(pre.adsh_tag_version_stmt.count_hash, filtered by stmt = 'EQ' in the probe key)",
+      "probe": "num(post sub filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 979282,
+      "notes": "Probe the persistent composite hash index on (adsh,tag,version,stmt) and use the stored count directly; do not binary-search pre/indexes/adsh_tag_version.rowids.bin in the hot loop."
+    },
+    {
+      "build": "tag(tag_version_hash, abstract = 0)",
+      "probe": "num(post sub+pre filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Retain the existing deferred tag lookup so tlabel is fetched only for rows that survived sub and pre."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sub/indexes/adsh_to_rowid.bin) with row-level reads of sub.sic and sub.cik",
+    "fact_join": "persistent compact_hash_map(pre.adsh_tag_version_stmt.count_hash) for (adsh,tag,version,stmt)->count, plus pre-built tag_version_hash for (tag,version) lookup",
+    "aggregation": "scan-time radix/hash partition buffers on final group_key=(sic,tlabel) carrying {group_key,cik,scaled_value,pre_count}; then per-partition compact_hash_map for sums/counts plus per-partition distinct_pair_set(group_key,cik)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "direct adsh lookup before sic and cik reads"
+    },
+    {
+      "index": "column_versions/pre.adsh_tag_version_stmt.count_hash/*",
+      "purpose": "replace pre sorted-index binary search and run scan with a single direct count lookup for stmt='EQ'"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "lookup tag rowid and tlabel after sub and pre have already filtered the probe stream"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the remaining 81.17 ms hot phase is a storage-level mismatch in the pre join path, because probing pre through a sorted rowid permutation requires an O(log N) binary search plus a run scan over a nearly unique 9.23M-key space inside the main num scan, creating cache-miss-heavy random access that dominates runtime. Strategy category E: build and use a persistent composite hash index on pre(adsh,tag,version,stmt) that stores the exact multiplicity for each key, keep the proven sub->pre->tag join order and existing partitioned aggregation, and replace the hot-loop pre probe with one direct hash lookup that returns pre_count immediately.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,80 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "resolve_usd_code",
+    "uom_offset_range",
+    "load_pre_index",
+    "load_zonemap",
+    "mmap_columns",
+    "two_pass_scan_filter_antijoin_aggregate",
+    "merge_having_topk",
+    "decode_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "method": "uom_offsets_range", "selectivity": 0.843},
+    {"table": "num", "predicate": "ddate BETWEEN 20230101 AND 20231231", "method": "zone_map + scalar", "selectivity": 0.272},
+    {"table": "num", "predicate": "value IS NOT NULL", "method": "!std::isnan(value)", "selectivity": 0.99}
+  ],
+  "join_order": [
+    {
+      "build": "pre_by_adsh_tag_ver index (prebuilt, mmap'd)",
+      "probe": "num(filtered by uom+ddate+value)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "probe_cardinality": 9000000,
+      "notes": "Probe pre_by_adsh_tag_ver bucket hash index; no match = passes anti-join. Use MADV_RANDOM on mmap."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "range": "uom_offsets[usdCode] → [usdStart, usdEnd)",
+    "estimated_rows_in_range": 33200000,
+    "rows": 33200000,
+    "zone_map": {
+      "index": "num_ddate_zonemap",
+      "block_size": 100000,
+      "block_index_formula": "global_row / blockSize",
+      "skip_condition": "zones[b].max_ddate < 20230101 || zones[b].min_ddate > 20231231"
+    },
+    "columns": [
+      {"name": "ddate", "file": "num/ddate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential within qualifying blocks, two-phase: filter then probe+aggregate"
+  },
+  "data_structures": {
+    "uom_dict": "load dictionary to find USD code",
+    "uom_offsets": "offset_table for USD row range",
+    "zone_map": "num_ddate_zonemap for block skipping",
+    "pre_index": "mmap pre_by_adsh_tag_ver.idx with MADV_RANDOM",
+    "aggregation": "flat_open_addressing_hash_map<uint64_t, {int64_t cnt, double total}>, power-of-2 slots, linear probing",
+    "selection_vector": "thread-local uint32_t[] of qualifying row indices per block"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "aggregation_strategy": "thread-local flat hash maps (open-addressing, 128K slots each ~3MB, fits in LLC), merge sequentially after scan",
+    "merge_optimization": "merge thread-local maps into global flat map; skip empty slots during merge via sentinel key"
+  },
+  "indexes": [
+    {"index": "uom_offsets", "purpose": "restrict scan to USD rows only"},
+    {"index": "num_ddate_zonemap", "purpose": "skip_blocks outside 2023 date range"},
+    {"index": "pre_by_adsh_tag_ver", "purpose": "anti_join_probe"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": [
+      {"column": "tag", "from": "tag_code", "dict": "dicts/tag_dict_offsets.bin + dicts/tag_dict_data.bin"},
+      {"column": "version", "from": "version_code", "dict": "dicts/version_dict_offsets.bin + dicts/version_dict_data.bin"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B+D: Two root causes identified. (1) std::unordered_map uses chained hashing with node-based allocation causing severe cache misses during both scan-time insertion and the merge phase (sort_topk=9ms). Replace with flat open-addressing hash map using power-of-2 sizing (128K slots × 24 bytes = 3MB per thread, fits in LLC). Use sentinel key UINT64_MAX for empty slots; linear probing. (2) Two-phase scan within each morsel: first pass filters ddate+value sequentially to build a compact selection vector of qualifying row indices, second pass loads sub_fk/tag_code/version_code only for qualifying rows and does index probe + aggregation. This improves branch prediction and reduces column reads for the ~73% of rows eliminated by ddate+value filters. For the anti-join probe, pack the 3-field comparison by checking a combined 64-bit value first (sub_fk<<32|tag_code) before checking version_code to reduce comparison cost. Merge phase: iterate flat map slots skipping sentinels (sequential scan, no pointer chasing). Expected improvement: ~5ms from flat hash map in scan, ~4ms from faster merge = target ~63ms.",
+  "correctness_anchors": {}
+}

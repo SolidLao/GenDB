@@ -1,0 +1,51 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 42.48333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 42.48333333333333,
+      "validation": "fail",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.37,
+        "main_scan": 9.12,
+        "output": 0.12,
+        "total": 39.71
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "TIMEOUT: Query Optimizer failed for Q1: Agent \"Query Optimizer\" timed out after 30m 0s",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 13.243333333333332,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 13.243333333333332,
+      "validation": "pass",
+      "strategy": "Root cause (correctness): the original line.bin stores int8_t, which truncates line values >= 128 via C signed overflow — (int8_t)300 = 44, (int8_t)256 = 0. The code read line as uint8_t, giving 40.88 for SI,H instead of the correct 48.27. A new int16_t column version was built from pre.csv preserving full values (range 1-482). Category E fix: mmap line_int16.bin, read as int16_t, treat 0 as null. Performance root cause (Category B): the iter_0 code allocates 64 per-thread ThreadState objects each containing bitset<86135>[64] ≈ 685KB, totaling ~44MB of page-faulted memory outside any timed phase, adding ~33ms overhead on top of a 9ms actual scan. Fix: replace per-thread bitsets with a single shared atomic uint64_t bitset (14 groups × 1347 words = 150KB); per-thread state shrinks to 336 bytes (always cache-resident). Expected result: correctness fixed; hot time should drop from 42ms to ~10-12ms by eliminating the large allocation overhead.",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "build_joins": 0,
+        "main_scan": 9.78,
+        "output": 0.89,
+        "total": 13.02
+      }
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "aggregate", "merge", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.985,
+      "notes": "10471 = date_to_days(1998-09-02); lineitem sorted ASC by l_shipdate so zone map skips tail blocks only"
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array[4]",
+    "aggregation_notes": "GroupAcc groups[4]; index = (l_returnflag_code << 1) | l_linestatus_code; 4 possible groups (3 returnflag x 2 linestatus codes), thread-local arrays merged at end",
+    "group_acc_fields": [
+      "int64_t sum_qty",
+      "double sum_price",
+      "double sum_disc_price",
+      "double sum_charge",
+      "int64_t sum_disc_hundredths",
+      "int64_t count"
+    ]
+  },
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "num_blocks": 600,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t",  "role": "filter"},
+      {"name": "l_returnflag",    "file": "lineitem/l_returnflag.bin",    "type": "int8_t",   "role": "group_key"},
+      {"name": "l_linestatus",    "file": "lineitem/l_linestatus.bin",    "type": "int8_t",   "role": "group_key"},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",   "role": "aggregate"},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",   "role": "aggregate"},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",   "role": "aggregate"},
+      {"name": "l_tax",           "file": "lineitem/l_tax.bin",           "type": "int8_t",   "role": "aggregate"}
+    ],
+    "dict_sidecars": [
+      {"column": "l_returnflag", "file": "lineitem/l_returnflag_dict.bin", "size": 3},
+      {"column": "l_linestatus", "file": "lineitem/l_linestatus_dict.bin", "size": 2}
+    ]
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "usage": "skip block b if zones[b].mn > 10471; lineitem sorted ASC so only tail blocks are skipped (~9 of 600)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_inline": {
+    "group_key": "(l_returnflag[i] << 1) | l_linestatus[i]",
+    "expressions": {
+      "sum_qty":        "groups[gid].sum_qty += l_quantity[i]",
+      "sum_price":      "groups[gid].sum_price += l_extendedprice[i]",
+      "sum_disc_price": "groups[gid].sum_disc_price += l_extendedprice[i] * (1.0 - l_discount[i] * 0.01)",
+      "sum_charge":     "groups[gid].sum_charge += l_extendedprice[i] * (1.0 - l_discount[i] * 0.01) * (1.0 + l_tax[i] * 0.01)",
+      "sum_disc":       "groups[gid].sum_disc_hundredths += l_discount[i]",
+      "count":          "groups[gid].count++"
+    },
+    "final_avg": {
+      "avg_qty":   "sum_qty / (double)count",
+      "avg_price": "sum_price / (double)count",
+      "avg_disc":  "sum_disc_hundredths * 0.01 / (double)count"
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "granularity": "block",
+    "thread_local_state": "GroupAcc[4] per thread",
+    "merge": "sum thread-local GroupAcc[4] arrays into global GroupAcc[4] after all threads complete"
+  },
+  "output": {
+    "groups": 4,
+    "order_by": ["l_returnflag_code ASC", "l_linestatus_code ASC"],
+    "order_notes": "Dict codes preserve lexicographic order (A=0<N=1<R=2; F=0<O=1); iterate group indices 0..3 naturally yields correct ORDER BY; decode chars from dict sidecars for final CSV output only",
+    "columns": [
+      "l_returnflag (decoded char)",
+      "l_linestatus (decoded char)",
+      "sum_qty",
+      "sum_base_price",
+      "sum_disc_price",
+      "sum_charge",
+      "avg_qty",
+      "avg_price",
+      "avg_disc",
+      "count_order"
+    ]
+  },
+  "execution_target": "cpp"
+}

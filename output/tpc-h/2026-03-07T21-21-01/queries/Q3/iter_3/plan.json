@@ -1,0 +1,140 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "decode_segment_dictionary",
+    "build_customer_bitset",
+    "scan_orders_build_order_filter",
+    "scan_lineitem_sorted_aggregate",
+    "merge_topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment='BUILDING')",
+      "probe": "orders(filtered by o_orderdate < 1995-03-15 via zonemap-pruned sequential scan)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300276,
+      "notes": "Build a dense customer-key bitset from customer_segment_postings and test o_custkey during the sequential orders scan."
+    },
+    {
+      "build": "orders(filtered by customer bitset and o_orderdate < 1995-03-15)",
+      "probe": "lineitem(sequential scan in l_orderkey order)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 1459230,
+      "notes": "Materialize a dense qualifying-order bitmap plus o_orderdate and o_shippriority arrays keyed by o_orderkey, then probe them with l_orderkey during a sequential lineitem scan."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.485963
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.547105
+    }
+  ],
+  "scan": {
+    "table": "customer(filtered via postings) -> orders(sequential zonemap-pruned scan) -> lineitem(sequential sorted scan)",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential on orders blocks with zone-map pruning, then sequential on lineitem in physical l_orderkey order with direct-array probes into qualifying-order state"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001 customer keys)",
+    "fact_join": "dense_bitset(15000001 order keys) + flat_array(orderdate, shippriority by order key) + zone_map(orders_orderdate_zonemap)",
+    "aggregation": "sorted_group_by with streaming per-order accumulator + fixed_min_heap(10) per thread"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_segment_postings",
+      "purpose": "enumerate BUILDING customer rowids without scanning customer"
+    },
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip non-qualifying orders blocks before touching order payload columns"
+    },
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "derive order-key partition boundaries so each thread scans a contiguous lineitem row range without splitting groups"
+    }
+  ],
+  "aggregation": "sorted_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B physical implementation mismatch. The current plan already removed most logical waste, but it still reaches qualifying lineitems through the cache-exceeding lineitem_order_postings rowid structure and late random payload fetches, which is a poor fit for a 60M-row fact table that is already physically sorted by l_orderkey. Replace that with a two-pass sequential design: zonemap-pruned orders scan builds a dense qualifying-order bitmap plus payload arrays keyed by o_orderkey, then a partitioned sequential lineitem scan filters l_shipdate, probes the dense order state by l_orderkey, and performs streaming sorted aggregation per order before thread-local top-k merge.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,66 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_sub_dimension",
+    "resolve_usd_code_and_range",
+    "parallel_scan_aggregate",
+    "compute_having_and_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range"},
+    {"table": "sub", "predicate": "fy = 2022", "selectivity": 0.196, "method": "direct_array_lookup"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.95, "method": "isnan_check"}
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2022)",
+      "probe": "num(uom='USD' range)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "probe_cardinality": 33200000,
+      "notes": "sub_fk is dense uint32_t index into sub table; sub_to_group[sub_fk] returns group_id or -1 for non-qualifying rows"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33200000,
+    "columns": [
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "notes": "Only scan [usdStart, usdEnd) range via mmap + madvise MADV_SEQUENTIAL on the needed range"
+  },
+  "data_structures": {
+    "sub_to_group": "int32_t[86135] — sub_row → group_id or -1 if fy!=2022; 344KB fits L2",
+    "fy2022_bitmap": "uint8_t[86135] — 1 byte per sub row for branch-free check; 86KB fits L2. Set to 1 if fy==2022, 0 otherwise. Use as fast pre-filter before group_id lookup.",
+    "cik_to_name": "flat array mapping: groups vector indexed by group_id, built during dim_filter",
+    "aggregation": "double[num_groups] per thread — thread-local dense arrays. ~10K groups × 8 bytes = 80KB per thread. 64 threads × 80KB = 5MB total, fits LLC. CRITICAL: use double, NOT long double. long double uses x87 FPU and prevents vectorization."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 131072,
+    "notes": "33M rows across 64 threads. Thread-local double arrays for aggregation. Merge phase: parallelize with each thread reducing a slice of group_ids across all thread-local arrays."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "skip_to_usd_range"}
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "key": "int32_t group_id (dense, maps to unique (name, cik) pair)",
+    "value": "double sum_value",
+    "estimated_groups": 10000,
+    "single_pass": true,
+    "notes": "Group by (name, cik) using dense group_id assigned during dim_filter. Same CIK can have different names. HAVING subquery re-aggregates by cik after main aggregation. Use double precision throughout — do NOT use long double."
+  },
+  "output": {
+    "columns": ["s.name (string)", "s.cik (int32_t)", "total_value (double)"],
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "method": "partial_sort"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B (physical implementation mismatch): The iter_0 inner loop used long double (80-bit x87 FPU) for accumulation, which prevents SSE/AVX vectorization and is 3-5x slower per operation than double. With ~6.5M qualifying rows in the hot loop, this is the dominant cost. Fix: (1) Replace all long double with double throughout — aggregation arrays, merge, threshold computation. This enables auto-vectorization of the inner accumulation loop. (2) Use madvise(MADV_SEQUENTIAL) on the scanned range of sub_fk.bin and value.bin instead of MAP_POPULATE on entire files — reduces page fault overhead. (3) Parallelize the merge phase: instead of single-threaded iteration over 64×10K entries, each thread reduces a slice of group_ids. (4) Increase morsel size to 128K for better instruction cache utilization and reduced scheduling overhead. (5) Use a separate uint8_t bitmap for fy2022 qualification check (86KB, fits L2) for branch-free pre-filtering before group_id lookup. Format output with %.2f for double."
+}

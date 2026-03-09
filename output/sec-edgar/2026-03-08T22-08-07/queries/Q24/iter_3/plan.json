@@ -1,0 +1,119 @@
+{
+  "query_id": "Q24",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version.partitioned_exact_p19",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/offsets.bin",
+        "offsets_format": "uint64_t[524289]",
+        "keys": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/keys.bin",
+        "keys_format": "TripleKey[8631890] where TripleKey={uint32_t a, uint32_t b, uint32_t c}"
+      },
+      "usage": "mmap offsets.bin and keys.bin; hash each filtered num (adsh,tag,version) with hash_triple, scatter tuples into the same 524288 top-bit partitions, then compare each partition-local unique triple only against keys[offsets[p]..offsets[p+1]) before emitting anti-survivors"
+    }
+  ],
+  "pipeline": [
+    "date_postings_range",
+    "uom_postings_membership",
+    "scatter_filtered_tuples_by_pre_partition",
+    "partition_local_triple_aggregate",
+    "anti_join_partition_scan",
+    "final_rollup_tag_version",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version partitioned exact index)",
+      "probe": "num(filtered tuples partitioned by hash_triple(adsh,tag,version))",
+      "type": "anti",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Reuse the existing 524288-way exact partitioning on pre; after scattering filtered num tuples to matching partitions, deduplicate exact triples inside each tiny partition and test membership once per unique triple instead of once per row."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 8997486,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "drive from num_ddate_postings range rowids, test USD via bitset membership, then in the same pass hash each surviving row to a pre partition and scatter (adsh,tag,version,value) into contiguous partition buffers for sequential per-partition processing"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(39401761) for num_uom_postings membership plus radix-partition offsets for 524288 candidate partitions",
+    "fact_join": "pre_built_index(hash_partitioned_exact_triples_p19) scanned partition-by-partition against partition-local unique candidate triples",
+    "aggregation": "partition-local tiny triple hash/sort buffers -> final compact_hash_map keyed by packed(tag,version)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidate rowids via postings range scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "apply USD membership before scattering candidate tuples"
+    },
+    {
+      "index": "pre.adsh_tag_version.partitioned_exact_p19",
+      "purpose": "anti-join membership on (adsh, tag, version) once per partition-local unique triple"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC",
+      "tag ASC",
+      "version ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after replacing the 805 MB open-addressed pre hash table, the remaining hot path still performs one anti-join lookup per filtered num row even though the filtered stream contains only 3877822 unique (adsh,tag,version) triples across 8997486 candidate rows, so about 56.9% of probes repeat work. Strategy category A/B: keep the postings-driven filter and existing partitioned pre storage extension, but restructure execution around the same 524288 hash partitions—scatter filtered tuples into partition buffers, aggregate exact triples inside each partition, probe the matching pre slice once per unique triple, and roll only anti-surviving triples up to (tag,version). This removes duplicate existence checks while keeping each partition working set tiny (filtered unique triples per partition avg 7.4, p99 14; pre slice avg 16.5, max 37), avoiding a global cache-exceeding triple hash map.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,94 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "partial_mmap_populate", "parallel_filter_scan", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.019,
+      "enforcement": "zone_map_block_skip_then_row_filter",
+      "notes": "Primary filter. Zone map eliminates ~98.1% of 600 blocks. Qualifying blocks are contiguous. Find [block_lo, block_hi) with linear scan over zone entries."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.21,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied per-row inside qualifying blocks."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "selectivity": 0.47,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied per-row inside qualifying blocks."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 100000,
+    "num_blocks": 600,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "partial_sequential",
+    "notes": "After zone map prune, qualifying rows span [row_lo, row_hi) = [block_lo*100000, min(block_hi*100000, total_rows)). Partial mmap covers only this range (~1.2M rows, ~17MB total across all four columns). MAP_POPULATE pre-faults all qualifying pages before threads start."
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "layout": {
+        "header": "uint32_t num_blocks (4B) + uint32_t block_size (4B)",
+        "entries": "ZoneEntry[num_blocks] = { int32_t min_date; int32_t max_date; } (8B each)",
+        "total_size_bytes": 4808
+      },
+      "usage": "Load zone map via fread BEFORE any column mmap. Scan all entries to find qualifying [block_lo, block_hi). Then mmap only that row range for each column.",
+      "date_constants": {
+        "LO": 8766,
+        "HI": 9131,
+        "LO_label": "1994-01-01",
+        "HI_label": "1995-01-01"
+      }
+    }
+  ],
+  "data_structures": {
+    "zone_map": "flat_array(600 entries, loaded via fread before column mmaps, L1-resident)",
+    "column_mmaps": "partial: each column mapped only for rows [row_lo, row_hi) with page-aligned offset and MAP_POPULATE to pre-fault qualifying pages synchronously",
+    "thread_accumulator": "double (per-thread local stack variable, no shared state)",
+    "partial_array": "std::vector<double> of size nthreads, written once per thread, read once in final reduction"
+  },
+  "aggregation": "single_scalar",
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_count": 64,
+    "partition_unit": "row_range within [row_lo, row_hi)",
+    "notes": "Divide [row_lo, row_hi) evenly across all hardware_concurrency() threads using row-range partitioning (NOT block-stride). Each thread applies per-block zone check for its assigned blocks, then per-row triple filter (sd -> disc -> qty), then accumulates revenue. No synchronization during scan. Single sequential reduction at end."
+  },
+  "output": {
+    "columns": ["revenue"],
+    "order_by": [],
+    "limit": null,
+    "format": "single_row_double",
+    "mkdir_strategy": "direct_syscall",
+    "notes": "Use mkdir(results_dir.c_str(), 0755) directly. Do NOT use system('mkdir -p ...') which fork+execs a shell. The results directory is created by the orchestrator before the binary runs, so mkdir may be a no-op (ignore EEXIST)."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category C (work elimination) targeting mmap and page-fault overhead. The previous best implementations (iter_0 at 19ms, iter_1/3 at 17ms) mmap all four column files in their entirety (834MB total: 240MB+57MB+57MB+480MB), even though the qualifying zone-map window spans only ~1.2M rows (~17MB). On every hot run, each thread triggers page faults when touching its slice of the qualifying range; even for cached pages, page faults cost ~1-2µs each, and 64 threads faulting concurrently causes kernel page-table lock contention. The fix is two-part: (1) after loading the zone map and computing [block_lo, block_hi), mmap ONLY the qualifying row range for each column (page-aligned offset and length), with the MAP_POPULATE flag to pre-fault all ~4200 qualifying pages synchronously in the main thread before any worker threads are spawned — eliminating page-fault contention entirely from the hot scan path; (2) replace system('mkdir -p') with a direct mkdir() syscall to eliminate the 3-5ms fork+exec overhead. Thread count stays at 64 with row-range partitioning (not block-stride, which hurt iter_3). Filter order remains sd->disc->qty (iter_0 original). This combination of partial mmap + MAP_POPULATE + direct mkdir has not been attempted in any previous iteration.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo_int8": 5,
+    "discount_hi_int8": 7,
+    "quantity_threshold_int8": 24,
+    "discount_scale": 0.01,
+    "revenue_formula": "SUM(l_extendedprice[i] * (l_discount[i] * 0.01)) for qualifying rows"
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "resolve_usd_code",
+    "uom_offset_range",
+    "load_pre_index",
+    "load_zonemap",
+    "mmap_columns",
+    "two_pass_scan_filter_antijoin_aggregate",
+    "merge_having_topk",
+    "decode_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "method": "uom_offsets_range", "selectivity": 0.843},
+    {"table": "num", "predicate": "ddate BETWEEN 20230101 AND 20231231", "method": "zone_map + scalar", "selectivity": 0.272},
+    {"table": "num", "predicate": "value IS NOT NULL", "method": "!std::isnan(value)", "selectivity": 0.99}
+  ],
+  "join_order": [
+    {
+      "build": "pre_by_adsh_tag_ver index (prebuilt, mmap'd)",
+      "probe": "num(filtered by uom+ddate+value)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "probe_cardinality": 9000000,
+      "notes": "Probe pre_by_adsh_tag_ver bucket hash index; no match = passes anti-join. Use MADV_RANDOM on mmap. Use software prefetching: while processing probe i, prefetch bucket_offsets for probe i+8."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "range": "uom_offsets[usdCode] → [usdStart, usdEnd)",
+    "estimated_rows_in_range": 33200000,
+    "rows": 33200000,
+    "zone_map": {
+      "index": "num_ddate_zonemap",
+      "block_size": 100000,
+      "block_index_formula": "global_row / blockSize",
+      "skip_condition": "zones[b].max_ddate < 20230101 || zones[b].min_ddate > 20231231"
+    },
+    "columns": [
+      {"name": "ddate", "file": "num/ddate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential within qualifying blocks, two-phase: filter then probe+aggregate"
+  },
+  "data_structures": {
+    "uom_dict": "load dictionary to find USD code",
+    "uom_offsets": "offset_table for USD row range",
+    "zone_map": "num_ddate_zonemap for block skipping",
+    "pre_index": "mmap pre_by_adsh_tag_ver.idx with MADV_RANDOM",
+    "aggregation": "CRITICAL: Do NOT use std::unordered_map. Implement a custom flat open-addressing hash map as a struct FlatHashMap with: (1) a keys array of uint64_t initialized to UINT64_MAX as sentinel, (2) a parallel values array of AggState {int64_t cnt; double total;}. Size = 131072 slots (power of 2, 128K). Probe = linear probing with mask. Lookup: slot = (key * 0x9E3779B97F4A7C15ULL >> 47) & mask; while keys[slot] != sentinel: if keys[slot] == key return slot, else slot = (slot+1)&mask. Insert: find empty sentinel slot, write key.",
+    "selection_vector": "thread-local uint32_t sel[100000] array (stack-allocated or vector) holding indices of qualifying rows within each block"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc), capped at 32",
+    "morsel_size": 100000,
+    "aggregation_strategy": "Each thread owns one FlatHashMap (131072 slots × 32 bytes = 4MB, fits in LLC). After scan, merge all thread-local maps into one global FlatHashMap by iterating slots and skipping sentinels.",
+    "merge_optimization": "Iterate slots sequentially; sentinel check is a single uint64_t comparison. No pointer chasing, no allocation, pure sequential memory access."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "purpose": "restrict scan to USD rows only"},
+    {"index": "num_ddate_zonemap", "purpose": "skip_blocks outside 2023 date range"},
+    {"index": "pre_by_adsh_tag_ver", "purpose": "anti_join_probe"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": [
+      {"column": "tag", "from": "tag_code", "dict": "dicts/tag_dict_offsets.bin + dicts/tag_dict_data.bin"},
+      {"column": "version", "from": "version_code", "dict": "dicts/version_dict_offsets.bin + dicts/version_dict_data.bin"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B+C: The iter_1 code used std::unordered_map despite the plan specifying flat hash maps, and did not implement two-phase scan. Root cause: (1) std::unordered_map causes node-based allocation and pointer-chasing during both scan-time insertion (~2ms overhead) and merge phase (sort_topk=5ms could be ~2ms with flat map). (2) Single-phase scan loads sub_fk/tag_code/version_code for ALL rows including the ~73% eliminated by ddate+value filters. Fix: (A) Implement an explicit custom FlatHashMap struct (NOT std::unordered_map) with contiguous key/value arrays, power-of-2 sizing, linear probing, sentinel-based empty detection. This eliminates allocation overhead and enables cache-friendly sequential merge. (B) Two-phase scan per block: pass 1 checks ddate+value and writes qualifying indices to a selection vector (sequential reads of ddate and value only); pass 2 loads sub_fk/tag_code/version_code only for qualifying rows, does anti-join probe, and aggregates. This reduces column reads by ~73%. (C) Software prefetching for anti-join probes: in pass 2, prefetch the bucket_offsets entry for the next qualifying row while processing the current probe, hiding memory latency for the 153MB index.",
+  "correctness_anchors": {}
+}

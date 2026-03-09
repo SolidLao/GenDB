@@ -1,0 +1,137 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub_sic_via_postings",
+    "materialize_filtered_sub_lookup",
+    "count_relevant_pre_eq_rows",
+    "build_filtered_pre_eq_triple_counts",
+    "scan_num_usd_postings",
+    "probe_sub_lookup",
+    "probe_filtered_pre_counts",
+    "probe_tag_pair_index",
+    "aggregate_distinct_cik_sum_count",
+    "merge_group_states",
+    "apply_having_and_topk",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered sic range; adsh -> sub_rowid)",
+      "probe": "num(filtered: uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 5246,
+      "notes": "Empirical sampling over 2077126 USD rows ranked sub->pre->tag fastest; build a sentinel-filled adsh lookup from sub_sic_postings so only qualifying filings reach later joins."
+    },
+    {
+      "build": "pre(filtered stmt='EQ' and adsh in qualifying sub set; (adsh,tag,version) -> eq_count)",
+      "probe": "num ⨝ sub(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 64656,
+      "notes": "Use a first pass over pre_stmt_postings to count reachable EQ rows, then allocate a compact triple-count map sized to the filtered set and populate it in a second pass."
+    },
+    {
+      "build": "tag((tag,version) -> rowid,tlabel,abstract)",
+      "probe": "num ⨝ sub(filtered) ⨝ pre(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Probe the persisted tag_tag_version_hash last; abstract=0 is required but not selective on this snapshot, so delay its cache-sized lookup until after pre pruning."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.0609
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.1294
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33234006,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(max_adsh_code+1, value=sub_rowid_or_sentinel) populated from sub_sic_postings for SIC 4000..4999",
+    "fact_join": "compact_hash_map(pre_sized by first pass over pre_stmt_postings restricted to qualifying adsh values, key=(adsh_u32,tag_u32,version_u32), value=eq_count_u32); probe tag with pre_built_index(tag_tag_version_hash)",
+    "aggregation": "compact_hash_map(thread_local, key=(sic_i32,tlabel_u32,stmt_u16), value={sum_value:f64,count_rows:u64,distinct_cik_hashset}); merge to global groups, apply HAVING count_distinct(cik) >= 2, then top-k"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_sic_postings",
+      "purpose": "enumerate qualifying sub rows in SIC range and seed the filtered adsh lookup"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "enumerate only EQ pre rows for the two-pass filtered triple-count build"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "scan only USD num row ids"
+    },
+    {
+      "index": "tag_tag_version_hash",
+      "purpose": "late exact lookup on (tag, version) to fetch tlabel and validate abstract=0"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category A plan mismatch. The current implementation spends most time rebuilding a 4194304-bucket (67108864-byte) EQ triple hash from all 1242132 pre EQ rows even though the sub SIC filter leaves only 5246 filings, only 74423 EQ rows remain reachable, and only 64656 filtered triples are ever probed. The revised plan pushes the sub semi-join ahead of the pre build, uses a first pass over pre_stmt_postings to count only reachable EQ rows, allocates a compact 262144-bucket (4194304-byte) triple-count map, and then probes joins in the empirically best sampled order sub->pre->tag so the selective sub lookup and small pre map prune rows before the tag lookup."
+}

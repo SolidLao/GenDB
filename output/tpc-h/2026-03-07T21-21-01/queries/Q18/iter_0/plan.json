@@ -1,0 +1,77 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_lineitem_aggregate_by_order",
+    "filter_having_sum_qty_gt_300",
+    "semi_join_orders_by_dense_pk",
+    "join_customer_by_dense_pk",
+    "fetch_lineitems_by_postings",
+    "aggregate_output_rows",
+    "topk_order_by_totalprice_date"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(lineitem grouped by l_orderkey, HAVING SUM(l_quantity) > 300)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Use qualifying order keys to probe orders_pk_dense and keep only matching order rows."
+    },
+    {
+      "build": "customer_pk_dense",
+      "probe": "orders(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1500000,
+      "notes": "Resolve o_custkey to customer row ids via dense direct addressing."
+    },
+    {
+      "build": "orders+customer(filtered)",
+      "probe": "lineitem_order_postings",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "For each surviving order, fetch its lineitem row ids from postings and sum l_quantity."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) > 300 grouped by l_orderkey",
+      "selectivity": 0.0000416
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(order_sum_by_key direct-addressed over l_orderkey domain)",
+    "fact_join": "pre_built_index(orders_pk_dense, customer_pk_dense, lineitem_order_postings)",
+    "aggregation": "compact_hash_map(pre_sized to qualifying orders)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

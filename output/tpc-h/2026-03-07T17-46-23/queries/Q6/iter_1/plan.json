@@ -1,0 +1,58 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zonemap_filter", "madvise_prefetch", "parallel_block_scan", "reduce"],
+  "filters": [
+    {"table": "lineitem", "column": "l_shipdate", "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131", "selectivity": 0.151, "apply_order": 1},
+    {"table": "lineitem", "column": "l_discount", "predicate": "l_discount >= 0.05 AND l_discount <= 0.07", "selectivity": 0.273, "apply_order": 2},
+    {"table": "lineitem", "column": "l_quantity", "predicate": "l_quantity < 24.0", "selectivity": 0.46, "apply_order": 3}
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 100000,
+    "columns": [
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential_block"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "skip_condition": "zones[b].max_date < 8766 || zones[b].min_date >= 9131",
+      "estimated_qualifying_blocks": 90,
+      "estimated_qualifying_rows": 9000000
+    }
+  ],
+  "data_structures": {
+    "zonemap": "struct_array({int32_t min_date, int32_t max_date})",
+    "accumulator": "thread_local_double_sum",
+    "qualifying_blocks": "compact_vector<uint32_t>"
+  },
+  "aggregation": "scalar_sum",
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scheduling": "static_balanced",
+    "notes": "Distribute qualifying blocks evenly across threads using static scheduling to eliminate dynamic scheduling overhead. Each thread gets a contiguous chunk of qualifying blocks for better prefetch behavior."
+  },
+  "output": {
+    "columns": ["revenue"],
+    "format": "single_scalar",
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B+C: The iter_0 inner loop at 22ms/9M rows across 64 cores indicates ~19 cycles/row — poor vectorization due to branching. Three changes: (1) Use branchless SIMD-friendly accumulation — compute all filter predicates as integer masks, combine with bitwise AND, convert to double mask (0.0 or 1.0), multiply into the accumulation expression so the compiler can auto-vectorize with no branch. The inner loop should be: int32_t m = (sd[i]>=DATE_LO) & (sd[i]<DATE_HI) & (disc[i]>=DISC_LO) & (disc[i]<=DISC_HI) & (qty[i]<QTY_THR); local_sum += m * ep[i] * disc[i]. (2) Call madvise(MADV_SEQUENTIAL) on each mmap'd column file before the scan to improve kernel readahead — the unmeasured 33ms gap (55ms total minus 22ms scan) likely includes page fault overhead for touching mmap'd pages; madvise reduces this. (3) Use static scheduling instead of dynamic(1) — with ~90 blocks and 64 threads the dynamic scheduling overhead is non-trivial relative to per-block work (~0.24ms/block). Also add __builtin_prefetch hints to prefetch the next block's data while processing the current block. Compile with -O3 -march=native -ffast-math to enable FMA and AVX vectorization of the branchless loop.",
+  "correctness_anchors": {
+    "date_19940101": 8766,
+    "date_19950101": 9131,
+    "discount_lo": 0.05,
+    "discount_hi": 0.07,
+    "quantity_threshold": 24.0
+  }
+}

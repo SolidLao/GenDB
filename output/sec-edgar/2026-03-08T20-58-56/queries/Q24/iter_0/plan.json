@@ -1,0 +1,65 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "prune_num_blocks_by_ddate_zonemap",
+    "scan_filtered_num_blocks",
+    "anti_join_pre",
+    "aggregate_tag_version",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version)",
+      "probe": "num(filtered by uom, ddate, value_not_null)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Use pre_adsh_tag_version_hash for existence checks on (adsh,tag,version); keep only misses (p.adsh IS NULL)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.0001
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(num_blocks_from_ddate_zonemap)",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_hash)",
+    "aggregation": "compact_hash_map(pre_sized)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

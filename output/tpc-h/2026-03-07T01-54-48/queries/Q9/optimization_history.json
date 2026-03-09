@@ -1,0 +1,115 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 315.7133333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 315.7133333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.82,
+        "dim_filter": 72.62,
+        "build_joins": 117.42,
+        "main_scan": 43.9,
+        "output": 0.39,
+        "total": 315.65
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 265.04,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 265.04,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level representation mismatch: runtime build_joins repeatedly scans all 15M orders and materializes a sparse orderkey->year array (cache-exceeding initialization plus per-row date extraction) even though Q9 only needs year lookup by orderkey during probes. Category E strategy: add a persistent dense year lookup extension keyed by o_orderkey and mmap it directly in execution; keep selective green-part filtering and lineitem composite-index probing unchanged, removing the recurring orders preprocessing work from hot path setup.",
+      "operation_timings": {
+        "data_loading": 0.41,
+        "dim_filter": 75.05,
+        "build_joins": 63.29,
+        "main_scan": 47.49,
+        "output": 0.96,
+        "total": 260.41
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 128.13,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 128.13,
+      "validation": "pass",
+      "strategy": "Root cause is storage-level and work-proportional mismatch: the hot path still re-evaluates varlen p_name LIKE '%green%' over all 2M part rows and then scans all 8M partsupp rows even though only a small qualifying subset contributes to joins. Category E with work elimination: add a persistent dense partkey->has_green lookup extension to replace runtime string scanning, then restructure partsupp filtering to keyed range retrieval on sorted ps_partkey so only qualifying ranges are materialized before probing lineitem_partsupp_hash; keep dense orderkey->year extension and direct-array aggregation unchanged.",
+      "operation_timings": {
+        "data_loading": 0.65,
+        "dim_filter": 5.85,
+        "build_joins": 0.52,
+        "main_scan": 48.9,
+        "output": 0.28,
+        "total": 127.99
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 136.82333333333335,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 136.82333333333335,
+      "validation": "pass",
+      "strategy": "Root cause is a cache-exceeding random-access pattern in main_scan: probing lineitem_partsupp_hash from filtered partsupp rows drives scattered lineitem row fetches across large columns, causing latency-bound misses and poor locality. Category B (algorithm change) with plan restructuring: switch to a lineitem-driven sequential scan, apply green-part filtering via dense has_green lookup, do point lookups into existing partsupp_pk_hash for supplycost, and keep dense o_orderkey->year plus direct-array nation/year aggregation so the dominant work becomes bandwidth-friendly sequential scanning instead of random fact-row access.",
+      "operation_timings": {
+        "data_loading": 0.48,
+        "dim_filter": 0,
+        "build_joins": 0.45,
+        "main_scan": 49.99,
+        "output": 1.29,
+        "total": 136.91
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 440.72333333333336,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 440.72333333333336,
+      "validation": "pass",
+      "strategy": "Root cause is a combined Category B/C mismatch: iter2 touches a selective subset but reads lineitem measures through random rowid access and repeatedly executes expensive floating conversion/rounding per matched row, making main_scan latency and compute heavy. The revised plan keeps selective green-part and partsupp pruning, but materializes matched lineitem rowids with nation and scaled supplycost payload, sorts by rowid to turn lineitem measure access into locality-friendly sequential reads, and uses existing scaled int16 discount/quantity column versions to remove per-row floating conversion in the hot loop while preserving direct-array nation/year aggregation.",
+      "operation_timings": {
+        "data_loading": 0.46,
+        "dim_filter": 4.79,
+        "build_joins": 369.72,
+        "main_scan": 17.3,
+        "output": 0.41,
+        "total": 440.66
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 113.04333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 113.04333333333334,
+      "validation": "pass",
+      "strategy": "Root cause is Category C work-proportional waste inside main_scan: iter_2 still performs expensive per-match floating conversions/rounding for l_discount and l_quantity (and repeatedly redoes derivable scaling work), inflating CPU time even after selective pruning. The revised plan keeps the fast selective partsupp-driven join shape from iter_2 but removes hot-loop conversion overhead by using existing scaled int16 lineitem discount/quantity versions and pre-scaling partsupp supplycost once per filtered key, while retaining dense year lookup and direct-array aggregation.",
+      "operation_timings": {
+        "data_loading": 0.68,
+        "dim_filter": 6.08,
+        "build_joins": 0.56,
+        "main_scan": 47.91,
+        "output": 0.22,
+        "total": 112.35
+      }
+    }
+  ]
+}

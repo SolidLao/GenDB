@@ -1,0 +1,133 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub",
+    "filter_tag",
+    "filter_pre_stmt",
+    "scan_num_fused",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num scan",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Build dense adsh->(sic,cik) lookup once; reject non-matching filings before expensive probes."
+    },
+    {
+      "build": "pre(filtered: stmt='EQ')",
+      "probe": "num stream after sub+num filters",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 979282,
+      "notes": "Use compact hash set on (adsh,tag,version) to avoid probing cache-exceeding triple posting indexes."
+    },
+    {
+      "build": "tag(filtered: abstract=0)",
+      "probe": "num stream after pre semi-join",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Lookup (tag,version)->tlabel directly from compact hash map built from tag columns."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh->sub_rowid) + compact_hash_map((tag,version)->tlabel)",
+    "fact_join": "compact_hash_set((adsh,tag,version) for pre stmt='EQ')",
+    "aggregation": "compact_hash_map((sic,tlabel,stmt) -> {sum,count,distinct_cik_hash_set})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a hardware/physical mismatch (Category B): iter_1 pays most time in startup by deserializing and touching cache-exceeding posting indexes (notably num_adsh_tag_version_hash) and rebuilding tag lookup state, so performance is dominated by memory traffic before useful filtering. The revised plan removes those large index-driven probes and uses a fused sequential num scan with early selective filters plus two compact cache-friendlier hash structures: a pre(stmt='EQ') triple semi-join set and a tag(tag,version)->tlabel map, with sub SIC filtering applied first via dense lookup. This shifts work to sequential access and proportional hash probes, reducing wasted startup work and random-access pressure.",
+  "correctness_anchors": {
+    "threshold_constant": [
+      4000,
+      4000,
+      100000
+    ]
+  }
+}

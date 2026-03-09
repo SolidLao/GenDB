@@ -1,0 +1,52 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_pre",
+    "partial_group_aggregate",
+    "merge_group_states",
+    "final_sort",
+    "decode_output"
+  ],
+  "scan": {
+    "table": "pre",
+    "columns": ["stmt", "rfile", "adsh", "line"],
+    "access": "sequential_full_scan",
+    "morsel_rows": 100000
+  },
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "compact_hash_map(thread_local, key=pack_u32(stmt_code,rfile_code), value={cnt:u64,sum_line:i64})",
+    "distinct": "hash_set(thread_local, key=pack_u64(stmt_code,rfile_code,adsh_code))",
+    "merge": "compact_hash_map(global, key=pack_u32(stmt_code,rfile_code), value={cnt:u64,sum_line:i64,num_filings:u64})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(min(32,nproc))"
+  },
+  "indexes": [],
+  "aggregation": "hash_group_by",
+  "distinct_aggregation": {
+    "function": "count_distinct",
+    "column": "adsh",
+    "strategy": "deduplicate_packed_group_adsh_keys_then_count"
+  },
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": null
+  },
+  "decode": {
+    "stmt": "dicts/pre_stmt.*",
+    "rfile": "dicts/pre_rfile.*",
+    "stage": "after_sort"
+  },
+  "execution_target": "cpp"
+}

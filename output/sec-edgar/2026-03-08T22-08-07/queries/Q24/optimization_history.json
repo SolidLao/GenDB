@@ -1,0 +1,115 @@
+{
+  "query_id": "Q24",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 447.96666666666664,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 447.96666666666664,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.64,
+        "dim_filter": 61.98,
+        "build_joins": 0,
+        "main_scan": 344.2,
+        "output": 0.72,
+        "total": 433.59
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 2112.3366666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 2112.3366666666666,
+      "validation": "pass",
+      "strategy": "Root cause: the hot path performs a cache-exceeding anti-probe into the 33,554,432-bucket pre hash table once per filtered num row, even though many filtered rows share the same (adsh, tag, version) anti-join key and therefore repeat identical existence checks. Strategy category A/C: restructure the plan to aggregate filtered num rows first by the full anti-join key, then probe pre_adsh_tag_version_groups once per unique triple, and finally roll surviving counts and sums up to (tag, version); order those unique probe keys by coarse hash-table region so each pass reuses a ~50 MB slice of hash.bin instead of thrashing across the full ~805 MB structure.",
+      "operation_timings": {
+        "data_loading": 0.66,
+        "dim_filter": 58.35,
+        "build_joins": 0,
+        "main_scan": 1843.43,
+        "output": 0.5,
+        "total": 1929.37
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 157.13,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 157.13,
+      "validation": "pass",
+      "strategy": "Root cause: the anti-join probes a 33554432-bucket open-addressed pre hash table whose 24-byte buckets occupy about 805 MB, far beyond the 88 MB LLC, so roughly 9.0M filtered num candidates pay random cache-miss latency in the hot path. Strategy category E: build and use a new exact partitioned-membership storage extension from the persisted unique pre triples, with 524288 hash partitions, a 4.1 MB offsets directory, and contiguous per-partition key slices averaging 16.5 triples (max 37). The revised plan keeps the postings-driven num filtering and direct (tag,version) aggregation, but replaces each cache-thrashing anti-probe with a directory lookup plus a tiny sequential exact-key scan.",
+      "operation_timings": {
+        "data_loading": 0.28,
+        "dim_filter": 51.09,
+        "build_joins": 0.41,
+        "main_scan": 81,
+        "output": 0.34,
+        "total": 153.53
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 560.4499999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 560.4499999999999,
+      "validation": "pass",
+      "strategy": "Root cause: after replacing the 805 MB open-addressed pre hash table, the remaining hot path still performs one anti-join lookup per filtered num row even though the filtered stream contains only 3877822 unique (adsh,tag,version) triples across 8997486 candidate rows, so about 56.9% of probes repeat work. Strategy category A/B: keep the postings-driven filter and existing partitioned pre storage extension, but restructure execution around the same 524288 hash partitions—scatter filtered tuples into partition buffers, aggregate exact triples inside each partition, probe the matching pre slice once per unique triple, and roll only anti-surviving triples up to (tag,version). This removes duplicate existence checks while keeping each partition working set tiny (filtered unique triples per partition avg 7.4, p99 14; pre slice avg 16.5, max 37), avoiding a global cache-exceeding triple hash map.",
+      "operation_timings": {
+        "data_loading": 0.61,
+        "dim_filter": 58.32,
+        "build_joins": 53.53,
+        "main_scan": 414.6,
+        "output": 1.08,
+        "total": 557.56
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 287.8433333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 287.8433333333333,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan chooses the 2023 date postings as the driver but then materializes a 33.2M-row USD membership bitset and processes the 12 date posting groups in date-value order, which turns the hot path into partially random gathers across num columns. Strategy category A: restructure the scan so the 12 date posting runs are k-way merged into one globally rowid-ordered stream, test uom by directly reading the 75 MB num/uom.bin column instead of building a postings bitset, and keep the existing partitioned exact pre anti-join plus thread-local (tag,version) aggregation. This removes the expensive dim_filter build and converts the surviving column reads into near-sequential bandwidth-friendly access. ",
+      "operation_timings": {
+        "data_loading": 0.41,
+        "dim_filter": 178.11,
+        "build_joins": 0.45,
+        "main_scan": 93.34,
+        "output": 0.51,
+        "total": 287.56
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 127.38333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 127.38333333333334,
+      "validation": "pass",
+      "strategy": "Root cause: after replacing the 805 MB open-addressed pre hash table, the remaining 81 ms hot phase still spends most work on anti-probing a pre layout organized by full-triple hash even though the filtered stream has strong adsh locality and almost every filtered num row matches pre, so reading num.value and redoing full-triple probe setup per row is wasted work. Strategy category E/A: build a new exact storage extension that groups pre's unique (adsh,tag,version) keys by adsh into a 673 KB dense offsets array plus a 66 MB sorted PairKey payload that fits in LLC, then probe only the current adsh's hot (tag,version) slice and late-materialize value after an anti-miss before rolling up by (tag,version).",
+      "operation_timings": {
+        "data_loading": 0.11,
+        "dim_filter": 55.56,
+        "build_joins": 0.5,
+        "main_scan": 56.89,
+        "output": 0.48,
+        "total": 125.36
+      }
+    }
+  ]
+}

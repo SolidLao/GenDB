@@ -1,0 +1,96 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d 1 MiB (32), L1i 1 MiB (32), L2 32 MiB (32), L3 44 MiB (2); threads/core 2; cores/socket 16",
+    "disk_type": "hdd",
+    "memory_gb": "376"
+  },
+  "tables": {
+    "sub": {
+      "role": "dimension",
+      "exact_row_count": 86135,
+      "hot_columns": ["adsh", "fy", "sic", "cik", "name"],
+      "column_stats": {
+        "adsh": { "min": "0000002178-22-000033", "max": "0000038725-22-000033", "approx_distinct": 100 },
+        "fy": { "min": 2021, "max": 2022, "approx_distinct": 2 },
+        "sic": { "min": 1311, "max": 7948, "approx_distinct": 67 },
+        "form": { "min": "10-K", "max": "6-K", "approx_distinct": 3 }
+      }
+    },
+    "num": {
+      "role": "fact",
+      "exact_row_count": 39401761,
+      "hot_columns": ["adsh", "tag", "version", "uom", "ddate", "value"],
+      "column_stats": {
+        "adsh": { "min": "0000012927-22-000010", "max": "0001828723-22-000015", "approx_distinct": 98 },
+        "tag": { "min": "AccountsReceivableNetCurrent", "max": "WeightedAverageNumberOfShareOutstandingBasicAndDiluted", "approx_distinct": 80 },
+        "version": { "min": "0000099780-22-000013", "max": "us-gaap/2021", "approx_distinct": 12 },
+        "ddate": { "min": 20181231, "max": 20220131, "approx_distinct": 14 },
+        "uom": { "min": "CAD", "max": "shares", "approx_distinct": 5 },
+        "value": { "min": -6330000000.0, "max": 151072000000.0, "approx_distinct": 94 }
+      }
+    },
+    "tag": {
+      "role": "dimension",
+      "exact_row_count": 1070662,
+      "hot_columns": ["tag", "version", "abstract", "custom", "datatype", "tlabel"],
+      "column_stats": {
+        "tag": { "min": "AccretionAmortizationOfDiscountsAndPremiums", "max": "WarrantsToPurchasePercentageOfEquity", "approx_distinct": 100 },
+        "version": { "min": "0000714310-24-000164", "max": "0001999480-24-000042", "approx_distinct": 84 },
+        "abstract": { "min": 0, "max": 0, "approx_distinct": 1 },
+        "custom": { "min": 1, "max": 1, "approx_distinct": 1 },
+        "datatype": { "min": "monetary", "max": "shares", "approx_distinct": 4 }
+      }
+    },
+    "pre": {
+      "role": "fact",
+      "exact_row_count": 9600799,
+      "hot_columns": ["adsh", "stmt", "rfile", "tag", "version", "line", "plabel"],
+      "column_stats": {
+        "adsh": { "min": "0000002178-22-000033", "max": "0000002178-22-000033", "approx_distinct": 1 },
+        "stmt": { "min": "BS", "max": "IS", "approx_distinct": 4 },
+        "rfile": { "min": "H", "max": "H", "approx_distinct": 1 },
+        "tag": { "min": "AccountsPayableCurrent", "max": "UnrealizedGainLossOnDerivativesAndCommodityContracts", "approx_distinct": 92 },
+        "version": { "min": "0000002178-22-000033", "max": "us-gaap/2021", "approx_distinct": 2 },
+        "line": { "min": 1, "max": 39, "approx_distinct": 39 }
+      }
+    }
+  },
+  "joins": [
+    { "left": "sub.adsh", "right": "num.adsh", "type": "PK-FK", "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 20 },
+    { "left": "sub.adsh", "right": "pre.adsh", "type": "PK-FK", "selectivity": "high", "left_unique": true, "right_unique": false, "right_max_duplicates": 250 },
+    { "left": "tag.(tag,version)", "right": "num.(tag,version)", "type": "PK-FK", "selectivity": "medium", "left_unique": true, "right_unique": false, "right_max_duplicates": 355 },
+    { "left": "tag.(tag,version)", "right": "pre.(tag,version)", "type": "PK-FK", "selectivity": "medium", "left_unique": true, "right_unique": false, "right_max_duplicates": 204 },
+    { "left": "num.(adsh,tag,version)", "right": "pre.(adsh,tag,version)", "type": "fact-fact", "selectivity": "medium", "left_unique": false, "right_unique": false, "right_max_duplicates": 8 }
+  ],
+  "filters": [
+    { "table": "pre", "column": "stmt", "operator": "IS NOT NULL", "selectivity": 1.0, "query": "Q1" },
+    { "table": "num", "column": "uom", "operator": "=", "selectivity": 0.001, "query": "Q2" },
+    { "table": "sub", "column": "fy", "operator": "=", "selectivity": 0.204, "query": "Q2" },
+    { "table": "num", "column": "value", "operator": "IS NOT NULL", "selectivity": 1.0, "query": "Q2" },
+    { "table": "num", "column": "uom", "operator": "=", "selectivity": 0.887, "query": "Q3" },
+    { "table": "sub", "column": "sic", "operator": "BETWEEN", "selectivity": 0.09, "query": "Q4" },
+    { "table": "pre", "column": "stmt", "operator": "=", "selectivity": 0.102, "query": "Q4" },
+    { "table": "tag", "column": "abstract", "operator": "=", "selectivity": 1.0, "query": "Q4" },
+    { "table": "pre", "column": "stmt", "operator": "=", "selectivity": 0.194, "query": "Q6" },
+    { "table": "sub", "column": "fy", "operator": "=", "selectivity": 0.0, "query": "Q6" },
+    { "table": "num", "column": "ddate", "operator": "BETWEEN", "selectivity": 0.0, "query": "Q24" }
+  ],
+  "aggregations": [
+    { "group_by": ["stmt", "rfile"], "functions": ["COUNT(*)", "COUNT(DISTINCT adsh)", "AVG(line)"], "query": "Q1", "estimated_groups": "14" },
+    { "group_by": ["adsh", "tag"], "functions": ["MAX(value)"], "query": "Q2", "estimated_groups": "high" },
+    { "group_by": ["name", "cik"], "functions": ["SUM(value)"], "query": "Q3", "estimated_groups": "high" },
+    { "group_by": ["cik"], "functions": ["SUM(value)"], "query": "Q3", "estimated_groups": "high" },
+    { "group_by": ["sic", "tlabel", "stmt"], "functions": ["COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"], "query": "Q4", "estimated_groups": "medium" },
+    { "group_by": ["name", "stmt", "tag", "plabel"], "functions": ["SUM(value)", "COUNT(*)"], "query": "Q6", "estimated_groups": "high" },
+    { "group_by": ["tag", "version"], "functions": ["COUNT(*)", "SUM(value)"], "query": "Q24", "estimated_groups": "medium" }
+  ],
+  "ordering": [
+    { "columns": ["cnt DESC"], "limit": null, "query": "Q1" },
+    { "columns": ["value DESC", "name ASC", "tag ASC"], "limit": 100, "query": "Q2" },
+    { "columns": ["total_value DESC"], "limit": 100, "query": "Q3" },
+    { "columns": ["total_value DESC"], "limit": 500, "query": "Q4" },
+    { "columns": ["total_value DESC"], "limit": 200, "query": "Q6" },
+    { "columns": ["cnt DESC"], "limit": 100, "query": "Q24" }
+  ]
+}

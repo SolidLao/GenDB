@@ -1,0 +1,91 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_runtime_dicts",
+    "filter_sub_fy",
+    "build_sub_adsh_name_map",
+    "filter_pre_stmt",
+    "build_pre_triple_to_plabel_map",
+    "scan_num_usd_postings",
+    "join_sub",
+    "join_pre",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "num(filtered: uom='USD' and value IS NOT NULL via postings scan)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 26612,
+      "notes": "Build adsh->name map from fy=2023; prune num rows early by adsh membership before triple lookup."
+    },
+    {
+      "build": "pre(filtered: stmt='IS' and adsh in sub_fy2023)",
+      "probe": "num_after_sub_join",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 566000,
+      "notes": "Build compact hash map on (adsh,tag,version)->plabel list to preserve 1:N pre multiplicity."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.308975445
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.184050401
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.842181936
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "hash_map<uint32 adsh, uint32 name_code>",
+    "fact_join": "compact_hash_map<triple(adsh,tag,version), small_vector<uint32 plabel_code>>",
+    "aggregation": "partitioned_compact_hash_map<key(name_code,stmt_code,tag_code,plabel_code), agg(sum_f64,count_u64)>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "details": "Parallelize num USD-postings scan and local aggregation; merge thread-local hash tables before top-k sort."
+  },
+  "indexes": [
+    {
+      "index": "num_uom_hash",
+      "purpose": "Enumerate only USD rowids; avoid full num scan."
+    },
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "Prune sub blocks before fy=2023 materialization."
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "Enumerate only pre rows with stmt='IS'."
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "Optional direct adsh->sub_row lookup fallback for name fetch."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp"
+}

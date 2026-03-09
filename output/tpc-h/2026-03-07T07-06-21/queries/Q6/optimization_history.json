@@ -1,0 +1,79 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause (Category A — plan restructuring): the iter_0 inner loop evaluates filters in the order l_shipdate → l_discount → l_quantity, but within qualifying blocks l_shipdate passes ~99% of the time (interior blocks are sorted entirely within [8766,9131)), making it the least selective gate despite being checked first. Reordering to l_discount (21% pass) → l_quantity (47%) → l_shipdate (99%) means 79% of rows are eliminated after reading only 1 byte (discount), reducing average memory traffic per row from 6.0 bytes to 2.4 bytes (60% reduction) and average branch evaluations per row from 2.2 to 1.3. Both effects reduce CPU cycles for the hot cache-resident scan. Additional improvements: (1) use unsigned-arithmetic range tricks to fuse each two-sided comparison into one branch; (2) use MADV_WILLNEED on the qualifying row range of each column instead of MADV_SEQUENTIAL on the full files, avoiding 800MB of useless kernel readahead on cold runs; (3) cache-line-pad the per-thread partial[] accumulator struct to eliminate false sharing.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause is Category C (work elimination): iter_0 applies a uniform three-filter inner loop to ALL qualifying blocks, including interior blocks where the zone map already guarantees every row passes the l_shipdate predicate. For the ~10 interior blocks (~83% of qualifying rows, ~1M rows), the code needlessly loads 4 bytes of l_shipdate per row and evaluates a branch that always succeeds, wasting ~4 MB of column reads and ~1M redundant branches. The fix is to split the per-block inner loop into two specialized variants: an interior loop (for blocks where zone.mn >= LO && zone.mx < HI) that reads only l_discount and l_quantity and skips l_shipdate entirely, and a boundary loop (for the ~2 blocks straddling 1994 date boundaries) that applies the full three-filter check in the original shipdate-first order. This directly eliminates the wasted work and also gives the compiler a cleaner int8-only hot path to vectorize. Deliberately avoids all changes from iter_1 (no MADV calls, no filter reordering in boundary loop, no cache-line padding on partial[]) to prevent re-introducing the regression.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause is Category D (parallelism tuning) combined with Category A (plan restructuring for output). Two distinct overheads dominate the 19ms run time. First: the current code spawns hardware_concurrency() = 64 threads unconditionally, but the qualifying zone-map range contains only ~12 blocks. Each thread processes ~18,750 rows — trivially fast compute — while thread creation and join for 64 threads costs ~50-100µs each = 6-12ms of pure lifecycle overhead, dominating actual compute time. Fix: cap thread count at min(hardware_concurrency, N_qualifying_blocks) ≈ 12, so each thread handles one or more complete 100K-row blocks. This reduces thread lifecycle cost from 64× to ~12× and eliminates partial-block boundary alignment complexity. Second: the output phase calls system('mkdir -p ...') which fork+execs a shell, costing 2-5ms. Since run.duration_ms measures full binary execution including output, this appears in the benchmark metric. Fix: replace with direct mkdir() syscall. Combined these two changes target ~7-12ms reduction from 19ms toward the 13ms benchmark. Filter order is kept identical to iter_0 (sd -> disc -> qty); no interior/boundary split is used — both alternatives regressed in previous iterations.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 19.52,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 19.52,
+      "validation": "pass",
+      "strategy": "Root cause is Category C (work elimination) targeting mmap and page-fault overhead. The previous best implementations (iter_0 at 19ms, iter_1/3 at 17ms) mmap all four column files in their entirety (834MB total: 240MB+57MB+57MB+480MB), even though the qualifying zone-map window spans only ~1.2M rows (~17MB). On every hot run, each thread triggers page faults when touching its slice of the qualifying range; even for cached pages, page faults cost ~1-2µs each, and 64 threads faulting concurrently causes kernel page-table lock contention. The fix is two-part: (1) after loading the zone map and computing [block_lo, block_hi), mmap ONLY the qualifying row range for each column (page-aligned offset and length), with the MAP_POPULATE flag to pre-fault all ~4200 qualifying pages synchronously in the main thread before any worker threads are spawned — eliminating page-fault contention entirely from the hot scan path; (2) replace system('mkdir -p') with a direct mkdir() syscall to eliminate the 3-5ms fork+exec overhead. Thread count stays at 64 with row-range partitioning (not block-stride, which hurt iter_3). Filter order remains sd->disc->qty (iter_0 original). This combination of partial mmap + MAP_POPULATE + direct mkdir has not been attempted in any previous iteration.",
+      "operation_timings": {
+        "zone_map_prune": 0.08,
+        "partial_mmap_populate": 10.06,
+        "main_scan": 5.8,
+        "output": 0.23,
+        "total": 18.42
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause (Category B — algorithm change): all prior iterations use mmap for the column files. Even on hot runs where data is in the OS page cache, mmap requires a kernel-mode page fault per 4KB page to install the PTE into the process page table (~2–5µs/page). The qualifying row range spans ~4200 pages (16.8MB across 4 columns), giving 8–21ms of page-fault overhead — confirmed by iter_4's profiling showing partial_mmap_populate=10ms and main_scan=6ms (total 16ms measured, 20ms wall). The fix replaces mmap entirely with pread() into pre-allocated anonymous buffers: (1) load zone map via fread (4808 bytes, unchanged); (2) compute qualifying row range [row_lo, row_hi) from zone scan; (3) posix_memalign 4 buffers for the qualifying window (~16.8MB total, fits in 44MB L3); (4) 4 concurrent pread() threads — one per column — to fill buffers from page cache at ~20 GB/s (~0.84ms total); (5) 64-thread parallel scan over in-memory buffers with zero page-fault overhead; (6) reduce + output with direct mkdir() syscall instead of system(). Anonymous memory does not require PTE installation via kernel VFS, making the entire 4200-page working set instantly accessible after pread completes.",
+      "operation_timings": {}
+    }
+  ]
+}

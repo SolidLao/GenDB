@@ -1,0 +1,103 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_fy_array",
+    "build_is_map_from_pre",
+    "parallel_scan_num_with_zone_maps",
+    "merge_thread_local_agg",
+    "decode_strings_topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "num",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "Load sub/fy.bin as flat int16_t array indexed by adsh_code (172 KB). O(1) probe: sub_fy[adsh_code] == 2023. No hash table needed."
+    },
+    {
+      "build": "pre(filtered: stmt='IS')",
+      "probe": "num",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 1730000,
+      "notes": "Build is_map: uint64_t key=(adsh_code<<32|tagver_code) -> uint32_t pre_row_index. ~1.73M entries. Probe returns pre_row for plabel decode and as group key component."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "method": "zone_map_block_skip + per_row_check"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2023",
+      "selectivity": 0.20
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == is_code",
+      "selectivity": 0.18
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "notes": "Treat NaN/sentinel as null if applicable; otherwise skip check if column has no nulls"
+    }
+  ],
+  "data_structures": {
+    "usd_code": "int8_t scalar loaded from indexes/uom_codes.bin",
+    "is_code": "int8_t scalar loaded from indexes/stmt_codes.bin",
+    "sub_fy_array": "flat_array(int16_t[86135]) indexed by adsh_code — 172 KB, fits in L3",
+    "is_map": "compact_hash_map<uint64_t, uint32_t>(pre_sized=1730000) key=(adsh_code<<32|tagver_code) value=pre_row_index",
+    "thread_local_agg": "compact_hash_map<uint64_t, {double sum_value, int64_t cnt}>(pre_sized=16384) key=(adsh_code<<32|pre_row) per thread",
+    "merged_agg": "compact_hash_map<uint64_t, {double sum_value, int64_t cnt}>(pre_sized=131072) after thread merge"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "unit": "num block (100,000 rows)",
+    "total_morsels": 395,
+    "shared_read_only": ["sub_fy_array", "is_map", "num columns", "pre plabel arrays"],
+    "thread_private": ["thread_local_agg"],
+    "notes": "Pre-processing (is_map build, sub load) single-threaded or 2-thread parallel. Main scan over num fully parallel with morsel dispatch. Merge agg maps after all threads complete."
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "condition": "zm[b].min_uom > usd_code || zm[b].max_uom < usd_code",
+      "expected_blocks_skipped": "~5% (87% uom=USD density, few blocks fully excluded)"
+    }
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "uint64_t packed as (uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)pre_row",
+    "accumulators": ["double sum_value", "int64_t cnt"],
+    "estimated_groups": 100000,
+    "merge": "iterate thread-local maps and merge into global map with addition"
+  },
+  "output": {
+    "decode": [
+      "name: sub_name_data[sub_name_offsets[adsh_code]..sub_name_offsets[adsh_code+1]]",
+      "stmt: fixed string 'IS' (all result rows pass stmt='IS' filter)",
+      "tag: tag_data[tag_offsets[tagver_code]..tag_offsets[tagver_code+1]] where tagver_code = pre_tagver_code[pre_row]",
+      "plabel: plabel_data[plabel_offsets[pre_row]..plabel_offsets[pre_row+1]]"
+    ],
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "topk_strategy": "partial_sort or nth_element + sort on 100K groups"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,143 @@
+{
+  "query_id": "Q1",
+  "storage_extensions": [
+    {
+      "id": "lineitem.rf_ls.combo_u8",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/lineitem.rf_ls.combo_u8/codes.bin",
+        "codes_format": "uint8_t[row_count]",
+        "keymap": "column_versions/lineitem.rf_ls.combo_u8/keymap.bin",
+        "keymap_format": "uint32_t k, then k pairs of uint32_t(returnflag_code, linestatus_code) by combo code"
+      },
+      "usage": "mmap codes.bin and keymap.bin; use combo_code[row] as direct GROUP BY key in aggregation, then map combo_code->(l_returnflag_code,l_linestatus_code) for final dictionary decode and ORDER BY"
+    },
+    {
+      "id": "lineitem.l_quantity.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_quantity*100)"
+      },
+      "usage": "mmap codes.bin; use scaled integer quantity for SUM/AVG accumulation"
+    },
+    {
+      "id": "lineitem.l_extendedprice.int32_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_extendedprice.int32_scaled_by_100/codes.bin",
+        "codes_format": "uint32_t[row_count], value=round(l_extendedprice*100)"
+      },
+      "usage": "mmap codes.bin; use scaled integer price for SUM/AVG and derived expressions"
+    },
+    {
+      "id": "lineitem.l_discount.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_discount*100)"
+      },
+      "usage": "mmap codes.bin; compute (100-discount_scaled) and avg discount with integer accumulation"
+    },
+    {
+      "id": "lineitem.l_tax.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_tax.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_tax*100)"
+      },
+      "usage": "mmap codes.bin; compute (100+tax_scaled) for charge accumulation"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "rf_ls_combo",
+        "file": "column_versions/lineitem.rf_ls.combo_u8/codes.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity_scaled",
+        "file": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_extendedprice_scaled",
+        "file": "column_versions/lineitem.l_extendedprice.int32_scaled_by_100/codes.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount_scaled",
+        "file": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_tax_scaled",
+        "file": "column_versions/lineitem.l_tax.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600)",
+    "fact_join": "none",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a storage-level key-width mismatch in the dominant scan (Category E): grouping by a tiny composite domain still reads two 32-bit dictionary code columns per row, inflating memory traffic in a bandwidth-bound path. The plan adds a persistent row-aligned composite uint8 key for (l_returnflag,l_linestatus), keeps existing scaled numeric columns and zonemap-driven shipdate filtering, and uses direct-array aggregation keyed by combo code with finalize-time keymap decode to preserve grouping and sort semantics while reducing scan bytes.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "shipdate_predicate": "l_shipdate <= 10471",
+    "avg_qty_formula": "sum_qty / count_order",
+    "avg_price_formula": "sum_base_price / count_order",
+    "avg_disc_formula": "sum_disc / count_order",
+    "group_by": "(l_returnflag, l_linestatus)",
+    "order_by": "l_returnflag ASC, l_linestatus ASC"
+  }
+}

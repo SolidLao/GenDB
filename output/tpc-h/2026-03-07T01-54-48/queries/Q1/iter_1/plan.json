@@ -1,0 +1,102 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "load_shipdate_zonemap",
+    "prune_blocks",
+    "scan_aggregate_fastpath",
+    "merge_thread_locals",
+    "finalize_decode_sort",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600_blocks_from_zonemap)",
+    "fact_join": "none",
+    "aggregation": "direct_array(thread_local_2d_groups)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is scan-path overhead relative to output (Category C) with high predicate selectivity (0.988), so almost all rows pay per-row filter and arithmetic overhead while producing only 6 groups; plan changes the scan to zone-map-driven block fast paths (if block max <= 10471 aggregate without per-row shipdate branch, otherwise run row filter), keeps direct-array thread-local aggregation, and tightens parallel execution to reduce scheduling overhead and keep sequential bandwidth high.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "shipdate_predicate": "l_shipdate <= 10471",
+    "avg_qty_formula": "sum_qty / count_order",
+    "avg_price_formula": "sum_base_price / count_order",
+    "avg_disc_formula": "sum_disc / count_order",
+    "group_by": "(l_returnflag, l_linestatus)",
+    "order_by": "l_returnflag ASC, l_linestatus ASC"
+  }
+}

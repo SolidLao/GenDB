@@ -1,0 +1,111 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 24222.410000000003,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 24222.410000000003,
+      "validation": "fail",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.39,
+        "build_joins": 21351.36,
+        "main_scan": 1964.93,
+        "merge_thread_local_agg": 103.21,
+        "decode_strings_topk_sort": 482.06,
+        "output": 24.03,
+        "total": 24171.46
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 5240.316666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 5240.316666666667,
+      "validation": "pass",
+      "strategy": "Two bugs fixed in this iteration. Correctness: iter_0 used raw tagver_code bytes as the GROUP BY tag proxy in the final string re-aggregation. Since tagver_code encodes (tag, version) while SQL groups by n.tag (tag string only), rows with the same tag but different versions were split into separate groups instead of merged — causing ~15% undercount in cnt and total_value. Fix: decode the actual tag string from tag_data[tag_offsets[tagver_code]..] and embed it in the composite group key. Performance: iter_0 built is_map from ALL 1.75M IS pre rows (capacity 4M x 16B = 64MB, exceeding L3=44MB) in a single-threaded loop — sampling showed 23.4s for Order A. Applying Category A/B fix (Order B, empirically validated): pre-filter pre rows by both stmt='IS' AND adsh_code in fy2023 DenseBitmap, reducing is_map to 550K entries (16MB, L3-resident). Sampling confirms 4.31x speedup (23.4s to 5.4s single-threaded). Additional fix: parallelize the pre scan using 64 OMP threads collecting IS+fy2023 pairs into per-thread vectors, then serial merge — eliminates the single-threaded build bottleneck. The 38.4MB next_is linked-list array is replaced by a forward scan in pre for the rare 0.7% of keys with duplicate (adsh,tagver) entries (leveraging pre's sorted order).",
+      "operation_timings": {
+        "data_loading": 0.39,
+        "dim_filter": 0.53,
+        "build_joins": 14.91,
+        "serial_merge_build_is_map": 3653.57,
+        "main_scan": 868.19,
+        "merge_thread_local_agg": 71.5,
+        "decode_strings_topk_sort": 457.07,
+        "output": 14.96,
+        "total": 5234.31
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "TIMEOUT: Query Optimizer failed for Q6: Agent \"Query Optimizer\" timed out after 30m 0s",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "TIMEOUT: Query Optimizer failed for Q6: Agent \"Query Optimizer\" timed out after 30m 0s",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 5594.646666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 5594.646666666667,
+      "validation": "pass",
+      "strategy": "Root cause (Category A+B): Three compounding issues caused the 5240ms stall. (1) The dominant bottleneck — serial_merge at 3654ms — arises from the two-phase parallel-collect-then-serial-merge architecture: CompactHashMap(1048576) computes cap=2097152 (NOT 1048576), creating a 32MB table; the preceding parallel OMP phase reads 86MB of pre data, completely evicting this 32MB from L3; the serial merge then performs 550K find+insert operations against a cold table at DRAM latency (~100ns/miss) instead of L3 speed (~10ns/miss). Fix: replace with a single-threaded sequential pre scan that builds is_map directly — 86MB sequential read at memory bandwidth speed (~10ms) + 550K inserts into a correctly-sized L3-resident 16MB map. CompactHashMap(600000) gives cap=1048576 x 16B = 16MB, which remains L3-resident throughout. (2) thread_local_agg oversizing: CompactHashMap(32768) creates 65536 x 28B = 1.8MB per thread x 64 threads = 115MB total — far exceeding L3 (44MB) and causing DRAM-speed agg probes on every update. Fix: reduce to expected=8192 giving 458KB per thread (fits in L2 per core), 29MB total (fits in L3). (3) String-keyed final re-aggregation: unordered_map<string, FinalEntry> with 600K composite string key allocations (heap fragmentation, slow hashing) accounts for most of the 457ms decode phase. Fix: replace with CompactHashMap<uint64_t, ReAggEntry> keyed on FNV-64 hash of the composite string — no heap allocation, inline hashing. Decode strings only for the final 200 output rows using stored sample_adsh_code and sample_pre_row. Expected total: ~150-200ms, a 26x improvement.",
+      "operation_timings": {
+        "data_loading": 0.39,
+        "dim_filter": 0.52,
+        "build_joins": 3857.71,
+        "main_scan": 1295.57,
+        "merge_thread_local_agg": 78.63,
+        "hash_reaggregate_decode_topk_sort": 268.06,
+        "output": 0.5,
+        "total": 5584.36
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 583.0966666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 583.0966666666667,
+      "validation": "pass",
+      "strategy": "Root cause is Category B (algorithm change): the serial_merge_build_is_map phase (3654ms, 70% of total) uses a single thread to merge 550K entries from 64 per-thread vectors into a global CompactHashMap. After the 86MB parallel OMP pre scan evicts the map from L3, and with 3/4 of thread-local vector data on remote NUMA nodes, each serial merge step pays 150-300ns in NUMA-remote and DRAM-cold latency — making the overall merge dominated by latency rather than throughput. Iter_4 confirmed that even a single-threaded sequential pre scan takes a similar 3858ms, ruling out the collect phase as the fix. The solution is to eliminate the serial merge entirely via a three-phase partitioned build: (A) parallel collect into per-thread per-partition buffers Buffers[tid][part] — zero cross-thread writes; (B) parallel merge where thread p owns and builds partition_map[p] from Buffers[*][p] in thread-ascending order (guaranteeing minimum pre_row per key) — 64 fully independent merges; (C) probe using partition_maps[part] during main_scan. Each of 64 sub-maps is ~262KB (near L2 size), and all 64 together total 16.8MB which stays in the 44MB L3 throughout main_scan — cutting probe latency from ~100ns (DRAM) to ~10ns (L3). Additionally incorporates iter_4's proven improvements: thread_local_agg sized to CompactHashMap(8192) for 458KB/thread (L2-resident, 29MB total in L3) and FNV-64 keyed final reagg (no string heap allocations, decode strings only for top-200 rows) which together reduce the reagg+decode phase from 457ms to ~268ms.",
+      "operation_timings": {
+        "data_loading": 0.49,
+        "dim_filter": 0.85,
+        "build_joins": 55.56,
+        "main_scan": 110.9,
+        "merge_thread_local_agg": 77.82,
+        "hash_reaggregate_fnv64_decode_topk": 254.18,
+        "output": 0.61,
+        "total": 578
+      }
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "sub_sic_range_postings",
+    "build_sub_adsh_filter",
+    "pre_stmt_eq_postings",
+    "build_pre_eq_triple_counts",
+    "scan_num_usd_postings",
+    "value_non_null_filter",
+    "probe_sub_direct_array",
+    "probe_pre_eq_hash",
+    "probe_tag_pair_index",
+    "partial_group_aggregate",
+    "merge_group_states",
+    "having_distinct_companies_ge_2",
+    "topk_total_value_desc",
+    "decode_output"
+  ],
+  "scan": {
+    "table": "num",
+    "columns": ["adsh", "tag", "version", "value"],
+    "access": "rowid_postings_scan(num_uom_postings='USD')",
+    "morsel_rows": 262144
+  },
+  "join_order": [
+    {
+      "build": "sub(filtered sic range; adsh -> sub_rowid)",
+      "probe": "num(filtered: uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 5242,
+      "notes": "Materialize a sentinel-filled direct array keyed by adsh code from the sub_sic_postings range scan; fetch sic and cik from the surviving sub rowid."
+    },
+    {
+      "build": "pre(filtered stmt='EQ'; (adsh,tag,version) -> eq_count)",
+      "probe": "num ⨝ sub(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1069672,
+      "notes": "Build a compact hash map from EQ pre rows keyed by triple with multiplicity count so SUM(value) and AVG(value) preserve join multiplicity without materializing duplicate joined rows."
+    },
+    {
+      "build": "tag((tag,version) -> rowid,tlabel,abstract)",
+      "probe": "num ⨝ sub(filtered) ⨝ pre(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Probe the persisted tag_tag_version_hash only after pre pruning; validate abstract=0 and fetch tlabel code for grouping."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.0609
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.1294
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "direct_array(max_adsh_code+1, value=sub_rowid_or_sentinel) populated from sub_sic_postings range; sub_sic and sub_cik stay in column arrays",
+    "fact_join": "compact_hash_map(read_only, key=(adsh_u32,tag_u32,version_u32), value=eq_count_u16_or_u32) built from pre_stmt_postings; pre_built_index(tag_tag_version_hash) for late tag lookup",
+    "aggregation": "compact_hash_map(thread_local, key=(sic_i32,tlabel_u32,stmt_u16), value={sum_value:f64,count_rows:u64})",
+    "distinct": "hash_set(thread_local, key=(sic_i32,tlabel_u32,stmt_u16,cik_i32))",
+    "merge": "compact_hash_map(global, key=(sic_i32,tlabel_u32,stmt_u16), value={sum_value:f64,count_rows:u64,num_companies:u64})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(min(64,nproc))"
+  },
+  "indexes": [
+    {
+      "index": "sub_sic_postings",
+      "purpose": "enumerate sub rows in the SIC range and seed the filtered adsh direct array"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "enumerate only USD num rowids for the fact-side scan"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "enumerate only EQ pre rows to build the filtered triple-count hash table"
+    },
+    {
+      "index": "tag_tag_version_hash",
+      "purpose": "late exact lookup on (tag, version) to fetch tlabel and verify abstract=0"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "distinct_aggregation": {
+    "function": "count_distinct",
+    "column": "s.cik",
+    "strategy": "deduplicate thread-local (sic,tlabel,stmt,cik) keys during probing, then merge unique company keys into per-group num_companies counts"
+  },
+  "having": {
+    "predicate": "COUNT(DISTINCT s.cik) >= 2",
+    "stage": "after_merge"
+  },
+  "output": {
+    "order_by": ["total_value DESC"],
+    "limit": 500
+  },
+  "decode": {
+    "tlabel": "dicts/tag_tlabel.*",
+    "stmt": "dicts/pre_stmt.*",
+    "stage": "after_topk"
+  },
+  "execution_target": "cpp"
+}

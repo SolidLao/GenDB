@@ -1,0 +1,117 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 207.42333333333332,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 207.42333333333332,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 1.08,
+        "dim_filter": 0.53,
+        "build_joins": 103.54,
+        "main_scan": 65.85,
+        "output": 22.53,
+        "total": 225.46
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 112.67,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 112.67,
+      "validation": "pass",
+      "strategy": "Root cause: Category A plan mismatch. The current implementation spends most time rebuilding a 4194304-bucket (67108864-byte) EQ triple hash from all 1242132 pre EQ rows even though the sub SIC filter leaves only 5246 filings, only 74423 EQ rows remain reachable, and only 64656 filtered triples are ever probed. The revised plan pushes the sub semi-join ahead of the pre build, uses a first pass over pre_stmt_postings to count only reachable EQ rows, allocates a compact 262144-bucket (4194304-byte) triple-count map, and then probes joins in the empirically best sampled order sub->pre->tag so the selective sub lookup and small pre map prune rows before the tag lookup.",
+      "operation_timings": {
+        "data_loading": 0.41,
+        "dim_filter": 0.27,
+        "build_joins": 25.86,
+        "main_scan": 51.61,
+        "output": 22.65,
+        "total": 129.04
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 103.22666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 103.22666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: after iteration 1, the hot path still does cache-unfriendly random probes into the 4194304-bucket tag hash (about 64MB of buckets plus offsets/rowids, roughly 76MB total) and also maintains DISTINCT bookkeeping in a second hash structure even though the sub and pre filters shrink the reachable domain to at most 64656 filtered triples. Strategy: Category A/C. Keep the selective sub->pre pruning, but during build_joins also deduplicate the reachable (tag,version) pairs and probe the persisted tag index once per pair to build a compact cache-resident pair->tlabel map; then scan USD num rows using only the filtered sub/pre/tag lookups and aggregate directly at (sic,tlabel,stmt,cik) grain so COUNT(DISTINCT cik) is fused into aggregation and rolled up once at finalize instead of maintaining and merging a separate distinct set.",
+      "operation_timings": {
+        "data_loading": 0.61,
+        "dim_filter": 0.43,
+        "build_joins": 49.17,
+        "main_scan": 32.07,
+        "output": 22.1,
+        "total": 122.85
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 83.63,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 83.63,
+      "validation": "pass",
+      "strategy": "Root cause: Category A/C/D. The remaining gap is dominated by build_joins wasted work: iteration 2 materializes a reachable (tag,version) dedupe table sized to all 1242132 EQ postings, which rounds to 4194304 buckets (about 32 MB before payloads) even though the filtered pre domain is only about 74423 reachable EQ rows and about 64656 filtered triples, and main_scan still uses dynamic morsels over a nearly uniform sequential USD row-id stream. The revised plan keeps the selective sub->pre->tag order, but builds only the compact filtered pre triple-count map from reachable EQ rows, derives unique tag/version pairs by scanning its occupied buckets sequentially, probes the persisted tag index once per derived pair to materialize the small tag map, and uses contiguous partition-parallel scan slices for the USD postings stream to reduce scheduling overhead while preserving row-order locality.",
+      "operation_timings": {
+        "data_loading": 0.46,
+        "dim_filter": 0.34,
+        "build_joins": 27.53,
+        "main_scan": 32.26,
+        "output": 21.22,
+        "total": 100.67
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 93.76666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 93.76666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: Category A/C. After iteration 3, the plan still drives the hot path from the full USD postings stream and touches 33234006 USD num rows even though the SIC filter reduces the reachable filing domain to 5242 adsh codes whose dense postings contain only 2968289 num rows, or 2564680 after the local USD filter, so the main scan still performs about 11x-13x more fact-row work than necessary. The revised plan keeps the selective sub->pre->tag build side, uses the existing num.adsh.postings_dense storage extension to enumerate only qualifying filing spans, checks uom='USD' and value-not-null inside those spans, balances parallel work by postings-slice cardinality, and preserves the compact filtered pre triple map plus derived tag map so the smaller num stream reaches the same join and aggregation logic with much less wasted scanning.",
+      "operation_timings": {
+        "data_loading": 0.48,
+        "dim_filter": 0.93,
+        "build_joins": 35.14,
+        "main_scan": 34.3,
+        "output": 8.9,
+        "total": 101.03
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 84.17333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 84.17333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: Category C/E. Iteration 3 still scans the full 33.24M-row USD postings stream and eagerly reads num.value plus join keys for every USD row even though the sub.sic filter leaves only 5242 filings whose dense num postings contribute about 2.97M rows total and only about 2.56M USD rows, so more than 90% of the hot-path fact-column traffic is wasted. Iteration 4 proved that switching the scan driver to adsh postings sacrifices the strong sequential locality of the USD postings stream and regresses. The revised plan keeps the fast sequential USD driver, uses the existing num.adsh.postings_dense storage extension only once up front to build a 39.4M-bit (~4.9 MB) shared qualifying-rowid mask that fits comfortably in the 88 MB LLC, tests that mask before touching num columns, and then reuses the compact filtered pre triple-count map plus derived tag map so only qualifying rows pay the expensive join and aggregation work.",
+      "operation_timings": {
+        "data_loading": 0.3,
+        "dim_filter": 0.63,
+        "build_joins": 26.69,
+        "main_scan": 33.57,
+        "output": 7.94,
+        "total": 87.93
+      }
+    }
+  ]
+}

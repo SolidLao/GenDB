@@ -1,0 +1,108 @@
+{
+  "query_id": "Q3",
+  "storage_extensions": [
+    {
+      "id": "num.adsh.postings_dense",
+      "action": "built_new",
+      "files": {
+        "offsets": "column_versions/num.adsh.postings_dense/offsets.bin",
+        "offsets_format": "uint64_t[max_code + 2] indexed by adsh_code",
+        "rowids": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "rowids_format": "uint32_t[row_count] grouped by adsh_code in input row order"
+      },
+      "usage": "mmap offsets.bin and rowids.bin; for each filtered sub filing row, read sub.adsh code, iterate rowids[offsets[adsh_code] : offsets[adsh_code + 1]) as that filing's num rows, then load only num.uom and num.value for those rowids"
+    }
+  ],
+  "pipeline": [
+    "filter_sub_2022",
+    "map_filtered_filings",
+    "scan_num_adsh_postings",
+    "aggregate_by_filing",
+    "rollup_inner",
+    "compute_avg_sub_total",
+    "rollup_outer",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num.adsh.postings_dense(filtered filing adsh slices)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 27331,
+      "notes": "Drive the fact side from filtered filing adsh codes using dense postings on num.adsh so only rows belonging to fy=2022 filings are visited."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh_postings_rowids",
+        "file": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential within each adsh postings slice"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(filtered filing_gid -> {sub_rowid, adsh_code, inner_gid, outer_gid}) built from sub_fy_postings plus sub.adsh/sub.cik/sub.name",
+    "fact_join": "dense_postings(offsets + rowids) on num.adsh; no runtime hash build",
+    "aggregation": "direct_array(shared filing_totals indexed by filing_gid, then direct-array rollups into cik and (name,cik) groups)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num.adsh.postings_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the hot path still does work proportional to the full 39.4M-row num table even though only the fy=2022 filing domain can join and only about 0.3173 x 0.8435 ≈ 26.8% of fact rows can survive both filters; it also pays for thread-local filing arrays and a merge pass. Strategy Category E: build a reusable dense postings version on num.adsh and restructure execution to drive the fact phase from filtered sub filings, so the scan touches only rows belonging to admissible filings, skips the num.adsh column entirely in the hot loop, and parallelizes by filing ownership with direct writes into filing_totals instead of replicated per-thread aggregates.",
+  "correctness_anchors": {}
+}

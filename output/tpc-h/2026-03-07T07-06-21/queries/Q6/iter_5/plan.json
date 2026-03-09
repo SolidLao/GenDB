@@ -1,0 +1,94 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "parallel_pread_load", "parallel_filter_scan", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.019,
+      "enforcement": "zone_map_block_skip_then_row_filter"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.21,
+      "enforcement": "row_filter_int8"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "selectivity": 0.47,
+      "enforcement": "row_filter_int8"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "pread_qualifying_range_only"
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "usage": "Load entire zone map via fread (4808 bytes, L1-resident). Linear scan of 600 entries to find contiguous qualifying block window [block_lo, block_hi). Compute row_lo = block_lo * block_size, row_hi = min(block_hi * block_size, total_rows)."
+    }
+  ],
+  "data_structures": {
+    "zone_map": "flat_array(600 entries, loaded via fread, L1-resident)",
+    "column_buffers": "4 anonymous heap buffers (posix_memalign 64-byte aligned) sized to qualifying row range only (~16.8MB total); populated via pread, no mmap, no page fault overhead",
+    "thread_accumulator": "double per-thread, stored in cache-line-padded struct (64-byte alignment) to prevent false sharing across 64 threads",
+    "final_reduction": "sequential sum of 64 thread-local doubles"
+  },
+  "parallelism": {
+    "strategy": "two_phase_parallel",
+    "threads": "auto(nproc)",
+    "phase1_io": "4 threads, one per column, each issues a single pread() call for the qualifying row range of its column; all 4 run concurrently to overlap column I/O",
+    "phase2_scan": "64 threads partition [row_lo, row_hi) evenly; each thread scans its sub-range over the in-memory buffers with no I/O or page fault overhead"
+  },
+  "io_strategy": {
+    "method": "pread_into_anonymous_buffer",
+    "rationale": "mmap requires one kernel-mode page fault per 4KB page to install PTE even when page is in OS cache (~2-5us/page × 4200 pages = 8-21ms). pread() copies directly from page cache to pre-allocated anonymous memory at memory bandwidth (~20 GB/s), costing ~0.84ms for 16.8MB total. Eliminates the dominant bottleneck from all prior iterations.",
+    "per_column": [
+      {"col": "l_shipdate",      "qualifying_bytes": 4800000,  "note": "row_lo*4 to row_hi*4"},
+      {"col": "l_discount",      "qualifying_bytes": 1200000,  "note": "row_lo*1 to row_hi*1"},
+      {"col": "l_quantity",      "qualifying_bytes": 1200000,  "note": "row_lo*1 to row_hi*1"},
+      {"col": "l_extendedprice", "qualifying_bytes": 9600000,  "note": "row_lo*8 to row_hi*8"}
+    ],
+    "total_qualifying_bytes": 16800000,
+    "fits_in_L3": true
+  },
+  "inner_loop": {
+    "description": "Per-row loop over in-memory buffers (zero I/O in this phase)",
+    "filter_order": ["l_shipdate (int32, guards boundary blocks)", "l_discount (int8)", "l_quantity (int8)"],
+    "compute": "revenue_local += buf_extprice[i - row_lo] * (buf_discount[i - row_lo] * 0.01)",
+    "note": "All pointers are to base of qualifying buffer (offset 0 = row_lo). Use local index j = i - row_lo for buffer access, or adjust loop bounds to j in [0, count). Per-block zone check still applied — skip any block where zone.mx < LO || zone.mn >= HI (handles boundary blocks correctly)."
+  },
+  "output": {
+    "columns": ["revenue"],
+    "order_by": [],
+    "limit": null,
+    "format": "single_row_double",
+    "mkdir_strategy": "direct_syscall: use mkdir() with errno==EEXIST check instead of system('mkdir -p ...'). Eliminates 3-5ms fork+exec overhead."
+  },
+  "aggregation": "single_scalar_double",
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — algorithm change): all prior iterations use mmap for the column files. Even on hot runs where data is in the OS page cache, mmap requires a kernel-mode page fault per 4KB page to install the PTE into the process page table (~2–5µs/page). The qualifying row range spans ~4200 pages (16.8MB across 4 columns), giving 8–21ms of page-fault overhead — confirmed by iter_4's profiling showing partial_mmap_populate=10ms and main_scan=6ms (total 16ms measured, 20ms wall). The fix replaces mmap entirely with pread() into pre-allocated anonymous buffers: (1) load zone map via fread (4808 bytes, unchanged); (2) compute qualifying row range [row_lo, row_hi) from zone scan; (3) posix_memalign 4 buffers for the qualifying window (~16.8MB total, fits in 44MB L3); (4) 4 concurrent pread() threads — one per column — to fill buffers from page cache at ~20 GB/s (~0.84ms total); (5) 64-thread parallel scan over in-memory buffers with zero page-fault overhead; (6) reduce + output with direct mkdir() syscall instead of system(). Anonymous memory does not require PTE installation via kernel VFS, making the entire 4200-page working set instantly accessible after pread completes.",
+  "correctness_anchors": {
+    "LO": 8766,
+    "HI": 9131,
+    "LO_label": "1994-01-01",
+    "HI_label": "1995-01-01",
+    "discount_lo_encoded": 5,
+    "discount_hi_encoded": 7,
+    "quantity_threshold": 24,
+    "revenue_formula": "SUM(l_extendedprice * (l_discount * 0.01))"
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 160.12,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 160.12,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.3,
+        "dim_filter": 5.49,
+        "build_joins": 98.97,
+        "main_scan": 10.7,
+        "output": 0.31,
+        "total": 156.51
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 57.72666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 57.72666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan spends almost all time in build_joins because it drives orders through orders_custkey_postings from qualifying customers, creating many random probes into orders metadata and materializing large intermediate qualifying-order arrays before scanning lineitem. Strategy category A (plan restructuring): build a tiny dense customer-membership bitset from the customer postings, then scan orders sequentially with orders_orderdate_zone_map pruning, test customer membership inline, and immediately probe the row-aligned lineitem_orderkey_groups to aggregate revenue per qualifying order in o_orderkey order. This replaces random index-nested-loop behavior with cache-friendly sequential access and fuses join plus aggregation to eliminate the expensive intermediate buffers.",
+      "operation_timings": {
+        "data_loading": 0.64,
+        "dim_filter": 2.32,
+        "build_joins": 0.01,
+        "main_scan": 20.83,
+        "output": 0.4,
+        "total": 57.89
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 74.26666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 74.26666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: iteration 1 still performs unnecessary full-table work on orders by reading o_custkey and usually o_orderdate for all 15M rows even though the existing postings indexes can identify a much smaller candidate set first; only about 300K BUILDING customers and about 1.48M orders survive the customer-plus-date predicates. Strategy category A (plan restructuring): switch to a hybrid indexed plan that traverses customer_mktsegment_postings and orders_custkey_postings to build a compact 15M-row qualifying-order bitset, using orders_orderdate_zone_map to avoid row-level date loads for whole blocks, then scan the row-aligned lineitem_orderkey_groups sequentially and touch order payload and lineitem payload columns only for bitset-selected rows. This keeps the compact selection structure cache-resident, removes the full orders metadata scan, and preserves sequential access for the expensive lineitem aggregation step.",
+      "operation_timings": {
+        "data_loading": 0.46,
+        "dim_filter": 0.01,
+        "build_joins": 27.27,
+        "main_scan": 11.08,
+        "output": 0.32,
+        "total": 71.81
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 161.39000000000001,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 161.39000000000001,
+      "validation": "pass",
+      "strategy": "Root cause: the best current plan still does lineitem work that is not proportional to output, because every BUILDING-plus-orderdate qualifying order descends into its lineitem run and performs row-level shipdate checks even when lineitem_shipdate_zone_map can prove the whole surrounding block rejects or accepts, and it eagerly streams order payload columns that only surviving rows need. Strategy category C (work elimination): keep the successful cache-resident customer bitset and sequential orders filtering path, materialize a compact qualifying-order bitset, then scan row-aligned lineitem_orderkey_groups sequentially while using lineitem_shipdate_zone_map to skip zero-result runs, fast-accept whole runs without l_shipdate loads, and late-materialize o_orderkey, o_orderdate, and o_shippriority only for positive-revenue rows. This removes unnecessary per-row lineitem checks and unnecessary order payload reads while preserving sequential access on the large structures.",
+      "operation_timings": {
+        "data_loading": 0.45,
+        "dim_filter": 1.66,
+        "build_joins": 73.6,
+        "main_scan": 9.91,
+        "output": 0.45,
+        "total": 120.26
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 36.74,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 36.74,
+      "validation": "pass",
+      "strategy": "Root cause: after iteration 1 fixed the join order, the remaining gap is main-scan bandwidth. The plan still streams wide order payload columns and wide lineitem revenue columns, plus a full row_counts array, even though only about 1.48M orders survive the customer and orderdate predicates, only about 6M lineitems are visited, and only the top-k survivors need full order payload. Strategy category E: keep the successful sequential orders-to-lineitem_groups plan, but switch revenue arithmetic to the existing narrow lineitem column versions, derive each lineitem run length from adjacent row_starts instead of scanning row_counts, and late-materialize o_orderdate, o_orderkey, and o_shippriority only for positive-revenue rows that may enter the thread-local top-k. This preserves the cache-resident customer bitset and zone-map pruning while materially reducing main-scan bytes.",
+      "operation_timings": {
+        "data_loading": 0.27,
+        "dim_filter": 1.47,
+        "build_joins": 0.01,
+        "main_scan": 12.43,
+        "output": 0.47,
+        "total": 34.99
+      }
+    }
+  ]
+}

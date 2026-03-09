@@ -1,0 +1,103 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "dim_filter",
+    "parallel_collect_orders",
+    "serial_insert_orders_map",
+    "parallel_scan_lineitem_aggregate",
+    "parallel_merge_agg",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment == 1)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "notes": "Bool bitset qualifying_cust[1500001] indexed directly by c_custkey value; ~1.5MB, fully L3-resident. Single-threaded build is trivial (~7ms). Probe from orders: O(1) array lookup, no hashing."
+    },
+    {
+      "build": "orders(filtered: o_orderdate < 8015 AND o_custkey in qualifying_cust)",
+      "probe": "lineitem(filtered: l_shipdate > 8015)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "COMPACT 8-byte slots: key=int32_t (sentinel=INT32_MIN), orderdate=int16_t (raw days value ~7900-9300, fits int16 max=32767), shippriority=int8_t, pad=uint8_t. Capacity 4194304 (2^22). Total: 4194304 * 8 = 32MB — fits in 44MB L3. Hash: hash32. Linear probing with mask. Build: two-phase parallel-collect + serial-insert. Probe: from lineitem parallel scan."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == 1",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 8015",
+      "selectivity": 0.49,
+      "output_cardinality": 7350000,
+      "index": "o_orderdate_zone_map",
+      "index_note": "Break loop early when zone_min[b] >= 8015 (orders sorted ascending by o_orderdate). ~74 of 150 blocks fully included; trailing ~76 blocks fully skipped."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 8015",
+      "selectivity": 0.51,
+      "output_cardinality": 30593000,
+      "index": "l_shipdate_zone_map",
+      "index_note": "Skip blocks where zone_max[b] <= 8015. For blocks where zone_min[b] > 8015, omit per-row shipdate check entirely."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey",     "file": "lineitem/l_orderkey.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate",     "file": "lineitem/l_shipdate.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice","file": "lineitem/l_extendedprice.bin","type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",     "file": "lineitem/l_discount.bin",     "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "prefetch": "mmap_prefetch_all on all four lineitem columns at startup (HDD readahead)"
+  },
+  "data_structures": {
+    "customer_filter": "bool qualifying_cust[1500001] indexed directly by c_custkey; ~1.5MB; fully L3-resident",
+    "orders_collect_buffer": "per-thread std::vector<OrdRow> where OrdRow = {int32_t okey, int32_t odate, int32_t spri}; filled during parallel orders scan; used for serial insert into orders_build_map",
+    "orders_build_map": "compact flat open-addressing hash map: capacity=4194304 (2^22), slot=8bytes {int32_t key (sentinel=INT32_MIN), int16_t orderdate, int8_t shippriority, uint8_t _pad}. Total: 32MB — fits in 44MB L3. hash32 + linear probing. Written by single thread after parallel collect phase (no CAS needed for build — serial insert avoids contention complexity).",
+    "per_thread_agg_map": "compact flat open-addressing hash map per thread: slot = {int32_t key (sentinel=INT32_MIN), int32_t orderdate, int32_t shippriority, double revenue} = 20 bytes; capacity=131072 (2^17); 2.6MB per thread (fits in L2/L3). Each thread owns its map exclusively during main_scan — zero locking overhead. Use hash32 + linear probing.",
+    "global_agg_map": "shared compact flat open-addressing hash map for parallel merge: same 20-byte slot struct; capacity=4194304 (2^22); 80MB total. During parallel merge, threads claim slots via atomic CAS on int32_t key field (__atomic_compare_exchange_n, EMPTY=INT32_MIN). Revenue accumulated via std::atomic<double> compare_exchange_weak spin loop. Since 1.47M keys map to 4M slots (37% load factor), CAS conflicts are rare."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_1_dim_filter": "single-threaded; 1.5MB scan; ~7ms",
+    "phase_2a_parallel_collect": "all 64 threads scan orders blocks in parallel using zone map (break when zone_min[b] >= kOrderDateMax); each thread appends qualifying rows {okey, odate, spri} to its thread-local std::vector; no shared state",
+    "phase_2b_serial_insert": "single thread iterates all 64 per-thread vectors and inserts each OrdRow into compact orders hash map; 1.47M inserts into L3-resident 32MB map at ~10ns/insert = ~15ms",
+    "phase_3_lineitem_scan": "parallel morsel-driven across all 64 threads; zone map applied per-block; probe into L3-resident 32MB orders map; aggregate into exclusive per-thread compact flat agg map; no cross-thread coordination",
+    "phase_4_parallel_merge": "all 64 threads run simultaneously; each thread iterates its own local flat agg map (2.6MB, L2-resident), for each non-empty entry: (a) CAS-claim the slot in global_agg_map using __atomic_compare_exchange_n on int32 key, (b) accumulate revenue using std::atomic<double>::compare_exchange_weak spin; orderdate and shippriority written once at slot claim time"
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "purpose": "skip_blocks — break early when zone_min[b] >= kOrderDateMax (sorted ascending)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip leading blocks where zone_max[b] <= kShipdateMin; skip per-row check for blocks where zone_min[b] > kShipdateMin"
+    }
+  ],
+  "aggregation": "hash_group_by — key=l_orderkey (int32, uniquely identifies group since each order has exactly one o_orderdate and o_shippriority); thread-local compact flat maps during scan; parallel merge into shared global compact flat map",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "scan global_agg_map for non-empty slots, push to result vector, std::partial_sort top-10"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Three compounding bottlenecks identified. (1) Hidden merge bottleneck (~124ms, largest): std::unordered_map uses chained buckets with separate heap allocations; merging 64 thread-local maps into a 3.5M-entry final map caused ~1.47M malloc calls plus pointer-chasing cache misses; fixed by replacing all std::unordered_map instances with compact flat open-addressing hash maps (20-byte slots), and performing the merge in parallel across all 64 threads using atomic CAS for key acquisition and atomic double compare_exchange_weak for revenue accumulation (Category B — algorithm change). (2) Orders hash map hardware mismatch (~104ms): 12-byte slots at 4M capacity = 50MB exceeds the 44MB L3 cache, causing RAM-level latency for both the serial build inserts and the 30M parallel lineitem probes; fixed by compressing slots to 8 bytes (int32 key + int16 orderdate + int8 shippriority + uint8 pad) giving 4M * 8 = 32MB, fully L3-resident (Category B — hardware fit). (3) Single-threaded orders build was a sequential bottleneck with 64 cores available; fixed by splitting into parallel collect phase (64 threads scan orders into per-thread vectors) followed by a fast serial insert into the L3-resident compact map (~15ms) (Category A — plan restructuring). Expected total after fixes: ~40-50ms.",
+  "correctness_anchors": {
+    "date_literal": "1995-03-15",
+    "revenue_formula": "l_extendedprice*(1-l_discount)"
+  }
+}

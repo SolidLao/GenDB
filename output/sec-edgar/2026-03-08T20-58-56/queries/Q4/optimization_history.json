@@ -1,0 +1,123 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 502.2533333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 502.2533333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 48.04,
+        "dim_filter": 1.11,
+        "build_joins": 321.33,
+        "main_scan": 81.27,
+        "output": 1.89,
+        "total": 454.54
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 468.1233333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 468.1233333333334,
+      "validation": "pass",
+      "strategy": "Root cause is a plan/physical mismatch: iter_0 spends 321ms in build_joins by constructing large runtime hash tables (pre triple counts and tag PK map) that collectively exceed LLC and repeat work already representable by existing posting indexes. Strategy Category A (plan restructuring) with hardware-aware simplification: use pre_stmt_hash as the selective driver and probe num_adsh_tag_version_hash directly (empirically fastest join order from sampling), then apply num filters, sub PK SIC filter, and late tag join before aggregation; this removes the dominant pre runtime build path and shifts work to index-driven probes proportional to filtered rows.",
+      "operation_timings": {
+        "data_loading": 287.83,
+        "dim_filter": 0,
+        "build_joins": 116.23,
+        "main_scan": 61.85,
+        "output": 1.94,
+        "total": 469.12
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 390.2166666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 390.2166666666667,
+      "validation": "pass",
+      "strategy": "Root cause is a hardware/physical mismatch (Category B): iter_1 pays most time in startup by deserializing and touching cache-exceeding posting indexes (notably num_adsh_tag_version_hash) and rebuilding tag lookup state, so performance is dominated by memory traffic before useful filtering. The revised plan removes those large index-driven probes and uses a fused sequential num scan with early selective filters plus two compact cache-friendlier hash structures: a pre(stmt='EQ') triple semi-join set and a tag(tag,version)->tlabel map, with sub SIC filtering applied first via dense lookup. This shifts work to sequential access and proportional hash probes, reducing wasted startup work and random-access pressure.",
+      "operation_timings": {
+        "data_loading": 230.9,
+        "dim_filter": 0,
+        "build_joins": 82.21,
+        "main_scan": 69.57,
+        "output": 1.79,
+        "total": 385.77
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 166.94,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 166.94,
+      "validation": "pass",
+      "strategy": "Root cause is wasted work and startup-heavy physical choices: the prior plan deserializes and probes cache-exceeding triple index structures before the selective SIC predicate is applied, so data_loading and build_joins dominate. Strategy Category C (work elimination) with plan restructuring applies sub SIC filtering first, intersects pre(stmt='EQ') with those adsh values to build a much smaller triple semi-join set, then probes num through num_adsh_fk_hash only for surviving filings; tag lookup is materialized only for needed (tag,version) keys. This removes most unnecessary startup parsing and reduces probe work to rows proportional to filtered adsh output.",
+      "operation_timings": {
+        "data_loading": 37.76,
+        "dim_filter": 0.61,
+        "build_joins": 58.74,
+        "main_scan": 60.09,
+        "output": 2.93,
+        "total": 160.18
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 150.36,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 150.36,
+      "validation": "pass",
+      "strategy": "Root cause is residual wasted work in the hot path (Category C): main_scan still performs per-row tag lookups and repeated DISTINCT-cik insert attempts for the same adsh/group, while build_joins eagerly materializes tag mappings before knowing surviving aggregate keys. The revised plan keeps the selective sub+pre pruning and num_adsh index probing, but switches to a two-phase aggregation keyed by (sic,tag,version,stmt), records DISTINCT cik once per adsh-group, and resolves tlabel only for post-scan distinct (tag,version) keys with abstract=0 before final rollup to (sic,tlabel,stmt). This removes redundant per-row hash/set work and shifts tag join cost to work proportional to surviving groups.",
+      "operation_timings": {
+        "data_loading": 30.32,
+        "dim_filter": 0.3,
+        "build_joins": 30.96,
+        "main_scan": 49.3,
+        "resolve_tag_tlabel": 29.53,
+        "final_aggregate_having": 3.4,
+        "output": 1.3,
+        "topk": 2.23,
+        "total": 146.08
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 171.80333333333337,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 171.80333333333337,
+      "validation": "pass",
+      "strategy": "Root cause is a combined physical/work mismatch: the current hot path still does per-row hash work in main_scan and resolves tag labels through a serialized PK map that causes random rowid accesses and cache-miss-heavy probes. Strategy Category B/C changes the plan to consolidate qualifying num rows per adsh into a compact (tag,version) map before pre multiplicity probes, reducing repeated hash lookups and DISTINCT insert attempts, then resolves tlabel by scanning tag columns sequentially for only needed keys to replace random-access PK-map probing. This keeps selective sub+pre pruning while shifting the remaining heavy work to sequential, cache-friendlier passes proportional to surviving groups.",
+      "operation_timings": {
+        "data_loading": 38.84,
+        "dim_filter": 0.32,
+        "build_joins": 32.5,
+        "main_scan": 63.57,
+        "resolve_tag_tlabel_sequential": 31.36,
+        "final_aggregate_having": 3.54,
+        "topk": 0.99,
+        "output": 1.35,
+        "total": 172.53
+      }
+    }
+  ]
+}

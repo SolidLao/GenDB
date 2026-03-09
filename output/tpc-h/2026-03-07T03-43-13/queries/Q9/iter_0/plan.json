@@ -1,0 +1,97 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "scan_lineitem",
+    "apply_green_bitset",
+    "lookup_supplier",
+    "probe_partsupp_hash",
+    "lookup_orders",
+    "lookup_nation",
+    "compute_amount",
+    "aggregate_array",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part_name_green_bitset",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 96000
+    },
+    {
+      "build": "supplier_pk_dense",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000
+    },
+    {
+      "build": "partsupp_pk_hash",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8000000
+    },
+    {
+      "build": "orders_pk_dense",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000
+    },
+    {
+      "build": "nation_pk_dense",
+      "probe": "supplier(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%' via part_name_green_bitset[l_partkey] != 0",
+      "selectivity": 0.048
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(2000001)",
+    "fact_join": "pre_built_index(partsupp_pk_hash)",
+    "aggregation": "direct_array(25x7 per_thread)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "part_name_green_bitset",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "partsupp_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ]
+  },
+  "execution_target": "cpp"
+}

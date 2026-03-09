@@ -1,0 +1,94 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_sorted_lineitem_streaming",
+    "boundary_key_reconcile",
+    "build_bitset_filter",
+    "scan_orders_all_columns",
+    "join_to_customer",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys_bitset(7.5MB)",
+      "probe": "orders(o_orderkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 2520,
+      "notes": "std::bitset<60000001> = 7.5MB; fits in L3 (44MB) with room to spare (117K cache lines out of 687K L3 capacity); replaces char is_big[60000001] (57MB > L3) from iter_4 which caused ~70ms of DRAM traffic during the 15M-row orders scan"
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index, 5.7MB)",
+      "probe": "qualifying_orders(o_custkey)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "5.7MB dense array; only ~2520 lookups; L3-resident; negligible cost"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem (sorted column version)",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000168,
+      "notes": "Pass 1 streaming group-by on pre-sorted l_orderkey: register-only accumulator (cur_key, cur_sum per thread), no hash table, no accumulator array, no merge phase. ~2520 qualifying orderkeys emitted."
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderkey IN qualifying_orderkeys",
+      "selectivity": 0.000168,
+      "notes": "std::bitset<60000001> test (7.5MB); after first pass warms the 117K cache lines, L3 hit rate ~100% for all 15M probes; orders scan reads all 4 columns (o_orderkey+o_custkey+o_orderdate+o_totalprice) together to avoid 2520 random DRAM accesses on qualifying rows"
+    }
+  ],
+  "scan": {
+    "table": "lineitem (sorted column version for Pass 1) + orders (all columns for Pass 2)",
+    "rows": 59986052,
+    "columns": [
+      {"name": "sorted_orderkey", "file": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "sorted_quantity", "file": "column_versions/lineitem.l_orderkey_qty.sorted/sorted_quantity.bin", "type": "int8_t", "bytes_per_row": 1},
+      {"name": "o_orderkey", "file": "orders/o_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_custkey", "file": "orders/o_custkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderdate", "file": "orders/o_orderdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_totalprice", "file": "orders/o_totalprice.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "pass1_accumulator": "register_only(cur_key: int32_t, cur_sum: int32_t per thread); zero heap allocation; no cache misses; boundary partials in per-thread struct for O(1) post-merge",
+    "qualifying_filter": "std::bitset<60000001> (7.5MB, L3-resident); 8x smaller than char is_big[60000001] (57MB > L3) used in iter_4; eliminates ~70ms DRAM traffic from orders scan miss-rate",
+    "sum_qty_lookup": "unordered_map<int32_t,int32_t> with ~2520 entries (20KB, L1/L2 resident); O(1) sum_qty retrieval for qualifying orders",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_lineitem_scan": "nthreads threads; each scans contiguous row range of sorted columns with register-only state (cur_key, cur_sum, first_key, last_key, first_sum, last_sum, interior vector); no shared data during scan",
+    "boundary_merge": "single-threaded; O(nthreads) work; reconciles at most 2*nthreads boundary key partials",
+    "pass2_orders_scan": "nthreads threads; each scans contiguous range of o_orderkey+o_custkey+o_orderdate+o_totalprice; bitset (7.5MB shared) accessed read-only, no coherency traffic; per-thread local vector for qualifying Q18Results; vectors merged after join"
+  },
+  "indexes": [
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "O(1) customer join for ~2520 qualifying order rows; 5.7MB fully L3-resident"
+    }
+  ],
+  "aggregation": "hash_group_by with 2520-entry unordered_map (sum_qty_map) built after Pass 1; o_orderkey uniquely determines all GROUP BY columns in TPC-H, so keying on orderkey suffices",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries; trivial"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: iter_4 used char is_big[60000001] (57MB) as the orders scan filter, which exceeds L3 (44MB). During the 15M-row parallel orders scan, each probe is_big[o_orderkey[j]] is a random access into a 57MB working set with ~23% L3 miss rate; 15M × 23% miss × 64 threads × 64B/line = ~14GB of DRAM traffic at 200 GB/s → ~70ms, causing the regression. Strategy Category C (work elimination via smarter data structure): replace the 57MB char array with std::bitset<60000001> (7.5MB, 8x smaller), which fits in the 44MB L3 (117K cache lines vs 687K L3 capacity). After the bitset is warmed in L3 on the first thread pass, all 15M probe accesses hit L3 at ~1ns each instead of DRAM at ~100ns. Pass 1 retains the sorted streaming scan from iter_3/iter_4: 64 threads scan sorted_orderkey.bin + sorted_quantity.bin (286MB sequential at 200 GB/s ≈ 1.4ms) with register-only accumulators — no merge phase, no heap allocation. The ~64 boundary key partials are reconciled in O(nthreads) single-threaded work. Pass 2 scans all 4 orders columns together (285MB sequential at 200 GB/s ≈ 1.4ms) to avoid 2520 random DRAM lookups into orders_by_orderkey (240MB >> L3, ~11ms in iter_3). Sum_qty is looked up from a 2520-entry unordered_map (L1/L2). Expected hot time: ~3-5ms vs 66ms baseline.",
+  "correctness_anchors": {
+    "sum_qty_format": "%.2f (e.g. 318.00, not 318)",
+    "c_name_format": "%.25s (fixed 26-byte field, print up to 25 chars)",
+    "o_totalprice_format": "%.2f",
+    "o_orderdate_decode": "days_since_epoch to YYYY-MM-DD via Howard Hinnant civil calendar algorithm",
+    "qualifying_threshold": "SUM(l_quantity) > 300 (strictly greater than, not >=)",
+    "max_orderkey": 60000000,
+    "bitset_size": 60000001,
+    "expected_qualifying_orderkeys": 2520
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "filter_num_usd_blocks",
+    "probe_sub_adsh_lookup",
+    "probe_pre_eq_sorted_index",
+    "probe_tag_version_hash",
+    "aggregate",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = 'USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Empirical sampling over 2000000 USD rows showed starting with sub is required; adsh_to_rowid gives the cheapest and most selective first test."
+    },
+    {
+      "build": "pre(indexed by adsh_tag_version_sorted, filtered at probe time to stmt = 'EQ')",
+      "probe": "num(post sub filter)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 979282,
+      "notes": "Use the existing sorted pre rowid index to binary-search (adsh,tag,version), scan the contiguous run, and count only stmt=eq_code matches; do not build a runtime pre hash table."
+    },
+    {
+      "build": "tag(tag_version_hash, abstract = 0)",
+      "probe": "num(post sub+pre filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Sampling showed sub->pre->tag is the fastest order because the pre probe cuts candidates to roughly 20 percent of sub survivors before paying the tag hash probe."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sub/indexes/adsh_to_rowid.bin) with row-level reads of sub.sic and sub.cik",
+    "fact_join": "pre/indexes/adsh_tag_version.rowids.bin for binary-search + contiguous-run stmt counting, plus pre-built tag_version_hash for (tag,version) lookup",
+    "aggregation": "thread-local compact_hash_map keyed by (sic,tlabel,stmt_code) with values {sum_value,row_count} plus thread-local distinct_pair_set(group_key,cik)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "direct adsh lookup before sic and cik reads"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "binary-search (adsh,tag,version) and scan only the matching contiguous rowid run instead of building a runtime pre hash table"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "lookup tag rowid and tlabel after sub and pre have already filtered the probe stream"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the prior plan was logically wrong for this hardware because it ignored the existing pre sorted index and spent 182.61ms building a large runtime pre hash table, including 64 thread-local hash maps whose combined working set pushes into LLC pressure for work that can be eliminated entirely. Strategy category A: restructure the plan to use the empirically best sampled join order sub->pre->tag, keep the cheap selective sub direct-array lookup first, use index nested-loop probes into pre/indexes/adsh_tag_version.rowids.bin to test stmt='EQ' without any pre build phase, and defer the tag hash probe until after the pre filter has reduced candidates."
+}

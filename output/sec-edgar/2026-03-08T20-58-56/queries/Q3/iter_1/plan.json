@@ -1,0 +1,102 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_sub_fy2022",
+    "build_usd_rowid_bitset",
+    "probe_num_by_adsh_postings",
+    "aggregate_by_filtered_subrow",
+    "rollup_name_cik_and_cik",
+    "compute_avg_threshold",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022)",
+      "probe": "num(index probe via num_adsh_fk_hash postings)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 17572,
+      "notes": "Drive fact access from filtered sub.adsh keys; for each adsh posting rowid, apply USD bitset + value-not-null and aggregate"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "num_adsh_fk_hash.rowids",
+        "file": "num/indexes/num_adsh_fk_hash.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_uom_hash.rowids",
+        "file": "num/indexes/num_uom_hash.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index-driven"
+  },
+  "data_structures": {
+    "dim_filter": "vector(filtered_sub_rows with adsh,cik,name) + adsh->filtered_sub_idx LUT",
+    "fact_join": "pre_built_index(num_adsh_fk_hash) with USD membership bitset from num_uom_hash",
+    "aggregation": "thread_local direct_array(filtered_sub_cardinality) then compact_hash_map rollup for (name,cik) and cik"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "prune sub blocks and materialize fy=2022 adsh keys"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "fetch only fact rowids for fy=2022 adsh keys instead of full num scan"
+    },
+    {
+      "index": "num_uom_hash",
+      "purpose": "build USD rowid bitset once and apply as cheap membership test during adsh posting probes"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "dense adsh domain bound and validation for adsh-keyed filters"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is plan/implementation mismatch: Iter 0 still pays full-table fact scan and per-row hash aggregation despite available posting indexes, so main_scan dominates. Strategy Category A/C: reorder to filter sub(fy=2022) first and drive fact access through num_adsh_fk_hash postings, apply USD via a compact rowid bitset built from num_uom_hash, and replace per-row hash updates with thread-local direct arrays over filtered sub keys before a small final rollup; this removes unnecessary row touches and hot-path hash work while preserving query semantics.",
+  "correctness_anchors": {}
+}

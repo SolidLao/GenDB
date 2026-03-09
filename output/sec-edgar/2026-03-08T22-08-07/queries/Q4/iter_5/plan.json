@@ -1,0 +1,161 @@
+{
+  "query_id": "Q4",
+  "storage_extensions": [
+    {
+      "id": "num.adsh.postings_dense",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/num.adsh.postings_dense/offsets.bin",
+        "offsets_format": "uint64_t[max_code + 2] indexed by adsh_code",
+        "rowids": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "rowids_format": "uint32_t[row_count] grouped by adsh_code in input row order"
+      },
+      "usage": "mmap offsets.bin and rowids.bin; for each qualifying sub.adsh code, walk its dense postings slice once to set a shared num-rowid bitset, then keep the main scan on num_uom_postings('USD') and test the bitset before reading num.value, num.adsh, num.tag, or num.version"
+    }
+  ],
+  "pipeline": [
+    "filter_sub_sic_via_postings",
+    "materialize_qualifying_sub_lookup",
+    "materialize_qualifying_num_rowid_bitset",
+    "count_reachable_pre_eq_rows",
+    "build_filtered_pre_eq_triple_counts",
+    "derive_reachable_tag_pairs_from_triples",
+    "materialize_filtered_tag_tlabel_map",
+    "scan_usd_postings_with_rowid_precheck",
+    "probe_filtered_pre_counts",
+    "probe_filtered_tag_map",
+    "aggregate_at_company_grain",
+    "roll_up_groups_apply_having_topk",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered sic range; adsh -> {sub_rowid,sic,cik})",
+      "probe": "pre(filtered stmt='EQ')",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 5242,
+      "notes": "Use sub_sic_postings first to materialize the qualifying filing set and its dense adsh lookup."
+    },
+    {
+      "build": "pre(filtered stmt='EQ' and adsh in qualifying sub set; (adsh,tag,version) -> eq_count)",
+      "probe": "num(filtered by USD postings and qualifying-rowid bitset)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 64656,
+      "notes": "Keep the compact reachable EQ triple-count map from the small filtered pre domain."
+    },
+    {
+      "build": "tag(filtered to unique reachable (tag,version) pairs; (tag,version) -> tlabel where abstract=0)",
+      "probe": "num ⨝ pre(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 15963,
+      "notes": "Derive unique reachable pairs from occupied filtered-pre triples, then probe tag_tag_version_hash once per pair to build a cache-resident label map."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.0609
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.1294
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "rowid in qualifying_adsh_rowid_bitset derived from sub.sic filter",
+      "selectivity": 0.0772
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num(USD postings stream with qualifying-rowid bitset precheck)",
+    "rows": 33235385,
+    "columns": [
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential scan over the USD postings rowid slice; test a shared cache-resident rowid bitset first, then read fact columns only for qualifying rows so the hot path preserves row-order locality while skipping most non-qualifying filings"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(max_adsh_code+1, value=sub_rowid_or_sentinel) plus shared bitset(num_row_count) marking num rowids whose adsh belongs to the qualifying SIC filing set",
+    "fact_join": "compact_hash_map(pre_sized by reachable EQ triples, key=(adsh_u32,tag_u32,version_u32), value=eq_count_u32); then compact_hash_map(pre_sized by reachable unique tag/version pairs, key=(tag_u32,version_u32), value=tlabel_u32)",
+    "aggregation": "compact_hash_map(thread_local, key=(sic_i32,tlabel_u32,stmt_u16,cik_i32), value={sum_value:f64,count_rows:u64}); merge once, roll up to (sic_i32,tlabel_u32,stmt_u16), and derive COUNT(DISTINCT cik) from one company-grain entry per key"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_sic_postings",
+      "purpose": "enumerate qualifying sub rows in the SIC range and seed the adsh lookup"
+    },
+    {
+      "index": "num.adsh.postings_dense",
+      "purpose": "materialize the shared qualifying num-rowid bitset before the main scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "drive a sequential USD-only rowid stream for the main scan"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "enumerate only EQ pre rows to count reachable rows and then build the compact filtered triple-count map"
+    },
+    {
+      "index": "tag_tag_version_hash",
+      "purpose": "resolve each unique reachable (tag,version) pair once during build_joins"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category C/E. Iteration 3 still scans the full 33.24M-row USD postings stream and eagerly reads num.value plus join keys for every USD row even though the sub.sic filter leaves only 5242 filings whose dense num postings contribute about 2.97M rows total and only about 2.56M USD rows, so more than 90% of the hot-path fact-column traffic is wasted. Iteration 4 proved that switching the scan driver to adsh postings sacrifices the strong sequential locality of the USD postings stream and regresses. The revised plan keeps the fast sequential USD driver, uses the existing num.adsh.postings_dense storage extension only once up front to build a 39.4M-bit (~4.9 MB) shared qualifying-rowid mask that fits comfortably in the 88 MB LLC, tests that mask before touching num columns, and then reuses the compact filtered pre triple-count map plus derived tag map so only qualifying rows pay the expensive join and aggregation work.",
+  "correctness_anchors": {}
+}

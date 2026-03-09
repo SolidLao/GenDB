@@ -1,0 +1,107 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "date_postings_range",
+    "uom_postings_membership",
+    "value_non_null_filter",
+    "partial_aggregate_num_by_adsh_tag_version",
+    "partition_unique_probe_keys_by_pre_hash_region",
+    "anti_probe_pre_triple_index_once_per_unique_key",
+    "rollup_tag_version",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version groups)",
+      "probe": "num(filtered and pre-aggregated by (adsh,tag,version))",
+      "type": "anti",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Use the persisted pre_adsh_tag_version_groups index only after collapsing filtered num rows to unique anti-join keys; partition unique probe keys by the high 4 bits of the initial hash slot and process one partition at a time so each pass focuses on about 1/16 of hash.bin (~50 MB)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 9026731,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "postings-driven candidate enumeration with random gathers into num columns"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(39401761) for USD membership; drive from num_ddate_postings range rowids",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_groups) probed once per unique (adsh,tag,version) after partitioning probe keys by hash region",
+    "aggregation": "thread_local compact_hash_map keyed by TripleKey(adsh,tag,version) -> {count_rows,sum_value}, then compact_hash_map keyed by packed(tag,version) for final rollup"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidate rowids via postings range scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "apply USD membership before materializing candidate triples"
+    },
+    {
+      "index": "pre_adsh_tag_version_groups",
+      "purpose": "exact anti-join existence lookup on unique (adsh,tag,version) keys"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC",
+      "tag ASC",
+      "version ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the hot path performs a cache-exceeding anti-probe into the 33,554,432-bucket pre hash table once per filtered num row, even though many filtered rows share the same (adsh, tag, version) anti-join key and therefore repeat identical existence checks. Strategy category A/C: restructure the plan to aggregate filtered num rows first by the full anti-join key, then probe pre_adsh_tag_version_groups once per unique triple, and finally roll surviving counts and sums up to (tag, version); order those unique probe keys by coarse hash-table region so each pass reuses a ~50 MB slice of hash.bin instead of thrashing across the full ~805 MB structure.",
+  "correctness_anchors": {}
+}

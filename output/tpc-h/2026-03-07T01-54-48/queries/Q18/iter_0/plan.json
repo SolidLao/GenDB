@@ -1,0 +1,76 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_lineitem_aggregate_having",
+    "semi_join_orders",
+    "join_customer",
+    "join_lineitem_by_index",
+    "final_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 600,
+      "notes": "Probe orders_pk_hash with sparse qualifying orderkeys; estimated selectivity ~4e-05 from 1% sample"
+    },
+    {
+      "build": "customer(pk)",
+      "probe": "orders_filtered",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Probe customer_pk_hash for each surviving order row"
+    },
+    {
+      "build": "orders_customer_filtered",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 600,
+      "notes": "Probe lineitem_orderkey_hash to fetch matching lineitems; avoid second full lineitem scan"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "GROUP BY l_orderkey HAVING SUM(l_quantity) > 300",
+      "selectivity": 0.00004
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(15000001)",
+    "fact_join": "pre_built_index",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "orders_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "lineitem_orderkey_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

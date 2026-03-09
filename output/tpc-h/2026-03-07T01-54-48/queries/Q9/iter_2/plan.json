@@ -1,0 +1,126 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_orderdate.year_dense_by_orderkey",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/orders.o_orderdate.year_dense_by_orderkey/codes.bin",
+        "codes_format": "int16_t[max_orderkey + 1] keyed by o_orderkey"
+      },
+      "usage": "mmap codes.bin once; use year_codes[o_orderkey] to get o_year during fact-row processing without scanning orders"
+    },
+    {
+      "id": "part.p_name.has_green_by_partkey",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/part.p_name.has_green_by_partkey/codes.bin",
+        "codes_format": "uint8_t[max_partkey + 1] keyed by p_partkey; 1=contains 'green', 0=otherwise"
+      },
+      "usage": "mmap codes.bin once; use has_green[p_partkey] as the p_name LIKE '%green%' predicate instead of runtime varlen substring scanning"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "part.p_name.has_green_by_partkey(extension)",
+      "probe": "partsupp(sorted by ps_partkey)",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 108782,
+      "notes": "Enumerate qualifying partkeys from dense green lookup and fetch only matching ps_partkey ranges via lower_bound/upper_bound on sorted ps_partkey."
+    },
+    {
+      "build": "partsupp(filtered green, key=(ps_partkey,ps_suppkey))",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 435128,
+      "notes": "Pack (ps_partkey,ps_suppkey) and probe pre-built lineitem_partsupp_hash to fetch matching lineitem rowids."
+    },
+    {
+      "build": "supplier+nation mappings",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Precompute suppkey->nationkey and nationkey->nation_code dense arrays."
+    },
+    {
+      "build": "orders.o_orderdate.year_dense_by_orderkey(extension)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 60000001,
+      "notes": "Lookup o_year by o_orderkey from dense extension during aggregation."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "has_green[p_partkey] = 1 (equivalent to p_name LIKE '%green%')",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "partsupp",
+      "predicate": "ps_partkey IN green_parts",
+      "selectivity": 0.054391
+    }
+  ],
+  "scan": {
+    "table": "partsupp",
+    "rows": 8000000,
+    "columns": [
+      {
+        "name": "ps_partkey",
+        "file": "partsupp/ps_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "ps_suppkey",
+        "file": "partsupp/ps_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "ps_supplycost",
+        "file": "partsupp/ps_supplycost.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(part.p_name.has_green_by_partkey)",
+    "fact_join": "sorted_range_lookup(ps_partkey) + pre_built_index(lineitem_partsupp_hash)",
+    "aggregation": "direct_array(25x7)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partsupp_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is storage-level and work-proportional mismatch: the hot path still re-evaluates varlen p_name LIKE '%green%' over all 2M part rows and then scans all 8M partsupp rows even though only a small qualifying subset contributes to joins. Category E with work elimination: add a persistent dense partkey->has_green lookup extension to replace runtime string scanning, then restructure partsupp filtering to keyed range retrieval on sorted ps_partkey so only qualifying ranges are materialized before probing lineitem_partsupp_hash; keep dense orderkey->year extension and direct-array aggregation unchanged.",
+  "correctness_anchors": {}
+}

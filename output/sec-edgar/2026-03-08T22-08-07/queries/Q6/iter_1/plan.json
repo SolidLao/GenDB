@@ -1,0 +1,120 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "resolve_dict_codes",
+    "scan_num_usd_postings",
+    "join_sub_via_dense_lookup",
+    "join_pre_via_persisted_triple_index",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub_adsh_dense_lookup + sub row payload",
+      "probe": "num(uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "Empirical sampling winner: apply sub first via existing dense adsh->rowid lookup, then verify fy==2023 and fetch name_code only for surviving rows."
+    },
+    {
+      "build": "pre_adsh_tag_version_groups persisted index",
+      "probe": "num_join_sub(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Probe the persisted (adsh,tag,version) group hash only after the sub filter; for each matched group, scan its rowids and keep rows with stmt='IS' to emit plabel codes."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.1841
+    }
+  ],
+  "scan": {
+    "table": "num_uom_postings('USD')",
+    "rows": 33234006,
+    "columns": [
+      {
+        "name": "rowid",
+        "file": "indexes/num/num_uom_postings.rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "pre_built_index(sub_adsh_dense_lookup -> sub_rowid); verify sub_fy==2023 and read sub_name on hit",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_groups) with group-rowid walk and pre_stmt check",
+    "aggregation": "compact_hash_map(thread_local, key=(name_code, tag_code, plabel_code), value=(sum, count))"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "drive the scan from the USD postings slice instead of scanning all num rows"
+    },
+    {
+      "index": "sub_adsh_dense_lookup",
+      "purpose": "map num.adsh directly to sub rowid, then test fy==2023 and fetch name_code in O(1)"
+    },
+    {
+      "index": "pre_adsh_tag_version_groups",
+      "purpose": "probe persisted (adsh,tag,version) groups instead of rebuilding a runtime pre hash"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan spends 356.8 ms in Category A/C work rebuilding a filtered pre hash even though a persisted triple index already exists, and the join order had not been validated. Quantitatively, the runtime build allocates roughly 84 MB for hash buckets plus about 21 MB for offsets and plabel payloads, which is comparable to or above the 88 MB LLC before any thread-local aggregation, while the persisted sub dense lookup is only about 337 KB. A 1,007,092-row empirical sample of the USD postings shows sub-first is the better join order: 216.8 ms for sub-first versus 308.4 ms for pre-first, because sub-first cuts triple-index probes from 285,952 to 90,326 and pre row checks from 1,397,803 to 449,232 on the same sample. The revised plan therefore streams USD num rowids, applies the sub join first via the existing dense lookup and fy check, then probes the persisted pre triple index only for surviving rows and filters stmt='IS' while aggregating, eliminating the expensive runtime pre-hash build entirely."
+}

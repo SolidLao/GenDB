@@ -1,0 +1,167 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh.triple_ranges",
+      "action": "built_new",
+      "files": {
+        "ranges": "column_versions/pre.adsh.triple_ranges/ranges.bin",
+        "ranges_format": "uint64_t n; struct { uint32_t adsh; uint64_t lo; uint64_t hi; }[n]"
+      },
+      "usage": "mmap ranges.bin; lookup adsh to get [lo,hi) span in pre_adsh_tag_version_hash entries and avoid per-adsh binary searches"
+    },
+    {
+      "id": "num.adsh.triple_ranges",
+      "action": "built_new",
+      "files": {
+        "ranges": "column_versions/num.adsh.triple_ranges/ranges.bin",
+        "ranges_format": "uint64_t n; struct { uint32_t adsh; uint64_t lo; uint64_t hi; }[n]"
+      },
+      "usage": "mmap ranges.bin; lookup adsh to get [lo,hi) span in num_adsh_tag_version_hash entries and avoid per-adsh binary searches"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "pre.adsh.triple_ranges + num.adsh.triple_ranges",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612,
+      "notes": "Resolve per-adsh triple-entry ranges in O(1) from compact range maps, then merge pre/num triple entries within each adsh."
+    },
+    {
+      "build": "pre triples(stmt='IS')",
+      "probe": "num triples(adsh,tag,version matched)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1862555,
+      "notes": "For matched triples, scan only num posting rows and aggregate by (name,stmt,tag,plabel)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.308975445
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "sub_filtered_adsh_driver",
+    "rows": 26612,
+    "columns": [
+      {
+        "name": "sub.adsh",
+        "file": "sub/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "sub.fy",
+        "file": "sub/fy.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre triple postings",
+        "file": "pre/indexes/pre_adsh_tag_version_hash.bin",
+        "type": "TripleKey+posting",
+        "bytes_per_row": 24
+      },
+      {
+        "name": "num triple postings",
+        "file": "num/indexes/num_adsh_tag_version_hash.bin",
+        "type": "TripleKey+posting",
+        "bytes_per_row": 24
+      },
+      {
+        "name": "num.uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "pre.plabel",
+        "file": "pre/plabel.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(sub_rows) + compact_vector(filtered_adsh)",
+    "fact_join": "pre_built_index(pre_stmt_hash + pre_adsh_tag_version_hash + num_adsh_tag_version_hash + adsh_range_maps)",
+    "aggregation": "thread_local_compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre.adsh.triple_ranges",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num.adsh.triple_ranges",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is cache-miss-heavy random lookup overhead (Category E): each filtered adsh currently triggers repeated binary searches over cache-exceeding triple-entry arrays. I added persistent compact storage extensions mapping adsh to contiguous triple-entry spans for both pre and num indexes, then revised the plan to drive joins via direct range lookups and in-range merge processing so main-scan work stays sequential and avoids high-latency random probes.",
+  "correctness_anchors": {}
+}

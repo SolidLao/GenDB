@@ -1,0 +1,94 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "load_usd_code",
+    "mmap_uom_ddate_binary_search_for_row_range",
+    "mmap_remaining_columns_madvise_qualifying_range",
+    "mmap_anti_array_madvise_willneed_all",
+    "build_adsh_first_level_index",
+    "main_scan_parallel_two_level_anti_join",
+    "merge_thread_maps",
+    "having_filter",
+    "topk_sort",
+    "decode_strings_and_output"
+  ],
+  "join_order": [
+    {
+      "build": "pre(indexes/pre_adsh_tagver_set.bin — sorted uint64_t array)",
+      "probe": "num(USD-2023 row range, ~8.9M rows)",
+      "type": "anti",
+      "strategy": "two_level_binary_search",
+      "build_cardinality": 8631890,
+      "notes": "Two-level search: (1) binary search a compact first-level AdshRange index (N_adsh unique adsh codes × 12 bytes ≈ 1-3MB, L3-resident after warm-up) to find the sub-range [start_idx, end_idx) in anti_data for the probe adsh_code. (2) Linear scan anti_data[start_idx..end_idx) for the exact uint64_t key — average ~50-80 entries = 400-640 bytes, fits in L1/L2 after first probe for each adsh group. If adsh_code not found in first-level index at all, row is an orphan immediately (zero second-level work). This eliminates DRAM misses: current single-level binary search in 69MB hits DRAM for bottom 4-5 levels (69MB > 44MB LLC). Two-level keeps all comparisons in L3/L2/L1."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code AND ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.226,
+      "method": "binary_search_exact_row_range",
+      "notes": "num is sorted by (uom_code ASC, ddate ASC). Use std::lower_bound/upper_bound on uom_code.bin to find USD row range, then lower_bound/upper_bound on ddate.bin within USD range to find [r_2023_start, r_2023_end). All rows in this range satisfy both filters exactly — no row-level uom/ddate checks needed. Actual qualifying count is ~8.9M rows (empirically observed in iter_2)."
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "row_filter",
+      "notes": "std::isnan(v) check per row. Very rare to be NaN."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",   "file": "num/uom_code.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "ddate",      "file": "num/ddate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "adsh_code",  "file": "num/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code","file": "num/tagver_code.bin","type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",      "file": "num/value.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "exact_range_scan",
+    "prefetch_strategy": "mmap uom and ddate first (MADV_RANDOM), binary search to find [r_2023_start, r_2023_end). Then mmap adsh, tagver, value (MADV_RANDOM), call madvise(MADV_WILLNEED) on [r_2023_start, r_2023_end) for each column. Also madvise(MADV_WILLNEED) on entire anti array (69MB). All madvise calls are async — they overlap with the index build phase."
+  },
+  "data_structures": {
+    "anti_set": "mmap pre_adsh_tagver_set.bin (zero-copy). Header: uint64_t n_unique (first 8 bytes). Data: n_unique sorted uint64_t keys at offset 8.",
+    "first_level_index": "struct AdshRange { uint32_t adsh_u; uint32_t start_idx; uint32_t end_idx; }. Built by single sequential pass over anti_data[0..n_anti): when anti_data[i]>>32 changes, emit {prev_adsh_u, range_start, i}. Result is sorted by adsh_u (inherited from sort order of anti array). Size: N_adsh × 12 bytes ≈ 1–3MB — fits comfortably in L3. After construction, first-level binary search warms up within first few hundred probes.",
+    "aggregation": "Per-thread unordered_map<int32_t, pair<int32_t,double>> keyed by tagver_code. Each thread reserves 512 slots. Merge into thread 0's map after scan. ~200KB per thread-map, L2-resident."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "chunk_size": 8192,
+    "notes": "Keep 64-thread parallel scan from iter_1 using atomic fetch_add morsel dispatch. Each thread has its own GroupMap (reserve 512). Merge after scan. With ~8.9M qualifying rows and two-level probes at ~178ns each: 8.9M × 178ns / 64 threads ≈ 24.8ms wall time. Do NOT use __gnu_parallel::sort (caused 333ms regression in iter_2). Do NOT use ProbeEntry collection — probe inline during scan as in iter_1."
+  },
+  "indexes": [
+    {
+      "index": "pre_adsh_tagver_set",
+      "file": "indexes/pre_adsh_tagver_set.bin",
+      "purpose": "anti_join sorted array. Header: uint64_t n_unique (8 bytes), then n_unique sorted uint64_t keys. Layout: key = ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code. mmap with MADV_WILLNEED to pre-fault all pages. Build first_level index via single sequential pass BEFORE parallel scan begins."
+    },
+    {
+      "index": "uom_codes_dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "dict_lookup — resolve USD string to int8_t usd_code. Layout: uint8_t N; N × {int8_t code, uint8_t slen, char[slen]}. NEVER hardcode usd_code."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "having": "cnt > 10",
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": "After top-100 selection, decode tag and version strings via tagver_code index into tag/tag_offsets.bin (uint32_t[TAG_COUNT+1]) + tag/tag_data.bin and tag/version_offsets.bin + tag/version_data.bin."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — algorithm change): main_scan=54ms is dominated by 8.9M binary searches (actual qualifying row count, not 67K as guide estimated) into the 69MB sorted anti array that exceeds the 44MB LLC. Each probe reaches the DRAM for bottom 4-5 binary search levels: 69MB/8B = 8.6M entries, 2^23 levels cover 8M positions → bottom 3 levels hit DRAM at ~100ns each, giving ~400ns per probe × 8.9M / 64 threads = 55ms. Fix: two-level structured search. Build a compact AdshRange first-level index (one entry per unique adsh_code: {adsh_u, start_idx, end_idx}) from a single sequential scan of anti_data. With an estimated 100K–200K unique adsh codes, first-level = 1.2–2.4MB, well within the 44MB LLC. Level-1 binary search: log2(150K)=17 comparisons × 10ns L3 latency = 170ns. Level-2 linear scan within the sub-range: average ~50-80 entries = 400-640 bytes, fits in L1/L2 after the first probe hitting that adsh group (8.9M/150K ≈ 59 probes per adsh → thoroughly L1-resident). If adsh_code is absent from first-level, row is immediately an orphan with no second-level work. Per-probe cost drops from ~390ns (DRAM-heavy) to ~180ns (all L3/L2/L1): 2.2× speedup → main_scan ~25ms. Keep iter_1's parallel morsel dispatch (64 threads, CHUNK=8192), madvise(WILLNEED) on qualifying column ranges and entire anti array, per-thread GroupMap aggregation, and inline probe pattern — do NOT collect probe entries or use parallel sort (those caused the 333ms regression in iter_2).",
+  "correctness_anchors": {
+    "ddate_lo": 20230101,
+    "ddate_hi": 20231231,
+    "having_cnt_gt": 10,
+    "uom_filter": "USD (loaded from indexes/uom_codes.bin, never hardcoded)",
+    "anti_join_key": "((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code",
+    "tagver_minus1_handling": "cast tagver_code to uint32_t before key construction — -1 becomes 0xFFFFFFFF, a valid non-matching key"
+  }
+}

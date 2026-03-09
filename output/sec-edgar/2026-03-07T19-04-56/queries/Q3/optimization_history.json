@@ -1,0 +1,42 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 65.68666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 65.68666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.23,
+        "dim_filter": 7.48,
+        "build_joins": 0.04,
+        "main_scan": 55.33,
+        "output": 2.26,
+        "total": 65.85
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 19.136666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 19.136666666666667,
+      "validation": "pass",
+      "strategy": "Category B (physical implementation mismatch): The iter_0 inner loop used long double (80-bit x87 FPU) for accumulation, which prevents SSE/AVX vectorization and is 3-5x slower per operation than double. With ~6.5M qualifying rows in the hot loop, this is the dominant cost. Fix: (1) Replace all long double with double throughout — aggregation arrays, merge, threshold computation. This enables auto-vectorization of the inner accumulation loop. (2) Use madvise(MADV_SEQUENTIAL) on the scanned range of sub_fk.bin and value.bin instead of MAP_POPULATE on entire files — reduces page fault overhead. (3) Parallelize the merge phase: instead of single-threaded iteration over 64×10K entries, each thread reduces a slice of group_ids. (4) Increase morsel size to 128K for better instruction cache utilization and reduced scheduling overhead. (5) Use a separate uint8_t bitmap for fy2022 qualification check (86KB, fits L2) for branch-free pre-filtering before group_id lookup. Format output with %.2f for double.",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "dim_filter": 3.99,
+        "main_scan": 12.29,
+        "output": 1.71,
+        "total": 18.08
+      }
+    }
+  ]
+}

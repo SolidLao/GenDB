@@ -1,0 +1,115 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 200.7033333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 200.7033333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.48,
+        "dim_filter": 26.36,
+        "build_joins": 95.17,
+        "main_scan": 28.18,
+        "output": 10.01,
+        "total": 207.14
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 290.11333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 290.11333333333334,
+      "validation": "pass",
+      "strategy": "Root cause is logical-plan mismatch (Category A) with substantial wasted work (Category C): the current implementation scans large filtered table regions and builds a runtime orders hash map even though selective pre-built hash indexes exist on both join keys. The revised plan replaces scan-plus-build with index-driven nested-loop joins from filtered customer keys to orders and then to lineitem, applies date predicates before downstream work, and keeps only aggregation state for qualifying rows to cut build_joins time and total rows touched.",
+      "operation_timings": {
+        "data_loading": 0.64,
+        "dim_filter": 5.12,
+        "build_joins": 157.73,
+        "main_scan": 30.49,
+        "output": 25.57,
+        "total": 300.21
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 629.16,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 629.16,
+      "validation": "pass",
+      "strategy": "Root cause is physical-implementation mismatch (Category B): iteration 1 regressed because it replaced sequential access with cache-miss-heavy random probes into very large hash indexes, while the baseline still spent most time in runtime hash-build/atomic update paths. The revised plan switches to fully sequential processing that exploits sort order on o_orderkey/l_orderkey: build a customer bitset via customer column scan, scan orders once with date+customer filters to produce sorted qualifying orders, then execute a key-range partitioned merge join against sorted lineitem with local direct-array revenue accumulation and final top-k merge, eliminating runtime hash join structures and hot-path atomics.",
+      "operation_timings": {
+        "data_loading": 0.82,
+        "dim_filter": 11.53,
+        "build_joins": 104.57,
+        "main_scan": 18.28,
+        "output": 30.8,
+        "total": 657.19
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 565.7933333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 565.7933333333333,
+      "validation": "pass",
+      "strategy": "Root cause is a physical hot-path mismatch (Category B) with wasted per-row synchronization work (Category C): the runtime orders hash map and atomic revenue updates create cache-miss and contention overhead that dominates build_joins. The revised plan keeps sequential scans and selective zonemap pruning, but replaces runtime hash structures with dense arrays keyed by o_orderkey (qualifier flag + order payload + direct revenue state), then uses partitioned direct aggregation with local run-combine over sorted lineitem orderkeys so qualifying work stays proportional and synchronization-heavy probes are removed.",
+      "operation_timings": {
+        "data_loading": 0.73,
+        "dim_filter": 28.73,
+        "build_joins": 25.64,
+        "main_scan": 15.34,
+        "output": 20.11,
+        "total": 580.97
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 328.08,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 328.08,
+      "validation": "pass",
+      "strategy": "Root cause is a combined physical and work-efficiency bottleneck: runtime orders hash-table construction plus per-row atomic revenue updates spend most hot time in build/probe overhead that is not proportional to final matches. Strategy category C with parallel aggregation tuning keeps sequential scans and zonemap pruning, replaces the runtime orders hash with a compact qualifying-order bitset keyed by o_orderkey, performs cheap membership tests during the lineitem scan, and accumulates revenue in thread-local compact maps merged once at the end to remove hot-path synchronization while preserving exact Q3 semantics.",
+      "operation_timings": {
+        "data_loading": 0.78,
+        "dim_filter": 28.51,
+        "build_joins": 13.66,
+        "main_scan": 11.58,
+        "output": 23.27,
+        "total": 345.42
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 393.34,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 393.34,
+      "validation": "pass",
+      "strategy": "Root cause is a logical and work-efficiency mismatch (Category A/C): the current plan pays a large build_joins cost by scanning broad orders ranges and constructing a runtime orders hash table before lineitem probing. This revision uses the selective pre-built orders_custkey_hash to enumerate only orders belonging to BUILDING customers, applies the orderdate predicate before materialization, then switches to a compact orderkey lookup plus partitioned direct-array aggregation during a zonemap-pruned sequential lineitem pass to remove hash-build overhead and hot-path atomic contention.",
+      "operation_timings": {
+        "data_loading": 200.59,
+        "dim_filter": 4.94,
+        "build_joins": 94.28,
+        "main_scan": 24.14,
+        "output": 8.92,
+        "total": 395.66
+      }
+    }
+  ]
+}

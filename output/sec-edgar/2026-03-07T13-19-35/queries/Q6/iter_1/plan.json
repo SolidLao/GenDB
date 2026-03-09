@@ -1,0 +1,126 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_fy_array_build_fy2023_bitmap",
+    "parallel_scan_pre_collect_IS_fy2023_pairs",
+    "serial_merge_build_is_map",
+    "parallel_scan_num_with_zone_maps",
+    "merge_thread_local_agg",
+    "decode_strings_reaggregate_topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "sub(direct_array, all rows)",
+      "probe": "num via adsh_code index",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "Load sub/fy.bin as flat int16_t[86135] array (172KB, L1-resident). Also build fy2023_bits: DenseBitmap(86135) where fy==2023. Empirically: 26612 qualifying adsh_codes (30.9% of sub)."
+    },
+    {
+      "build": "pre(filtered: stmt='IS' AND adsh in fy2023_set)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 550374,
+      "notes": "Sampling confirmed: IS+fy2023 rows = 554253 (31.4% of IS rows). is_map capacity ~1M entries x 16 bytes = 16MB — fits in L3 (44MB). Order B is 4.31x faster than Order A (23.4s vs 5.4s single-thread). No next_is linked-list array: use forward scan in pre for the 0.7% of keys with duplicate (adsh,tagver) entries."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "method": "zone_map_block_skip + per_row_check"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL (std::isnan check)",
+      "selectivity": 0.999
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2023",
+      "selectivity": 0.309,
+      "notes": "Empirically measured: 26612/86135 = 30.9% pass"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == is_code AND adsh_code in fy2023_bitmap",
+      "selectivity": 0.058,
+      "notes": "Applied during pre scan to build smaller is_map (5.8% of pre rows pass)"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",   "file": "num/uom_code.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",  "file": "num/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code","file": "num/tagver_code.bin","type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",      "file": "num/value.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_fy_array":  "int16_t[86135] direct array (172KB, L1-resident) — indexed by adsh_code",
+    "fy2023_bitmap": "DenseBitmap(86135) — 10.8KB, L1-resident; marks adsh_codes where sub_fy==2023",
+    "is_map":        "CompactHashMap<uint64_t,uint32_t>(expected=550374) — ~16MB, L3-resident; key=(adsh_code<<32|tagver_code), value=first_pre_row in pre for this IS+fy2023 key",
+    "thread_local_agg": "CompactHashMap<uint64_t,AggEntry>(expected=16384) per thread — key=(adsh_code<<32|pre_row), value={double sum_value, int64_t cnt}",
+    "merged_agg": "CompactHashMap<uint64_t,AggEntry>(expected=600000) — merged from all thread-local maps",
+    "final_agg": "std::unordered_map<std::string,FinalEntry> reserved for ~600000 groups; key=name+'\\x01'+tag_string+'\\x01'+plabel — CORRECTNESS FIX: use decoded tag STRING, not raw tagver_code bytes"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "build_phase": "PARALLEL OMP: 64 threads each scan a range of pre rows, collect IS+fy2023 (key,pre_row) pairs into per-thread vectors; then serial merge builds global is_map — eliminates single-threaded bottleneck",
+    "scan_phase": "PARALLEL OMP: morsel-driven over 395 num blocks (100K rows each), atomic next_block counter",
+    "shared_read_only": ["sub_fy_array", "fy2023_bitmap", "is_map", "num columns", "pre columns for plabel+stmt lookup"],
+    "thread_private": ["thread_local_agg", "per_thread_pair_vector"]
+  },
+  "build_phase_detail": {
+    "step1": "Load sub/fy.bin (172KB). Build int16_t sub_fy[86135]. Build DenseBitmap fy2023_bits(86135): set bit for each adsh_code where sub_fy[adsh]==2023.",
+    "step2_parallel_collect": "OMP parallel loop over pre rows [0..pre_N). Each thread scans its range. Per row i: if pre_stmt[i]==is_code AND fy2023_bits.test(pre_adsh[i]) → emit pair (key=(adsh_code<<32|tagver_code), pre_row=i) to thread_local vector. Each thread's vector is in row-ascending order.",
+    "step3_serial_merge": "Single-threaded: iterate all per-thread vectors in thread-index order (thread 0 first, preserving row order). For each (key, pre_row): if key NOT in is_map → is_map.insert(key, pre_row). If key already present → skip (we keep the first/smallest pre_row). This correctly captures the first IS+fy2023 pre_row for each (adsh,tagver) key.",
+    "duplicate_handling": "For the ~0.7% of is_map keys with multiple IS+fy2023 pre rows (3879 duplicate keys): during main scan, after finding first_pre_row via is_map, linearly scan forward in pre (pre_adsh[r]==adsh AND pre_tagver[r]==tagver AND pre_stmt[r]==is_code) to process all additional pre rows for that key. Since pre is sorted by (adsh_code, tagver_code), duplicates are always contiguous. Eliminates the 38.4MB next_is array entirely.",
+    "expected_is_map_size": "550374 entries, capacity 1048576, memory ~16MB (fits in 44MB L3)"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "condition": "zm[b].min_uom > usd_code || zm[b].max_uom < usd_code",
+      "layout": "uint32_t n_blocks; then n_blocks x ZoneMap{int8_t min_uom, int8_t max_uom, [2-byte pad], int32_t min_ddate, int32_t max_ddate} = 12 bytes each"
+    }
+  ],
+  "aggregation": "two_phase_hash_group_by",
+  "aggregation_detail": {
+    "phase1_key": "uint64_t packed as (uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)pre_row",
+    "phase1_accumulators": ["double sum_value", "int64_t cnt"],
+    "phase1_estimated_groups": 600000,
+    "phase2_key": "CORRECTNESS FIX — composite string: name_sv + '\\x01' + TAG_STRING + '\\x01' + plabel_sv where TAG_STRING is decoded from tagver_code via tag_data[tag_offsets[tagver_code]..tag_offsets[tagver_code+1]]. DO NOT use raw tagver_code bytes as tag proxy — this was the iter_0 bug. Different tagver_codes can decode to the same tag string (same tag, different version); they must be merged into the same group.",
+    "phase2_accumulators": ["double sum_value", "int64_t cnt", "int32_t tagver_code (first seen, for tag decode in output)", "string plabel"],
+    "phase2_estimated_groups_after_merge": 200000
+  },
+  "output": {
+    "decode": [
+      "name: sub_name_data[sub_name_offsets[adsh_code]..sub_name_offsets[adsh_code+1]] — extract from phase2 composite key (before first '\\x01')",
+      "stmt: fixed string 'IS'",
+      "tag: tag_data[tag_offsets[tagver_code]..tag_offsets[tagver_code+1]] — extract from phase2 composite key (between first and second '\\x01'... BUT tag is already in the key as a string — extract from key directly by parsing between delimiters)",
+      "plabel: from FinalEntry.plabel field"
+    ],
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "topk_strategy": "partial_sort or nth_element+sort on phase2 groups"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two bugs fixed in this iteration. Correctness: iter_0 used raw tagver_code bytes as the GROUP BY tag proxy in the final string re-aggregation. Since tagver_code encodes (tag, version) while SQL groups by n.tag (tag string only), rows with the same tag but different versions were split into separate groups instead of merged — causing ~15% undercount in cnt and total_value. Fix: decode the actual tag string from tag_data[tag_offsets[tagver_code]..] and embed it in the composite group key. Performance: iter_0 built is_map from ALL 1.75M IS pre rows (capacity 4M x 16B = 64MB, exceeding L3=44MB) in a single-threaded loop — sampling showed 23.4s for Order A. Applying Category A/B fix (Order B, empirically validated): pre-filter pre rows by both stmt='IS' AND adsh_code in fy2023 DenseBitmap, reducing is_map to 550K entries (16MB, L3-resident). Sampling confirms 4.31x speedup (23.4s to 5.4s single-threaded). Additional fix: parallelize the pre scan using 64 OMP threads collecting IS+fy2023 pairs into per-thread vectors, then serial merge — eliminates the single-threaded build bottleneck. The 38.4MB next_is linked-list array is replaced by a forward scan in pre for the rare 0.7% of keys with duplicate (adsh,tagver) entries (leveraging pre's sorted order).",
+  "correctness_anchors": {}
+}

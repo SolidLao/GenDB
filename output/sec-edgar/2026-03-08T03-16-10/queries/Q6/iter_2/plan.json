@@ -1,0 +1,125 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_dim",
+    "scan_num",
+    "aggregate_num_triples",
+    "scan_pre_probe",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub.adsh_to_rowid(fy=2023,name)",
+      "probe": "num(uom='USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612,
+      "notes": "Use the dense adsh lookup to discard non-2023 filings during the sequential num scan."
+    },
+    {
+      "build": "num(uom='USD' and sub.fy=2023) aggregated by (adsh,tag,version) -> {sum(value),count}",
+      "probe": "pre(stmt='IS' and sub.fy=2023)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 2301934,
+      "notes": "Empirically best join order from sampling_join_order.cpp: partitioned num-hash then sequential pre scan beat pre-then-num-index on the full dataset."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.844
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "pre",
+      "predicate": "adsh IN sub(fy=2023)",
+      "selectivity": 0.309
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_id->sub_rowid) with fy/name side arrays",
+    "fact_join": "radix_partitioned compact_hash_map on filtered num keyed by (adsh,tag,version) storing {sum,count}; partition count chosen so each partition hash table fits in LLC before probing sequential pre rows",
+    "aggregation": "compact_hash_map on (name_id, stmt_id, tag_id, plabel_id), allocated per partition and merged once"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre/indexes/stmt.zone_map.bin",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the remaining hot time comes from cache-miss-heavy random probes into the 157 MB num sorted index and double binary-search work for roughly 550k filtered pre keys, while the filtered num side can be consumed sequentially. Strategy category B with plan restructuring: filter sub first, scan num sequentially with uom zone-map pruning and dense adsh lookup, aggregate surviving rows by (adsh,tag,version) into LLC-sized radix partitions, then scan pre sequentially with stmt zone-map pruning and probe those partitions to expand matching plabel rows into the final group-by.",
+  "correctness_anchors": {}
+}

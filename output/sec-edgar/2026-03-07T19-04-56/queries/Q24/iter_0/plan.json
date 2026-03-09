@@ -1,0 +1,103 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "resolve_usd_code",
+    "uom_offset_range",
+    "load_pre_index",
+    "scan_filter_antijoin_aggregate",
+    "having_filter",
+    "topk_sort",
+    "decode_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "method": "uom_offsets_range", "selectivity": 0.843},
+    {"table": "num", "predicate": "ddate BETWEEN 20230101 AND 20231231", "method": "zone_map + scalar", "selectivity": 0.272},
+    {"table": "num", "predicate": "value IS NOT NULL", "method": "!std::isnan(value)", "selectivity": 0.99}
+  ],
+  "join_order": [
+    {
+      "build": "pre_by_adsh_tag_ver index (prebuilt)",
+      "probe": "num(filtered by uom+ddate+value)",
+      "type": "anti",
+      "strategy": "index_probe",
+      "probe_cardinality": 9000000,
+      "notes": "Probe pre_by_adsh_tag_ver index for each qualifying num row; no match = passes anti-join"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "range": "uom_offsets[usdCode] → [usdStart, usdEnd)",
+    "estimated_rows_in_range": 33200000,
+    "zone_map": {
+      "index": "num_ddate_zonemap",
+      "block_size": 100000,
+      "block_index_formula": "global_row / blockSize",
+      "skip_condition": "zones[b].max_ddate < 20230101 || zones[b].min_ddate > 20231231"
+    },
+    "columns_needed": ["ddate", "value", "sub_fk", "tag_code", "version_code"],
+    "column_load_order": "ddate first (filter), then value (filter), then sub_fk+tag_code+version_code (anti-join keys)"
+  },
+  "anti_join": {
+    "index": "pre_by_adsh_tag_ver",
+    "index_file": "indexes/pre_by_adsh_tag_ver.idx",
+    "hash_function": "hashKey3(sub_fk, tag_code, version_code)",
+    "bucket_lookup": "hashKey3(...) & (numBuckets - 1)",
+    "entry_struct": {"sub_fk": "uint32_t", "tag_code": "uint32_t", "version_code": "uint32_t", "row_idx": "uint32_t"},
+    "entry_size_bytes": 16,
+    "match_means": "row is excluded (anti-join)"
+  },
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_keys": ["tag_code", "version_code"],
+    "group_key_types": ["uint32_t", "uint32_t"],
+    "aggregates": [
+      {"name": "cnt", "function": "COUNT(*)"},
+      {"name": "total", "function": "SUM(value)"}
+    ],
+    "estimated_groups": 50000,
+    "data_structure": "compact_hash_map<uint64_t, AggState>",
+    "composite_key": "(uint64_t(tag_code) << 32) | version_code",
+    "agg_state": {"cnt": "int64_t", "total": "double"}
+  },
+  "having": {
+    "predicate": "cnt > 10",
+    "estimated_output_rows": 2000
+  },
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "method": "partial_sort or priority_queue",
+    "decode": [
+      {"column": "tag", "from": "tag_code", "dict": "dicts/tag_dict_offsets.bin + dicts/tag_dict_data.bin"},
+      {"column": "version", "from": "version_code", "dict": "dicts/version_dict_offsets.bin + dicts/version_dict_data.bin"}
+    ],
+    "columns": ["tag", "version", "cnt", "total"]
+  },
+  "data_structures": {
+    "uom_dict": "load dictionary to find USD code",
+    "uom_offsets": "offset_table for USD row range",
+    "zone_map": "num_ddate_zonemap for block skipping",
+    "pre_index": "mmap pre_by_adsh_tag_ver.idx (bucket_offsets + entries)",
+    "aggregation": "compact_hash_map<uint64_t, {int64_t cnt, double total}>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partition_by": "block ranges within USD range",
+    "morsel_size": 100000,
+    "aggregation_merge": "thread-local hash maps, merge after scan",
+    "shared_read_only": ["pre_index", "zone_map", "uom_offsets"]
+  },
+  "indexes": [
+    {"index": "uom_offsets", "purpose": "restrict scan to USD rows only"},
+    {"index": "num_ddate_zonemap", "purpose": "skip_blocks outside 2023 date range"},
+    {"index": "pre_by_adsh_tag_ver", "purpose": "anti_join_probe"}
+  ],
+  "memory_estimate": {
+    "pre_index": "~150MB (9.6M entries × 16 bytes + bucket offsets)",
+    "zone_map": "<1MB",
+    "aggregation_per_thread": "~4MB per thread (50K groups × ~80 bytes)",
+    "column_mmap": "mmap all columns, OS manages pages"
+  },
+  "execution_target": "cpp"
+}

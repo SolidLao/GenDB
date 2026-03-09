@@ -1,0 +1,120 @@
+{
+  "query_id": "Q3",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_net_price",
+      "action": "use_existing",
+      "files": {
+        "net_price": "column_versions/lineitem.l_net_price/net_price.bin",
+        "net_price_format": "double[59986052]; net_price[i] = l_extendedprice[i] * (1.0 - l_discount[i]); all rows valid"
+      },
+      "usage": "mmap net_price.bin; in main_scan use net_price[i] as the revenue contribution (instead of computing l_extendedprice[i]*(1.0-l_discount[i])). Do NOT mmap l_extendedprice.bin or l_discount.bin — they are replaced by this column entirely."
+    }
+  ],
+  "pipeline": [
+    "fused_parallel_region_open",
+    "parallel_dim_filter",
+    "single_setup_last_ord_block",
+    "parallel_collect_orders",
+    "parallel_insert_combined_map_and_bloom",
+    "parallel_scan_lineitem_aggregate",
+    "fused_parallel_region_close",
+    "topk_output"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment == 1)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "notes": "bool qualifying_cust[1500001] indexed directly by c_custkey value (~1.5MB L3-resident). Built inside fused parallel region with #pragma omp for schedule(static), non-overlapping custkey writes (c_custkey sorted ascending)."
+    },
+    {
+      "build": "orders(filtered: o_orderdate < 8015 AND o_custkey in qualifying_cust)",
+      "probe": "lineitem(filtered: l_shipdate > 8015)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "combined_map (2M slots × 16B = 32MB, 64 partitions × 32768 slots). 4MB blocked bloom filter (65536 blocks × 64B each, 8 bit probes per key). Revenue from precomputed net_price[i] (no FP multiply needed)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == 1",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 8015",
+      "selectivity": 0.49,
+      "output_cardinality": 7350000,
+      "index": "o_orderdate_zone_map",
+      "index_note": "break early when zone_min[b] >= kOrderDateMax (orders sorted ascending by o_orderdate)"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 8015",
+      "selectivity": 0.51,
+      "output_cardinality": 30593000,
+      "index": "l_shipdate_zone_map",
+      "index_note": "skip leading blocks where zone_max[b] <= kShipdateMin; omit per-row check where zone_min[b] > kShipdateMin"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_net_price","file": "column_versions/lineitem.l_net_price/net_price.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "prefetch": "mmap_prefetch_all on l_orderkey, l_shipdate, l_net_price, plus orders and customer columns at startup"
+  },
+  "data_structures": {
+    "customer_filter": "bool qualifying_cust[1500001] indexed directly by c_custkey value; ~1.5MB; L3-resident; parallel-built (c_custkey sorted ascending → non-overlapping custkey range per thread, no atomics)",
+    "mini_pool": "Single flat allocation: OrdRow* mini_pool = malloc(MAXTHREADS * NUM_PARTS * MINI_CAP * sizeof(OrdRow)) where MINI_CAP=512 (reduced from 1024; expected ~360 entries/buffer, 99.99th-pct Poisson(360) ≈ 436 < 512). int32_t pool_cnt[MAXTHREADS*NUM_PARTS] zero-initialized. Total size: 64*64*512*8 = 16MB (down from 32MB). Free inside fused parallel region with #pragma omp single after Phase 2b.",
+    "combined_map": "2,097,152 (2^21) CombinedSlot entries, 16 bytes each = 32MB. CombinedSlot: {int32_t key (sentinel=0, safe since TPC-H orderkeys >= 1), int16_t orderdate, int8_t shippriority, uint8_t _pad, double revenue} alignas(16). calloc-allocated (zero pages from OS). In Phase 2b, each thread memsets its 512KB partition (pre-faults all 128 pages before random insert probes). 64 partitions × 32768 slots. Partition index = hash32(key) & 63; within-partition start = (hash32(key) >> 6) & 32767; mask = 32767.",
+    "bloom_filter": "uint8_t bloom[4194304] (4MB, aligned 64B). 65536 blocks × 64B = 1 cache-line per block (512 bits/block). 8 multiplier primes for 8 bit positions per key. bloom_set built atomically (atomic_fetch_or) inside Phase 2b by the partition owner. bloom_check: load 1 cache-line, check 8 bit positions with early-exit. Free after the fused parallel region ends, before output phase."
+  },
+  "parallelism": {
+    "strategy": "single_fused_parallel_region",
+    "threads": "auto(nproc)",
+    "structure": "CRITICAL CHANGE from iter_3: replace 4 separate #pragma omp parallel regions with ONE persistent #pragma omp parallel region that wraps all compute phases. Use #pragma omp for (with its implicit barrier) to separate phases and #pragma omp single (with its implicit barrier) for single-threaded setup. This eliminates 3 OpenMP thread pool wake/sleep cycles — the primary cause of the 24ms unlabeled gap.",
+    "fused_region_layout": {
+      "dim_filter": "#pragma omp for schedule(static): divide 1500000 customer rows into nthreads equal chunks; each thread writes to non-overlapping qualifying_cust[] range. Implicit barrier at end of for.",
+      "single_setup": "#pragma omp single { compute last_ord_block by scanning orders_zm.zm_min until zone_min[b] >= kOrderDateMax; also compute li_nb and li_bs. } Implicit barrier at end of single.",
+      "phase_2a_collect": "#pragma omp for schedule(dynamic,1) over orders blocks [0..last_ord_block). For each qualifying row (pass date filter AND qualifying_cust check): compute part = hash32(okey) & 63; write OrdRow to flat mini_pool[(tid*NUM_PARTS+part)*MINI_CAP + pool_cnt[...]++]. Implicit barrier at end of for.",
+      "phase_2b_insert_bloom": "#pragma omp for schedule(static) over 64 partitions (1 per thread). (a) memset 512KB partition (pre-fault pages). (b) insert all mini_pool entries for this partition from all nthreads source threads via linear probe (no contention). (c) bloom_set_atomic for each inserted key. Store key last with ATOMIC_RELEASE. Implicit barrier at end of for.",
+      "free_mini_pool": "#pragma omp single { free(mini_pool); free(pool_cnt); } Implicit barrier.",
+      "phase_3_main_scan": "#pragma omp for schedule(dynamic,1) over lineitem blocks. Zone-map: skip blocks where zone_max[b] <= kShipdateMin; omit per-row check where zone_min[b] > kShipdateMin. For each qualifying row: (a) load hv=hash32(l_orderkey[i]); check bloom (1 cache-line, 8 bits, early-exit); if miss: continue. (b) probe combined_map partition (ATOMIC_ACQUIRE key load, linear probe, ATOMIC_ACQUIRE sentinel check). If match: CAS-add net_price[i] to slot->revenue. Implicit barrier at end of for.",
+      "parallel_region_end": "All threads exit the single omp parallel region. free(bloom) called after region."
+    },
+    "output_phase": "SEPARATE (outside fused region, after free(bloom)): #pragma omp parallel for schedule(static) over 64 partitions, each thread maintains thread-local top-10 heap (padded to 256B). Single-threaded merge of 64×10 candidates → final top-10 → sort → CSV. Output phase excluded from timing_ms."
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "purpose": "skip_blocks — break early when zone_min[b] >= kOrderDateMax (orders sorted ascending)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip leading blocks where zone_max[b] <= kShipdateMin; omit per-row shipdate check where zone_min[b] > kShipdateMin"
+    }
+  ],
+  "aggregation": "Direct atomic CAS accumulation into combined_map slot->revenue. Key = l_orderkey (uniquely identifies group since each order has one orderdate and one shippriority). Revenue value = net_price[i] from precomputed extension. No separate aggregation phase. No merge phase.",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "Parallel scan of combined_map (64 threads × 1 partition each = 512KB per thread), thread-local top-10 heap (padded LocalTop10 struct, 256B, to eliminate false sharing). Single-threaded merge of 640 candidates → sort_heap → CSV write."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A — plan restructuring): The previous iteration used 4 separate OpenMP parallel regions (dim_filter, Phase 2a collect, Phase 2b insert+bloom, Phase 3 main_scan), each paying thread pool wake/sleep cost. The labeled phases sum to only 34ms, but timing_ms is 58ms — a 24ms unlabeled gap that appears entirely in the overhead between parallel regions (thread startup, barrier synchronization, OS scheduler latency for 64 threads). On this system with passive OMP wait policy, each parallel region incurs ~5ms of thread management overhead; 4 regions = ~20ms, consistent with the 24ms gap. The fix is a single fused #pragma omp parallel region wrapping all four phases, using #pragma omp for (with implicit barriers) for phase separation and #pragma omp single for single-threaded setup — eliminating 3 of the 4 thread pool startups and saving ~15ms. Secondary improvement (Category E — use existing storage extension): replace reading l_extendedprice.bin (480MB) and l_discount.bin (480MB) with the precomputed l_net_price.bin column (480MB total, identical formula l_extendedprice*(1-l_discount)), saving 240MB of DRAM reads from main_scan and eliminating the per-row FP multiply for ~3M matching rows (~1-2ms). Minor improvement (Category C — work elimination): reduce MINI_CAP from 1024 to 512, halving mini_pool allocation from 32MB to 16MB (expected ~360 entries/buffer, 99.99th-pct ~436 < 512), reducing allocation and page-fault overhead. Expected total timing_ms: ~40-45ms, beating the 47ms GenDB reference.",
+  "correctness_anchors": {
+    "date_literal": "1995-03-15",
+    "revenue_formula": "l_extendedprice*(1-l_discount)"
+  }
+}

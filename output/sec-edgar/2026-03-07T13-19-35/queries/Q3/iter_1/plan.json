@@ -1,0 +1,78 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_dict_uom",
+    "load_sub_arrays",
+    "build_compact_indexes",
+    "fused_parallel_scan_aggregate",
+    "compute_avg_threshold",
+    "having_filter",
+    "decode_names",
+    "topk_sort"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code", "file": "num/uom_code.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code","file": "num/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",    "file": "num/value.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "zone_map_index": "indexes/num_zone_maps.bin",
+    "zone_map_skip": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code"
+  },
+  "filters": [
+    {"table": "num", "predicate": "uom_code == usd_code", "selectivity": 0.87},
+    {"table": "sub", "predicate": "sub_fy[adsh_code] == 2022",  "selectivity": 0.20,
+     "notes": "sub_fy flat array (172KB) resident in L1; O(1) lookup"}
+  ],
+  "join_order": [
+    {
+      "build": "sub_fy flat array (86135 × int16_t)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row index; sub_fy[adsh_code] == 2022 is O(1)"
+    }
+  ],
+  "data_structures": {
+    "sub_fy_array":       "flat_array int16_t[86135] — loaded once, used in scan loop",
+    "sub_cik_array":      "flat_array int32_t[86135] — loaded once",
+    "adsh_group_id":      "flat_array int32_t[86135] — compact group index (0..n_groups-1) or -1; built during data_loading by grouping fy=2022 sub rows by (name_string, cik)",
+    "adsh_cik_idx":       "flat_array int32_t[86135] — compact cik index (0..n_ciks-1) or -1; built during data_loading alongside adsh_group_id using a cik→idx hash map over fy=2022 rows",
+    "local_group_sum":    "flat_array long double[n_groups] per thread — indexed directly by adsh_group_id[adsh_code]; no hash probing; initialized to 0.0",
+    "local_cik_sum":      "flat_array double[n_ciks] per thread — indexed directly by adsh_cik_idx[adsh_code]; no hash probing; initialized to 0.0",
+    "merged_group_sum":   "flat_array long double[n_groups] — element-wise reduction of per-thread local_group_sum after scan",
+    "merged_cik_sum":     "flat_array double[n_ciks] — element-wise reduction of per-thread local_cik_sum after scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Single fused OMP parallel for over active_blocks (schedule dynamic,8). Each thread owns local_group_sum[long double] and local_cik_sum[double] flat arrays. After scan loop, reduce by iterating local arrays in a second parallel or serial reduction step. Flat array sizes: n_groups ~25000 (400KB long double), n_ciks ~17000 (136KB double). Total thread-local footprint: ~536KB/thread × 64 threads = ~34MB < 44MB L3."
+  },
+  "aggregation": "flat_array_direct",
+  "fused_scan_logic": {
+    "description": "Single parallel pass computing both cik_sum (for HAVING threshold) and group_sum (for output) from identical filter. Eliminates second full-table scan.",
+    "inner_loop": "for each row r in block: if uom[r]==usd_code && fy_arr[adsh[r]]==2022: local_group_sum[grp_arr[adsh[r]]] += val[r]; local_cik_sum[cik_idx_arr[adsh[r]]] += val[r]",
+    "post_scan": "merge local_group_sum arrays element-wise (OMP parallel for over n_groups); merge local_cik_sum arrays element-wise (serial or OMP over n_ciks); avg_threshold = sum(merged_cik_sum) / n_ciks"
+  },
+  "indexes": [
+    {"index": "num_zone_maps", "file": "indexes/num_zone_maps.bin", "purpose": "skip_blocks"},
+    {"index": "uom_codes",     "file": "indexes/uom_codes.bin",     "purpose": "dict_lookup"}
+  ],
+  "having": {
+    "predicate": "merged_group_sum[gid] > avg_threshold",
+    "threshold_source": "sum(merged_cik_sum) / n_ciks (computed after single fused scan)"
+  },
+  "output": {
+    "decode_step": "for each gid where merged_group_sum[gid] > avg_threshold: name via name_offsets/name_data[groups[gid].rep_adsh], cik = groups[gid].cik",
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "sort_strategy": "partial_sort (nth_element + sort on ~500 survivors)",
+    "format": "%.2Lf for total_value (long double)"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: two problems in the logical plan. First, pass 1 (cik aggregation for HAVING threshold) was single-threaded despite 64 available cores, consuming 205ms. The sequential constraint was unnecessary because avg_threshold is used only in a > comparison where floating-point accumulation order at the margin is inconsequential. Second, two separate full-table scans (298ms total) over identical data with identical filters, when both accumulators can be computed in a single fused pass. Strategy: Category A (plan restructuring) — fuse pass 1 and pass 2 into one single parallel scan that simultaneously accumulates local_group_sum (for output) and local_cik_sum (for threshold), both as flat arrays indexed by pre-built compact integer keys. Category B (algorithm change) — replace CompactHashMap probing with direct flat array indexing: adsh_group_id[ac] (0..n_groups-1) already is a compact index; build adsh_cik_idx[ac] (0..n_ciks-1) during data_loading. Thread-local flat arrays (400KB long double for groups + 136KB double for ciks = 536KB/thread × 64 = 34MB) fit within the 44MB L3, giving cache-resident random-access updates with zero hash overhead. Post-scan element-wise merge of small flat arrays is trivially fast. Expected outcome: single parallel scan replaces two (one sequential + one parallel), with direct array accumulators eliminating hash probing entirely."
+}

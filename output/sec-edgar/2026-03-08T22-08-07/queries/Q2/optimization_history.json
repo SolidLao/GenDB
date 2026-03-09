@@ -1,0 +1,45 @@
+{
+  "query_id": "Q2",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 82.13000000000001,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 82.13000000000001,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.18,
+        "dim_filter": 0.25,
+        "build_joins": 39.29,
+        "main_scan": 14.49,
+        "output": 0.9,
+        "total": 65.18
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 34.18,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 34.18,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan spends most of its time in build_joins because it scans the pure slice twice and uses over-sized thread-local packed-key hash tables for a post-semijoin grouping problem that is actually tiny; the join-order sampler measured sub-first at about 58 ms versus about 830 ms for aggregating before the sub semijoin, and the same sampler found only about 155k qualifying rows, 1326 active adsh values, and 3362 final (adsh,tag) groups. Strategy category A/C: keep the empirically best sub-first semijoin order, replace the flat hash aggregate with a dense adsh-indexed sparse bucket layout that stores {max_value,tie_count} per tag, merge only touched adsh buckets, and emit the top-100 directly from grouped winners so the expensive self-join / second raw scan over num disappears entirely.",
+      "operation_timings": {
+        "data_loading": 0.42,
+        "dim_filter": 0.55,
+        "build_joins": 22.49,
+        "main_scan": 0.25,
+        "output": 0.43,
+        "total": 34.55
+      }
+    }
+  ]
+}

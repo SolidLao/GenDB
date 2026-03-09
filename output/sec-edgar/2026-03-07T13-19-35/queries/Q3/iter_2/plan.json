@@ -1,0 +1,83 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_dict_uom",
+    "load_sub_arrays",
+    "build_compact_indexes",
+    "fused_parallel_scan_aggregate",
+    "sequential_merge_group_sum",
+    "compute_cik_sum_from_group_sum",
+    "compute_avg_threshold",
+    "having_filter",
+    "decode_names",
+    "topk_sort"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code", "file": "num/uom_code.bin",   "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code","file": "num/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",    "file": "num/value.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "zone_map_index": "indexes/num_zone_maps.bin",
+    "zone_map_skip": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code",
+    "prefetch": "software prefetch 16 rows ahead: __builtin_prefetch(gid_ptr + adsh_ptr[r+16], 0, 1) to overlap L3 latency for gid_ptr[adsh_code] random lookups"
+  },
+  "filters": [
+    {"table": "num", "predicate": "uom_code == usd_code", "selectivity": 0.87},
+    {"table": "sub", "predicate": "sub_fy[adsh_code] == 2022", "selectivity": 0.20,
+     "notes": "sub_fy flat array (172KB) resident in L1; O(1) lookup via gid_ptr sentinel: gid_ptr[ac] < 0 means fy!=2022, no separate sub_fy lookup needed in hot loop"}
+  ],
+  "join_order": [
+    {
+      "build": "sub_fy flat array (86135 × int16_t)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row index; gid_ptr[adsh_code] < 0 sentinel encodes fy!=2022"
+    }
+  ],
+  "data_structures": {
+    "sub_fy_array":     "flat_array int16_t[86135] — loaded once, used in build_compact_indexes only",
+    "sub_cik_array":    "flat_array int32_t[86135] — loaded once",
+    "adsh_group_id":    "flat_array int32_t[86135] — compact group index (0..n_groups-1) or -1 if fy!=2022; built during build_compact_indexes using uint64_t hash key",
+    "all_grp":          "flat_array int64_t[nthreads × n_groups] — thread-major layout; thread t's block at offset t*n_groups; per-thread group accumulator in cents (int64_t); NO all_cik array",
+    "group_sum":        "flat_array int64_t[n_groups] — merged from all_grp via sequential t-outer-g-inner loop",
+    "cik_sum":          "flat_array int64_t[n_ciks] — computed POST-MERGE from group_sum in O(n_groups) pass; NOT accumulated during scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_schedule": "schedule(static) — uniform block size, static partitioning eliminates atomic scheduling overhead",
+    "merge_strategy": "sequential t-outer g-inner: for t in 0..nthreads: lp=all_grp+t*n_groups; for g in 0..n_groups: group_sum[g]+=lp[g]. Each iteration is a 200KB sequential scan. Total 12.8MB sequential reads vs 21ms of strided random L3 access in prior iteration.",
+    "notes": "Eliminate all_cik (5.1MB) entirely. Drop lc[] update from scan hot loop. After group_sum merge: for each gid in 0..n_groups, cik_sum[groups[gid].cik_idx] += group_sum[gid]. This is O(n_groups)=O(17K) vs O(34M) accumulation in scan."
+  },
+  "aggregation": "flat_array_direct",
+  "fused_scan_logic": {
+    "description": "Single parallel pass computing ONLY group_sum (adsh-level) from identical filter. cik_sum computed post-merge from group_sum. Eliminates lc[] random write from hot loop.",
+    "build_group_key": "uint64_t key = (uint64_t)(uint32_t)cik << 32 | fnv1a32(name_ptr, name_len); use unordered_map<uint64_t,int32_t> — integer key is ~4x faster than std::string key. GroupInfo stores {rep_adsh, cik, cik_idx}.",
+    "inner_loop": "const int PFETCH=16; for r in block: if r+PFETCH<row_end: __builtin_prefetch(gid_ptr+adsh_ptr[r+PFETCH],0,1); if uom_ptr[r]!=usd_code continue; ac=adsh_ptr[r]; gid=gid_ptr[ac]; if gid<0 continue; lg[gid]+=llround(val_ptr[r]*100.0)",
+    "post_scan_merge": "sequential: zero group_sum; for t=0..nthreads: lp=all_grp+t*n_groups; for g=0..n_groups: group_sum[g]+=lp[g]",
+    "post_merge_cik": "zero cik_sum[n_ciks]; for gid=0..n_groups: cik_sum[groups[gid].cik_idx]+=group_sum[gid]; avg_threshold_cents=sum(cik_sum)/n_ciks"
+  },
+  "indexes": [
+    {"index": "num_zone_maps", "file": "indexes/num_zone_maps.bin", "purpose": "skip_blocks"},
+    {"index": "uom_codes",     "file": "indexes/uom_codes.bin",     "purpose": "dict_lookup"}
+  ],
+  "having": {
+    "predicate": "group_sum[gid] > avg_threshold_cents",
+    "threshold_source": "sum(cik_sum[0..n_ciks-1]) / n_ciks (computed in O(n_groups) post-merge pass)"
+  },
+  "output": {
+    "decode_step": "for each gid where group_sum[gid] > avg_threshold_cents: name via name_offsets/name_data[groups[gid].rep_adsh], cik = groups[gid].cik",
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "sort_strategy": "partial_sort (nth_element + sort on ~500 survivors)",
+    "format": "integer cents formatted as dollars.cents (%lld.%02lld)"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: two problems identified post-iteration-1. (1) Merge bottleneck (~21ms unaccounted): the group_sum merge used OMP parallel-for with groups as outer loop and threads as inner loop — a column-major traversal of a row-major matrix (all_grp[t*n_groups+g]), generating 1.6M random L3 accesses with stride 200KB. Fix (Category B): swap to t-outer-g-inner sequential scan; each thread's 200KB block is read sequentially, converting random L3 access to 12.8MB streaming reads (~0.3ms at 50 GB/s). (2) Redundant cik accumulation in scan (Category C): the hot loop did 2 random writes per qualifying row (lg[gid] and lc[cik_idx]). Since cik_sum = sum of group_sum values per cik, it can be computed from group_sum in O(n_groups)=O(17K) post-merge instead of O(34M) in-scan, eliminating the lc[] write and the 5.1MB all_cik allocation entirely. (3) Faster group_map (Category A): replace std::unordered_map<string,int32_t> with unordered_map<uint64_t,int32_t> using key=(cik<<32)|fnv1a32(name) — integer key hash/compare eliminates string allocation and is ~4x faster. (4) Explicit prefetch: software prefetch gid_ptr 16 rows ahead to overlap L3 latency for data-dependent random lookups. Expected: merge ~21ms->~2ms, build_joins ~6ms->~2ms, scan ~26ms->~21ms, total ~25ms."
+}

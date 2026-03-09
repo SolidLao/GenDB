@@ -1,0 +1,196 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "gendb"
+  },
+  "tables": {
+    "lineitem": {
+      "estimated_rows": 59986052,
+      "sort_order": ["l_shipdate ASC"],
+      "block_size": 100000,
+      "file_format": { "filename": "lineitem.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["l_orderkey","l_partkey","l_suppkey","l_linenumber","l_quantity","l_extendedprice","l_discount","l_tax","l_returnflag","l_linestatus","l_shipdate","l_commitdate","l_receiptdate","l_shipinstruct","l_shipmode","l_comment"] },
+      "columns": [
+        { "name": "l_orderkey",      "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",             "role": "join/group/filter" },
+        { "name": "l_partkey",       "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",             "role": "join" },
+        { "name": "l_suppkey",       "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",             "role": "join" },
+        { "name": "l_linenumber",    "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",             "role": "payload" },
+        { "name": "l_quantity",      "cpp_type": "int8_t",  "semantic_type": "DECIMAL(15,2)","encoding": "int8_integer_value","role": "filter/agg", "note": "actual values 1-50 (whole numbers), stored as int8" },
+        { "name": "l_extendedprice", "cpp_type": "double",  "semantic_type": "DECIMAL(15,2)","encoding": "plain_double",      "role": "agg" },
+        { "name": "l_discount",      "cpp_type": "int8_t",  "semantic_type": "DECIMAL(15,2)","encoding": "int8_hundredths",   "role": "filter/agg", "note": "values 0.00-0.10 stored as 0-10 (multiply by 100)" },
+        { "name": "l_tax",           "cpp_type": "int8_t",  "semantic_type": "DECIMAL(15,2)","encoding": "int8_hundredths",   "role": "agg",        "note": "values 0.00-0.08 stored as 0-8 (multiply by 100)" },
+        { "name": "l_returnflag",    "cpp_type": "int8_t",  "semantic_type": "CHAR(1)",      "encoding": "dict_int8",         "role": "group/order", "dict": {"A":0,"N":1,"R":2}, "dict_file": "lineitem/l_returnflag_dict.bin" },
+        { "name": "l_linestatus",    "cpp_type": "int8_t",  "semantic_type": "CHAR(1)",      "encoding": "dict_int8",         "role": "group/order", "dict": {"F":0,"O":1}, "dict_file": "lineitem/l_linestatus_dict.bin" },
+        { "name": "l_shipdate",      "cpp_type": "int32_t", "semantic_type": "DATE",         "encoding": "days_since_epoch",  "role": "filter/sort_key" },
+        { "name": "l_commitdate",    "cpp_type": "int32_t", "semantic_type": "DATE",         "encoding": "days_since_epoch",  "role": "payload" },
+        { "name": "l_receiptdate",   "cpp_type": "int32_t", "semantic_type": "DATE",         "encoding": "days_since_epoch",  "role": "payload" }
+      ],
+      "indexes": [
+        {
+          "name": "l_shipdate_zone_map",
+          "type": "zone_map",
+          "columns": ["l_shipdate"],
+          "file": "lineitem/l_shipdate_zone_map.bin",
+          "layout": "header:{uint32_t num_blocks, uint32_t block_size} + blocks:{int32_t min_date, int32_t max_date}",
+          "note": "Enables block-skip for Q6 (1.9% selectivity), Q3 (54.5% pass), Q1 (98.5% pass)"
+        }
+      ],
+      "rationale": "Sorted by l_shipdate enables zone maps; int8 encoding for quantity/discount/tax saves 8x space vs double (480MB→60MB each), critical for 60M-row table. dict encoding for returnflag/linestatus enables direct integer GROUP BY (4 groups total)."
+    },
+    "orders": {
+      "estimated_rows": 15000000,
+      "sort_order": [],
+      "block_size": 100000,
+      "file_format": { "filename": "orders.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["o_orderkey","o_custkey","o_orderstatus","o_totalprice","o_orderdate","o_orderpriority","o_clerk","o_shippriority","o_comment"] },
+      "columns": [
+        { "name": "o_orderkey",    "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",           "role": "join/group" },
+        { "name": "o_custkey",     "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",           "role": "join" },
+        { "name": "o_totalprice",  "cpp_type": "double",  "semantic_type": "DECIMAL(15,2)","encoding": "plain_double",    "role": "order/output" },
+        { "name": "o_orderdate",   "cpp_type": "int32_t", "semantic_type": "DATE",         "encoding": "days_since_epoch","role": "filter/group/output" },
+        { "name": "o_shippriority","cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",           "role": "group/output" }
+      ],
+      "indexes": [
+        {
+          "name": "orders_by_orderkey",
+          "type": "dense_array",
+          "columns": ["o_orderkey"],
+          "file": "orders/orders_by_orderkey.bin",
+          "layout": "int32_t array[60000001]; array[o_orderkey] = row_index; -1 = unused slot",
+          "note": "240MB direct-address array; enables O(1) lineitem→orders join in Q3, Q9, Q18"
+        }
+      ]
+    },
+    "customer": {
+      "estimated_rows": 1500000,
+      "sort_order": [],
+      "block_size": 100000,
+      "file_format": { "filename": "customer.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["c_custkey","c_name","c_address","c_nationkey","c_phone","c_acctbal","c_mktsegment","c_comment"] },
+      "columns": [
+        { "name": "c_custkey",    "cpp_type": "int32_t", "semantic_type": "INTEGER",  "encoding": "plain",      "role": "join" },
+        { "name": "c_name",       "cpp_type": "char[26]","semantic_type": "VARCHAR(25)","encoding":"fixed_26",  "role": "output",  "note": "null-padded to 26 bytes; used in Q18 GROUP BY/output" },
+        { "name": "c_nationkey",  "cpp_type": "int32_t", "semantic_type": "INTEGER",  "encoding": "plain",      "role": "payload", "note": "not used in workload queries; stored for completeness" },
+        { "name": "c_mktsegment", "cpp_type": "int8_t",  "semantic_type": "CHAR(10)", "encoding": "dict_int8",  "role": "filter",  "dict": {"AUTOMOBILE":0,"BUILDING":1,"FURNITURE":2,"HOUSEHOLD":3,"MACHINERY":4}, "dict_file": "customer/c_mktsegment_dict.bin" }
+      ],
+      "indexes": [
+        {
+          "name": "customer_by_custkey",
+          "type": "dense_array",
+          "columns": ["c_custkey"],
+          "file": "customer/customer_by_custkey.bin",
+          "layout": "int32_t array[1500001]; array[c_custkey] = row_index; -1 = unused",
+          "note": "6MB array; enables O(1) orders→customer join in Q3, Q18"
+        }
+      ]
+    },
+    "part": {
+      "estimated_rows": 2000000,
+      "sort_order": [],
+      "block_size": 100000,
+      "file_format": { "filename": "part.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["p_partkey","p_name","p_mfgr","p_brand","p_type","p_size","p_container","p_retailprice","p_comment"] },
+      "columns": [
+        { "name": "p_partkey", "cpp_type": "int32_t", "semantic_type": "INTEGER",    "encoding": "plain",   "role": "join" },
+        { "name": "p_name",    "cpp_type": "char[56]","semantic_type": "VARCHAR(55)", "encoding": "fixed_56","role": "filter", "note": "null-padded 56 bytes; scanned for LIKE '%green%' in Q9" }
+      ],
+      "indexes": [
+        {
+          "name": "part_by_partkey",
+          "type": "dense_array",
+          "columns": ["p_partkey"],
+          "file": "part/part_by_partkey.bin",
+          "layout": "int32_t array[2000001]; array[p_partkey] = row_index; -1 = unused",
+          "note": "8MB array; enables O(1) lineitem→part join in Q9"
+        }
+      ]
+    },
+    "partsupp": {
+      "estimated_rows": 8000000,
+      "sort_order": [],
+      "block_size": 100000,
+      "file_format": { "filename": "partsupp.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["ps_partkey","ps_suppkey","ps_availqty","ps_supplycost","ps_comment"] },
+      "columns": [
+        { "name": "ps_partkey",   "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",       "role": "join" },
+        { "name": "ps_suppkey",   "cpp_type": "int32_t", "semantic_type": "INTEGER",      "encoding": "plain",       "role": "join" },
+        { "name": "ps_supplycost","cpp_type": "double",  "semantic_type": "DECIMAL(15,2)","encoding": "plain_double","role": "agg" }
+      ],
+      "indexes": [
+        {
+          "name": "partsupp_hash_index",
+          "type": "hash",
+          "columns": ["ps_partkey","ps_suppkey"],
+          "file": "partsupp/partsupp_hash_index.bin",
+          "layout": "header:{uint64_t capacity=16777216, uint64_t count} + slots:{uint64_t key, int32_t row_idx, int32_t pad}; key=(uint64_t)ps_partkey*200001ULL+ps_suppkey; empty_sentinel=0; open_addressing_linear_probe",
+          "hash_fn": "fibonacci: slot=(key*11400714819323198485ULL)>>(64-24) then linear probe",
+          "note": "16M slots * 16 bytes = 256MB; enables O(1) (partkey,suppkey)→ps_supplycost lookup in Q9"
+        }
+      ]
+    },
+    "supplier": {
+      "estimated_rows": 100000,
+      "sort_order": [],
+      "block_size": 100000,
+      "file_format": { "filename": "supplier.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["s_suppkey","s_name","s_address","s_nationkey","s_phone","s_acctbal","s_comment"] },
+      "columns": [
+        { "name": "s_suppkey",  "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "plain", "role": "join" },
+        { "name": "s_nationkey","cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "plain", "role": "join" }
+      ],
+      "indexes": [
+        {
+          "name": "supplier_by_suppkey",
+          "type": "dense_array",
+          "columns": ["s_suppkey"],
+          "file": "supplier/supplier_by_suppkey.bin",
+          "layout": "int32_t array[100001]; array[s_suppkey] = row_index",
+          "note": "400KB trivial; enables O(1) lineitem→supplier join in Q9"
+        }
+      ]
+    },
+    "nation": {
+      "estimated_rows": 25,
+      "sort_order": [],
+      "block_size": 25,
+      "file_format": { "filename": "nation.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["n_nationkey","n_name","n_regionkey","n_comment"] },
+      "columns": [
+        { "name": "n_nationkey", "cpp_type": "int32_t", "semantic_type": "INTEGER",   "encoding": "plain",   "role": "join" },
+        { "name": "n_name",      "cpp_type": "char[26]","semantic_type": "CHAR(25)",   "encoding": "fixed_26","role": "group/output" },
+        { "name": "n_regionkey", "cpp_type": "int32_t", "semantic_type": "INTEGER",   "encoding": "plain",   "role": "payload" }
+      ],
+      "indexes": [
+        {
+          "name": "nation_by_nationkey",
+          "type": "dense_array",
+          "columns": ["n_nationkey"],
+          "file": "nation/nation_by_nationkey.bin",
+          "layout": "int32_t array[25]; array[n_nationkey] = row_index",
+          "note": "Trivial 100-byte array; Q9 supplier→nation join"
+        }
+      ]
+    },
+    "region": {
+      "estimated_rows": 5,
+      "sort_order": [],
+      "block_size": 5,
+      "file_format": { "filename": "region.tbl", "delimiter": "|", "trailing_delimiter": true, "column_order": ["r_regionkey","r_name","r_comment"] },
+      "columns": [
+        { "name": "r_regionkey", "cpp_type": "int32_t", "semantic_type": "INTEGER", "encoding": "plain",   "role": "payload" },
+        { "name": "r_name",      "cpp_type": "char[26]","semantic_type": "CHAR(25)", "encoding": "fixed_26","role": "payload" }
+      ],
+      "indexes": []
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "DECIMAL_PLAIN": "double",
+    "DECIMAL_INT8_HUNDREDTHS": "int8_t",
+    "DECIMAL_INT8_INTEGER": "int8_t",
+    "DATE": "int32_t"
+  },
+  "date_encoding": "days_since_epoch_1970",
+  "dict_encoding_note": "int8_t dict codes are stable: loaded from *_dict.bin sidecar files. NEVER hardcode dict values in query code — load from file at startup.",
+  "hardware_config": {
+    "cpu_cores": 64,
+    "l1d_cache_mb": 1,
+    "l2_cache_mb": 32,
+    "l3_cache_mb": 44,
+    "disk_type": "hdd",
+    "total_memory_gb": 376
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_sub_dimension",
+    "resolve_usd_code",
+    "uom_offset_range_scan",
+    "parallel_scan_aggregate",
+    "compute_having_threshold",
+    "filter_and_topk"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range"},
+    {"table": "sub", "predicate": "fy = 2022", "selectivity": 0.196, "method": "bitset_lookup"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.95, "method": "isnan_check"}
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2022)",
+      "probe": "num(uom='USD' range)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "probe_cardinality": 33200000,
+      "notes": "sub_fk is dense uint32_t index into sub table; use direct array lookup fy2022_bitset[sub_fk] — no hashing needed"
+    }
+  ],
+  "steps": {
+    "load_sub_dimension": {
+      "description": "Load sub columns and build lookup structures",
+      "loads": [
+        {"file": "sub/fy.bin", "type": "int16_t", "rows": 86135},
+        {"file": "sub/cik.bin", "type": "int32_t", "rows": 86135},
+        {"file": "sub/name_offsets.bin", "type": "uint64_t"},
+        {"file": "sub/name_data.bin", "type": "char"}
+      ],
+      "build": [
+        {
+          "name": "fy2022_bitset",
+          "type": "bitset",
+          "size": 86135,
+          "logic": "fy2022_bitset[i] = (fy[i] == 2022)"
+        },
+        {
+          "name": "cik_to_name",
+          "type": "flat_hash_map<int32_t, string>",
+          "estimated_entries": 8886,
+          "logic": "For each sub row where fy==2022, map cik[i] -> name[i]. Only need one name per cik."
+        }
+      ]
+    },
+    "resolve_usd_code": {
+      "description": "Resolve 'USD' string to dictionary code",
+      "loads": [
+        {"file": "num/uom_dict_offsets.bin", "type": "uint64_t"},
+        {"file": "num/uom_dict_data.bin", "type": "char"}
+      ],
+      "output": "usdCode (uint8_t)"
+    },
+    "uom_offset_range_scan": {
+      "description": "Use uom_offsets index to get contiguous USD row range",
+      "loads": [
+        {"file": "num/uom_offsets.bin", "type": "struct{uint64_t start, end}"}
+      ],
+      "output": "usdStart, usdEnd (~33.2M rows)"
+    },
+    "parallel_scan_aggregate": {
+      "description": "Single-pass parallel scan computing SUM(value) GROUP BY cik for both main query and HAVING subquery",
+      "loads": [
+        {"file": "num/sub_fk.bin", "type": "uint32_t", "range": "[usdStart, usdEnd)", "access": "sequential"},
+        {"file": "num/value.bin", "type": "double", "range": "[usdStart, usdEnd)", "access": "sequential"}
+      ],
+      "logic": "For each row i in [usdStart, usdEnd): if !isnan(value[i]) && fy2022_bitset[sub_fk[i]]: cik = sub_cik[sub_fk[i]]; sum_by_cik[cik] += value[i]",
+      "notes": "Within USD range, rows sorted by sub_fk — good cache locality for sub lookups. Thread-local aggregation maps merged at end."
+    },
+    "compute_having_threshold": {
+      "description": "Compute AVG of per-cik sums for HAVING clause",
+      "logic": "threshold = sum_of_all_group_totals / num_groups"
+    },
+    "filter_and_topk": {
+      "description": "Filter groups exceeding threshold, partial sort for top 100",
+      "logic": "For each (cik, total): if total > threshold, collect (name=cik_to_name[cik], cik, total). Use std::partial_sort or nth_element for top 100 DESC."
+    }
+  },
+  "data_structures": {
+    "fy2022_bitset": "bitset(86135) — 1 bit per sub row, ~10.5 KB, fits L1 cache",
+    "sub_cik_array": "direct_array<int32_t>(86135) — ~336 KB, fits L2 cache",
+    "cik_to_name": "flat_hash_map<int32_t, string>(pre_sized=8886)",
+    "aggregation": "flat_hash_map<int32_t, double>(pre_sized=8886) — per-thread, ~200 KB each, fits L2 cache"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "scan_target": "parallel_scan_aggregate",
+    "merge": "Merge thread-local flat_hash_map<int32_t, double> into global map after scan",
+    "notes": "33M rows across 64 threads = ~520K rows/thread. Thread-local aggregation avoids contention. sub dimension arrays shared read-only."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "skip_to_usd_range"}
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "key": "int32_t cik",
+    "value": "double sum_value",
+    "estimated_groups": 8886,
+    "single_pass": true,
+    "notes": "Same aggregation serves both main query GROUP BY and HAVING subquery. name is functionally dependent on cik — group by cik only, look up name at output."
+  },
+  "output": {
+    "columns": ["s.name (string)", "s.cik (int32_t)", "total_value (double)"],
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "method": "partial_sort"
+  },
+  "execution_target": "cpp"
+}

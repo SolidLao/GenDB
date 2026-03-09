@@ -1,0 +1,77 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; use plabel_codes[pre_row] as integer group key component instead of varlen string lookup. Only decode plabel strings for the final 200 output rows using dict_offsets + dict_data."
+    }
+  ],
+  "pipeline": ["filter_sub_fy2023", "build_name_id_map", "find_dict_codes", "build_pre_hash_map_IS_fy2023", "scan_num_usd_range", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "sub(filtered by fy=2023)",
+      "probe": "num(USD range)",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 16200,
+      "notes": "Bitset indexed by sub_fk for O(1) filter during num scan"
+    },
+    {
+      "build": "pre(filtered by stmt='IS' AND sub_fk passes fy2023)",
+      "probe": "num(USD range, fy2023-filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 200000,
+      "notes": "Build hash multimap from DOUBLY-filtered pre rows: stmt='IS' AND fy2023[sub_fk]. Only ~200K entries (vs 1.06M in iter_2). Key=(sub_fk, tag_code, version_code), value=plabel_code. Hash map ~6MB, fits in 44MB LLC."
+    }
+  ],
+  "filters": [
+    {"table": "sub", "predicate": "fy == 2023", "selectivity": 0.188},
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range"},
+    {"table": "num", "predicate": "!isnan(value)", "selectivity": 0.95},
+    {"table": "pre", "predicate": "stmt = 'IS' AND fy2023[sub_fk]", "selectivity": 0.021, "method": "stmt_offsets_range + fy2023_bitset"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33250000,
+    "columns": [
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "fy2023_mask": "bitset(86135) — O(1) sub_fk filter, ~11KB, fits in L1",
+    "sub_fk_to_name_id": "direct_array(uint32_t, 86135) — maps sub_fk to deduplicated name_id, ~344KB",
+    "pre_hash_map": "open_addressing_hash_multimap<packed_key(sub_fk:20, tag_code:18, version_code:17 → uint64_t) → plabel_code:uint32_t>. Build from IS+fy2023 filtered pre rows. ~200K entries, 16 bytes/slot, capacity ~512K slots (40% load), total ~8MB. FITS IN 44MB LLC. Use linear probing with EMPTY_KEY sentinel. For multi-value: allow duplicate keys with consecutive probing — when inserting a duplicate key, probe to next empty slot. When looking up, continue scanning past matching keys until empty slot. Use same hashKey3 function for consistency.",
+    "aggregation": "open_addressing_hash_map<GroupKey(name_id:u32, tag_code:u32, plabel_code:u32 packed into uint64_t) → AggValue(sum:double, count:u64)>, thread-local with merge. Reserve ~32K per thread."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Morsel size 100K rows over USD range. Thread-local open-addressing agg maps, merge after scan. Pre hash map is shared read-only (built single-threaded before scan)."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "Get contiguous USD row range in num"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "Get contiguous IS row range in pre for hash map build"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name", "p.stmt(constant 'IS')", "n.tag(decoded from tag_dict)", "p.plabel(decoded from plabel dict)", "total_value(SUM)", "cnt(COUNT)"],
+    "order_by": ["total_value DESC"],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A+C (plan restructuring + work elimination): Iter_1's main_scan bottleneck (56ms scan-only) is caused by ~6.2M random probes into the 275MB pre_by_adsh_tag_ver.idx (6x LLC). Iter_2 built a 32MB runtime hash map from 1.06M IS pre rows (borderline LLC) but the 10ms build cost offset the scan improvement. The key missed optimization: also apply fy2023 filter during pre hash build, reducing entries from 1.06M to ~200K (1.06M × 0.188). The resulting hash map is ~8MB (5x smaller), solidly fitting in the 44MB LLC. Build cost: ~3ms for scanning 1.06M IS pre rows sequentially and inserting only ~200K qualifying entries. During num scan, every probe hits LLC instead of main memory, eliminating the cache-miss bottleneck. Use open-addressing with packed uint64_t keys (sub_fk|tag_code|version_code) and uint32_t plabel_code values. DO NOT use the pre-built index file at all."
+}

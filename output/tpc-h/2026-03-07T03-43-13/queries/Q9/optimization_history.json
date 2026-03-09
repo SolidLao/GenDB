@@ -1,0 +1,61 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 112.11666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 112.11666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.27,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 58.4,
+        "output": 1.32,
+        "total": 111.38
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 77.73333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 77.73333333333333,
+      "validation": "pass",
+      "strategy": "The hot time is dominated by the main scan because the current plan probes a full 8M-row `partsupp` hash whose 192 MB key/row arrays exceed the 88 MB LLC, and it also performs repeated random `orders` lookups even though `lineitem` is already ordered by `l_orderkey`. This revision uses strategy category A: restructure the plan so the `p_name LIKE '%green%'` filter is pushed into the `partsupp` build side, creating a green-only cache-resident join structure for about 384k rows, fuse supplier+nation into a tiny dense `suppkey -> nation_code` map, and exploit lineitem orderkey runs with contiguous thread partitions so order-year lookup becomes a seeded streaming/cached operation instead of a per-row random lookup.",
+      "operation_timings": {
+        "data_loading": 0.81,
+        "dim_filter": 14.27,
+        "build_joins": 23.89,
+        "main_scan": 33.51,
+        "output": 1.18,
+        "total": 73.73
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 30.463333333333335,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 30.463333333333335,
+      "validation": "pass",
+      "strategy": "The remaining gap comes from a storage-level mismatch: iteration 1 cut main-scan cost, but it still spends 14 ms in dim_filter and 24 ms rebuilding cache-friendly join state because the available persistent structures do not match Q9's direct-lookup access pattern. This revision uses strategy category E: persist three all-rows dense lookup arrays—a `suppkey -> nation_code` byte map, an `orderkey -> year_idx` byte map, and a `partkey -> 4 x (suppkey, supplycost_i32)` payload—so execution becomes a single sequential lineitem scan with only direct-array probes and per-thread array aggregation, eliminating the runtime partsupp repack and dimension build phases while keeping the hot working set near LLC size.",
+      "operation_timings": {
+        "data_loading": 0.16,
+        "dim_filter": 0.01,
+        "build_joins": 0.4,
+        "main_scan": 28.91,
+        "output": 0.6,
+        "total": 30.14
+      }
+    }
+  ]
+}

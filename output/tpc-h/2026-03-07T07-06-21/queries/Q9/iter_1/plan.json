@@ -1,0 +1,120 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "build_green_part_bitset",
+    "build_compact_green_partsupp_ht",
+    "build_orderkey_yearoff_array",
+    "precompute_suppkey_to_nationrow",
+    "parallel_lineitem_scan",
+    "aggregate_reduce",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "notes": "Build uint8_t green_part[2000001] by scanning part/p_name.bin; strstr for 'green'. ~5.5% selectivity → ~3.3M passing lineitem rows."
+    },
+    {
+      "build": "partsupp(green-only subset, ~440K rows)",
+      "probe": "lineitem(l_partkey, l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 440000,
+      "notes": "At startup, scan partsupp sequentially (ps_partkey.bin, ps_suppkey.bin, ps_supplycost.bin — 122MB sequential). Insert only rows where green_part[ps_partkey]==1 into a compact open-addressing hash table: 2^20=1,048,576 slots, each slot=(uint64_t key, double cost)=16 bytes, total 16MB → fits in 44MB L3. Key formula: partkey*200001ULL+suppkey (identical to prebuilt index). LOG2_CAP=20, FIB_CONST=11400714819323198485ULL, linear probe. Empty sentinel key=0ULL. Eliminates all LLC misses for partsupp lookup vs the prebuilt 256MB hash table."
+    },
+    {
+      "build": "orders(o_orderkey → year_offset, all 15M orders)",
+      "probe": "lineitem(l_orderkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Build int8_t okey_yearoff[60000001] at startup: mmap orders_by_orderkey.bin (240MB) + o_orderdate.bin (57MB); for each entry in orders_by_orderkey where value != -1, compute extract_year(o_orderdate[row]) - 1992 and store as int8_t at position [orderkey]. Entries with no order (sentinel -1) store value 127 (or 0xFF for out-of-range sentinel). Hot path: year_off = (int)okey_yearoff[l_orderkey[i]] — single 1-byte random access into 60MB vs two int32_t accesses into 297MB. Halves LLC misses for orders. Software prefetch: __builtin_prefetch(&okey_yearoff[l_orderkey[i+16]], 0, 1) in hot loop."
+    },
+    {
+      "build": "supplier(s_suppkey → nationrow)",
+      "probe": "lineitem(l_suppkey) [green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Precompute int32_t suppkey_to_nationrow[100001]: load supplier_by_suppkey + s_nationkey + nation_by_nationkey. 400KB, always L3-resident. Same as iter_0."
+    },
+    {
+      "build": "nation(n_nationkey → n_name)",
+      "probe": "supplier(s_nationkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "Load 25-row nation table (650 bytes). Fold into suppkey_to_nationrow precomputation."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "output_rows": 110000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",       "file": "lineitem/l_partkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey",       "file": "lineitem/l_suppkey.bin",       "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "green_part_filter":    "uint8_t[2000001], 2MB, L3-resident; indexed by p_partkey",
+    "compact_partsupp_ht":  "open-addressing hash, 2^20 slots, slot=(uint64_t key, double cost)=16 bytes, 16MB total → L3-resident (44MB L3); built at runtime by sequential scan of partsupp 8M rows, inserting only green-part entries (~440K); replaces prebuilt 256MB partsupp_hash_index",
+    "orderkey_yearoff":     "int8_t[60000001], 60MB, single-level direct array indexed by l_orderkey → year offset 0-6 (127 for missing); built at startup from orders_by_orderkey+o_orderdate; replaces two-level 297MB lookup",
+    "suppkey_to_nationrow": "int32_t[100001], 400KB, L3-resident",
+    "nation_names":         "char[25][26], 650 bytes, L3-resident",
+    "aggregation":          "double profits[25][10] per thread (cache-line aligned struct), zero-initialized; reduced single-threaded after parallel phase"
+  },
+  "parallelism": {
+    "strategy":        "morsel_driven",
+    "threads":         "auto(nproc)",
+    "morsel_size":     100000,
+    "parallel_phase":  "lineitem scan (60M rows split across 64 threads)",
+    "thread_local_state": "double profits[25][10] per thread, in alignas(64) struct to avoid false sharing",
+    "reduction":       "single-threaded sum over thread_profits[t][n][y] after join phase completes"
+  },
+  "indexes": [
+    {
+      "index": "green_part uint8_t[2000001]",
+      "purpose": "O(1) filter of lineitem rows by l_partkey; 2MB, L3-resident"
+    },
+    {
+      "index": "compact_green_partsupp_ht (built at runtime, 16MB)",
+      "purpose": "O(1) (l_partkey, l_suppkey) → ps_supplycost with L3-resident hash table; replaces prebuilt 256MB partsupp_hash_index to eliminate LLC misses"
+    },
+    {
+      "index": "okey_yearoff int8_t[60000001] (built at startup, 60MB)",
+      "purpose": "O(1) l_orderkey → year_offset (0–6); single 1-byte access replaces two-level int32 dereference through 297MB orders structures"
+    },
+    {
+      "index": "suppkey_to_nationrow int32_t[100001]",
+      "purpose": "O(1) l_suppkey → nation row index; 400KB, L3-resident"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Q2 — physical implementation vs hardware): the hot path's two dominant random-access structures both greatly exceed the 44MB LLC. The prebuilt partsupp_hash_index is 256MB (5.8× LLC) and the two-level orders lookup (orders_by_orderkey 240MB + o_orderdate 57MB = 297MB, 6.7× LLC) together produce ~9.9M LLC cache misses for the 3.3M qualifying lineitem rows. Strategy Category B: replace the prebuilt 256MB partsupp hash with a compact runtime-built open-addressing hash covering only the ~440K green-part partsupp entries (2^20 = 1M slots × 16 bytes = 16MB), which fits within the 44MB L3 and converts all partsupp lookups from LLC misses to L3 hits. Strategy Category C: replace the two-level orders dereference (two int32_t random accesses into 297MB) with a single int8_t okey_yearoff[60000001] = 60MB direct array built at startup, halving the orders cache miss count and reducing the per-access transfer from 8 bytes (two int32_t) to 1 byte. Together these reduce the combined hot-path random-access footprint from ~553MB to ~76MB (16MB L3-resident partsupp + 60MB orders), making partsupp lookups fully L3-resident and cutting orders miss frequency by ~50%.",
+  "correctness_anchors": {
+    "threshold_constant_part_rows":     2000000,
+    "threshold_constant_supplier_rows": 100000
+  }
+}

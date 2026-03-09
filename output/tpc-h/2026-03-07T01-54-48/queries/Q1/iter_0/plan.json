@@ -1,0 +1,43 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "zonemap_prune_shipdate_blocks",
+    "scan_and_filter_lineitem",
+    "partial_aggregate_by_returnflag_linestatus",
+    "finalize_aggregate_and_compute_avgs",
+    "decode_dictionary_and_sort",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(600_blocks_from_zonemap)",
+    "fact_join": "none",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp"
+}

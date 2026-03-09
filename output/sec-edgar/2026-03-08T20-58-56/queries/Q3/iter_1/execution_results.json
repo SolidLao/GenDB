@@ -1,0 +1,56 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 399
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q3": {
+          "rows_expected": 100,
+          "rows_actual": 100,
+          "match": false,
+          "error": "1 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "total_value": {
+              "category": "sum_money",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "18652189000081.70",
+                  "actual": "18655494293194.39",
+                  "abs_diff": 3305293112.69,
+                  "rel_diff_pct": 0.0177,
+                  "tolerance": "$100",
+                  "row": 85,
+                  "pattern": "value_mismatch"
+                }
+              ]
+            }
+          },
+          "tie_aware": true,
+          "order_column": "total_value",
+          "mismatch_patterns": {
+            "value_mismatch": 1
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 348.18666666666667,
+  "hot_timing_ms": 348.18666666666667,
+  "operation_timings": {
+    "data_loading": 2.52,
+    "dim_filter": 0.55,
+    "build_joins": 82.52,
+    "main_scan": 220.27,
+    "output": 44.17,
+    "total": 384.29
+  }
+}

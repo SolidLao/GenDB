@@ -1,0 +1,36 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_pre",
+    "aggregate_direct",
+    "reduce_thread_locals",
+    "sort_by_cnt_desc",
+    "decode_output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "direct_array(stmt_id,rfile_id) with per-group bitset(86135) for distinct adsh"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

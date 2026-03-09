@@ -1,0 +1,120 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "filter_orders",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders(filtered: o_orderdate < 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 330000,
+      "notes": "Build only a customer-key bitset from customer_mktsegment_hash and probe during sequential orders scan."
+    },
+    {
+      "build": "orders_after_customer_date(project: o_orderkey)",
+      "probe": "lineitem(filtered: l_shipdate > 9204)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 1461923,
+      "notes": "Materialize qualifying o_orderkey as a dense bitset keyed by orderkey; lineitem sequential scan does O(1) membership test before local revenue accumulation."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.535
+    },
+    {
+      "table": "lineitem JOIN orders_after_customer_date",
+      "predicate": "l_orderkey = o_orderkey",
+      "selectivity": 0.00963
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "flat_array(bitset max_orderkey+1)",
+    "aggregation": "compact_hash_map(pre_sized, thread_local_then_merge)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a combined physical and work-efficiency bottleneck: runtime orders hash-table construction plus per-row atomic revenue updates spend most hot time in build/probe overhead that is not proportional to final matches. Strategy category C with parallel aggregation tuning keeps sequential scans and zonemap pruning, replaces the runtime orders hash with a compact qualifying-order bitset keyed by o_orderkey, performs cheap membership tests during the lineitem scan, and accumulates revenue in thread-local compact maps merged once at the end to remove hot-path synchronization while preserving exact Q3 semantics.",
+  "correctness_anchors": {
+    "o_orderdate_cutoff_days_since_epoch": 9204,
+    "l_shipdate_cutoff_days_since_epoch": 9204,
+    "revenue_formula": "l_extendedprice * (1 - l_discount)",
+    "date_literal": "1995-03-15"
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_year_idx",
+      "action": "use_existing",
+      "files": {
+        "year_idx": "column_versions/lineitem.l_year_idx/year_idx.bin",
+        "year_idx_format": "uint8_t[59986052]; entry i = (year - 1992) for the order of lineitem row i (0=1992..6=1998); all entries valid"
+      },
+      "usage": "mmap year_idx.bin as uint8_t[59986052]. In pass 2: l_year_arr[idx] gives year index directly — sequential access via sorted selvec. No l_orderkey column needed."
+    },
+    {
+      "id": "lineitem.l_net_price",
+      "action": "built_new",
+      "files": {
+        "net_price": "column_versions/lineitem.l_net_price/net_price.bin",
+        "net_price_format": "double[59986052]; net_price[i] = l_extendedprice[i] * (1.0 - l_discount[i]); all entries valid"
+      },
+      "usage": "mmap net_price.bin as double[59986052]. In pass 2: load l_net_price_arr[idx] instead of l_extprice[idx] * (1.0 - l_discount[idx]). Eliminates the l_discount column from pass 2, saving 173MB of unique cache lines at 5.5% qualifying density (36% of 480MB double-column CL touched). The amount formula becomes: amount = l_net_price_arr[idx] - ps_cost * l_quantity[idx]."
+    }
+  ],
+  "pipeline": [
+    "mmap_columns_no_prefetch",
+    "parallel_build_green_bitset",
+    "parallel_build_compact_ps_hash_with_cas",
+    "load_supplier_nation_arrays",
+    "lineitem_pass1_scan_partkey_build_selvec_with_stored_lp",
+    "lineitem_pass2_gather_with_software_prefetch_and_aggregate",
+    "merge_aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(p_name LIKE '%green%')",
+      "probe": "lineitem.l_partkey (pass 1)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110600,
+      "notes": "Parallel p_name scan (112MB, stride=56) to build uint8_t is_green[2000001] (2MB, L3-resident). Pass 1 reads only l_partkey (240MB sequential, parallel), stores qualifying {idx, lp} pairs in per-thread vectors."
+    },
+    {
+      "build": "partsupp(filtered to green ps_partkey only)",
+      "probe": "lineitem.(l_partkey, l_suppkey) in pass 2",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 440000,
+      "notes": "Parallel scan of partsupp raw columns (128MB). CAS-based parallel insertion of ~440K green entries into compact hash (capacity 1048576=2^20, key=uint64 (partkey<<32|suppkey), value=double ps_supplycost, 16MB total — L3-resident). Probe during pass 2 using (lp<<32|ls) key constructed from selvec.lp and l_suppkey[idx]."
+    },
+    {
+      "build": "supplier(direct array suppkey->nationkey)",
+      "probe": "lineitem.l_suppkey in pass 2",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "uint8_t supp_nat[100001] (100KB, L1-resident). Single-threaded build from s_suppkey + s_nationkey columns."
+    },
+    {
+      "build": "nation(all)",
+      "probe": "supp_nat[l_suppkey]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "char nation_names[25][26] from n_name.bin — 650 bytes, L1-resident."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "strstr(p_name_buf + row*56, 'green') != nullptr",
+      "selectivity": 0.0553,
+      "output_cardinality": 110600
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",   "file": "lineitem/l_partkey.bin",   "type": "int32_t", "bytes_per_row": 4, "pass": "pass1_only_sequential"},
+      {"name": "l_suppkey",   "file": "lineitem/l_suppkey.bin",   "type": "int32_t", "bytes_per_row": 4, "pass": "pass2_random_with_prefetch"},
+      {"name": "l_net_price", "file": "column_versions/lineitem.l_net_price/net_price.bin", "type": "double", "bytes_per_row": 8, "pass": "pass2_random_with_prefetch"},
+      {"name": "l_quantity",  "file": "lineitem/l_quantity.bin",  "type": "double",  "bytes_per_row": 8, "pass": "pass2_random_with_prefetch"},
+      {"name": "l_year_idx",  "file": "column_versions/lineitem.l_year_idx/year_idx.bin", "type": "uint8_t", "bytes_per_row": 1, "pass": "pass2_random_with_prefetch"}
+    ],
+    "access_pattern": "two_pass",
+    "notes": "Pass 1: parallel sequential scan of l_partkey only (240MB, no MADV_WILLNEED). Each thread stores qualifying {int32_t idx, int32_t lp} pairs in a local vector. OMP static schedule ensures per-thread sub-vectors are sorted; concatenation in thread-id order yields globally sorted result — no std::sort needed. Pass 2: divide sorted selvec evenly across nthreads. For each qualifying entry, use stored selvec[j].lp (avoids re-reading l_partkey), and software-prefetch all payload columns PREFETCH_DIST iterations ahead."
+  },
+  "data_structures": {
+    "part_filter": "uint8_t is_green[2000001] — 2MB, L3-resident. Built in parallel from p_name scan.",
+    "compact_ps_hash": "Flat hash: uint64_t keys[1048576] (sentinel=0xFFFFFFFFFFFFFFFF, CAS-claimed), double values[1048576]; 16MB total, L3-resident. Parallel CAS insertion of 440K green partsupp entries. key=(uint64(ps_partkey)<<32)|uint32(ps_suppkey).",
+    "supplier_lookup": "uint8_t supp_nat[100001] — 100KB, L1-resident.",
+    "selection_vector": "struct SelvecEntry { int32_t idx; int32_t lp; } per qualifying row (~3.3M entries = 26.4MB). Built per-thread with static OMP schedule (each thread's sub-vector sorted), concatenated in order — globally sorted, no std::sort needed.",
+    "net_price_lookup": "double l_net_price_arr[59986052] — mmap of lineitem.l_net_price extension. Random access via sorted selvec indices with software prefetch. Eliminates l_extendedprice and l_discount from pass 2.",
+    "year_lookup": "uint8_t l_year_arr[59986052] — mmap of lineitem.l_year_idx extension. Random access via sorted selvec indices with software prefetch.",
+    "nation_lookup": "char nation_names[25][26] — 650 bytes, L1-resident.",
+    "aggregation": "double thread_agg[25][7] per thread (1400 bytes each, cache-line aligned with alignas(64) padding between nation rows). Merged into final_agg after pass 2."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Phase 1 (p_name + partsupp scans): nthreads parallel. Phase 2 (pass 1): nthreads parallel static OMP over 60M rows. Phase 3 (pass 2): divide selvec evenly across nthreads — each thread handles a contiguous slice of sorted indices for ascending cache access. Software prefetch distance: PREFETCH_DIST=32 iterations ahead for all 4 payload columns simultaneously."
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Three root causes addressed. (1) Category C: data_loading exclusive was 47ms due to MADV_WILLNEED on l_partkey (240MB) — the kernel walks 60K page-table entries even for hot-cache data at ~0.7µs/page = 42ms overhead. Fix: remove l_partkey.prefetch() entirely; the parallel OMP pass-1 scan naturally faults pages in parallel across 64 threads (~1ms added to pass 1 vs 42ms saved). (2) Category E: pass 2 accessed 3 double payload columns (l_extprice, l_discount, l_quantity) each causing ~173MB of unique cache-line fetches at 5.5% qualifying density. New lineitem.l_net_price column version (double[60M], built in 0.45s) precomputes l_extprice*(1-l_discount), replacing two column reads with one — saving 173MB of unique CL from l_discount. (3) Category B: pass 2 was latency-bound (~25GB/s effective) due to irregular-stride random access into 480MB columns; hardware prefetcher cannot detect the variable stride. Fix: explicit software prefetching with PREFETCH_DIST=32 ahead for all 4 payload columns in the pass-2 loop, converting to bandwidth-bound at ~50GB/s. Additionally, selection vector now stores (idx, lp) pairs so l_partkey need not be re-read in pass 2 (saves 142MB unique CL). Budget: data_loading 7ms + dim_filter 5ms + build_joins 9ms + pass1 5ms + pass2 11ms = 37ms target.",
+  "correctness_anchors": {}
+}

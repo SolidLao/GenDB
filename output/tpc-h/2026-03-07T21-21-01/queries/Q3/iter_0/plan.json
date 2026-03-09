@@ -1,0 +1,79 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "decode_segment_dictionary",
+    "fetch_building_customers",
+    "expand_orders_via_cust_postings",
+    "filter_orderdate",
+    "expand_lineitems_via_order_postings",
+    "filter_shipdate_and_accumulate_per_order",
+    "merge_topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment='BUILDING')",
+      "probe": "orders",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Use customer_segment_postings to get customer rowids, load c_custkey, then expand through orders_cust_postings; avoids scanning 15M orders on HDD."
+    },
+    {
+      "build": "orders(filtered by customer join and o_orderdate < 1995-03-15)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1458000,
+      "notes": "Sampled order hit rate to qualifying lineitems is ~7.6%; expand qualifying orders through lineitem_order_postings and aggregate per order."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.485963
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.050208
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(customer_rowids) + flat_array(c_custkeys)",
+    "fact_join": "pre_built_index(customer_segment_postings, orders_cust_postings, lineitem_order_postings)",
+    "aggregation": "array_direct(per_order_revenue keyed by qualifying order position) + fixed_min_heap(10)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "customer_segment_postings",
+      "purpose": "resolve BUILDING customers without scanning customer table"
+    },
+    {
+      "index": "orders_cust_postings",
+      "purpose": "expand filtered customer keys to candidate orders"
+    },
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "expand qualifying orders to only matching lineitems by order key"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp"
+}

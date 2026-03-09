@@ -1,0 +1,77 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; read plabel_codes[pre_row] as integer group key component for IS-range pre rows during hash map build. Decode plabel strings only for final 200 output rows."
+    }
+  ],
+  "pipeline": ["filter_sub_fy2023", "build_name_id_map", "find_dict_codes", "build_is_pre_hashmap", "scan_num_usd_range", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "sub(filtered by fy=2023)",
+      "probe": "num(USD range)",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 16200,
+      "notes": "Bitset indexed by sub_fk for O(1) filter during num scan"
+    },
+    {
+      "build": "pre(filtered by stmt='IS', ~1.06M rows)",
+      "probe": "num(USD range, fy2023-filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1060000,
+      "notes": "Build a COMPACT open-addressing hash multimap at runtime from IS-range pre rows only. Key=(sub_fk, tag_code, version_code) packed into uint64_t, value=plabel_code. DO NOT use the pre_by_adsh_tag_ver.idx file. This replaces 275MB random-access index probes + stmt_code + plabel_code random reads with a single ~30-40MB cache-resident structure."
+    }
+  ],
+  "filters": [
+    {"table": "sub", "predicate": "fy == 2023", "selectivity": 0.188},
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range"},
+    {"table": "num", "predicate": "!isnan(value)", "selectivity": 0.95},
+    {"table": "pre", "predicate": "stmt = 'IS'", "selectivity": 0.11, "method": "stmt_offsets_range"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33250000,
+    "columns": [
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "fy2023_mask": "bitset(86135) — O(1) sub_fk filter",
+    "sub_fk_to_name_id": "direct_array(uint32_t, 86135) — maps sub_fk to deduplicated name_id",
+    "is_pre_hashmap": "Open-addressing hash multimap built at runtime from IS-filtered pre rows. Use stmt_offsets to get IS row range in pre table. Scan that range, read pre/sub_fk.bin, pre/tag_code.bin, pre/version_code.bin, and plabel codes.bin for those rows. Pack key as uint64_t: ((uint64_t)sub_fk << 34) | ((uint64_t)tag_code << 17) | version_code (sub_fk max 86135=17bits, tag_code max 198311=18bits, version_code max 83815=17bits, total 52 bits). Store plabel_code as uint32_t value. Use struct {uint64_t key; uint32_t plabel_code; uint32_t padding;} = 16 bytes/slot. For multi-value handling: when inserting a duplicate key with different plabel_code, use linear probing to find next empty slot and store as separate entry (same key, different value). During probe, scan all consecutive matching keys. Capacity: next power of 2 above 1.06M * 2 = ~4M slots × 16 bytes = 64MB. To fit LLC better, use load factor 0.5: 2M slots × 16 bytes = 32MB. Initialize with EMPTY_KEY sentinel.",
+    "aggregation": "open_addressing_hash_map<GroupKey(name_id:u32, tag_code:u32, plabel_code:u32) packed into uint64_t → AggValue(sum:double, count:u64)>, thread-local with merge. Same packKey as iter_1."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Morsel size 100K rows over USD range. Thread-local agg maps, merge after scan. The is_pre_hashmap is SHARED read-only across all threads (built once before parallel scan). Software prefetch: for each num row, prefetch the is_pre_hashmap slot for a row PREFETCH_DIST ahead."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "Get contiguous USD row range in num"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "Get contiguous IS row range in pre for building compact hash map"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name", "p.stmt(constant 'IS')", "n.tag(decoded from tag_dict)", "p.plabel(decoded from plabel dict)", "total_value(SUM)", "cnt(COUNT)"],
+    "order_by": ["total_value DESC"],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B (algorithm change): The main_scan phase (~90ms) is bottlenecked by random probes into the 275MB pre_by_adsh_tag_ver.idx file, which is 6x larger than the 44MB LLC. Each of ~6.2M qualifying num rows triggers random reads into: (1) the 275MB index, (2) stmt_code array (9.6MB), and (3) plabel_codes array (38MB) — total ~322MB random-access working set. The fix: stop using the pre-built index entirely. Instead, build a compact open-addressing hash multimap at runtime from only the IS-filtered pre rows (~1.06M rows). Pack the 3-component key into a single uint64_t (52 bits). The resulting hash map is ~32MB and fits in LLC. During the num scan, each qualifying row does a single probe into this cache-resident structure instead of 3 random accesses into cache-exceeding arrays. Expected speedup: 2-3x on main_scan phase from eliminating L3 cache misses. Build cost: ~5-10ms for sequential scan of 1.06M pre rows (sequential I/O, trivially fast)."
+}

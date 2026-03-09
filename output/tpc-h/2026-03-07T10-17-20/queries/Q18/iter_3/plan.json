@@ -1,0 +1,180 @@
+{
+  "query_id": "Q18",
+  "storage_extensions": [
+    {
+      "id": "lineitem.sorted_by_okey",
+      "action": "use_existing",
+      "files": {
+        "sorted_l_orderkey": "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin",
+        "sorted_l_orderkey_format": "int32_t[59986052] sorted ascending by l_orderkey"
+      },
+      "usage": "mmap sorted_l_orderkey.bin. Pass 1: parallel sequential scan for run-length aggregation."
+    },
+    {
+      "id": "lineitem.sorted_by_okey.l_qty_uint8",
+      "action": "built_new",
+      "files": {
+        "sorted_l_qty_uint8": "column_versions/lineitem.sorted_by_okey/sorted_l_qty_uint8.bin",
+        "sorted_l_qty_uint8_format": "uint8_t[59986052]; value = (uint8_t)l_quantity; integer in [1,50]; row order matches sorted_l_orderkey.bin"
+      },
+      "usage": "mmap sorted_l_qty_uint8.bin instead of sorted_l_quantity.bin (double). Accumulate as int32_t running sum (no overflow: 50 * 60M = 3B, fits int32). Compare sum > 300 as integer. Store sum_qty as double for output (cast final int32 sum to double). Reduces Pass 1 from 720MB to 300MB total (sorted_l_orderkey 240MB + sorted_l_qty_uint8 60MB)."
+    }
+  ],
+  "pipeline": [
+    "pass1_parallel_sorted_scan_aggregate_uint8",
+    "pass1_boundary_merge",
+    "prefault_hash_pages_parallel",
+    "pass2_hash_probes_serial",
+    "prefault_orders_column_pages_parallel",
+    "pass2_column_reads_serial",
+    "sort_topk"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_set (known after boundary merge, ~624 entries)",
+      "probe": "qualifying orderkeys from Pass 1",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Pass 2 iterates over 624 qualifying keys directly — no lineitem scan"
+    },
+    {
+      "build": "o_orderkey_hash (pre_built_index, mmap, 256MB)",
+      "probe": "qualifying orderkeys (~624 total)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 15000000,
+      "notes": "~624 probes; pages pre-faulted in parallel before the serial probe loop"
+    },
+    {
+      "build": "c_custkey_hash (pre_built_index, mmap, 32MB)",
+      "probe": "o_custkey for qualifying orders (~624 total)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "~624 probes; pages pre-faulted in second parallel sweep after orows are known"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem (sorted by l_orderkey)",
+      "predicate": "sum_qty > 300 (integer comparison, accumulated as int32)",
+      "selectivity": 0.0000415,
+      "notes": "Applied after accumulating full run-sum for each orderkey in Pass 1"
+    }
+  ],
+  "scan": {
+    "table": "lineitem (sorted by l_orderkey)",
+    "rows": 59986052,
+    "columns": [
+      {"name": "sorted_l_orderkey", "file": "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "sorted_l_qty_uint8", "file": "column_versions/lineitem.sorted_by_okey/sorted_l_qty_uint8.bin", "type": "uint8_t", "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential (single pass, 300MB total vs 720MB in iter_2)"
+  },
+  "data_structures": {
+    "pass1_thread_local": "struct BoundaryState { int32_t first_key, last_key; int32_t first_partial_sum, last_partial_sum; int64_t first_end_pos, last_start_pos; } per thread — tiny, L1-resident. Use int32_t for sum accumulation (max sum per key = 50*60M/15M = 200, well below INT32_MAX).",
+    "pass1_qualifying_keys": "std::vector<QualifyingKey> per thread, QualifyingKey = { int32_t key; int32_t sum_qty_int; int64_t start_pos; int64_t end_pos; }",
+    "pass1_inline_hash_prefault": "Within the parallel scan, when a thread emits an interior qualifying key, immediately issue volatile read of o_hash_keys[hash32(key) & o_hash_mask] to pre-fault the hash table page. This overlaps page-fault latency with the 20ms scan.",
+    "prefault_hash_arrays_parallel": "After boundary merge: open a new #pragma omp parallel section. Each thread takes a subset of the 624 qualifying keys, computes hash position h = hash32(key) & mask, and reads one byte from o_hash_keys[h] and one byte from o_hash_vals[h] (volatile read). Faults in the relevant pages of the 256MB o_orderkey_hash. This converts ~1248 serial page faults (5us each = 6ms) into 64-thread parallel work (0.1ms total).",
+    "prefault_c_hash_parallel": "In the same parallel sweep as above: also pre-fault the c_custkey_hash pages. Compute c_hash_pos = hash32(o_hash_keys[h] ... but we don't know custkey yet. SKIP c_custkey_hash prefault at this stage — do it after orow is known.",
+    "prefault_orders_cols_parallel": "After serial hash probes produce 624 orow values: open another #pragma omp parallel section. Each thread takes a subset of the 624 orow values, does volatile reads of o_custkey_col[orow], o_orderdate_col[orow], o_totalprice_col[orow], and c_hash_keys[hash32(o_custkey_col[orow]) & c_hash_mask] to pre-fault those pages. Converts ~1872 serial page faults into parallel work.",
+    "orders_index": "mmap(orders/o_orderkey_hash.bin), open-addressing int32->int32, capacity 33554432, MADV_RANDOM",
+    "customer_index": "mmap(customer/c_custkey_hash.bin), open-addressing int32->int32, capacity 4194304, MADV_RANDOM",
+    "output_buffer": "std::vector<Result> (~624 entries), sorted and top-100 emitted"
+  },
+  "passes": [
+    {
+      "pass": 1,
+      "name": "pass1_parallel_sorted_scan_aggregate_uint8",
+      "description": "Parallel morsel-driven scan of sorted_l_orderkey (int32, 240MB) + sorted_l_qty_uint8 (uint8, 60MB) = 300MB total (vs 720MB in iter_2). Each thread scans contiguous chunk [row0, row1). Accumulate run-length sums as int32_t (max value per key well below INT32_MAX). When key changes: if cur_sum > 300, emit QualifyingKey to thread-local vector and IMMEDIATELY issue a volatile read of o_hash_keys[hash32(key) & o_hash_mask] to pre-fault the hash table page for this qualifying key. Record boundary state for first/last key as before.",
+      "parallel": true,
+      "threads": "auto(nproc)",
+      "memory_per_thread": "~200 bytes (boundary state + running accumulators) — L1-resident",
+      "total_data_read": "300 MB (sorted_l_orderkey 240MB + sorted_l_qty_uint8 60MB) — sequential, single pass",
+      "key_change": "Use int32_t cur_sum (not double); compare cur_sum > 300 (integer). Cast to double for output: qk.sum_qty = (double)cur_sum.",
+      "inline_prefault": "When interior qualifying key found: volatile int32_t dummy = o_hash_keys[hash32(key) & o_hash_mask]; (void)dummy; — pre-faults the hash page during the parallel scan, amortizing the cost."
+    },
+    {
+      "pass": "1_boundary_merge",
+      "name": "pass1_boundary_merge",
+      "description": "Same logic as iter_2: merge adjacent thread boundary states, collect all qualifying keys (interior + boundary-spanning) into global_qualifying vector. Expected ~624 qualifying keys.",
+      "parallel": false,
+      "expected_qualifying_keys": 624
+    },
+    {
+      "pass": "2a",
+      "name": "prefault_hash_pages_parallel",
+      "description": "After boundary merge, open a short #pragma omp parallel section over the 624 qualifying keys. Each thread processes its share of qualifying keys: for each key k, compute h = hash32(k) & o_hash_mask, then issue: volatile int32_t d1 = o_hash_keys[h]; volatile int32_t d2 = o_hash_vals[h]; (void)d1; (void)d2; This maps the pages of the 256MB o_orderkey_hash into the process's page table in parallel. With 64 threads × ~20 pages each × ~5us per page fault from hot page cache = ~5us total (parallel). All 1248 hash pages are now in the process page table before the serial probe loop.",
+      "parallel": true,
+      "threads": "auto(nproc)",
+      "expected_duration": "~0.1ms (vs 6ms serial page faults in iter_2)"
+    },
+    {
+      "pass": "2b",
+      "name": "pass2_hash_probes_serial",
+      "description": "Serial pass over ~624 qualifying keys. For each: probe o_orderkey_hash to get orders_row (orow). Pages already in page table from prefault step: each probe is now L3 cache miss (~100ns) not a page fault (~5us). Collect (key, orow) pairs into a small array. Store resulting orow values for next prefault step.",
+      "parallel": false
+    },
+    {
+      "pass": "2c",
+      "name": "prefault_orders_column_pages_parallel",
+      "description": "After getting all 624 orow values, open another short #pragma omp parallel section. Each thread processes its share of 624 orow values: for each orow, issue volatile reads of o_custkey_col[orow], o_orderdate_col[orow], o_totalprice_col[orow], c_name_col[orow_for_cust * 26] (use orow to get custkey, then c_hash for customer row). Actually, to prefault c_custkey_hash we need custkey which requires reading o_custkey_col[orow] first. Simplify: parallel prefault of o_custkey_col[orow], o_orderdate_col[orow], o_totalprice_col[orow] for all 624 orows. Then also prefault c_custkey_hash first probe position using the now-available custkey values.",
+      "parallel": true,
+      "threads": "auto(nproc)"
+    },
+    {
+      "pass": "2d",
+      "name": "pass2_column_reads_serial",
+      "description": "Serial pass over 624 (key, orow) pairs. Read o_custkey[orow], o_orderdate[orow], o_totalprice[orow] (pages now hot), probe c_custkey_hash to get crow (pages hot), read c_name[crow*26]. Build Result structs with sum_qty from qualifying key records.",
+      "parallel": false
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_parallel": true,
+    "pass1_boundary_merge_serial": true,
+    "prefault_pass_parallel": true,
+    "pass2_serial": true,
+    "notes": "New: two short parallel prefault sweeps (prefault_hash + prefault_orders_cols) between boundary merge and serial probes. These are brief (<<1ms each) but eliminate the serial page-fault overhead from build_joins."
+  },
+  "indexes": [
+    {
+      "index": "o_orderkey_hash",
+      "file": "orders/o_orderkey_hash.bin",
+      "purpose": "join_lookup: qualifying l_orderkey -> orders row index",
+      "access": "mmap, MADV_RANDOM, ~624 total probes; pages pre-faulted before probe loop"
+    },
+    {
+      "index": "c_custkey_hash",
+      "file": "customer/c_custkey_hash.bin",
+      "purpose": "join_lookup: o_custkey -> customer row index",
+      "access": "mmap, MADV_RANDOM, ~624 total probes; pages pre-faulted in second sweep"
+    }
+  ],
+  "column_reads": {
+    "pass1": [
+      "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin",
+      "column_versions/lineitem.sorted_by_okey/sorted_l_qty_uint8.bin"
+    ],
+    "pass2_on_demand_for_qualifying_rows_only": [
+      "orders/o_custkey.bin",
+      "orders/o_orderdate.bin",
+      "orders/o_totalprice.bin",
+      "customer/c_name.bin"
+    ]
+  },
+  "aggregation": "linear_run_length with int32_t accumulator (cast to double for output)",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::sort on ~624 Result structs",
+    "date_decode": "convert o_orderdate (int32 days since 1970-01-01) to YYYY-MM-DD for output only (100 rows)",
+    "c_name_access": "c_name_buf + cust_row * 26 — fixed-stride 26-byte slots"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two root causes identified from iter_2's 66ms profile. (1) main_scan (20ms): Reading sorted_l_quantity.bin as double (8 bytes/row = 480MB) wastes 7x bandwidth — TPC-H l_quantity is always an integer in [1,50], fitting in uint8 (1 byte/row = 60MB). A new storage extension (sorted_l_qty_uint8.bin, 60MB) built via type-narrowing reduces Pass 1 data from 720MB to 300MB (sorted_l_orderkey 240MB + sorted_l_qty_uint8 60MB), targeting a proportional reduction in main_scan time (~8ms vs 20ms). (2) build_joins (15ms): The serial probe loop over 624 qualifying keys probed into large hash tables (o_orderkey_hash 256MB, c_custkey_hash 32MB) plus random-access into orders column files — all with pages NOT in the process's page table after the sequential scan evicts them from TLB. Each probe triggers a minor page fault (~5us from hot page cache). 624 probes x ~6 sequential page faults each = ~15ms serial overhead. Fix (Category B/C): two parallel prefault sweeps. First sweep (64 threads, 624 qualifying keys): touch each o_orderkey_hash key/value slot in parallel, mapping pages into the process page table in ~0.1ms total. Second sweep (after orow values known): touch o_custkey, o_orderdate, o_totalprice, and c_custkey_hash slots in parallel. Additionally, within Pass 1's parallel scan, each thread that finds an interior qualifying key immediately touches the corresponding hash table page — amortizing hash prefaults across the 20ms scan. Together these eliminate ~12ms of serial page-fault latency from build_joins.",
+  "correctness_anchors": {}
+}

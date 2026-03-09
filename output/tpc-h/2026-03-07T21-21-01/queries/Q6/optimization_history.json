@@ -1,0 +1,61 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 57.25,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 57.25,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "dim_filter": 0.01,
+        "build_joins": 0,
+        "main_scan": 26.22,
+        "output": 0.27,
+        "total": 53.75
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 68.13666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 68.13666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: the current Q6-specific zone map provides no pruning in practice because all 458 blocks overlap the predicate ranges, so the hot phase is a full-table scan that also reads l_extendedprice for rows that fail filters. Strategy category C: keep the cheap zone-map prepass but switch to late materialization by scanning only l_shipdate, l_discount, and l_quantity to build per-thread qualifying row-id vectors, then read l_extendedprice only for qualifying rows and accumulate thread-local scalar sums. This removes most wasted payload reads while preserving the existing parallel scan structure and scalar aggregation.",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "dim_filter": 0.01,
+        "build_joins": 0.66,
+        "main_scan": 34.57,
+        "output": 0.15,
+        "total": 66.41
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 7.183333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 7.183333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan is a full-table bandwidth-bound scan because the Q6 zone map does not prune any blocks, so even the best implementation still streams about 1.6 GB of base columns. Strategy category E: build and use a shipdate-ordered covering storage extension for all lineitem rows, with offsets by encoded shipdate and losslessly narrowed payload columns (discount as uint8 percent, quantity as uint8 units, extendedprice as uint32 cents). The revised plan seeks directly to the 1994 shipdate range, scans only 9,099,165 compact entries sequentially, and aggregates with exact integer arithmetic to minimize memory traffic and eliminate wasted base-column reads.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 3.3,
+        "output": 0.29,
+        "total": 5.89
+      }
+    }
+  ]
+}

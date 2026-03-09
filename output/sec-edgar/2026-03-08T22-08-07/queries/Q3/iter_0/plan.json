@@ -1,0 +1,71 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_uom_literal",
+    "filter_sub_2022",
+    "materialize_group_ids",
+    "probe_usd_fact",
+    "dual_array_aggregate",
+    "compute_avg_sub_total",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num(filtered uom='USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Use sub_adsh_dense_lookup plus sub_rowid-to-group-id arrays; shared by outer and inner aggregates."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.317325129
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.843465225
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "direct_array(sub_rowid_to_inner_gid, sub_rowid_to_outer_gid, invalid=-1) built from sub_fy_postings; outer groups=8251, inner groups=7991",
+    "fact_join": "pre_built_index(sub_adsh_dense_lookup)",
+    "aggregation": "direct_array(thread_local_inner_sums[7991], thread_local_outer_sums[8251])"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_fy_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_dense_lookup",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,115 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 144.40333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 144.40333333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.13,
+        "dim_filter": 5.62,
+        "build_joins": 49.59,
+        "main_scan": 14.86,
+        "output": 1.93,
+        "total": 142.44
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 96.70666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 96.70666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: Category A plan mismatch. The current implementation spends most time in build_joins materializing and copying a 1.46M-row qualifying-orders intermediate, then rereads it in main_scan to reach lineitems. Replace that two-phase flow with a fused index-nested-loop pipeline: enumerate BUILDING customers from postings, expand orders through orders_cust_postings, apply o_orderdate immediately, traverse lineitem_order_postings for each surviving order, apply l_shipdate, accumulate revenue in registers, and push positive results straight into thread-local top-k state before a final merge.",
+      "operation_timings": {
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 28.98,
+        "data_loading": 96.42,
+        "output": 0.96,
+        "total": 97.4
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 82.22333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 82.22333333333334,
+      "validation": "pass",
+      "strategy": "Root cause: Category C wasted work. The current implementation prefetches and advises roughly 2 GB of orders and lineitem data plus postings arrays up front, so hot time is dominated by data_loading rather than the fused revenue loop. Replace the customer-to-orders postings expansion with a compact customer-key bitset built from customer_segment_postings, run a zonemap-pruned sequential scan of orders to test both predicates in one pass, and only then probe lineitem_order_postings with late materialization of l_shipdate, l_extendedprice, and l_discount for qualifying order slices. This removes unnecessary upfront loading, preserves the fused order-to-lineitem pipeline, and keeps the working set proportional to surviving orders.",
+      "operation_timings": {
+        "data_loading": 0.12,
+        "dim_filter": 2.96,
+        "build_joins": 0,
+        "main_scan": 21.44,
+        "output": 1.3,
+        "total": 78.62
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 283.03,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 283.03,
+      "validation": "pass",
+      "strategy": "Root cause: Category B physical implementation mismatch. The current plan already removed most logical waste, but it still reaches qualifying lineitems through the cache-exceeding lineitem_order_postings rowid structure and late random payload fetches, which is a poor fit for a 60M-row fact table that is already physically sorted by l_orderkey. Replace that with a two-pass sequential design: zonemap-pruned orders scan builds a dense qualifying-order bitmap plus payload arrays keyed by o_orderkey, then a partitioned sequential lineitem scan filters l_shipdate, probes the dense order state by l_orderkey, and performs streaming sorted aggregation per order before thread-local top-k merge.",
+      "operation_timings": {
+        "data_loading": 0.2,
+        "dim_filter": 3.39,
+        "build_joins": 207.03,
+        "main_scan": 17.76,
+        "output": 0.42,
+        "total": 273.99
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 218.79666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 218.79666666666665,
+      "validation": "pass",
+      "strategy": "Root cause: Category A plan mismatch. Iteration 2 still scans all 15M orders even though customer_segment_postings and orders_cust_postings can cut the order work down to the 300k BUILDING customers and roughly 1.46M surviving orders; iteration 3 showed that replacing this with a 15M-key dense order-state table is too expensive to build. The revised plan expands only BUILDING customers through orders_cust_postings, filters o_orderdate immediately, materializes a compact qualifying-order array that fits in LLC, sorts it by o_orderkey, and then probes lineitem_order_postings in that order so the rowid and payload accesses become streaming rather than scattered.",
+      "operation_timings": {
+        "data_loading": 0.31,
+        "dim_filter": 2.4,
+        "build_joins": 129.85,
+        "main_scan": 18.04,
+        "output": 0.23,
+        "total": 215.13
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 259.9166666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 259.9166666666667,
+      "validation": "pass",
+      "strategy": "Root cause: Category B physical implementation mismatch. The surviving plan already removed most logical waste, but its hot path still performs about 1.46M probes into the cache-exceeding lineitem_order_postings structures (~480 MB offsets plus ~480 MB rowids) and then fetches lineitem payloads with poor locality. Replace the full orders scan and global order sort with a selective postings-driven pipeline: enumerate BUILDING customers from customer_segment_postings, expand through orders_cust_postings, apply o_orderdate immediately, and partition the ~1.46M surviving orders by orderkey range so each partition's offsets, rowids, and payload slice stays within LLC. Process partitions independently with thread-local top-k merge, avoiding the dense 15M-key state from iteration 3 and the expensive global sort/materialization from iteration 4.",
+      "operation_timings": {
+        "data_loading": 0.71,
+        "dim_filter": 3.92,
+        "build_joins": 164.45,
+        "main_scan": 19.18,
+        "output": 0.2,
+        "total": 256.94
+      }
+    }
+  ]
+}

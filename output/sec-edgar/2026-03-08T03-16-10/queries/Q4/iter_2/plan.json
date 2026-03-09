@@ -1,0 +1,136 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "filter_num_usd_blocks",
+    "probe_sub_adsh_lookup",
+    "probe_pre_eq_sorted_index",
+    "probe_tag_version_hash",
+    "partition_qualifying_rows",
+    "aggregate_partitions",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = 'USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Keep adsh_to_rowid as the cheapest first filter on the num scan."
+    },
+    {
+      "build": "pre(indexed by adsh_tag_version_sorted, filtered at probe time to stmt = 'EQ')",
+      "probe": "num(post sub filter)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 979282,
+      "notes": "Retain the existing binary-search plus contiguous-run probe into the sorted pre rowid index; do not build a runtime pre hash table."
+    },
+    {
+      "build": "tag(tag_version_hash, abstract = 0)",
+      "probe": "num(post sub+pre filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Probe only after sub and pre filtering so tlabel is fetched only for surviving rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sub/indexes/adsh_to_rowid.bin) with row-level reads of sub.sic and sub.cik",
+    "fact_join": "pre/indexes/adsh_tag_version.rowids.bin for binary-search + contiguous-run stmt counting, plus pre-built tag_version_hash for (tag,version) lookup",
+    "aggregation": "scan-time radix/hash partition buffers on final group_key=(sic,tlabel) carrying {group_key,cik,scaled_value,pre_count}; then per-partition compact_hash_map for sums/counts plus per-partition distinct_pair_set(group_key,cik)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "direct adsh lookup before sic and cik reads"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "binary-search (adsh,tag,version) and scan only the matching contiguous rowid run instead of building a runtime pre hash table"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "lookup tag rowid and tlabel after sub and pre have already filtered the probe stream"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after the iteration-1 join fix, the remaining gap is no longer in join probing but in aggregation state layout; the thread-local group map plus thread-local distinct set are replicated across 64 threads, and their combined footprint exceeds the 88 MB LLC before growth, so the post-scan merge becomes the dominant cache-miss-heavy phase. Strategy category B: keep the proven sub->pre->tag join order, but replace replicated thread-local aggregation with scan-time partitioning of qualifying rows by final group key and aggregate one cache-sized partition at a time, using per-partition sum/count and distinct-(group_key,cik) structures so dedup and merge happen locally instead of through one large 64-way merge.",
+  "correctness_anchors": {}
+}

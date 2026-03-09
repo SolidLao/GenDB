@@ -1,0 +1,150 @@
+{
+  "query_id": "Q18",
+  "storage_extensions": [
+    {
+      "id": "lineitem.sorted_by_okey",
+      "action": "built_new",
+      "files": {
+        "sorted_l_orderkey": "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin",
+        "sorted_l_orderkey_format": "int32_t[59986052] sorted ascending",
+        "sorted_l_quantity": "column_versions/lineitem.sorted_by_okey/sorted_l_quantity.bin",
+        "sorted_l_quantity_format": "double[59986052] reordered to match sorted_l_orderkey"
+      },
+      "usage": "mmap both files. Pass 1: parallel sequential scan with linear run-length aggregation (no hash map, no scatter). Pass 2: use recorded (start, end) positions from Pass 1 to sum l_quantity for each qualifying orderkey without re-scanning all 60M rows."
+    }
+  ],
+  "pipeline": [
+    "pass1_parallel_sorted_scan_aggregate",
+    "pass1_boundary_merge",
+    "pass2_qualifying_key_lookups",
+    "sort_topk"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_set (flat int32_t array, ~624 entries, L1-resident)",
+      "probe": "qualifying orderkeys from Pass 1",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Pass 2 iterates over 624 qualifying keys directly — no lineitem scan needed"
+    },
+    {
+      "build": "o_orderkey_hash (pre_built_index, mmap)",
+      "probe": "qualifying orderkeys (~624 total)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 15000000,
+      "notes": "~624 probes total — negligible cost"
+    },
+    {
+      "build": "c_custkey_hash (pre_built_index, mmap)",
+      "probe": "o_custkey for qualifying orders (~624 total)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "~624 probes total — negligible cost"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem (sorted)",
+      "predicate": "sum_qty > 300.0",
+      "selectivity": 0.0000415,
+      "notes": "Applied after accumulating the full run-sum for each orderkey in Pass 1"
+    }
+  ],
+  "scan": {
+    "table": "lineitem (sorted by l_orderkey)",
+    "rows": 59986052,
+    "columns": [
+      {"name": "sorted_l_orderkey", "file": "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "sorted_l_quantity", "file": "column_versions/lineitem.sorted_by_okey/sorted_l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential (single pass in Pass 1 only; Pass 2 uses recorded positions)"
+  },
+  "data_structures": {
+    "pass1_thread_local": "struct BoundaryState { int32_t first_key, last_key; double first_partial_sum, last_partial_sum; int64_t first_end_pos, last_start_pos; } per thread — tiny, L1-resident",
+    "pass1_qualifying_keys": "std::vector<QualifyingKey> per thread, where QualifyingKey = { int32_t key; double sum_qty; int64_t start_pos; int64_t end_pos; } — holds interior (complete) qualifying keys found by this thread",
+    "pass2_groups": "std::vector<GroupEntry> of ~624 entries — { int32_t orderkey; double sum_qty; int32_t orders_row; int32_t cust_row; }",
+    "orders_index": "mmap(orders/o_orderkey_hash.bin), open-addressing int32→int32, capacity 33554432, MADV_RANDOM",
+    "customer_index": "mmap(customer/c_custkey_hash.bin), open-addressing int32→int32, capacity 4194304, MADV_RANDOM",
+    "output_buffer": "std::vector<Result> (~624 entries), sorted and top-100 emitted"
+  },
+  "passes": [
+    {
+      "pass": 1,
+      "name": "pass1_parallel_sorted_scan_aggregate",
+      "description": "Parallel morsel-driven scan of sorted_l_orderkey + sorted_l_quantity with linear run-length aggregation. No hash map, no scatter buffers. Each thread processes a contiguous range [row0, row1) of the sorted arrays. Within each chunk: maintain running (current_key, running_sum, run_start_pos). When key changes: if running_sum > 300, emit QualifyingKey{key, sum, run_start, run_end} to thread-local qualifying_keys vector. Record boundary state for first and last key in each thread chunk (these may be split across thread boundaries).",
+      "parallel": true,
+      "threads": "auto(nproc)",
+      "memory_per_thread": "~200 bytes (boundary state + running accumulators) — L1-resident",
+      "total_data_read": "720 MB (sorted_l_orderkey 240MB + sorted_l_quantity 480MB) — sequential, single pass",
+      "boundary_handling": {
+        "first_key_in_chunk": "Record first_key = sorted_l_orderkey[row0], accumulate partial sum from row0 until key changes. Store as (first_key, first_partial_sum, first_end_pos) in thread boundary struct.",
+        "last_key_in_chunk": "Record last_key = sorted_l_orderkey[row1-1], accumulate partial sum backwards from row1-1 until key changes (or beginning of the last run). Store as (last_key, last_partial_sum, last_start_pos). If first_key == last_key (entire chunk is same key), collapse into single boundary entry.",
+        "interior_keys": "All keys with runs fully contained within [row0, row1) are complete and can be filtered/emitted directly."
+      }
+    },
+    {
+      "pass": "1_boundary_merge",
+      "name": "pass1_boundary_merge",
+      "description": "Serial post-pass: after all threads complete, merge adjacent thread boundary states. For each pair of adjacent threads t and t+1: if thread[t].last_key == thread[t+1].first_key, combine their partial sums. The combined sum determines whether this boundary-spanning key qualifies. Collect all qualifying keys (from interior vectors + boundary merge) into a single global qualifying_keys array, including their (start_pos, end_pos) in the sorted arrays.",
+      "parallel": false,
+      "expected_qualifying_keys": 624
+    },
+    {
+      "pass": 2,
+      "name": "pass2_qualifying_key_lookups",
+      "description": "Serial pass over ~624 qualifying orderkeys. For each qualifying key: (1) use recorded (start_pos, end_pos) to directly sum sorted_l_quantity[start_pos..end_pos] — no binary search needed, positions already known from Pass 1; (2) probe o_orderkey_hash to get orders_row; (3) read o_custkey[orders_row], o_orderdate[orders_row], o_totalprice[orders_row]; (4) probe c_custkey_hash to get cust_row. Store GroupEntry in results vector. No lineitem scan — only 624 hash probes and ~624×4=2496 sequential quantity reads.",
+      "parallel": false,
+      "total_probes": 624,
+      "eliminates": "Full second 60M-row lineitem scan from iter_1 (was 25ms)"
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_parallel": true,
+    "pass1_boundary_merge_serial": true,
+    "pass2_serial": true,
+    "notes": "Pass 2 is serial because it only has ~624 qualifying keys — parallelism overhead would dominate"
+  },
+  "indexes": [
+    {
+      "index": "o_orderkey_hash",
+      "file": "orders/o_orderkey_hash.bin",
+      "purpose": "join_lookup: qualifying l_orderkey → orders row index",
+      "access": "mmap, MADV_RANDOM, ~624 total probes"
+    },
+    {
+      "index": "c_custkey_hash",
+      "file": "customer/c_custkey_hash.bin",
+      "purpose": "join_lookup: o_custkey → customer row index",
+      "access": "mmap, MADV_RANDOM, ~624 total probes"
+    }
+  ],
+  "column_reads": {
+    "pass1": [
+      "column_versions/lineitem.sorted_by_okey/sorted_l_orderkey.bin",
+      "column_versions/lineitem.sorted_by_okey/sorted_l_quantity.bin"
+    ],
+    "pass2_on_demand_for_qualifying_rows_only": [
+      "orders/o_custkey.bin",
+      "orders/o_orderdate.bin",
+      "orders/o_totalprice.bin",
+      "customer/c_name.bin"
+    ]
+  },
+  "aggregation": "linear_run_length",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::sort on ~624 Result structs",
+    "date_decode": "convert o_orderdate (int32 days since 1970-01-01) to YYYY-MM-DD for output only (100 rows)",
+    "c_name_access": "c_name_buf + cust_row * 26 — fixed-stride 26-byte slots"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category E — Storage Extension): The iter_1 scatter/gather Pass 1 moves 1.6GB of data (64 threads × 64 partitions × 32768 slots × 12B) through DRAM-speed random writes during scatter (Phase A) and DRAM-speed reads during gather (Phase B), far exceeding the 44MB LLC. Each of the 60M scatter writes lands at a random strided location in a 24MB-per-thread address range, making every write a DRAM miss. The fix builds a one-time storage extension: lineitem sorted by l_orderkey (two files: sorted_l_orderkey.bin 240MB + sorted_l_quantity.bin 480MB, built with 2-pass LSD radix sort in 4.3s). With sorted data, Pass 1 becomes a single sequential read of 720MB with linear run-length aggregation: each thread scans a contiguous chunk, maintains a running (key, sum) accumulator, and emits qualifying keys with their start/end positions when the key changes — zero hash operations, zero scatter, zero DRAM-random writes. A tiny serial boundary merge handles keys split across thread chunk boundaries. Pass 2 also changes fundamentally: instead of re-scanning all 60M lineitem rows, it iterates over only ~624 qualifying keys, using the (start_pos, end_pos) positions recorded in Pass 1 to directly read the quantity ranges (no binary search needed), then performs the hash probes and customer lookup. This eliminates the entire 60M-row Pass 2 scan. Expected Pass 1: ~10-20ms (720MB sequential / 64 threads). Expected Pass 2: ~1-2ms (624 direct lookups). Total expected: ~15-25ms.",
+  "correctness_anchors": {}
+}

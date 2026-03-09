@@ -1,0 +1,138 @@
+{
+  "query_id": "Q3",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_extendedprice.u32",
+      "action": "use_existing",
+      "files": {
+        "values": "column_versions/lineitem.l_extendedprice.u32/values.bin",
+        "values_format": "uint32_t[row_count]"
+      },
+      "usage": "mmap values.bin and use values[row] as l_extendedprice in scaled-by-100 revenue arithmetic instead of reading lineitem/l_extendedprice.bin"
+    },
+    {
+      "id": "lineitem.l_discount.u8",
+      "action": "use_existing",
+      "files": {
+        "values": "column_versions/lineitem.l_discount.u8/values.bin",
+        "values_format": "uint8_t[row_count]"
+      },
+      "usage": "mmap values.bin and use values[row] as l_discount in scaled-by-100 revenue arithmetic instead of reading lineitem/l_discount.bin"
+    }
+  ],
+  "pipeline": [
+    "resolve_building_dict_code",
+    "build_customer_membership_bitset",
+    "scan_orders_with_orderdate_zone_pruning",
+    "probe_row_aligned_lineitem_runs_via_row_starts",
+    "aggregate_revenue_with_narrow_lineitem_columns",
+    "late_materialize_order_payload_for_topk",
+    "topk_10_by_revenue"
+  ],
+  "join_order": [
+    {
+      "build": "customer(BUILDING membership bitset keyed by c_custkey)",
+      "probe": "orders(sequential scan with orders_orderdate_zone_map pruning)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 300276,
+      "notes": "Resolve the runtime dict code for BUILDING, scan only that posting list, and set a dense customer-membership bitset. Then scan orders in o_orderkey row order; skip blocks with mins >= 9204, fast-accept blocks with maxs < 9204, and test customer membership inline."
+    },
+    {
+      "build": "qualifying orders in row order",
+      "probe": "lineitem_orderkey_groups(row-aligned direct lookup by order row)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1480000,
+      "notes": "For each qualifying order row, use lineitem_orderkey_groups.row_starts[order_row] and row_starts[order_row + 1] (or total lineitem rows for the final group) to derive the contiguous lineitem run, then aggregate qualifying revenue from that run."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.511
+    }
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_starts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_starts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice_u32",
+        "file": "column_versions/lineitem.l_extendedprice.u32/values.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount_u8",
+        "file": "column_versions/lineitem.l_discount.u8/values.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(max_c_custkey + 1)",
+    "fact_join": "pre_built_index(lineitem_orderkey_groups.row_starts with adjacent-start delta to derive row_count)",
+    "aggregation": "array_direct(thread-local topk heaps; no global group hash table)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_postings",
+      "purpose": "enumerate BUILDING customer rows without scanning the full customer table"
+    },
+    {
+      "index": "orders_orderdate_zone_map",
+      "purpose": "skip or fast-accept order blocks before any row-level o_orderdate load"
+    },
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "jump directly from qualifying order row to its contiguous lineitem run"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after iteration 1 fixed the join order, the remaining gap is main-scan bandwidth. The plan still streams wide order payload columns and wide lineitem revenue columns, plus a full row_counts array, even though only about 1.48M orders survive the customer and orderdate predicates, only about 6M lineitems are visited, and only the top-k survivors need full order payload. Strategy category E: keep the successful sequential orders-to-lineitem_groups plan, but switch revenue arithmetic to the existing narrow lineitem column versions, derive each lineitem run length from adjacent row_starts instead of scanning row_counts, and late-materialize o_orderdate, o_orderkey, and o_shippriority only for positive-revenue rows that may enter the thread-local top-k. This preserves the cache-resident customer bitset and zone-map pruning while materially reducing main-scan bytes.",
+  "correctness_anchors": {}
+}

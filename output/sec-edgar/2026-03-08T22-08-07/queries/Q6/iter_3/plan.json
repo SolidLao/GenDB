@@ -1,0 +1,121 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "resolve_dict_codes",
+    "build_filtered_sub_name_lookup",
+    "build_pre_is_by_adsh",
+    "scan_num_usd_postings",
+    "join_sub_then_pre_via_dense_adsh",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "filtered_name_by_adsh from sub_fy_postings(fy=2023)",
+      "probe": "num(uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26616,
+      "notes": "Materialize a dense uint32_t array keyed by global adsh code that stores sub.name only for FY 2023 filings; non-qualifying codes keep the empty sentinel so the hot loop does one array lookup instead of a rowid lookup plus fy check."
+    },
+    {
+      "build": "pre_is_by_adsh from pre_stmt_postings(stmt='IS')",
+      "probe": "num_join_sub(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1767049,
+      "notes": "Pack the stmt='IS' rows into adsh-local contiguous slices with SoA payload arrays for tag, version, and plabel; for each surviving num row, use adsh to fetch the slice and linearly compare the ~20-row average candidate list to find matching (tag, version)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.1841
+    }
+  ],
+  "scan": {
+    "table": "num_uom_postings('USD')",
+    "rows": 33234006,
+    "columns": [
+      {
+        "name": "rowid",
+        "file": "indexes/num/num_uom_postings.rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(filtered_name_by_adsh) built from sub_fy_postings + sub.adsh + sub.name",
+    "fact_join": "flat_array(pre_is_offsets_by_adsh) + compact SoA payload arrays pre_is_tag/pre_is_version/pre_is_plabel over stmt='IS' rows",
+    "aggregation": "compact_hash_map keyed by (name_code, tag_code, plabel_code)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_fy_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the iter_1 hot path still performs about 10.3M probes into the persisted `pre_adsh_tag_version_groups` hash, whose 33,554,432 24-byte buckets alone are about 768 MiB and far exceed the 88 MiB LLC, making the join latency-bound on random cache misses. Strategy category B/C: keep the successful sub-first order, but replace the cache-exceeding triple-hash probe with a compact `stmt='IS'` payload grouped by `adsh`. Build a dense `filtered_name_by_adsh` array from `sub_fy_postings`, then pack the 1,767,049 `IS` pre rows into contiguous adsh-local slices storing only `(tag, version, plabel)`. This working set is about 21.2 MiB for payload plus less than 1 MiB of dense offset arrays, so the hot loop becomes dense-array lookups plus short sequential scans over about 20.6 `IS` rows per filing on average instead of random probes into an 805 MiB structure."
+}

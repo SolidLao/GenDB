@@ -1,0 +1,97 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "classify_shipdate_blocks",
+    "scan_full_pass_blocks",
+    "scan_mixed_blocks",
+    "aggregate_by_returnflag_linestatus",
+    "sort_groups"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY",
+      "selectivity": 0.985939
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential by 131072-row blocks; classify each block from shipdate zone map into full-pass (max<=cutoff), mixed (min<=cutoff<max), or skip (min>cutoff)"
+  },
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "per-thread uint8_t key_to_slot[65536] initialized to 0xFF plus compact AggState slots[8] and populated_keys[8]; separate block lists for full-pass and mixed shipdate blocks"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "classify each 131072-row block into full-pass, mixed, or skip so full-pass blocks avoid row-level shipdate checks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The root cause is wasted predicate work in the scan hot loop: the current plan still loads l_shipdate and evaluates a row-level cutoff branch for essentially every row even though selectivity is 98.5939% and the grouping state already fits comfortably in cache. Strategy category C: use the existing shipdate zone map not to prune by min_value, which failed previously, but to classify 131072-row blocks by max/min so blocks with max_value <= cutoff run through a no-predicate fast path that never touches l_shipdate, only mixed blocks perform row checks, and only min_value > cutoff blocks are skipped entirely; keep the cache-resident direct key-to-slot aggregation and parallelize over block morsels to preserve sequential access while reducing per-row work.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(gendb::date_str_to_epoch_days(\"1998-12-01\"), -90)",
+    "revenue_formula": "disc_price * (1.0L + static_cast<long double>(tax)"
+  }
+}

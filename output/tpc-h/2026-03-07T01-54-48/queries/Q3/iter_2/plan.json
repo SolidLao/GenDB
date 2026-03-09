@@ -1,0 +1,141 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders(filtered: o_orderdate < 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 330000,
+      "notes": "Build c_custkey bitset by sequential scan of customer columns, then one sequential zonemap-pruned orders scan to emit qualifying orders projected as (o_orderkey,o_orderdate,o_shippriority) in o_orderkey order."
+    },
+    {
+      "build": "orders_after_customer_date(sorted by o_orderkey)",
+      "probe": "lineitem(filtered: l_shipdate > 9204, sorted by l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1461923,
+      "notes": "Use key-range partitioned merge join on sorted keys (o_orderkey=l_orderkey); avoid runtime hash-table build/probe and avoid random index lookups."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.535
+    }
+  ],
+  "scan": {
+    "table": "customer+orders+lineitem",
+    "rows": 76486052,
+    "columns": [
+      {
+        "name": "c_mktsegment",
+        "file": "customer/c_mktsegment.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "flat_array",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is physical-implementation mismatch (Category B): iteration 1 regressed because it replaced sequential access with cache-miss-heavy random probes into very large hash indexes, while the baseline still spent most time in runtime hash-build/atomic update paths. The revised plan switches to fully sequential processing that exploits sort order on o_orderkey/l_orderkey: build a customer bitset via customer column scan, scan orders once with date+customer filters to produce sorted qualifying orders, then execute a key-range partitioned merge join against sorted lineitem with local direct-array revenue accumulation and final top-k merge, eliminating runtime hash join structures and hot-path atomics.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,97 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_usd_code",
+    "build_filtered_adsh_to_subrow",
+    "build_dense_group_ids_for_filtered_subrows",
+    "scan_num_with_uom_zone_pruning",
+    "parallel_accumulate_thread_local_subrow_sums",
+    "reduce_thread_local_subrow_sums",
+    "direct_array_rollup_cik_and_name_cik",
+    "finalize_avg_sub_total",
+    "apply_having",
+    "topk_total_value_desc",
+    "decode_name"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num(filtered uom='USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Build one filtered shared adsh_id->sub_row lookup and dense group-id arrays once, then stream num and aggregate through those compact ids."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.317
+    },
+    {
+      "table": "joined(num,sub)",
+      "predicate": "n.adsh = s.adsh AND s.fy = 2022 after n.uom = 'USD'",
+      "selectivity": 0.251
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(shared adsh id -> filtered sub_row or kEmpty32), plus dense arrays filtered_sub_row -> cik_group_id and filtered_sub_row -> outer_group_id",
+    "fact_join": "direct_array(filtered adsh_to_subrow)",
+    "aggregation": "thread_local direct_array(filtered_sub_row -> partial sum) with one array per worker, reduced once; final cik and (name_id,cik) rollups use dense direct_array totals indexed by precomputed compact group ids"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category C. Iteration 1 still performs substantial wasted work by materializing a dense block_count x filtered_sub_rows accumulation matrix, which is about 86 MB for 395 num blocks and 27,333 qualifying sub rows, then zero-initializing and reducing that oversized structure even though only 64 workers contribute. Replace it with one cache-sized dense sum array per worker (about 27,333 x 8 bytes = 219 KB each, fitting in L2 and only about 14 MB total across 64 threads), and precompute compact dense ids for cik and (name_id,cik) so the post-scan threshold and outer grouping are direct-array rollups instead of hash aggregation. This eliminates excess page faults, shrinks the reduction working set into LLC, and keeps the entire plan as sequential fact scan plus dense-array lookups.",
+  "correctness_anchors": {}
+}

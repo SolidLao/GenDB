@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GenDB — LLM-Powered Generative Query Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Reset & Base ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #fafafa;
+  color: #23272f;
+  line-height: 1.65;
+  overflow-x: hidden;
+}
+a { color: #6366f1; text-decoration: none; transition: color 0.2s; }
+a:hover { color: #4f46e5; }
+
+/* ── Utility ─────────────────────────────────────────────── */
+.container { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+.mono { font-family: 'JetBrains Mono', monospace; }
+.dim { color: #8b8fa3; }
+.tag {
+  display: inline-block; padding: 5px 14px; border-radius: 20px;
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.tag-indigo { background: #eef2ff; color: #6366f1; }
+.tag-emerald { background: #ecfdf5; color: #059669; }
+.tag-amber { background: #fffbeb; color: #d97706; }
+.tag-rose { background: #fff1f2; color: #e11d48; }
+
+/* ── Nav ─────────────────────────────────────────────────── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: rgba(250,250,250,0.85); backdrop-filter: blur(20px) saturate(1.5);
+  border-bottom: 1px solid #e5e7eb;
+}
+nav .container {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 60px;
+}
+nav .logo { font-weight: 900; font-size: 1.2rem; letter-spacing: -0.03em; color: #23272f; }
+nav .logo span { color: #6366f1; }
+nav .links { display: flex; gap: 32px; }
+nav .links a { color: #6b7280; font-size: 0.9rem; font-weight: 500; transition: color 0.15s; }
+nav .links a:hover { color: #23272f; }
+
+/* ── Hero ────────────────────────────────────────────────── */
+.hero {
+  padding: 150px 0 90px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(232,234,255,0.45) 0%, #fafafa 100%);
+}
+.hero::before {
+  content: '';
+  position: absolute; top: -200px; left: 50%; transform: translateX(-50%);
+  width: 1000px; height: 1000px;
+  background: radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 60%);
+  pointer-events: none;
+}
+.hero h1 {
+  font-size: 3.8rem; font-weight: 900; letter-spacing: -0.035em;
+  line-height: 1.08; margin-bottom: 24px;
+  background: linear-gradient(135deg, #23272f 0%, #6366f1 55%, #059669 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero .subtitle {
+  font-size: 1.2rem; color: #6b7280; max-width: 620px; margin: 0 auto 40px;
+  line-height: 1.75;
+}
+.hero-stats {
+  display: flex; justify-content: center; gap: 56px; flex-wrap: wrap;
+  margin-top: 48px;
+}
+.hero-stat { text-align: center; }
+.hero-stat .number {
+  font-size: 2.6rem; font-weight: 900; letter-spacing: -0.03em;
+}
+.hero-stat .number.c-emerald { color: #059669; }
+.hero-stat .number.c-indigo { color: #6366f1; }
+.hero-stat .number.c-amber { color: #d97706; }
+.hero-stat .label { font-size: 0.85rem; color: #8b8fa3; margin-top: 6px; }
+.hero-buttons { display: flex; gap: 14px; justify-content: center; margin-top: 44px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 13px 28px; border-radius: 11px; font-weight: 600; font-size: 0.95rem;
+  transition: all 0.2s; border: none; cursor: pointer;
+}
+.btn-primary { background: #6366f1; color: #fff; box-shadow: 0 2px 8px rgba(99,102,241,0.25); }
+.btn-primary:hover { background: #4f46e5; color: #fff; box-shadow: 0 4px 16px rgba(99,102,241,0.3); }
+.btn-secondary {
+  background: #fff; color: #23272f;
+  border: 1px solid #d1d5db; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.btn-secondary:hover { background: #f5f5f5; color: #23272f; border-color: #b0b5c0; }
+
+/* ── Sections ────────────────────────────────────────────── */
+section { padding: 88px 0; }
+section h2 {
+  font-size: 2.2rem; font-weight: 800; letter-spacing: -0.025em;
+  margin-bottom: 16px; color: #23272f;
+}
+section .section-sub {
+  color: #6b7280; font-size: 1.1rem; max-width: 680px; margin-bottom: 52px;
+  line-height: 1.7;
+}
+
+/* ── What is GenDB ───────────────────────────────────────── */
+.pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+  margin-top: 44px;
+}
+.pipeline-step {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 24px 18px;
+  text-align: center;
+  transition: all 0.3s;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+}
+.pipeline-step:hover {
+  border-color: #c7c9ff;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(99,102,241,0.08);
+}
+.pipeline-step .step-num {
+  font-size: 0.7rem; font-weight: 700; color: #6366f1;
+  text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px;
+}
+.pipeline-step h4 { font-size: 0.92rem; font-weight: 700; margin-bottom: 8px; color: #23272f; }
+.pipeline-step p { font-size: 0.78rem; color: #8b8fa3; line-height: 1.55; }
+
+/* ── Why GenDB cards ─────────────────────────────────────── */
+.why-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.why-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 32px 26px;
+  transition: all 0.3s;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+}
+.why-card:hover {
+  border-color: #c7c9ff;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(99,102,241,0.08);
+}
+.why-card .icon {
+  width: 44px; height: 44px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.3rem; margin-bottom: 18px;
+}
+.why-card h3 { font-size: 1.12rem; font-weight: 700; margin-bottom: 10px; color: #23272f; }
+.why-card p { font-size: 0.95rem; color: #6b7280; line-height: 1.65; }
+
+/* ── Leaderboard ─────────────────────────────────────────── */
+.leaderboard-section { background: linear-gradient(180deg, rgba(252,231,243,0.4) 0%, #f7f7f8 40%, #f7f7f8 100%); }
+.workload-tabs {
+  display: flex; gap: 10px; margin-bottom: 36px;
+}
+.workload-tab {
+  padding: 10px 24px; border-radius: 10px; font-size: 0.9rem; font-weight: 600;
+  cursor: pointer; transition: all 0.2s;
+  background: #fff; color: #6b7280;
+  border: 1px solid #e5e7eb;
+}
+.workload-tab.active {
+  background: #6366f1; color: #fff;
+  border-color: #6366f1;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.25);
+}
+.workload-tab:hover:not(.active) { background: #eef2ff; color: #4f46e5; border-color: #c7c9ff; }
+.leaderboard-panel { display: none; }
+.leaderboard-panel.active { display: block; }
+
+/* ── Table ───────────────────────────────────────────────── */
+.lb-table-wrap {
+  border-radius: 16px; overflow: hidden;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+table.lb {
+  width: 100%; border-collapse: collapse;
+  font-size: 0.95rem;
+}
+table.lb thead th {
+  padding: 16px 18px; text-align: left;
+  font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: #8b8fa3;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+table.lb thead th:first-child { width: 52px; text-align: center; }
+table.lb tbody tr {
+  border-bottom: 1px solid #f0f1f3;
+  transition: background 0.15s;
+}
+table.lb tbody tr:last-child { border-bottom: none; }
+table.lb tbody tr:hover { background: #f8f8ff; }
+table.lb td {
+  padding: 16px 18px; vertical-align: middle;
+}
+table.lb td:first-child { text-align: center; font-weight: 800; font-size: 0.95rem; color: #b0b5c0; }
+table.lb .rank-1 { color: #ca8a04; }
+table.lb .rank-2 { color: #78716c; }
+table.lb .rank-3 { color: #c2410c; }
+table.lb .system-name {
+  font-weight: 600; font-size: 0.95rem;
+  display: flex; align-items: center; gap: 10px;
+}
+table.lb .system-name .sys-tag {
+  font-size: 0.68rem; padding: 3px 9px; border-radius: 6px;
+  font-weight: 700;
+}
+table.lb .time-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 0.95rem; }
+table.lb .slowdown {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; font-weight: 600;
+}
+table.lb .bar-cell { width: 28%; }
+.bar-bg {
+  height: 10px; border-radius: 5px; background: #f0f1f3;
+  overflow: hidden; position: relative;
+}
+.bar-fill {
+  height: 100%; border-radius: 5px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* GenDB rows highlight */
+table.lb tbody tr.gendb-row {
+  background: #f8f8ff;
+}
+table.lb tbody tr.gendb-row:hover {
+  background: #f0f0ff;
+}
+table.lb tbody tr.gendb-best {
+  background: #f0fdf8;
+}
+table.lb tbody tr.gendb-best:hover {
+  background: #e6faf2;
+}
+
+/* ── Model Comparison ────────────────────────────────────── */
+.model-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px;
+  margin-top: 36px;
+}
+.model-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 26px 22px;
+  transition: all 0.3s;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+}
+.model-card:hover {
+  border-color: #c7c9ff;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(99,102,241,0.08);
+}
+.model-card .model-rank {
+  font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 8px;
+}
+.model-card .model-name { font-weight: 800; font-size: 1.1rem; margin-bottom: 4px; color: #23272f; }
+.model-card .model-provider { font-size: 0.82rem; color: #8b8fa3; margin-bottom: 18px; }
+.model-metric {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 8px 0;
+  border-top: 1px solid #f0f1f3;
+}
+.model-metric:first-of-type { border-top: none; }
+.model-metric .metric-label { font-size: 0.85rem; color: #8b8fa3; }
+.model-metric .metric-value { font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 0.95rem; color: #23272f; }
+
+/* ── Roadmap ─────────────────────────────────────────────── */
+.roadmap-section { background: linear-gradient(180deg, rgba(238,242,255,0.4) 0%, rgba(240,253,248,0.4) 100%); }
+.roadmap-principles {
+  display: flex; gap: 32px; margin-bottom: 52px; flex-wrap: wrap;
+}
+.roadmap-principle {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 0.95rem; font-weight: 600; color: #23272f;
+}
+.roadmap-principle .rp-dot {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+}
+.roadmap-timeline {
+  position: relative; padding-left: 36px;
+}
+.roadmap-timeline::before {
+  content: ''; position: absolute; left: 11px; top: 8px; bottom: 8px;
+  width: 2px; background: linear-gradient(180deg, #6366f1, #059669);
+  border-radius: 1px;
+}
+.roadmap-item {
+  position: relative; padding: 0 0 40px 0;
+}
+.roadmap-item:last-child { padding-bottom: 0; }
+.roadmap-item::before {
+  content: ''; position: absolute; left: -30px; top: 6px;
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 3px solid #6366f1; background: #fff;
+}
+.roadmap-item.done::before {
+  background: #059669; border-color: #059669;
+}
+.roadmap-item.future::before {
+  background: #fff; border-color: #d1d5db;
+}
+.roadmap-item .ri-label {
+  font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 4px;
+}
+.roadmap-item .ri-label.done { color: #059669; }
+.roadmap-item .ri-label.next { color: #6366f1; }
+.roadmap-item .ri-label.planned { color: #8b8fa3; }
+.roadmap-item h4 { font-size: 1.05rem; font-weight: 700; color: #23272f; margin-bottom: 4px; }
+.roadmap-item p { font-size: 0.92rem; color: #6b7280; line-height: 1.6; max-width: 600px; }
+
+/* ── Team ───────────────────────────────────────────────── */
+.team-member {
+  text-align: center; text-decoration: none; display: block;
+  transition: transform 0.3s;
+}
+.team-member:hover { transform: translateY(-4px); }
+.team-member img {
+  width: 120px; height: 120px; border-radius: 50%; object-fit: cover;
+  border: 3px solid #e5e7eb; margin-bottom: 14px;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+.team-member:hover img {
+  border-color: #c7c9ff;
+  box-shadow: 0 6px 20px rgba(99,102,241,0.12);
+}
+.team-member h4 { font-size: 1.08rem; font-weight: 700; color: #23272f; margin-bottom: 4px; }
+.team-member p { font-size: 0.88rem; color: #8b8fa3; }
+
+/* ── Footer ──────────────────────────────────────────────── */
+footer {
+  padding: 48px 0; border-top: 1px solid #e5e7eb;
+  text-align: center; color: #8b8fa3; font-size: 0.88rem;
+}
+footer a { color: #6b7280; }
+footer a:hover { color: #23272f; }
+
+/* ── Responsive ──────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .hero h1 { font-size: 2.6rem; }
+  .pipeline-grid { grid-template-columns: repeat(3, 1fr); }
+  .why-grid { grid-template-columns: 1fr; }
+  .model-grid { grid-template-columns: repeat(2, 1fr); }
+  .hero-stats { gap: 28px; }
+}
+@media (max-width: 600px) {
+  .hero h1 { font-size: 2rem; }
+  .pipeline-grid { grid-template-columns: 1fr 1fr; }
+  .model-grid { grid-template-columns: 1fr; }
+  nav .links { gap: 16px; }
+  nav .links a { font-size: 0.8rem; }
+  .hero-stats { flex-direction: column; gap: 16px; }
+  .roadmap-principles { flex-direction: column; gap: 16px; }
+}
+
+/* ── Animations ──────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  opacity: 0; animation: fadeInUp 0.6s ease forwards;
+}
+.fade-in-d1 { animation-delay: 0.1s; }
+.fade-in-d2 { animation-delay: 0.2s; }
+.fade-in-d3 { animation-delay: 0.3s; }
+.fade-in-d4 { animation-delay: 0.4s; }
+
+/* Divider */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #d1d5db, transparent);
+  margin: 0 auto; max-width: 600px;
+}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="container">
+    <a href="#" class="logo" style="text-decoration:none;"><span>Gen</span>DB</a>
+    <div class="links">
+      <a href="#about">About</a>
+      <a href="#why">Why</a>
+      <a href="#leaderboard">Leaderboard</a>
+      <a href="#models">Models</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#team">Team</a>
+      <a href="https://arxiv.org/abs/2603.02081">Paper</a>
+      <a href="https://github.com/SolidLao/GenDB">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <h1 class="fade-in">The Next Generation of<br>Query Processing</h1>
+    <p class="subtitle fade-in fade-in-d1">
+      GenDB is a Generative Query Engine that uses LLM agents to generate instance-optimized
+      query execution code, tailored to your specific data, workloads, and hardware.
+    </p>
+    <div class="hero-buttons fade-in fade-in-d2">
+      <a href="https://arxiv.org/abs/2603.02081" class="btn btn-primary">Read the Paper &rarr;</a>
+      <a href="https://github.com/SolidLao/GenDB" class="btn btn-secondary">View on GitHub</a>
+    </div>
+    <div class="hero-stats fade-in fade-in-d3">
+      <div class="hero-stat">
+        <div class="number c-emerald">2.4x</div>
+        <div class="label">faster than DuckDB on TPC-H</div>
+      </div>
+      <div class="hero-stat">
+        <div class="number c-indigo">6.8x</div>
+        <div class="label">faster than DuckDB on SEC-EDGAR</div>
+      </div>
+      <div class="hero-stat">
+        <div class="number c-amber">280x</div>
+        <div class="label">faster than PostgreSQL</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- About -->
+<section id="about" style="background: linear-gradient(180deg, #fafafa 0%, rgba(236,253,245,0.45) 100%);">
+  <div class="container">
+    <span class="tag tag-emerald">What is GenDB?</span>
+    <h2 style="margin-top: 16px;">Synthesized, Not Engineered</h2>
+    <p class="section-sub">
+      Five specialized LLM agents collaborate through a structured pipeline to generate
+      optimized storage structures, indexes, and standalone native executables &mdash; all tailored to the specific data, workload, and hardware.
+    </p>
+    <div class="pipeline-grid">
+      <div class="pipeline-step fade-in">
+        <div class="step-num">Agent 1</div>
+        <h4>Workload Analyzer</h4>
+        <p>Profiles hardware, samples data, extracts workload characteristics</p>
+      </div>
+      <div class="pipeline-step fade-in fade-in-d1">
+        <div class="step-num">Agent 2</div>
+        <h4>Storage Designer</h4>
+        <p>Designs layouts with encoding, compression, indexes, and zone maps</p>
+      </div>
+      <div class="pipeline-step fade-in fade-in-d2">
+        <div class="step-num">Agent 3</div>
+        <h4>Query Planner</h4>
+        <p>Generates resource-aware execution plans adapted to data and hardware</p>
+      </div>
+      <div class="pipeline-step fade-in fade-in-d3">
+        <div class="step-num">Agent 4</div>
+        <h4>Code Generator</h4>
+        <p>Implements plans as optimized native code with SIMD and parallelism</p>
+      </div>
+      <div class="pipeline-step fade-in fade-in-d4">
+        <div class="step-num">Agent 5</div>
+        <h4>Query Optimizer</h4>
+        <p>Iteratively refines code using runtime profiling feedback</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Why -->
+<section id="why" style="background: linear-gradient(180deg, rgba(255,251,235,0.45) 0%, #fafafa 100%);">
+  <div class="container">
+    <span class="tag tag-amber">Why GenDB?</span>
+    <h2 style="margin-top: 16px;">A Third Option</h2>
+
+    <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 36px 32px; margin-bottom: 48px; box-shadow: 0 1px 4px rgba(0,0,0,0.03);">
+      <p style="font-size: 1.05rem; color: #6b7280; line-height: 1.8; margin-bottom: 20px;">
+        Today, every new use case demands either a painful extension or an entirely new system:
+      </p>
+      <div style="display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 24px;">
+        <div style="flex: 1; min-width: 280px;">
+          <p style="font-size: 0.85rem; font-weight: 700; color: #e11d48; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Option 1 &mdash; Extend an existing system</p>
+          <p style="font-size: 0.95rem; color: #6b7280; line-height: 1.65;">
+            PostgreSQL &rarr; PostGIS, TimescaleDB, pgvector, Citus, pg_duckdb, AGE &hellip;<br>
+            Each extension <a href="https://www.vldb.org/pvldb/vol18/p1962-kim.pdf" style="color:#6366f1;">fights the host system&rsquo;s architectural constraints</a>.
+          </p>
+        </div>
+        <div style="flex: 1; min-width: 280px;">
+          <p style="font-size: 0.85rem; font-weight: 700; color: #e11d48; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Option 2 &mdash; Build a new system</p>
+          <p style="font-size: 0.95rem; color: #6b7280; line-height: 1.65;">
+            DuckDB, Umbra, ClickHouse, Milvus, Pinecone, InfluxDB, Neo4j &hellip;<br>
+            Each requires years of engineering and significant monetary costs.
+          </p>
+        </div>
+      </div>
+      <div style="border-top: 2px solid #ecfdf5; padding-top: 20px;">
+        <p style="font-size: 0.85rem; font-weight: 700; color: #059669; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Option 3 &mdash; Generate</p>
+        <p style="font-size: 1.05rem; color: #23272f; line-height: 1.7; font-weight: 500;">
+          Use LLMs to <strong>generate per-query execution code</strong>. No extension wrestling, no multi-year engineering. New techniques become reachable through prompt updates.
+        </p>
+      </div>
+    </div>
+
+    <div class="why-grid">
+      <div class="why-card">
+        <div class="icon" style="background: #ecfdf5;">
+          <span style="color: #059669;">&#9889;</span>
+        </div>
+        <h3>Performance</h3>
+        <p>Instance-optimized code exploits exact data distributions, group cardinalities, join selectivities, and cache topology. No general-purpose engine can match this.</p>
+      </div>
+      <div class="why-card">
+        <div class="icon" style="background: #eef2ff;">
+          <span style="color: #6366f1;">&#9881;</span>
+        </div>
+        <h3>Extensibility</h3>
+        <p>Integrating new techniques requires prompting, not re-engineering. Semantic queries, GPU-native code, learned indexes &mdash; all reachable through prompt updates.</p>
+      </div>
+      <div class="why-card">
+        <div class="icon" style="background: #fffbeb;">
+          <span style="color: #d97706;">&#36;</span>
+        </div>
+        <h3>Economics</h3>
+        <p><a href="https://www.vldb.org/pvldb/vol17/p3694-saxena.pdf" style="color:#6366f1;">80% of queries repeat in 50% of clusters</a>. Generation cost is amortized over many executions, making it cost-effective for recurring analytical workloads.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Leaderboard -->
+<section id="leaderboard" class="leaderboard-section">
+  <div class="container">
+    <span class="tag tag-rose">Leaderboard</span>
+    <h2 style="margin-top: 16px;">Performance Rankings</h2>
+    <p class="section-sub">
+      Total query execution time across all queries. GenDB variants use different LLM backbone models.
+      All systems run on identical hardware with full parallelism enabled.
+    </p>
+
+    <div class="workload-tabs">
+      <div class="workload-tab active" onclick="showTab('tpch')">TPC-H (SF10, ~10GB)</div>
+      <div class="workload-tab" onclick="showTab('edgar')">SEC-EDGAR (3yr, ~5GB)</div>
+    </div>
+
+    <!-- TPC-H -->
+    <div class="leaderboard-panel active" id="panel-tpch">
+      <div class="lb-table-wrap">
+        <table class="lb">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>System</th>
+              <th>Total Time</th>
+              <th>vs. Best GenDB</th>
+              <th class="bar-cell">Relative</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-tpch"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SEC-EDGAR -->
+    <div class="leaderboard-panel" id="panel-edgar">
+      <div class="lb-table-wrap">
+        <table class="lb">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>System</th>
+              <th>Total Time</th>
+              <th>vs. Best GenDB</th>
+              <th class="bar-cell">Relative</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-edgar"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Model Comparison -->
+<section id="models" style="background: linear-gradient(180deg, #f7f7f8 0%, rgba(238,242,255,0.45) 100%);">
+  <div class="container">
+    <span class="tag tag-indigo">Model Comparison</span>
+    <h2 style="margin-top: 16px;">Generation Cost &amp; Speed</h2>
+    <p class="section-sub">
+      Different LLM backbone models offer different trade-offs between generated code quality, generation time, and cost. Ranked by average query execution time.
+    </p>
+    <div class="model-grid" id="model-cards"></div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Roadmap -->
+<section id="roadmap" class="roadmap-section">
+  <div class="container">
+    <span class="tag tag-indigo">Roadmap</span>
+    <h2 style="margin-top: 16px;">What&rsquo;s Next</h2>
+    <p class="section-sub">
+      GenDB is under active development. Every step follows three principles:
+    </p>
+
+    <div class="roadmap-principles">
+      <div class="roadmap-principle">
+        <div class="rp-dot" style="background: #059669;"></div>
+        Higher Quality
+      </div>
+      <div class="roadmap-principle">
+        <div class="rp-dot" style="background: #6366f1;"></div>
+        More Robust
+      </div>
+      <div class="roadmap-principle">
+        <div class="rp-dot" style="background: #d97706;"></div>
+        Lower Cost
+      </div>
+    </div>
+
+    <div class="roadmap-timeline">
+      <div class="roadmap-item done">
+        <div class="ri-label done">Completed</div>
+        <h4>OLAP Workloads</h4>
+        <p>Multi-agent pipeline for analytical queries. Evaluated on TPC-H and SEC-EDGAR, outperforming DuckDB, Umbra, ClickHouse, MonetDB, and PostgreSQL.</p>
+      </div>
+      <div class="roadmap-item">
+        <div class="ri-label next">In Progress</div>
+        <h4>Self-Evolving Agent Memory</h4>
+        <p>Agents learn from past runs, accumulate optimization experience, and improve generation quality over time &mdash; without retraining the underlying LLMs.</p>
+      </div>
+      <div class="roadmap-item future">
+        <div class="ri-label planned">Planned</div>
+        <h4>GPU-Native Code Generation</h4>
+        <p>Generate CUDA and GPU-accelerated code targeting libcudf for cost-efficient GPU analytics, not just CPU.</p>
+      </div>
+      <div class="roadmap-item future">
+        <div class="ri-label planned">Planned</div>
+        <h4>Semantic Query Processing</h4>
+        <p>Generate code for multimodal data &mdash; images, audio, text &mdash; with AI-powered operators, moving beyond SQL&rsquo;s relational model.</p>
+      </div>
+      <div class="roadmap-item future">
+        <div class="ri-label planned">Planned</div>
+        <h4>&hellip; and more</h4>
+        <p>Reusable operators across queries, query template generation, hybrid execution with traditional DBMS, and further cost reduction as LLMs become faster and cheaper.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Team -->
+<section id="team" style="padding: 72px 0;">
+  <div class="container" style="text-align: center;">
+    <span class="tag tag-emerald">Team</span>
+    <h2 style="margin-top: 16px;">GenDB Team</h2>
+    <p class="section-sub" style="margin-left: auto; margin-right: auto;">
+      Built at Cornell University.
+    </p>
+    <div style="display: flex; justify-content: center; gap: 56px; flex-wrap: wrap;">
+      <a href="https://solidlao.github.io/" class="team-member">
+        <img src="assets/jiale.jpg" alt="Jiale Lao">
+        <h4>Jiale Lao</h4>
+        <p>Cornell University</p>
+      </a>
+      <a href="https://itrummer.github.io/" class="team-member">
+        <img src="assets/immanuel-trummer.png" alt="Immanuel Trummer">
+        <h4>Immanuel Trummer</h4>
+        <p>Cornell University</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>GenDB &mdash; Jiale Lao &amp; Immanuel Trummer, Cornell University</p>
+    <p style="margin-top: 8px;">
+      <a href="https://arxiv.org/abs/2603.02081">Paper</a> &nbsp;&middot;&nbsp;
+      <a href="https://github.com/SolidLao/GenDB">GitHub</a>
+    </p>
+  </div>
+</footer>
+
+<script>
+// ── Data ──────────────────────────────────────────────────────────────────
+const TPCH = [
+  { name: "GenDB", model: "Opus 4.6", type: "gendb-best", ms: 246.0, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Sonnet 4.6", type: "gendb", ms: 285.3, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.4", type: "gendb", ms: 374.2, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.3 Codex", type: "gendb", ms: 522.9, tag: "gendb", tagColor: "emerald" },
+  { name: "Umbra", model: null, type: "dbms", ms: 589.6, tag: "dbms", tagColor: "indigo" },
+  { name: "DuckDB", model: null, type: "dbms", ms: 594.3, tag: "dbms", tagColor: "indigo" },
+  { name: "MonetDB", model: null, type: "dbms", ms: 1416.3, tag: "dbms", tagColor: "amber" },
+  { name: "ClickHouse", model: null, type: "dbms", ms: 2407.3, tag: "dbms", tagColor: "amber" },
+  { name: "PostgreSQL", model: null, type: "dbms", ms: 85550.6, tag: "dbms", tagColor: "rose" },
+];
+
+const EDGAR = [
+  { name: "GenDB", model: "Opus 4.6", type: "gendb-best", ms: 241.5, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.4", type: "gendb", ms: 456.8, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.3 Codex", type: "gendb", ms: 659.0, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Sonnet 4.6", type: "gendb", ms: 830.4, tag: "gendb", tagColor: "emerald" },
+  { name: "Umbra", model: null, type: "dbms", ms: 1280.4, tag: "dbms", tagColor: "indigo" },
+  { name: "DuckDB", model: null, type: "dbms", ms: 1639.2, tag: "dbms", tagColor: "indigo" },
+  { name: "ClickHouse", model: null, type: "dbms", ms: 2046.6, tag: "dbms", tagColor: "amber" },
+  { name: "MonetDB", model: null, type: "dbms", ms: 29713.4, tag: "dbms", tagColor: "rose" },
+  { name: "PostgreSQL", model: null, type: "dbms", ms: 67672.0, tag: "dbms", tagColor: "rose" },
+];
+
+// Ranked by avg query time (best to worst)
+const MODELS = [
+  {
+    name: "Opus 4.6", provider: "Anthropic (Claude)",
+    color: "#B2182B",
+    tpch: { ms: 246.0, cost: 27.98, time: 78.6 },
+    edgar: { ms: 241.5, cost: 41.85, time: 86.8 },
+  },
+  {
+    name: "GPT-5.4", provider: "OpenAI (Codex)",
+    color: "#2166AC",
+    tpch: { ms: 374.2, cost: 12.61, time: 56.1 },
+    edgar: { ms: 456.8, cost: 32.08, time: 69.8 },
+  },
+  {
+    name: "Sonnet 4.6", provider: "Anthropic (Claude)",
+    color: "#F4A582",
+    tpch: { ms: 285.3, cost: 62.46, time: 182.2 },
+    edgar: { ms: 830.4, cost: 55.44, time: 244.2 },
+  },
+  {
+    name: "GPT-5.3 Codex", provider: "OpenAI (Codex)",
+    color: "#92C5DE",
+    tpch: { ms: 522.9, cost: 10.79, time: 68.7 },
+    edgar: { ms: 659.0, cost: 21.19, time: 69.2 },
+  },
+];
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+function fmt(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
+  return ms.toFixed(0) + "ms";
+}
+
+function buildLeaderboard(data, tbodyId) {
+  const tbody = document.getElementById(tbodyId);
+  const bestGendb = data.find(d => d.type === "gendb-best");
+  const baseMs = bestGendb ? bestGendb.ms : data[0].ms;
+
+  // Linear bar: ratio vs best GenDB, capped at 10x so differences are visible
+  const CAP = 10;
+
+  data.forEach((row, i) => {
+    const rank = i + 1;
+    const ratio = row.ms / baseMs;
+    const barPct = Math.min(ratio / CAP * 100, 100);
+    const isGendb = row.type.startsWith("gendb");
+    const isBest = row.type === "gendb-best";
+
+    const barColor = isGendb ? "#059669" : "#6366f1";
+    let ratioStr;
+    if (ratio <= 1.005) {
+      ratioStr = '<span style="color:#059669; font-weight:700;">1.0x (baseline)</span>';
+    } else {
+      const color = ratio <= 3 ? "#d97706" : "#e11d48";
+      ratioStr = `<span style="color:${color}">${ratio.toFixed(1)}x slower</span>`;
+    }
+
+    const rankClass = rank <= 3 ? ` rank-${rank}` : "";
+    const rowClass = isBest ? "gendb-best" : (isGendb ? "gendb-row" : "");
+
+    const sysLabel = row.model
+      ? `${row.name} <span class="dim" style="font-weight:400; font-size:0.88rem;">(${row.model})</span>`
+      : row.name;
+
+    const tagMap = { emerald: "tag-emerald", indigo: "tag-indigo", amber: "tag-amber", rose: "tag-rose" };
+    const tagLabel = isGendb ? "GenDB" : "DBMS";
+    const tagHtml = `<span class="sys-tag ${tagMap[row.tagColor]}">${tagLabel}</span>`;
+
+    tbody.innerHTML += `
+      <tr class="${rowClass}">
+        <td class="${rankClass}">${rank}</td>
+        <td><div class="system-name">${tagHtml} ${sysLabel}</div></td>
+        <td class="time-val">${fmt(row.ms)}</td>
+        <td class="slowdown">${ratioStr}</td>
+        <td class="bar-cell">
+          <div class="bar-bg">
+            <div class="bar-fill" style="width:${barPct}%; background:${barColor};"></div>
+          </div>
+        </td>
+      </tr>`;
+  });
+}
+
+function buildModelCards() {
+  const container = document.getElementById("model-cards");
+  const rankLabels = ["#1 Best Performance", "#2", "#3", "#4"];
+  const rankColors = ["#059669", "#6366f1", "#d97706", "#8b8fa3"];
+  MODELS.forEach((m, i) => {
+    const avgMs = (m.tpch.ms + m.edgar.ms) / 2;
+    container.innerHTML += `
+      <div class="model-card" style="border-top: 3px solid ${m.color};">
+        <div class="model-rank" style="color: ${rankColors[i]};">${rankLabels[i]}</div>
+        <div class="model-name">${m.name}</div>
+        <div class="model-provider">${m.provider}</div>
+        <div class="model-metric">
+          <span class="metric-label">TPC-H</span>
+          <span class="metric-value">${fmt(m.tpch.ms)}</span>
+        </div>
+        <div class="model-metric">
+          <span class="metric-label">SEC-EDGAR</span>
+          <span class="metric-value">${fmt(m.edgar.ms)}</span>
+        </div>
+        <div class="model-metric">
+          <span class="metric-label">Avg Query Time</span>
+          <span class="metric-value">${fmt(avgMs)}</span>
+        </div>
+        <div class="model-metric">
+          <span class="metric-label">Avg Gen. Time</span>
+          <span class="metric-value">${((m.tpch.time + m.edgar.time) / 2).toFixed(0)} min</span>
+        </div>
+        <div class="model-metric">
+          <span class="metric-label">Avg Gen. Cost</span>
+          <span class="metric-value">$${((m.tpch.cost + m.edgar.cost) / 2).toFixed(0)}</span>
+        </div>
+      </div>`;
+  });
+}
+
+function showTab(id) {
+  document.querySelectorAll('.workload-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.leaderboard-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// Init
+buildLeaderboard(TPCH, "tbody-tpch");
+buildLeaderboard(EDGAR, "tbody-edgar");
+buildModelCards();
+</script>
+</body>
+</html>

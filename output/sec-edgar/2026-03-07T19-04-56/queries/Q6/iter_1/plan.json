@@ -1,0 +1,77 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.plabel.dict",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/pre.plabel.dict/codes.bin",
+        "codes_format": "uint32_t[9600799]",
+        "dict_offsets": "column_versions/pre.plabel.dict/dict.offsets",
+        "dict_offsets_format": "uint64_t[698149]",
+        "dict_data": "column_versions/pre.plabel.dict/dict.data",
+        "dict_data_format": "raw string bytes"
+      },
+      "usage": "mmap codes.bin; use plabel_codes[pre_row] as integer group key component instead of varlen string lookup. Only decode plabel strings for the final 200 output rows using dict_offsets + dict_data."
+    }
+  ],
+  "pipeline": ["filter_sub_fy2023", "build_name_id_map", "find_dict_codes", "build_pre_hash_map_for_IS", "scan_num_usd_range", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "sub(filtered by fy=2023)",
+      "probe": "num(USD range)",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 16200,
+      "notes": "Bitset indexed by sub_fk for O(1) filter during num scan"
+    },
+    {
+      "build": "pre(filtered by stmt='IS')",
+      "probe": "num(USD range, fy2023-filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1060000,
+      "notes": "Build hash map from IS-filtered pre rows keyed on (sub_fk, tag_code, version_code) → plabel_code (uint32_t from dict-encoded plabel). No string operations needed."
+    }
+  ],
+  "filters": [
+    {"table": "sub", "predicate": "fy == 2023", "selectivity": 0.188},
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range"},
+    {"table": "num", "predicate": "!isnan(value)", "selectivity": 0.95},
+    {"table": "pre", "predicate": "stmt = 'IS'", "selectivity": 0.11, "method": "stmt_offsets_range"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33250000,
+    "columns": [
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "fy2023_mask": "bitset(86135) — O(1) sub_fk filter",
+    "sub_fk_to_name_id": "direct_array(uint32_t, 86135) — maps sub_fk to deduplicated name_id",
+    "pre_hash_map": "compact_hash_multimap<(sub_fk:u32, tag_code:u32, version_code:u32) → plabel_code:u32>, bucket-chain layout, ~1.06M entries. Entry struct: {sub_fk, tag_code, version_code, plabel_code} all uint32_t. Use same hashKey3 function. Build from IS range of pre using dict-encoded plabel codes — NO string operations.",
+    "aggregation": "open_addressing_hash_map<GroupKey(name_id:u32, tag_code:u32, plabel_code:u32) → AggValue(sum:double, count:u64)>, thread-local with merge. Use open-addressing (linear probing) instead of std::unordered_map for better cache behavior. Reserve ~32K per thread."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Morsel size 100K rows over USD range. Thread-local open-addressing agg maps, merge after scan. Move tag_dict loading to output phase to overlap with parallel scan if possible."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "Get contiguous USD row range in num"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "Get contiguous IS row range in pre"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name", "p.stmt(constant 'IS')", "n.tag(decoded from tag_dict)", "p.plabel(decoded from plabel dict)", "total_value(SUM)", "cnt(COUNT)"],
+    "order_by": ["total_value DESC"],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category E + A: The data_loading phase consumed 560ms (82% of total), dominated by 1.06M varlen plabel string constructions, hashings, and unordered_map insertions during pre hash map build. Root cause is a storage-level mismatch: varlen plabel strings force expensive per-row string operations. Built dict-encoded pre.plabel (698K unique values → uint32_t codes). The revised plan: (1) mmap plabel codes.bin and read integer codes for IS range rows instead of varlen string dedup — eliminates all string operations from pre hash map build, reducing it from ~500ms to ~20ms; (2) use open-addressing hash maps for thread-local aggregation instead of std::unordered_map for better cache locality; (3) defer tag_dict loading to output phase since it's only needed for decoding 200 result rows. Group key is all-integer: (name_id:u32, tag_code:u32, plabel_code:u32)."
+}

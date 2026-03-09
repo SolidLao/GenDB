@@ -1,0 +1,119 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "prefilter_sub",
+    "build_pre_eq_hashset",
+    "scan_num_usd_range",
+    "join_sub_filter",
+    "join_tag_index",
+    "join_pre_hashset",
+    "aggregate",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num(usd_range)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3500,
+      "probe_cardinality": 33200000,
+      "notes": "sub_fk is dense index into sub table; precompute sic_ok[sub_row] bitset, direct lookup via num.sub_fk"
+    },
+    {
+      "build": "tag(abstract=0)",
+      "probe": "num(after sub filter)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 1070000,
+      "probe_cardinality": 1360000,
+      "notes": "Use tag_pk_index for O(1) lookup by (tag_code, version_code); check abstract[tag_row]==0 inline"
+    },
+    {
+      "build": "pre(stmt='EQ')",
+      "probe": "num(after sub+tag filter)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 1240000,
+      "probe_cardinality": 1360000,
+      "notes": "Use stmt_offsets to get EQ range in pre; build hash set of (sub_fk, tag_code, version_code) from those rows; semi-join since we only need existence"
+    }
+  ],
+  "filters": [
+    {"table": "num", "column": "uom_code", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range_scan"},
+    {"table": "num", "column": "value", "predicate": "value IS NOT NULL", "selectivity": 0.85, "method": "isnan_check"},
+    {"table": "sub", "column": "sic", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.041, "method": "range_check"},
+    {"table": "pre", "column": "stmt_code", "predicate": "stmt = 'EQ'", "selectivity": 0.129, "method": "stmt_offsets_range_scan"},
+    {"table": "tag", "column": "abstract", "predicate": "abstract = 0", "selectivity": 0.9999, "method": "direct_check"}
+  ],
+  "data_structures": {
+    "sub_sic_ok": "bitset(86135)",
+    "sub_sic_val": "direct_array(int16_t, 86135)",
+    "sub_cik_val": "direct_array(int32_t, 86135)",
+    "pre_eq_hashset": "compact_hash_set(key=(uint32_t sub_fk, uint32_t tag_code, uint32_t version_code), pre_sized=1240000)",
+    "tag_abstract": "direct_array(int8_t, 1070662)",
+    "tag_pk_index": "pre_built_index(mmap)",
+    "aggregation": "compact_hash_map(key=(int16_t sic, uint32_t tag_row), value=(double sum, uint64_t count, robin_hood_set<int32_t> cik_set), pre_sized=500000)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "scan_target": "num_usd_range",
+    "morsel_size": 100000,
+    "threads": "auto(nproc)",
+    "notes": "Parallel scan of USD range in num; thread-local aggregation maps merged after scan"
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "get USD row range to skip non-USD rows"},
+    {"index": "tag_pk_index", "file": "indexes/tag_pk_index.idx", "purpose": "O(1) lookup of tag row by (tag_code, version_code)"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "get EQ row range in pre to build hash set"}
+  ],
+  "execution_steps": {
+    "step1_prefilter_sub": {
+      "description": "Load sub/sic.bin and sub/cik.bin. Build sic_ok bitset and cache sic/cik arrays.",
+      "output": "sic_ok bitset, sic_val array, cik_val array"
+    },
+    "step2_build_pre_eq_hashset": {
+      "description": "Use stmt_offsets to find EQ code and get (start,end) range in pre. Load sub_fk, tag_code, version_code for that range. Insert (sub_fk, tag_code, version_code) tuples into hash set.",
+      "memory_estimate_mb": 30,
+      "output": "pre_eq_hashset"
+    },
+    "step3_load_tag": {
+      "description": "mmap tag_pk_index. Load tag/abstract.bin into memory.",
+      "output": "tag_pk_index slots, abstract array"
+    },
+    "step4_parallel_scan_num": {
+      "description": "Use uom_offsets to find USD range. Parallel morsel scan over [usd_start, usd_end). For each row i: (1) check !isnan(value[i]), (2) check sic_ok[sub_fk[i]], (3) lookup tag_pk_index(tag_code[i], version_code[i]) → tag_row, check abstract[tag_row]==0, (4) probe pre_eq_hashset(sub_fk[i], tag_code[i], version_code[i]), (5) if all pass: aggregate into thread-local map keyed by (sic_val[sub_fk[i]], tag_row).",
+      "columns_accessed": ["num/value.bin", "num/sub_fk.bin", "num/tag_code.bin", "num/version_code.bin"],
+      "filter_order": ["value_not_null", "sic_ok_sub_fk", "tag_pk_abstract", "pre_eq_hashset"],
+      "output": "thread-local aggregation maps"
+    },
+    "step5_merge_aggregate": {
+      "description": "Merge thread-local maps into global map. Each entry: (sic, tag_row) → (sum_value, count_value, cik_set).",
+      "output": "global aggregation map"
+    },
+    "step6_having_and_output": {
+      "description": "Filter groups where cik_set.size() >= 2. Compute avg = sum/count. Decode tlabel from tag table (tlabel_offsets + tlabel_data). stmt is constant 'EQ'. Partial sort (top-500) by total_value DESC. Output limit 500."
+    }
+  },
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "(int16_t sic, uint32_t tag_row)",
+    "group_key_notes": "p.stmt is constant 'EQ' so excluded from key",
+    "accumulators": {
+      "sum_value": "double",
+      "count_value": "uint64_t",
+      "cik_set": "flat_hash_set<int32_t>"
+    },
+    "thread_local": true,
+    "merge_strategy": "iterate_and_merge"
+  },
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt(='EQ')", "num_companies", "total_value", "avg_value"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "having": "num_companies >= 2",
+    "sort_strategy": "partial_sort"
+  },
+  "execution_target": "cpp"
+}

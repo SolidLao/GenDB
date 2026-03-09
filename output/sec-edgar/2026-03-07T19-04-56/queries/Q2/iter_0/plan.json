@@ -1,0 +1,126 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "resolve_uom_pure_code",
+    "load_uom_offsets_range",
+    "build_fy2022_bitset",
+    "pass1_build_max_map",
+    "pass2_collect_matches",
+    "decode_and_topk"
+  ],
+  "steps": [
+    {
+      "id": "resolve_uom_pure_code",
+      "operation": "dict_lookup",
+      "dict": "num/uom_dict",
+      "lookup_value": "pure",
+      "output": "pureCode (uint8_t)"
+    },
+    {
+      "id": "load_uom_offsets_range",
+      "operation": "index_lookup",
+      "index": "uom_offsets",
+      "key": "pureCode",
+      "output": "row range [start, end) ~1.38M rows"
+    },
+    {
+      "id": "build_fy2022_bitset",
+      "operation": "scan_filter",
+      "table": "sub",
+      "column": "fy",
+      "predicate": "fy == 2022",
+      "output": "bitset<86135>",
+      "selectivity": 0.196,
+      "cardinality_in": 86135,
+      "cardinality_out": 16882
+    },
+    {
+      "id": "pass1_build_max_map",
+      "operation": "aggregate_scan",
+      "description": "Scan pure-uom range, build (sub_fk, tag_code) -> MAX(value)",
+      "scan_range": "uom_offsets[pureCode]",
+      "columns_read": ["num/sub_fk.bin", "num/tag_code.bin", "num/value.bin"],
+      "filter": "!isnan(value)",
+      "group_key": "(sub_fk, tag_code)",
+      "aggregation": "MAX(value)",
+      "cardinality_in": 1380000,
+      "estimated_groups": 500000
+    },
+    {
+      "id": "pass2_collect_matches",
+      "operation": "filter_scan",
+      "description": "Re-scan pure-uom range, collect rows matching max and fy2022",
+      "scan_range": "uom_offsets[pureCode]",
+      "columns_read": ["num/sub_fk.bin", "num/tag_code.bin", "num/value.bin"],
+      "filters": [
+        "!isnan(value)",
+        "fy2022_bitset[sub_fk]",
+        "value == max_map[(sub_fk, tag_code)]"
+      ],
+      "output_columns": ["sub_fk", "tag_code", "value"],
+      "estimated_matches": 5000
+    },
+    {
+      "id": "decode_and_topk",
+      "operation": "decode_sort_limit",
+      "decode": [
+        { "column": "sub_fk", "via": "sub/name (varlen_string)", "output": "s.name" },
+        { "column": "tag_code", "via": "dicts/tag_dict", "output": "n.tag" }
+      ],
+      "sort": ["value DESC", "name ASC", "tag ASC"],
+      "limit": 100
+    }
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2022 bitset)",
+      "probe": "num(pure uom range)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub_fk is dense row index into sub; bitset lookup O(1)"
+    },
+    {
+      "build": "max_map from pass1 (hash_map of (sub_fk,tag_code)->max_value)",
+      "probe": "num(pure uom range) pass2",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 500000,
+      "notes": "Equality join on (sub_fk, tag_code) AND value == max_value"
+    }
+  ],
+  "filters": [
+    { "table": "num", "predicate": "uom_code == pureCode", "selectivity": 0.035, "method": "uom_offsets index" },
+    { "table": "num", "predicate": "!isnan(value)", "selectivity": 0.95, "method": "inline check" },
+    { "table": "sub", "predicate": "fy == 2022", "selectivity": 0.196, "method": "bitset precomputed" }
+  ],
+  "data_structures": {
+    "fy2022_filter": "bitset(86135)",
+    "max_map": "compact_hash_map<pair<uint32_t,uint32_t>, double>(pre_sized=750000)",
+    "result_candidates": "std::vector<tuple<uint32_t,uint32_t,double>>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1": "parallel scan with thread-local hash maps, merge at end via max",
+    "pass2": "parallel scan with thread-local result vectors, concatenate",
+    "morsel_size": 100000
+  },
+  "indexes": [
+    { "index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "skip_blocks" }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name (string)", "n.tag (string)", "n.value (double)"],
+    "order_by": ["value DESC", "name ASC", "tag ASC"],
+    "limit": 100
+  },
+  "memory_estimate": {
+    "sub_fy": "168 KB",
+    "fy2022_bitset": "11 KB",
+    "columns_per_pass": "~22 MB (sub_fk + tag_code + value for 1.38M rows)",
+    "max_map": "~24 MB (500K entries × 48 bytes)",
+    "total": "~50 MB"
+  },
+  "execution_target": "cpp"
+}

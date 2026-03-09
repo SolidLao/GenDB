@@ -1,0 +1,189 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_parallel_direct_aggregate",
+    "pass1_parallel_merge_filter",
+    "pass1_serial_build_qualifying_set",
+    "pass2_scan_lineitem_filter_join_aggregate",
+    "pass2_merge_groups",
+    "sort_topk"
+  ],
+  "passes": [
+    {
+      "pass": 1,
+      "description": "Subquery: parallel direct thread-local aggregation then parallel merge/filter — no scatter buffers",
+      "phase_A": {
+        "name": "pass1_parallel_direct_aggregate",
+        "approach": "thread_local_compact_hash_maps",
+        "pre_allocation": "Allocate ALL map storage outside the parallel region: two flat arrays, each nthreads * SUB_CAP elements. Use std::vector<int32_t> and std::vector<double> of size nthreads*SUB_CAP each. SUB_CAP = 524288 (2^19, 512K entries). Keys array: nthreads * 512K * 4 = 128MB. Vals array: nthreads * 512K * 8 = 256MB. Total: 384MB. One malloc pair, no runtime allocation.",
+        "parallel_init": "Each thread initialises its own segment: keys[tid*SUB_CAP .. (tid+1)*SUB_CAP] = SENTINEL (INT32_MIN); vals[...] = 0.0. Uses first-touch NUMA placement.",
+        "parallel_scan": "Each thread scans its sequential lineitem chunk [row0, row1). For each row i: local_map[tid].add(l_orderkey[i], l_quantity[i]). No scatter, no push_back, no dynamic allocation. The QtyMap::add() uses open-addressing linear probe with SENTINEL sentinel.",
+        "data_structure": "QtyMap (pre-allocated SOA: int32_t keys[SUB_CAP] + double vals[SUB_CAP]) per thread. Capacity SUB_CAP=524288 handles ~234K distinct orderkeys per thread at 45% load factor.",
+        "memory_footprint": "6MB per thread (2MB keys + 4MB vals); 64 * 6MB = 384MB total pre-allocated",
+        "scan": {
+          "table": "lineitem",
+          "columns": ["l_orderkey", "l_quantity"],
+          "rows": 59986052,
+          "access_pattern": "sequential per thread chunk"
+        }
+      },
+      "phase_B": {
+        "name": "pass1_parallel_merge_filter",
+        "approach": "parallel_partition_merge",
+        "description": "After a barrier, each thread t is responsible for the key sub-space where hash32(key) & (nthreads-1) == t. Thread t scans ALL nthreads local maps sequentially. For each occupied slot (key, val) in map s where hash32(key) & (nthreads-1) == t, it accumulates val into a thread-local merge accumulator (small std::unordered_map<int32_t,double> or a second tiny QtyMap capped at 8192 entries for ~3700 expected unique keys per partition). After scanning all source maps, thread t emits qualifying keys (sum > 300.0) into its per-thread qualifying list tq[t].",
+        "merge_map_per_thread": "Use a tiny QtyMap with capacity MERGE_CAP=16384 (2^14) for each thread's merge partition. Memory: 64 * 16K * 12 = 12MB. Fits in L2/L3.",
+        "reads_per_thread": "64 source maps * (512K slots * 12 bytes / 64 active fraction) ≈ 6MB sequential scan per thread. Cache-friendly."
+      },
+      "phase_C": {
+        "name": "pass1_serial_build_qualifying_set",
+        "description": "Serial: union tq[0..nthreads-1] into TinyHashSet (2048 slots, L1-resident). Count qualifying orderkeys for diagnostic fprintf."
+      },
+      "filter": {
+        "predicate": "sum_qty > 300.0",
+        "estimated_qualifying_orderkeys": 624
+      },
+      "output": "qualifying_set (TinyHashSet, 2048 slots, fits in L1 cache)"
+    },
+    {
+      "pass": 2,
+      "description": "Main query: parallel lineitem scan with qualifying-set filter, index probes, thread-local group aggregation, merge",
+      "scan": {
+        "table": "lineitem",
+        "columns": ["l_orderkey", "l_quantity"],
+        "rows": 59986052,
+        "parallelism": "morsel_driven",
+        "threads": "auto(nproc)",
+        "access_pattern": "sequential per thread chunk"
+      },
+      "filter": {
+        "predicate": "qualifying_set.contains(l_orderkey)",
+        "selectivity": 0.00001,
+        "notes": "TinyHashSet.contains() is inlined, ~L1 lookup, eliminates ~99.999% of rows"
+      },
+      "joins": [
+        {
+          "build": "o_orderkey_hash (pre_built_index, mmap)",
+          "probe": "qualifying lineitem rows via l_orderkey",
+          "type": "inner",
+          "strategy": "index_nested_loop",
+          "build_cardinality": 15000000,
+          "notes": "Only ~few thousand total probes for qualifying rows; mmap 256MB index with MADV_RANDOM"
+        },
+        {
+          "build": "c_custkey_hash (pre_built_index, mmap)",
+          "probe": "o_custkey from qualifying orders",
+          "type": "inner",
+          "strategy": "index_nested_loop",
+          "build_cardinality": 1500000,
+          "notes": "~300-624 unique customer lookups; mmap 32MB index with MADV_RANDOM"
+        }
+      ],
+      "aggregation": {
+        "strategy": "thread_local_hash_maps_then_merge",
+        "key": "l_orderkey",
+        "accumulators": ["sum(l_quantity)"],
+        "payload_per_group": ["orders_row", "cust_row"],
+        "data_structure": "std::unordered_map<int32_t, GroupEntry> per thread, reserve(512)",
+        "merge": "single_threaded_reduce into global_groups (reserve 1024)",
+        "notes": "~624 qualifying groups; negligible merge cost"
+      }
+    }
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_set (TinyHashSet, 2048 slots, L1-resident)",
+      "probe": "lineitem.l_orderkey (pass 2)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 624,
+      "notes": "Eliminates 99.999% of lineitem rows before any index probe"
+    },
+    {
+      "build": "o_orderkey_hash (pre_built_index)",
+      "probe": "qualifying lineitem rows",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 15000000,
+      "notes": "~few thousand probes total; mmap, MADV_RANDOM"
+    },
+    {
+      "build": "c_custkey_hash (pre_built_index)",
+      "probe": "o_custkey from qualifying orders",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "~300-624 unique probes total"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem (pass 2)",
+      "predicate": "qualifying_set.contains(l_orderkey)",
+      "selectivity": 0.00001,
+      "notes": "TinyHashSet check per row — L1 cache resident, negligible cost"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential (scanned twice: pass 1 and pass 2)"
+  },
+  "data_structures": {
+    "pass1_local_qty_maps": "64 × QtyMap(capacity=524288, SOA int32_t keys + double vals), all storage pre-allocated outside parallel region as two flat arrays (128MB + 256MB = 384MB total). No malloc inside parallel region.",
+    "pass1_merge_maps": "64 × tiny QtyMap(capacity=16384) for parallel merge phase, pre-allocated (12MB total). Each thread owns one for its hash partition.",
+    "qualifying_set": "TinyHashSet (2048 slots, int32_t, open-addressing, L1-resident ~8KB)",
+    "pass2_group_maps": "std::unordered_map<int32_t, GroupEntry> per thread (reserve 512), GroupEntry = {double sum_qty; int32_t orders_row; int32_t cust_row}",
+    "orders_index": "mmap(orders/o_orderkey_hash.bin), open-addressing int32→int32, capacity 33554432, MADV_RANDOM",
+    "customer_index": "mmap(customer/c_custkey_hash.bin), open-addressing int32→int32, capacity 4194304, MADV_RANDOM",
+    "output_buffer": "std::vector<Result> (reserve ~1000), sorted and top-100 emitted"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_phase_A_parallel": true,
+    "pass1_phase_B_parallel": true,
+    "pass2_parallel": true,
+    "barriers": ["after pass1 phase A (all local maps complete before merge)", "after pass1 phase B (all qualifying lists complete before TinyHashSet build)"],
+    "merge_strategy": "pass1: parallel partition merge (each thread owns 1/nthreads of key space); pass2: single-threaded reduce of ~624 groups"
+  },
+  "indexes": [
+    {
+      "index": "o_orderkey_hash",
+      "file": "orders/o_orderkey_hash.bin",
+      "purpose": "join_lookup: l_orderkey → orders row index",
+      "access": "mmap, random probes only for qualifying rows (few thousand total)"
+    },
+    {
+      "index": "c_custkey_hash",
+      "file": "customer/c_custkey_hash.bin",
+      "purpose": "join_lookup: o_custkey → customer row index",
+      "access": "mmap, random probes only for qualifying orders (~624 total)"
+    }
+  ],
+  "column_reads": {
+    "pass1": ["lineitem/l_orderkey.bin", "lineitem/l_quantity.bin"],
+    "pass2": ["lineitem/l_orderkey.bin", "lineitem/l_quantity.bin"],
+    "on_demand_after_join": [
+      "orders/o_custkey.bin",
+      "orders/o_orderdate.bin",
+      "orders/o_totalprice.bin",
+      "customer/c_name.bin"
+    ]
+  },
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::sort on ~624 result structs",
+    "date_decode": "convert o_orderdate (int32 days since 1970-01-01) to YYYY-MM-DD for output only (100 rows)",
+    "c_name_access": "c_name_buf + cust_row * 26 — fixed-stride 26-byte slots"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A — Plan Restructuring): iter_0's scatter/gather Pass 1 used 4096 unreserved std::vector objects (64 threads × 64 partitions) that grew via push_back, causing ~57,344 malloc+memcpy+free calls with 64 threads simultaneously hammering the system allocator. Additionally, Phase A wrote 720MB of scatter data to 4096 scattered DRAM locations (poor write locality) and Phase B read it back (poor read locality), totalling ~1.44GB of extra cache-hostile traffic that explains the 1051ms. The fix eliminates all scatter buffers and replaces them with 64 pre-allocated thread-local QtyMaps (512K capacity each, 384MB total, allocated as two flat arrays outside the parallel region). Each thread aggregates directly into its own map during the sequential scan (no vectors, no malloc, sequential reads + local random writes). A second parallel phase then merges by key-space partition (each thread t handles keys where hash(key) & (nthreads-1) == t, scanning all 64 maps sequentially — ~6MB per thread, L3-resident reads). Pass 2 is unchanged (already 23ms).",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,116 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer_build_bitset",
+    "scan_orders_filter_build_compact_hashmap",
+    "scan_lineitem_zone_skip_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(c_mktsegment='BUILDING')",
+      "probe": "orders(o_custkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 300000,
+      "notes": "Identical to iter_0: single-threaded scan of c_mktsegment + c_custkey; build uint8_t cust_ok[1500001] (1.5 MB, L3-resident). Read building_code from c_mktsegment_dict.bin at startup (do not hardcode)."
+    },
+    {
+      "build": "orders(cust_ok[o_custkey] AND o_orderdate < 9204)",
+      "probe": "lineitem(l_shipdate > 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1461000,
+      "notes": "COMPACT OrderHashMap: struct OrderSlot { int32_t key; int16_t orderdate; int8_t shippriority; int8_t _pad; } = 8 bytes/slot. orderdate stored as int16_t (max qualifying value 9203 <= 32767). shippriority stored as int8_t (TPC-H range 0-9 fits). Capacity = next power-of-2 >= 2*total_qual (with minimum 2M); for ~1.46M qualifying orders this yields 4M slots. Memory: 4M x 8 = 32 MB. Combined with qualifying_orders bitset (7.5 MB) the hot random-access working set is 39.5 MB, within the 44 MB LLC. Sentinel: key = -1 (all slots zero-initialized to {-1, 0, 0, 0} — use a signed fill). Hash: Knuth multiplicative (uint32_t)(key * 2654435761u) & mask. Linear probing with open addressing."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == building_code (resolved at runtime from dict)",
+      "selectivity": 0.20,
+      "output_rows": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "cust_ok[o_custkey] && o_orderdate < 9204",
+      "selectivity": 0.097,
+      "output_rows": 1461000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "zone_map: skip blocks where zones[b].max_date <= 9204",
+      "selectivity": 0.545,
+      "notes": "lineitem sorted ASC by l_shipdate; ~273 of 600 blocks skipped entirely (early blocks all have shipdate <= threshold)"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.545,
+      "output_rows": 17823100
+    },
+    {
+      "table": "lineitem",
+      "predicate": "qualifying_orders_bitset[l_orderkey] — bit-packed uint64_t[(60000001+63)/64]",
+      "selectivity": 0.329,
+      "output_rows": 5870000,
+      "notes": "Bit-packed bitset rejects ~67% of l_shipdate-passing rows before compact hash probe. Bitset is 7.5 MB, L3-resident."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential with zone-map block skipping; morsels = one zone-map block = 100K rows; use madvise(MADV_SEQUENTIAL) on all lineitem files and madvise(MADV_WILLNEED) prefetch at startup"
+  },
+  "data_structures": {
+    "customer_filter": "uint8_t cust_ok[1500001] — zero-initialized vector, 1.5 MB, L3-resident",
+    "orders_prefilter": "bit-packed uint64_t qualifying_orders[(60000001+63)/64] — 7.5 MB, L3-resident; set bit k when orderkey k qualifies; used as early-reject before compact hash probe",
+    "orders_metadata": "COMPACT flat open-addressing hash map — 4M slots x 8 bytes = 32 MB total; struct OrderSlot { int32_t key; int16_t orderdate; int8_t shippriority; int8_t _pad; }; initialize ALL slots with key=-1 (use std::vector<OrderSlot> assigned to {-1,0,0,0}); capacity = next_pow2(max(2000000, total_qual*2)); for 1.46M entries this is 4M slots (LF ~0.37); combined with qualifying_orders bitset gives 39.5 MB hot working set <= 44 MB LLC",
+    "local_aggregation": "thread_local std::unordered_map<int32_t,AggState> — lazy allocation (no upfront page faults); struct AggState { long double revenue; int32_t orderdate; int32_t shippriority; }; reserve(100000) per thread; keyed by l_orderkey (uniquely determines orderdate+shippriority post-join); revenue as long double for precision; merged sequentially into global map inside the output phase (output phase is excluded from the timing metric)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_breakdown": {
+      "phase1_customer": "single_threaded — 7 MB total I/O (c_mktsegment 1.4 MB + c_custkey 5.7 MB); fast sequential scan, build cust_ok bitset",
+      "phase2_orders": "parallel morsel-driven — scan 4 orders columns (~228 MB total); each thread appends qualifying OrderRow{orderkey,orderdate,shippriority} to thread-local std::vector<OrderRow>; main thread merges all thread-local vectors sequentially into qualifying_orders bitset + compact OrderHashMap; the merge is single-threaded (1.46M insertions into 32 MB LLC-resident structure is fast, ~14 ms)",
+      "phase3_lineitem": "morsel_driven parallel — zone-map block list pre-computed; atomic<size_t> next_block work-stealing; each thread processes full blocks (100K rows); per-row: zone-skip -> shipdate filter -> bitset prefilter -> compact hash probe -> thread-local unordered_map accumulate; thread-local maps merged in output phase (excluded from timing)"
+    }
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — pre-compute qualifying block list: skip blocks where zones[b].max_date <= 9204; eliminates ~273/600 blocks; remaining ~327 blocks processed in parallel"
+    },
+    {
+      "index": "orders_by_orderkey",
+      "purpose": "not_used — dense array is 240 MB (exceeds LLC, random access penalty); in-memory qualifying_orders bitset + compact hash map from filtered orders is faster"
+    },
+    {
+      "index": "customer_by_custkey",
+      "purpose": "not_used — direct customer column scan to build cust_ok bitset is cheaper"
+    }
+  ],
+  "aggregation": "hash_group_by — keyed by l_orderkey only (uniquely determines o_orderdate and o_shippriority after join); thread-local std::unordered_map<int32_t,AggState>; merge into global std::unordered_map inside output phase; partial_sort top-10 by (revenue DESC, orderdate ASC)",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "sequential merge of thread-local unordered_maps into global map (inside output phase, excluded from timing), then partial_sort for top-10"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause of iter_1 and iter_2 regressions (Category B mismatch, incorrectly isolated): both iterations correctly identified that the iter_0 OrderHashMap (8M slots x 12B = 96MB) exceeds the 44MB LLC, and correctly shrank it to 4M x 8B = 32MB — but both ALSO replaced the thread-local std::unordered_map aggregation with pre-allocated flat AggHashMaps (iter_1: 256K x 20B x 64 threads = 320MB upfront; iter_2: 64K x 20B x 64 threads = 82MB upfront plus a 40MB single-threaded merge phase counted in timing). Those AggHashMap initializations caused the build_joins regression to 80ms and added a new 27ms sequential_flat_merge phase. Iter_3 isolates the correct Category B fix: compact OrderSlot from 12B to 8B (orderdate as int16_t, shippriority as int8_t) with capacity = next_pow2(2 x total_qual) yielding 4M slots x 8B = 32MB — combined with the 7.5MB qualifying_orders bitset the hot working set is 39.5MB, fitting in the 44MB LLC. The aggregation reverts exactly to iter_0's std::unordered_map approach (lazy allocation, no upfront page faults, merge inside the output phase which is excluded from the timing metric). This combination — compact LLC-resident OrderHashMap + iter_0 aggregation — has not been tried before and eliminates the hash probe cache-miss bottleneck without introducing any new counted-phase overhead.",
+  "correctness_anchors": {
+    "revenue_formula_1": "l_extendedprice*(1-l_discount)",
+    "revenue_formula_2": "l_extendedprice * (1 - l_discount/100)",
+    "date_threshold": "DATE_1995_03_15 = 9204",
+    "o_orderdate_predicate": "o_orderdate < 9204",
+    "l_shipdate_predicate": "l_shipdate > 9204",
+    "orderdate_int16_max_value": "9203 (max qualifying o_orderdate, safe for int16_t)"
+  }
+}

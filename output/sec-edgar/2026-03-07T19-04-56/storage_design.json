@@ -1,0 +1,90 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "gendb" },
+  "tables": {
+    "sub": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "std::string", "semantic_type": "primary_key", "encoding": "varlen_string" },
+        { "name": "cik", "cpp_type": "int32_t", "semantic_type": "identifier", "encoding": "fixed" },
+        { "name": "name", "cpp_type": "std::string", "semantic_type": "text", "encoding": "varlen_string" },
+        { "name": "sic", "cpp_type": "int16_t", "semantic_type": "industry_code", "encoding": "fixed" },
+        { "name": "countryba", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "stprba", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "cityba", "cpp_type": "std::string", "semantic_type": "text", "encoding": "varlen_string" },
+        { "name": "countryinc", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "form", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "period", "cpp_type": "int32_t", "semantic_type": "date_yyyymmdd", "encoding": "fixed" },
+        { "name": "fy", "cpp_type": "int16_t", "semantic_type": "year", "encoding": "fixed" },
+        { "name": "fp", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "filed", "cpp_type": "int32_t", "semantic_type": "date_yyyymmdd", "encoding": "fixed" },
+        { "name": "accepted", "cpp_type": "std::string", "semantic_type": "datetime", "encoding": "varlen_string" },
+        { "name": "prevrpt", "cpp_type": "int8_t", "semantic_type": "flag", "encoding": "fixed" },
+        { "name": "nciks", "cpp_type": "int16_t", "semantic_type": "count", "encoding": "fixed" },
+        { "name": "afs", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "wksi", "cpp_type": "int8_t", "semantic_type": "flag", "encoding": "fixed" },
+        { "name": "fye", "cpp_type": "std::string", "semantic_type": "code", "encoding": "varlen_string" },
+        { "name": "instance", "cpp_type": "std::string", "semantic_type": "filename", "encoding": "varlen_string" }
+      ],
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "86135",
+      "indexes": []
+    },
+    "num": {
+      "columns": [
+        { "name": "sub_fk", "cpp_type": "uint32_t", "semantic_type": "foreign_key_to_sub", "encoding": "dense_fk_array", "note": "derived from adsh via sub lookup" },
+        { "name": "tag_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "tag_dict" },
+        { "name": "version_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "version_dict" },
+        { "name": "uom_code", "cpp_type": "uint8_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "uom_dict", "note": "201 distinct values" },
+        { "name": "ddate", "cpp_type": "int32_t", "semantic_type": "date_yyyymmdd", "encoding": "fixed" },
+        { "name": "value", "cpp_type": "double", "semantic_type": "numeric_value", "encoding": "fixed", "null_representation": "NaN" }
+      ],
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"] },
+      "sort_order": ["uom_code", "sub_fk"], "block_size": 100000, "estimated_rows": "39401761",
+      "indexes": [
+        { "name": "uom_offsets", "type": "offset_table", "columns": ["uom_code"], "note": "start/end row index for each uom_code value" },
+        { "name": "num_ddate_zonemap", "type": "zone_map", "columns": ["ddate"], "block_size": 100000 }
+      ]
+    },
+    "tag": {
+      "columns": [
+        { "name": "tag_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "tag_dict" },
+        { "name": "version_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "version_dict" },
+        { "name": "abstract", "cpp_type": "int8_t", "semantic_type": "flag", "encoding": "fixed" },
+        { "name": "tlabel", "cpp_type": "std::string", "semantic_type": "text", "encoding": "varlen_string" }
+      ],
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "1070662",
+      "indexes": [
+        { "name": "tag_pk_index", "type": "hash", "columns": ["tag_code", "version_code"], "note": "maps (tag_code, version_code) → tag table row index" }
+      ]
+    },
+    "pre": {
+      "columns": [
+        { "name": "sub_fk", "cpp_type": "uint32_t", "semantic_type": "foreign_key_to_sub", "encoding": "dense_fk_array" },
+        { "name": "tag_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "tag_dict" },
+        { "name": "version_code", "cpp_type": "uint32_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "version_dict" },
+        { "name": "stmt_code", "cpp_type": "uint8_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "stmt_dict" },
+        { "name": "rfile_code", "cpp_type": "uint8_t", "semantic_type": "dict_code", "encoding": "dictionary", "dict": "rfile_dict" },
+        { "name": "line", "cpp_type": "int16_t", "semantic_type": "ordinal", "encoding": "fixed" },
+        { "name": "plabel", "cpp_type": "std::string", "semantic_type": "text", "encoding": "varlen_string" }
+      ],
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"] },
+      "sort_order": ["stmt_code", "sub_fk"], "block_size": 100000, "estimated_rows": "9600799",
+      "indexes": [
+        { "name": "pre_by_adsh_tag_ver", "type": "hash", "columns": ["sub_fk", "tag_code", "version_code"], "note": "maps (sub_fk, tag_code, version_code) → list of pre row indices" },
+        { "name": "stmt_offsets", "type": "offset_table", "columns": ["stmt_code"], "note": "start/end row index for each stmt_code value" }
+      ]
+    }
+  },
+  "shared_dictionaries": {
+    "tag_dict": { "scope": "cross_table", "tables": ["num", "tag", "pre"], "location": "gendb/dicts/tag_dict" },
+    "version_dict": { "scope": "cross_table", "tables": ["num", "tag", "pre"], "location": "gendb/dicts/version_dict" },
+    "uom_dict": { "scope": "num", "location": "gendb/num/uom_dict" },
+    "stmt_dict": { "scope": "pre", "location": "gendb/pre/stmt_dict" },
+    "rfile_dict": { "scope": "pre", "location": "gendb/pre/rfile_dict" }
+  },
+  "actual_row_counts": { "sub": 86135, "num": 39401761, "tag": 1070662, "pre": 9600799 },
+  "actual_dict_sizes": { "tag_dict": 198311, "version_dict": 83815, "uom_dict": 201, "stmt_dict": 9, "rfile_dict": 2 },
+  "type_mappings": { "INTEGER": "int32_t", "DOUBLE": "double", "VARCHAR": "std::string" },
+  "date_encoding": "yyyymmdd_integer",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "44", "disk_type": "hdd", "total_memory_gb": "376" }
+}

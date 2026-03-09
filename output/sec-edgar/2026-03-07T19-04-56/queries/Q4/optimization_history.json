@@ -1,0 +1,62 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 381.19000000000005,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 381.19000000000005,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "prefilter_sub": 0.46,
+        "build_pre_eq_hashset": 50.11,
+        "load_tag": 0.04,
+        "main_scan": 25.73,
+        "merge_aggregate": 58.46,
+        "output": 17.58,
+        "total": 396.23
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 101.59666666666668,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 101.59666666666668,
+      "validation": "pass",
+      "strategy": "Category C (work elimination). Root cause: massive over-allocation of data structures. (1) pre_eq hash table was pre-sized to 1.24M (40MB) but only ~51K entries after SIC filter — fix with two-pass counting to right-size to 1.6MB (fits L3). (2) Thread-local AggMaps pre-sized to 100K each = 384MB across 64 threads, causing ~150ms of page faults on initialization — reduce to 4096 initial capacity = 8MB total (fits L3). (3) unordered_set<int32_t> per aggregation group for CIK tracking has huge per-instance overhead and slow merge — replace with vector<int32_t> + deferred sort+unique, which is faster for the typical case of few distinct CIKs per group. These three changes eliminate ~250ms of wasted memory initialization and reduce merge from 58ms by removing hash set iteration overhead.",
+      "operation_timings": {
+        "dim_filter": 0.43,
+        "build_joins": 12.77,
+        "main_scan": 29.13,
+        "output": 1.44,
+        "merge_aggregate": 34.56,
+        "total": 102.05
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 82.02666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 82.02666666666667,
+      "validation": "pass",
+      "strategy": "Category A (plan restructuring). Root cause: merge_aggregate (35ms) dominates because it performs expensive varlen string reads and string-keyed hash map operations for EVERY occupied slot across all 64 thread-local maps. Fix: two-phase merge — first merge all thread-local maps by integer key (sic, tag_row) into a single global integer-keyed map (fast, no strings), then do string re-aggregation by tlabel in a single pass over the much smaller merged result. This reduces string operations by ~64× (once per unique group vs once per thread observation). Secondary: parallelize build_joins phase — the two-pass scan over 1.24M EQ pre rows is currently single-threaded; use OpenMP parallel for with reduction for counting pass and parallel insert for the second pass. Expected improvement: merge 35→15ms, build_joins 13→5ms, total ~90ms.",
+      "operation_timings": {
+        "dim_filter": 0.11,
+        "build_joins": 11.27,
+        "main_scan": 6.51,
+        "output": 1.74,
+        "merge_aggregate": 39.99,
+        "total": 83.23
+      }
+    }
+  ]
+}

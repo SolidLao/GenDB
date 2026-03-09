@@ -1,0 +1,110 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 287.70666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 287.70666666666665,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "dim_filter": 6.91,
+        "build_joins": 103.87,
+        "main_scan": 51.64,
+        "output": 2.18,
+        "total": 286.05
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 290.49666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 290.49666666666667,
+      "validation": "pass",
+      "strategy": "Three compounding bottlenecks identified. (1) Hidden merge bottleneck (~124ms, largest): std::unordered_map uses chained buckets with separate heap allocations; merging 64 thread-local maps into a 3.5M-entry final map caused ~1.47M malloc calls plus pointer-chasing cache misses; fixed by replacing all std::unordered_map instances with compact flat open-addressing hash maps (20-byte slots), and performing the merge in parallel across all 64 threads using atomic CAS for key acquisition and atomic double compare_exchange_weak for revenue accumulation (Category B — algorithm change). (2) Orders hash map hardware mismatch (~104ms): 12-byte slots at 4M capacity = 50MB exceeds the 44MB L3 cache, causing RAM-level latency for both the serial build inserts and the 30M parallel lineitem probes; fixed by compressing slots to 8 bytes (int32 key + int16 orderdate + int8 shippriority + uint8 pad) giving 4M * 8 = 32MB, fully L3-resident (Category B — hardware fit). (3) Single-threaded orders build was a sequential bottleneck with 64 cores available; fixed by splitting into parallel collect phase (64 threads scan orders into per-thread vectors) followed by a fast serial insert into the L3-resident compact map (~15ms) (Category A — plan restructuring). Expected total after fixes: ~40-50ms.",
+      "operation_timings": {
+        "data_loading": 0.43,
+        "dim_filter": 5.65,
+        "build_joins": 37.76,
+        "main_scan": 25.49,
+        "output": 15.72,
+        "total": 302.76
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 102.60333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 102.60333333333334,
+      "validation": "pass",
+      "strategy": "Iter 1's catastrophic regression (290ms) was caused by the parallel CAS merge phase: 64 threads atomically updating a shared 4M-slot × 24-byte = ~100MB global agg map that vastly exceeded the 44MB L3 cache, so every atomic CAS incurred ~100ns RAM latency plus coherency-storm overhead across 64 cores — accounting for the ~218ms gap between summed phase times (85ms) and total (303ms) (Category B root cause). The fix eliminates the merge phase entirely by consolidating the orders join filter and aggregation accumulator into a single combined_map of 2M slots × 16 bytes = 32MB, which fits in the 44MB L3 cache; during the parallel lineitem scan each thread probes the combined_map and atomically accumulates revenue in-place via a CAS loop (union double/uint64_t), with CAS latency at L3 speed (~15-30ns) rather than RAM speed (~100ns), and contention per key is negligible given 3M hits spread over 1.47M distinct slots across 64 threads (Category B fix). Additionally, the 22ms serial orders insert bottleneck is eliminated by a partition-scatter parallel insert: during the parallel orders collect phase each thread scatters qualifying OrdRow entries to per-thread per-partition mini-buffers using hash32(okey) & 63 as the partition index, then all 64 threads simultaneously insert into their exclusively-owned 512KB partition of combined_map with no contention, reducing the serial 22ms insert to ~0.5ms parallel (Category A fix). Partition uses bits 0-5 of hash32(key) and within-partition linear-probe start uses bits 6-20 (>> 6 shift), ensuring independent bit ranges and uniform slot distribution within each partition.",
+      "operation_timings": {
+        "data_loading": 0.31,
+        "dim_filter": 4.59,
+        "build_joins": 14.63,
+        "main_scan": 52.05,
+        "output": 32.08,
+        "total": 132.07
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 57.50666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 57.50666666666666,
+      "validation": "pass",
+      "strategy": "Root cause (Category C — work elimination): 90% of the ~30M lineitem rows that pass the shipdate filter don't match any qualifying order, yet each still probes the combined_map through ~5.5 linear-probe slots before finding a sentinel, generating ~150M L3 cache line accesses that saturate the shared L3 bandwidth and account for the full 52ms main_scan. The fix is a 4MB blocked bloom filter (65536 cache-line-sized blocks x 512 bits, 8 bit-probes per block), built from qualifying orderkeys after Phase 2b completes. With 22.4 keys per block the false-positive rate is 0.022%, so of 27M non-matching probes only ~6K false positives reach combined_map — reducing combined_map probes from 30M to ~3M. Each bloom check costs exactly 1 L3 cache-line load (vs 5.5 for a combined_map miss), dropping main_scan from 52ms to ~10ms. A secondary improvement (Category A) parallelizes dim_filter: since c_custkey is sorted ascending, dividing 1.5M customer rows into 64 even chunks gives each thread a non-overlapping custkey range, making writes to qualifying_cust[] race-free without atomics, saving ~3ms. Mini_bufs allocation is changed from 4096 individual std::vector::reserve() calls to a single flat malloc, reducing pre-phase heap overhead. Expected timing_ms: ~38-45ms, beating the 47ms GenDB reference.",
+      "operation_timings": {
+        "data_loading": 0.19,
+        "dim_filter": 3.01,
+        "build_joins": 15.67,
+        "main_scan": 14.63,
+        "output": 0.54,
+        "total": 53.07
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 54.81666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 54.81666666666667,
+      "validation": "pass",
+      "strategy": "Root cause (Category A — plan restructuring): The previous iteration used 4 separate OpenMP parallel regions (dim_filter, Phase 2a collect, Phase 2b insert+bloom, Phase 3 main_scan), each paying thread pool wake/sleep cost. The labeled phases sum to only 34ms, but timing_ms is 58ms — a 24ms unlabeled gap that appears entirely in the overhead between parallel regions (thread startup, barrier synchronization, OS scheduler latency for 64 threads). On this system with passive OMP wait policy, each parallel region incurs ~5ms of thread management overhead; 4 regions = ~20ms, consistent with the 24ms gap. The fix is a single fused #pragma omp parallel region wrapping all four phases, using #pragma omp for (with implicit barriers) for phase separation and #pragma omp single for single-threaded setup — eliminating 3 of the 4 thread pool startups and saving ~15ms. Secondary improvement (Category E — use existing storage extension): replace reading l_extendedprice.bin (480MB) and l_discount.bin (480MB) with the precomputed l_net_price.bin column (480MB total, identical formula l_extendedprice*(1-l_discount)), saving 240MB of DRAM reads from main_scan and eliminating the per-row FP multiply for ~3M matching rows (~1-2ms). Minor improvement (Category C — work elimination): reduce MINI_CAP from 1024 to 512, halving mini_pool allocation from 32MB to 16MB (expected ~360 entries/buffer, 99.99th-pct ~436 < 512), reducing allocation and page-fault overhead. Expected total timing_ms: ~40-45ms, beating the 47ms GenDB reference.",
+      "operation_timings": {
+        "data_loading": 0.13,
+        "fused_compute": 34.39,
+        "output": 0.72,
+        "total": 51.16
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 55.806666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 55.806666666666665,
+      "validation": "pass",
+      "strategy": "Two independent bottlenecks identified in iter_4's 55ms: (1) Category C (work elimination) — free(mini_pool, 32MB) inside #pragma omp single after Phase 2b calls munmap(32MB) which triggers TLB shootdown IPIs to all 64 cores; with MAXTHREADS=64 this costs roughly 5-10ms while all threads wait at the implicit omp single barrier. Similarly, free(combined_map, 32MB) after the output phase (still within timing_ms = total - output) incurs another ~5-10ms TLB shootdown. Since this is a short-lived query binary that exits immediately after writing results, these frees are unnecessary — the OS reclaims all process memory on exit without per-page TLB invalidation. Removing free(mini_pool), free(pool_cnt) from inside the omp single and removing free(combined_map)/free(bloom) from cleanup eliminates ~10-20ms of TLB overhead. (2) Category C (work elimination) — bloom filter uses 8 hash probes per row for 30M rows in Phase 3: 8 x hash32(key*prime_j) ~ 24ns/row x 30M / 64 threads ~ 11ms of compute. Reducing to 4 probes cuts this to ~6ms (FP rate rises from 0.018% to 0.07%, adding ~19K extra combined_map probes out of 27M non-matching rows — negligible). (3) Category A (plan restructuring) — Phase 3 computed shared_li_first_block in single_setup and loop from there with schedule(static), skipping the ~294 leading dead blocks and switching from dynamic to static scheduling for the contiguous 306-block active range (near-perfect load balance, lower overhead). Combined expected improvement: ~15-25ms, targeting timing_ms of 30-40ms.",
+      "operation_timings": {
+        "data_loading": 0.14,
+        "fused_compute": 40.08,
+        "output": 1.03,
+        "total": 54.16
+      }
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 24191
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q6": {
+          "rows_expected": 200,
+          "rows_actual": 200,
+          "match": false,
+          "error": "198 row(s) differ across 5 column(s)",
+          "column_failures": {
+            "total_value": {
+              "category": "sum_money",
+              "failure_count": 198,
+              "samples": [
+                {
+                  "expected": "36950713800000.00",
+                  "actual": "31169400400000.00",
+                  "abs_diff": 5781313400000,
+                  "rel_diff_pct": 15.646,
+                  "tolerance": "$100",
+                  "row": 0,
+                  "pattern": "value_mismatch"
+                },
+                {
+                  "expected": "15947450000000.00",
+                  "actual": "14972242000000.00",
+                  "abs_diff": 975208000000,
+                  "rel_diff_pct": 6.1151,
+                  "tolerance": "$100",
+                  "row": 1,
+                  "pattern": "value_mismatch"
+                }
+              ]
+            },
+            "cnt": {
+              "category": "exact_count",
+              "failure_count": 197,
+              "samples": [
+                {
+                  "expected": "198",
+                  "actual": "168",
+                  "abs_diff": 30,
+                  "rel_diff_pct": 15.1515,
+                  "row": 0,
+                  "pattern": "value_mismatch"
+                },
+                {
+                  "expected": "184",
+                  "actual": "158",
+                  "abs_diff": 26,
+                  "rel_diff_pct": 14.1304,
+                  "row": 1,
+                  "pattern": "value_mismatch"
+                }
+              ]
+            }
+          },
+          "tie_aware": true,
+          "order_column": "total_value",
+          "mismatch_patterns": {
+            "value_mismatch": 6,
+            "string_mismatch": 9
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 24222.410000000003,
+  "hot_timing_ms": 24222.410000000003,
+  "operation_timings": {
+    "data_loading": 0.39,
+    "build_joins": 21351.36,
+    "main_scan": 1964.93,
+    "merge_thread_local_agg": 103.21,
+    "decode_strings_topk_sort": 482.06,
+    "output": 24.03,
+    "total": 24171.46
+  }
+}

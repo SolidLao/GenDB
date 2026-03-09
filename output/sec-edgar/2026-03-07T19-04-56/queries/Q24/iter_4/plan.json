@@ -1,0 +1,80 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "resolve_usd_code",
+    "uom_offset_range",
+    "load_pre_index",
+    "load_zonemap",
+    "mmap_columns",
+    "two_pass_scan_group_prefetch_antijoin_aggregate",
+    "merge_having_topk",
+    "decode_output"
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "method": "uom_offsets_range", "selectivity": 0.843},
+    {"table": "num", "predicate": "ddate BETWEEN 20230101 AND 20231231", "method": "zone_map + scalar", "selectivity": 0.272},
+    {"table": "num", "predicate": "value IS NOT NULL", "method": "!std::isnan(value)", "selectivity": 0.99}
+  ],
+  "join_order": [
+    {
+      "build": "pre_by_adsh_tag_ver index (pre-built, mmap)",
+      "probe": "num(filtered by uom+ddate+value)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "probe_cardinality": 9000000,
+      "notes": "Anti-join probe into pre-built bucket hash index. Use two-stage group prefetching to hide both memory latency levels (bucket_offsets + entries)."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "range": "uom_offsets[usdCode] → [usdStart, usdEnd)",
+    "estimated_rows_in_range": 33200000,
+    "rows": 33200000,
+    "zone_map": {
+      "index": "num_ddate_zonemap",
+      "block_size": 100000,
+      "block_index_formula": "global_row / blockSize",
+      "skip_condition": "zones[b].max_ddate < 20230101 || zones[b].min_ddate > 20231231"
+    },
+    "columns": [
+      {"name": "ddate", "file": "num/ddate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential within qualifying blocks, two-phase: filter then group-prefetch probe+aggregate"
+  },
+  "data_structures": {
+    "uom_dict": "load dictionary to find USD code",
+    "uom_offsets": "offset_table for USD row range",
+    "zone_map": "num_ddate_zonemap for block skipping",
+    "pre_index": "mmap pre_by_adsh_tag_ver.idx with MADV_RANDOM",
+    "group_prefetch_buffer": "Per-thread batch buffer of BATCH_SIZE=32 pending probes. Each entry stores: row index (uint32_t), sub_fk/tag_code/version_code (uint32_t×3), hash (uint64_t), bucket (uint64_t), bStart (uint64_t), bEnd (uint64_t). Stack-allocated struct array.",
+    "aggregation": "Custom FlatHashMap struct with: (1) keys array of uint64_t initialized to 0 as sentinel via MAP_ANONYMOUS, (2) parallel vals array of AggState {int64_t cnt; double total;}, (3) occupied_slots vector<uint32_t> tracking indices of written slots. Size = 131072 slots (power of 2). Key encoding: ((tag_code<<32)|version_code)+1 to avoid sentinel collision. Linear probing with multiplicative hash. On insert of NEW key, push slot index to occupied_slots.",
+    "selection_vector": "thread-local uint32_t sel[100000] holding qualifying row indices within each block"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc), capped at 32",
+    "morsel_size": 100000,
+    "aggregation_strategy": "Each thread owns one FlatHashMap with occupied_slots tracking. After scan, merge by iterating only occupied_slots of each thread-local map."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "purpose": "restrict scan to USD rows only"},
+    {"index": "num_ddate_zonemap", "purpose": "skip_blocks outside 2023 date range"},
+    {"index": "pre_by_adsh_tag_ver", "purpose": "anti_join_probe with group prefetching"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": [
+      {"column": "tag", "from": "tag_code", "dict": "dicts/tag_dict_offsets.bin + dicts/tag_dict_data.bin"},
+      {"column": "version", "from": "version_code", "dict": "dicts/version_dict_offsets.bin + dicts/version_dict_data.bin"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category D (micro-architecture optimization): main_scan=29ms dominates. Root cause: 9M anti-join probes into 153MB pre index (3.5× LLC) with TWO dependent cache misses per probe — first to read bucket_offsets[bucket], second to read pre_entries[bStart..bEnd]. The iter_3 code prefetches bucket_offsets 8 rows ahead but NEVER prefetches the entries array, leaving the second (dependent) cache miss fully latency-bound at ~100ns each. Fix: implement two-stage group prefetching (amortized hash probing) with BATCH_SIZE=32. Process qualifying rows in batches of 32: Stage 1 computes all 32 hashes and issues __builtin_prefetch for bucket_offsets[bucket] for each; Stage 2 reads all 32 bucket offset pairs (bStart, bEnd) and issues __builtin_prefetch for &pre_entries[bStart] for each; Stage 3 performs the actual entry scan and match check for all 32, aggregating anti-join survivors. This hides BOTH levels of dependent memory latency by separating them into distinct loops with 32 prefetches in flight simultaneously. The tail (selCount % 32 remaining rows) is processed with the same pattern. DO NOT implement a Bloom filter — analysis shows it is ineffective for this anti-join pattern where 99% of rows match (Bloom positive requires full index probe for correctness, saving only ~1% of probes). Keep all other structures unchanged: FlatHashMap with occupied_slots, two-phase scan (pass 1 filter, pass 2 probe), zone map block skipping. Expected main_scan reduction: 29ms → 12-18ms from hiding the entries cache miss latency.",
+  "correctness_anchors": {}
+}

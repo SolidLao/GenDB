@@ -1,0 +1,111 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "prune_num_blocks_by_ddate_zonemap",
+    "scan_ddate_to_candidate_rowids",
+    "filter_candidates_by_uom_and_value",
+    "anti_join_pre_on_survivors",
+    "aggregate_tag_version",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version)",
+      "probe": "num(survivors after ddate+uom+value)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Defer mmap/use of pre_adsh_tag_version_hash until survivor count is non-zero; skip join phase entirely on empty candidate sets."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.0001
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(num_blocks_from_ddate_zonemap) + selection_vector(rowids)",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_hash)",
+    "aggregation": "compact_hash_map(pre_sized_to_survivors)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: most hot time comes from touching wide num columns and initializing anti-join resources before establishing whether the 2023 ddate window yields any rows; this is a Category C work-elimination fix with plan restructuring. The plan now makes ddate the first-stage scan key, materializes candidate rowids, applies uom/value only on candidates, and defers loading/using pre anti-join structures and join key columns unless survivors exist, eliminating unnecessary random lookups and reducing loaded bytes on likely-empty windows.",
+  "correctness_anchors": {}
+}

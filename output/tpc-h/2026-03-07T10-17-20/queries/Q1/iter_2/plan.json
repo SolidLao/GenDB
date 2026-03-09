@@ -1,0 +1,64 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["open_columns_and_zone_map", "launch_worker_threads_immediately", "work_stealing_parallel_scan", "reduce_thread_local_accums", "emit_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.98,
+      "notes": "kQ1ShipdateMax = 10471 (1998-09-02). Zone map: skip blocks where zone_min[b] > 10471 (~12 trailing blocks). Fast path: zone_max[b] <= 10471 (588/600 blocks) — no per-row date check. Slow path: boundary blocks with per-row guard."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_returnflag",    "file": "lineitem/l_returnflag.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_linestatus",    "file": "lineitem/l_linestatus.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "double",  "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8},
+      {"name": "l_tax",           "file": "lineitem/l_tax.bin",           "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "zone_map_file": "lineitem/l_shipdate_zone_map.bin",
+    "zone_map_usage": "Read both zone_min[b] and zone_max[b]. Three-way: (1) zone_min[b] > 10471 => skip block; (2) zone_max[b] <= 10471 => fast path (no per-row date check); (3) otherwise => slow path with per-row date guard."
+  },
+  "data_structures": {
+    "aggregation": "direct_array[6] with hybrid-precision accumulators — key = l_returnflag * 2 + l_linestatus; 6 slots; one alignas(64) thread-local copy per thread; reduce by summation after parallel scan",
+    "accumulator_precision": "double for sum_qty, sum_base_price, sum_disc; long double for sum_disc_price and sum_charge (required for correctness: large accumulated sums at ~$5.4e11 total would lose cents of precision with double). struct Q1Accum must be exactly 64 bytes (1 cache line). 6 slots × 64 bytes = 384 bytes per thread, well within L1.",
+    "thread_local_storage": "std::vector<ThreadAccums> thread_accums(nthreads); each ThreadAccums is alignas(64) with Q1Accum slots[6]. Allocated before worker threads start.",
+    "work_queue": "std::atomic<int> next_block{0}; workers call next_block.fetch_add(1, std::memory_order_relaxed) to steal the next block; loop until returned value >= num_blocks"
+  },
+  "parallelism": {
+    "strategy": "std_thread_work_stealing",
+    "threads": 8,
+    "implementation": "Use std::thread instead of OpenMP. Thread count: nthreads = 8 (sufficient to saturate 60 GB/s aggregate DRAM bandwidth with sequential reads; each core sustains ~8-12 GB/s sequential). Main thread (tid=0) begins scanning blocks immediately at t=0 via work-stealing loop — NO separate warmup. Worker threads (tid=1..7) are created with std::thread and immediately enter the same work-stealing scan loop. Thread creation (~3.5ms for 7 threads) overlaps with DRAM reads on the main thread, eliminating the 34ms dead-time overhead of OMP fork-join barrier. std::atomic<int> next_block{0} with memory_order_relaxed fetch_add serializes block assignment with negligible contention (600 blocks / 8 threads = ~75 steals each).",
+    "no_omp_warmup": "Remove the dummy OMP warmup parallel region entirely. Do NOT use #pragma omp parallel anywhere. The only parallelism is via std::thread.",
+    "block_granularity": "Each std::thread steals one block at a time from next_block. With 600 total blocks and 8 threads, each thread steals ~75 blocks sequentially — sequential access pattern preserves hardware prefetcher effectiveness within each thread's stolen range."
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "Three-way block classification: skip (zone_min > threshold), fast_path (zone_max <= threshold, no per-row date check), slow_path (boundary blocks with per-row check)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "emit slots 0..5 in key order (key = returnflag*2+linestatus is already ascending); skip count==0 slots; no runtime sort needed",
+    "decode": {
+      "l_returnflag": "rf_chars[] = {'A','N','R'} — A=0, N=1, R=2 from encode_returnflag",
+      "l_linestatus": "ls_chars[] = {'F','O'} — F=0, O=1 from encode_linestatus"
+    },
+    "format": "%.2f for double fields; %.2Lf for long double fields (sum_disc_price, sum_charge); %lld for count"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category D — Parallelism tuning): iter_1 places a dummy OMP warmup region outside any measured phase, leaving ~34ms of dead time (64 OS thread creations via pthread_create, ~0.5ms each) that adds directly to wall-clock total. In OMP's fork-join model all threads must be created and reach the parallel barrier before any work starts, so this overhead is unavoidable. The fix is to replace OMP with std::thread + atomic work-stealing: the main thread starts scanning blocks at t=0 using std::atomic<int> next_block; 7 worker threads are created asynchronously and immediately join the same work-stealing loop. Thread creation time (~3.5ms for 7 threads) overlaps with DRAM reads on the main thread instead of being dead time. Thread count is reduced from 64 to 8: 8 threads easily saturate the observed 60 GB/s DRAM bandwidth (sequential reads, hardware prefetcher sustains ~8-12 GB/s per core), so scan time stays at ~34ms while the thread-creation overhead drops from ~34ms serial to ~3.5ms overlapped. Estimated total: ~35-36ms vs 68ms. Accumulator precision is unchanged from iter_1: long double for sum_disc_price and sum_charge to preserve correctness of large accumulated sums; double for sum_qty, sum_base_price, sum_disc. Zone-map three-way classification and fast-path branch-free loop are preserved unchanged.",
+  "correctness_anchors": {
+    "revenue_formula": "disc_price * (1.0 + tax[i])"
+  }
+}

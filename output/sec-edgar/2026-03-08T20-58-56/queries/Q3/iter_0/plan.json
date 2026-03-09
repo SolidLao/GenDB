@@ -1,0 +1,76 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "build_fy2022_adsh_filter",
+    "scan_usd_fact_rows",
+    "join_sub_by_adsh",
+    "aggregate_outer_name_cik",
+    "aggregate_inner_cik",
+    "compute_avg_threshold",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022)",
+      "probe": "num(filtered: uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Use sub_adsh_pk_hash dense LUT and fy=2022 bitmap to test membership in O(1) per fact row"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173274511
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8434649913
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "joined(num,sub)",
+      "predicate": "num.adsh joins sub.adsh and sub.fy=2022",
+      "selectivity": 0.2518875996
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(lut_size_from_sub_adsh_pk_hash) for fy2022 adsh membership",
+    "fact_join": "pre_built_index(num_uom_hash) + direct_array_lookup(sub_adsh_pk_hash)",
+    "aggregation": "thread_local compact_hash_map for (name,cik)->sum and cik->sum, then parallel merge"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_hash",
+      "purpose": "retrieve sorted posting list for USD rowids and avoid full-table predicate evaluation"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "O(1) dense adsh->rowid lookup for join"
+    },
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "prune sub blocks while constructing fy=2022 filter"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

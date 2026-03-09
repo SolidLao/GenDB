@@ -1,0 +1,102 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "load_shipdate_zonemap",
+    "prune_shipdate_blocks",
+    "scan_filter_and_fp64_aggregate",
+    "merge_thread_local_aggregates",
+    "finalize_avgs_decode_and_sort",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600_blocks_from_zonemap)",
+    "fact_join": "none",
+    "aggregation": "direct_array(thread_local_fp64_sums_uint64_count)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(min(nproc,32))"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category C work inflation in the hot scan path: almost all rows pass the predicate, but each row still pays expensive fixed-point conversion and rounding before aggregation even though only six groups are produced. The revised plan keeps the single-pass sequential scan and zone-map block pruning, but switches to FP64 accumulation (with uint64 count) and computes output rounding only at finalize time, while using static partitioned parallel scan to reduce scheduler overhead and improve vectorization-friendly tight loops.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "shipdate_predicate": "l_shipdate <= 10471",
+    "avg_qty_formula": "sum_qty / count_order",
+    "avg_price_formula": "sum_base_price / count_order",
+    "avg_disc_formula": "sum_disc / count_order",
+    "group_by": "(l_returnflag, l_linestatus)",
+    "order_by": "l_returnflag ASC, l_linestatus ASC"
+  }
+}

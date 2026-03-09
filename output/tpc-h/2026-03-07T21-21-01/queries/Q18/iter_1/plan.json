@@ -1,0 +1,96 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_lineitem_stream_group_by_orderkey",
+    "filter_having_sum_qty_gt_300",
+    "semi_join_orders_by_dense_pk",
+    "join_customer_by_dense_pk",
+    "fetch_lineitems_by_postings",
+    "topk_order_by_totalprice_date"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(streamed from lineitem grouped by contiguous l_orderkey runs, HAVING SUM(l_quantity) > 300)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Exploit sorted lineitem order to emit only qualifying order keys, then resolve each order through orders_pk_dense."
+    },
+    {
+      "build": "customer_pk_dense",
+      "probe": "orders(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1500000,
+      "notes": "Resolve o_custkey to customer row ids via dense direct addressing."
+    },
+    {
+      "build": "orders+customer(filtered)",
+      "probe": "lineitem_order_postings",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "For each surviving order, use the postings slice to recompute outer SUM(l_quantity) without rescanning lineitem."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "streamed GROUP BY l_orderkey with HAVING SUM(l_quantity) > 300",
+      "selectivity": 0.0000416
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "streaming_run_aggregate(current_orderkey,current_sum) with thread-local qualifying key vectors",
+    "fact_join": "pre_built_index(orders_pk_dense, customer_pk_dense, lineitem_order_postings)",
+    "aggregation": "topk_heap(100) after per-order outer sum from postings"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "sorted_group_by",
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the inner HAVING phase used a 15M-slot direct-address array with atomic updates for every lineitem row, creating cache-exceeding random writes and heavy contention even though lineitem is already sorted by l_orderkey. Strategy category A: restructure the plan to stream the inner GROUP BY directly over contiguous l_orderkey runs, emit only qualifying order keys, and keep the sparse outer work on the existing dense PK and postings indexes so all expensive work becomes sequential in the hot path and proportional to the 624 surviving orders."
+}

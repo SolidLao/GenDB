@@ -1,0 +1,106 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "zone_map_density_check",
+    "filter_shipdate_bitmap",
+    "filter_discount_quantity_compact",
+    "late_materialize_sum"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.15168801240661745
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.2727561067029382
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 2400",
+      "selectivity": 0.45995502421129497
+    },
+    {
+      "table": "lineitem",
+      "predicate": "(l_discount >= 5 AND l_discount <= 7) AND l_quantity < 2400",
+      "selectivity": 0.12541235419193783
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131 AND l_discount >= 5 AND l_discount <= 7 AND l_quantity < 2400",
+      "selectivity": 0.018992148374758853
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential predicate passes with selective late materialization"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(59986052)",
+    "fact_join": "none",
+    "aggregation": "thread_local_scalar_sum + thread_local_rowid_discount_buffers"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "skip_blocks fast-path only; if all blocks survive, bypass blockwise path and run contiguous row-range scan"
+    },
+    {
+      "index": "lineitem_discount_zone_map",
+      "purpose": "skip_blocks fast-path only; do not build per-block metadata when overlap ratio is 100%"
+    },
+    {
+      "index": "lineitem_quantity_zone_map",
+      "purpose": "skip_blocks fast-path only; use only for candidate-density check before choosing scan kernel"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B algorithm change. The current 100000-row zone maps prune 0 of 600 blocks, so the hot path degenerates into a branch-heavy full scan with sparse random probes into cache-exceeding 480 MB discount and quantity columns; that access pattern is latency-bound and wastes the 88 MB LLC. Replace the block-oriented kernel with a contiguous row-range plan: first stream l_shipdate once and write a 59986052-bit qualifying bitmap, then stream l_discount and l_quantity sequentially to clear non-qualifying bits while compacting surviving row ids plus discount values into thread-local buffers, and finally late-materialize l_extendedprice only for the final survivors and reduce with thread-local sums. Keep the existing zone maps only as a cheap precheck and bypass them entirely when candidate density is 100%.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 5,
+    "discount_hi": 7,
+    "quantity_hi": 2400,
+    "revenue_formula": "SUM(l_extendedprice * l_discount) with scaled_i64 arithmetic; divide by 10000.0 for CSV output"
+  }
+}

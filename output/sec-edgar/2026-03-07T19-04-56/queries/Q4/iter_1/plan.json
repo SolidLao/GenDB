@@ -1,0 +1,100 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "prefilter_sub",
+    "build_pre_eq_hashset",
+    "load_tag",
+    "scan_num_usd_range",
+    "merge_aggregate",
+    "having_topk_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num(usd_range)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3500,
+      "notes": "sic_ok bitset over 86K sub rows; direct lookup via num.sub_fk"
+    },
+    {
+      "build": "pre(stmt='EQ' AND sic_ok[sub_fk])",
+      "probe": "num(after sub filter)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 51000,
+      "notes": "CRITICAL: pre-size hash table to ~51K (EQ rows filtered by sic_ok), NOT 1.24M. Two-pass: first count qualifying rows, then allocate and insert. Reduces memory from 40MB to ~1.6MB (fits L3)."
+    },
+    {
+      "build": "tag(abstract=0)",
+      "probe": "num(after sub+pre filter)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 1070000,
+      "notes": "Use tag_pk_index for O(1) lookup; check abstract[tag_row]==0 inline"
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range_scan"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.85, "method": "isnan_check"},
+    {"table": "sub", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.041},
+    {"table": "pre", "predicate": "stmt = 'EQ'", "selectivity": 0.129, "method": "stmt_offsets_range_scan"},
+    {"table": "tag", "predicate": "abstract = 0", "selectivity": 0.9999}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33200000,
+    "columns": [
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential_within_usd_range"
+  },
+  "data_structures": {
+    "sub_sic_ok": "bitset(86135) — 10.8KB, trivially fits cache",
+    "sub_sic_val": "direct_array(int16_t, 86135) — 172KB",
+    "sub_cik_val": "direct_array(int32_t, 86135) — 344KB",
+    "pre_eq_hashset": "compact_hash_map(key=(uint32_t sub_fk, uint32_t tag_code, uint32_t version_code), value=uint32_t count, pre_sized=COUNTED_QUALIFYING_ROWS ~51K). CRITICAL: two-pass build — first iterate EQ range counting entries where sic_ok[sub_fk], then allocate table to 2× that count, then re-iterate and insert. Memory: ~51K × 2 × 16 bytes = 1.6MB, fits in L3.",
+    "tag_abstract": "direct_array(int8_t, 1070662) — 1MB",
+    "tag_pk_index": "pre_built_index(mmap) — used as-is",
+    "aggregation": "thread-local compact_hash_map(key=uint64_t(sic,tag_row), value=(double sum, uint64_t count, vector<int32_t> cik_buf), INITIAL_CAPACITY=4096 per thread). 64 threads × 4096 × 32 bytes = 8MB total, fits in L3. Use small_vector or inline std::vector<int32_t> for CIK collection — no unordered_set."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "scan_target": "num_usd_range",
+    "morsel_size": 100000,
+    "threads": "auto(nproc)",
+    "notes": "Thread-local agg maps with SMALL initial capacity (4096, not 100K). Grows on demand. Total init memory = 8MB vs previous 384MB."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "get USD row range"},
+    {"index": "tag_pk_index", "file": "indexes/tag_pk_index.idx", "purpose": "O(1) tag lookup"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "get EQ row range in pre"}
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "(int16_t sic, uint32_t tag_row) packed as uint64_t",
+    "group_key_notes": "p.stmt is constant 'EQ', excluded from key. tag_row is used as proxy for tlabel; re-aggregate by actual tlabel string only at output (small final map).",
+    "accumulators": {
+      "sum_value": "double",
+      "count_value": "uint64_t",
+      "cik_buf": "std::vector<int32_t> — append CIK values during scan, sort+unique only at merge/output. Avoids per-insert hash set overhead."
+    },
+    "thread_local": true,
+    "merge_strategy": "iterate local maps, merge into global map. For CIK: use std::move to transfer vectors from largest contributor, then append+sort+unique from remaining. Or: concatenate all cik_bufs per group, do single sort+unique at the end."
+  },
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt(='EQ')", "num_companies", "total_value", "avg_value"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "having": "num_companies >= 2",
+    "sort_strategy": "partial_sort"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category C (work elimination). Root cause: massive over-allocation of data structures. (1) pre_eq hash table was pre-sized to 1.24M (40MB) but only ~51K entries after SIC filter — fix with two-pass counting to right-size to 1.6MB (fits L3). (2) Thread-local AggMaps pre-sized to 100K each = 384MB across 64 threads, causing ~150ms of page faults on initialization — reduce to 4096 initial capacity = 8MB total (fits L3). (3) unordered_set<int32_t> per aggregation group for CIK tracking has huge per-instance overhead and slow merge — replace with vector<int32_t> + deferred sort+unique, which is faster for the typical case of few distinct CIKs per group. These three changes eliminate ~250ms of wasted memory initialization and reduce merge from 58ms by removing hash set iteration overhead.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

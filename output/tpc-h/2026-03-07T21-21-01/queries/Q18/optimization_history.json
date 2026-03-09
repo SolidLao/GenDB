@@ -1,0 +1,79 @@
+{
+  "query_id": "Q18",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 282.35999999999996,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 282.35999999999996,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.19,
+        "dim_filter": 229.59,
+        "build_joins": 1.22,
+        "main_scan": 0.05,
+        "output": 1.87,
+        "total": 279.35
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 63.29,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 63.29,
+      "validation": "pass",
+      "strategy": "Root cause: the inner HAVING phase used a 15M-slot direct-address array with atomic updates for every lineitem row, creating cache-exceeding random writes and heavy contention even though lineitem is already sorted by l_orderkey. Strategy category A: restructure the plan to stream the inner GROUP BY directly over contiguous l_orderkey runs, emit only qualifying order keys, and keep the sparse outer work on the existing dense PK and postings indexes so all expensive work becomes sequential in the hot path and proportional to the 624 surviving orders.",
+      "operation_timings": {
+        "data_loading": 0.42,
+        "dim_filter": 19.97,
+        "build_joins": 1.23,
+        "main_scan": 0.04,
+        "output": 1.49,
+        "total": 43.8
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 81.53666666666668,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 81.53666666666668,
+      "validation": "pass",
+      "strategy": "Root cause: after iteration 1, nearly all remaining hot time was still in the HAVING phase because the plan scanned lineitem/l_orderkey.bin only to rediscover order boundaries that already exist in lineitem_order_postings.offsets, adding roughly 240 MB of redundant sequential input to the hot path. Strategy category C: eliminate that wasted work by partitioning the orderkey domain over the postings offsets array, summing l_quantity over each order's contiguous row range, emitting only the 624 qualifying order keys, and reusing the same contiguous ranges for the sparse outer SUM while keeping order and customer lookups on the existing dense PK arrays.",
+      "operation_timings": {
+        "data_loading": 0.54,
+        "dim_filter": 24.67,
+        "build_joins": 0.57,
+        "main_scan": 0.06,
+        "output": 1.48,
+        "total": 61.01
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 45.13666666666668,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 45.13666666666668,
+      "validation": "pass",
+      "strategy": "Root cause: the current logical plan recomputes the outer SUM(l_quantity) by revisiting lineitem postings even though the inner HAVING pass already computes the exact per-order aggregate for the same l_orderkey groups, so the remaining hot-path work includes unnecessary second-pass lineitem accesses and index traffic for only 624 surviving orders. Strategy category A: carry sum_qty forward from the initial streamed sorted aggregation, eliminate the outer lineitem/postings fetch entirely, keep only dense direct-array lookups into orders and customer, and run the scan with bandwidth-efficient moderate parallelism instead of a fixed 64-thread fanout.",
+      "operation_timings": {
+        "data_loading": 0.25,
+        "dim_filter": 26.7,
+        "build_joins": 0.86,
+        "main_scan": 0.04,
+        "output": 1.68,
+        "total": 45.07
+      }
+    }
+  ]
+}

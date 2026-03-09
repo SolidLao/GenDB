@@ -1,0 +1,103 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 1240.6766666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 1240.6766666666665,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.76,
+        "dim_filter": 1.13,
+        "build_joins": 250.96,
+        "main_scan": 904.2,
+        "output": 2.69,
+        "total": 1239.1
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 281.03999999999996,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 281.03999999999996,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan does unnecessary work in the wrong order and uses cache-exceeding runtime structures, specifically a filtered-pre hash table larger than LLC and oversized thread-local aggregation maps while still scanning nearly all num rows. Strategy category A with work elimination: filter sub first, scan pre sequentially with stmt zone-map pruning and the sub adsh filter to build only the surviving triple->plabel payloads, then probe num through the existing sorted (adsh,tag,version) index instead of full-scanning num; aggregate with right-sized lazy worker maps so the working set stays closer to cache and the 904 ms main scan disappears.",
+      "operation_timings": {
+        "data_loading": 0.7,
+        "dim_filter": 0.87,
+        "build_joins": 125.99,
+        "main_scan": 121.24,
+        "output": 1.31,
+        "total": 271.33
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 1034.8333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 1034.8333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: the remaining hot time comes from cache-miss-heavy random probes into the 157 MB num sorted index and double binary-search work for roughly 550k filtered pre keys, while the filtered num side can be consumed sequentially. Strategy category B with plan restructuring: filter sub first, scan num sequentially with uom zone-map pruning and dense adsh lookup, aggregate surviving rows by (adsh,tag,version) into LLC-sized radix partitions, then scan pre sequentially with stmt zone-map pruning and probe those partitions to expand matching plabel rows into the final group-by.",
+      "operation_timings": {
+        "data_loading": 0.42,
+        "dim_filter": 0.58,
+        "build_joins": 828.43,
+        "main_scan": 168.09,
+        "output": 2.07,
+        "total": 1033.82
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 119.96,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 119.96,
+      "validation": "pass",
+      "strategy": "Root cause: iteration 1 still pays for two cache-unfriendly phases, a 550k-entry runtime pre hash build and roughly 550k double binary searches against the 39.4M-row num permutation. Strategy category E: build persistent sorted unique-key run directories for num and pre over the existing (adsh,tag,version) rowid indexes, then use the dense sub adsh filter to restrict work to 2023 filings and merge only those per-adsh key ranges. This replaces runtime structure construction and repeated index searches with sequential key-range scans, and it defers random row payload reads to the much smaller set of equal-key runs where uom, stmt, value, and plabel are actually needed.",
+      "operation_timings": {
+        "data_loading": 0.9,
+        "dim_filter": 3.03,
+        "build_joins": 1.8,
+        "main_scan": 99.22,
+        "output": 1.32,
+        "total": 120.34
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "CRASHED: Agent \"Code Generator\" failed: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Mar 8th, 2026 4:16 AM.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "CRASHED: Query Optimizer failed for Q6: Agent \"Query Optimizer\" failed: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Mar 8th, 2026 4:16 AM.",
+      "operation_timings": {}
+    }
+  ]
+}

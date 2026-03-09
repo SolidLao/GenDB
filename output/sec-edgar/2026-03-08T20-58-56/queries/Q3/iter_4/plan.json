@@ -1,0 +1,85 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "bind_fact_postings",
+    "scan_fact_postings",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022)",
+      "probe": "num(via num_adsh_fk_hash postings)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 17572,
+      "notes": "Use sub.adsh keys after fy filter and directly lookup fact rowid posting slices in num_adsh_fk_hash; apply USD and non-null filters while scanning posting rowids."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 8040000,
+    "columns": [
+      {
+        "name": "num.uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(filtered_sub_rows) built from sub_fy_zonemap-pruned scan",
+    "fact_join": "pre_built_index(num_adsh_fk_hash posting slices keyed by adsh)",
+    "aggregation": "thread_local direct_array(filtered_sub_cardinality) with final compact_hash_map rollup for (name,cik) and cik"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is logical/physical overwork in fact access: the current plan uses num.adsh.triple_ranges over a tag-version posting structure even though Q3 joins only on adsh, adding avoidable per-entry indirection inside the hot scan. Strategy Category A/C: restructure join probing to use num_adsh_fk_hash directly from filtered sub(adsh, fy=2022), scan only those posting rowids, and keep per-thread direct-array aggregation with a small final rollup for HAVING and top-k.",
+  "correctness_anchors": {}
+}

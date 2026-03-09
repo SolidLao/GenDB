@@ -1,0 +1,120 @@
+{
+  "query_id": "Q3",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_net_price",
+      "action": "use_existing",
+      "files": {
+        "net_price": "column_versions/lineitem.l_net_price/net_price.bin",
+        "net_price_format": "double[59986052]; net_price[i] = l_extendedprice[i] * (1.0 - l_discount[i]); all rows valid"
+      },
+      "usage": "mmap net_price.bin; in main_scan use net_price[i] as the revenue contribution (instead of computing l_extendedprice[i]*(1.0-l_discount[i])). Do NOT mmap l_extendedprice.bin or l_discount.bin — they are replaced by this column entirely."
+    }
+  ],
+  "pipeline": [
+    "fused_parallel_region_open",
+    "parallel_dim_filter",
+    "single_setup_first_li_block",
+    "parallel_collect_orders",
+    "parallel_insert_combined_map_and_bloom",
+    "parallel_scan_lineitem_aggregate",
+    "fused_parallel_region_close",
+    "topk_output"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment == 1)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "notes": "bool qualifying_cust[1500001] indexed directly by c_custkey value (~1.5MB L3-resident). Built inside fused parallel region with #pragma omp for schedule(static); non-overlapping custkey range writes per thread (c_custkey sorted ascending)."
+    },
+    {
+      "build": "orders(filtered: o_orderdate < 8015 AND o_custkey in qualifying_cust)",
+      "probe": "lineitem(filtered: l_shipdate > 8015)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "combined_map (2M slots × 16B = 32MB, 64 partitions × 32768 slots). 4MB blocked bloom filter reduced to 4 probes per key (down from 8). Revenue from precomputed net_price[i]."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == 1",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 8015",
+      "selectivity": 0.49,
+      "output_cardinality": 7350000,
+      "index": "o_orderdate_zone_map",
+      "index_note": "break early when zone_min[b] >= kOrderDateMax (orders sorted ascending by o_orderdate)"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 8015",
+      "selectivity": 0.51,
+      "output_cardinality": 30593000,
+      "index": "l_shipdate_zone_map",
+      "index_note": "compute shared_li_first_block = first b where zone_max[b] > kShipdateMin; Phase 3 loops from [shared_li_first_block, shared_li_nb) skipping the ~294 fully-dead blocks entirely"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_net_price","file": "column_versions/lineitem.l_net_price/net_price.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "prefetch": "mmap_prefetch_all on l_orderkey, l_shipdate, l_net_price, plus orders and customer columns at startup"
+  },
+  "data_structures": {
+    "customer_filter": "bool qualifying_cust[1500001] indexed directly by c_custkey value; ~1.5MB; L3-resident; parallel-built (c_custkey sorted ascending → non-overlapping custkey range per thread, no atomics)",
+    "combined_map": "2,097,152 (2^21) CombinedSlot entries, 16 bytes each = 32MB. CombinedSlot: {int32_t key (sentinel=0), int16_t orderdate, int8_t shippriority, uint8_t _pad, double revenue} alignas(16). Allocate with aligned_alloc(64, COMBINED_CAP*sizeof(CombinedSlot)) — NOT calloc. Phase 2b explicitly memsets each 512KB partition before inserting, so calloc zero-init is redundant. 64 partitions × 32768 slots. Partition = hash32(key) & 63; within-partition start = (hash32(key) >> 6) & 32767. CRITICAL: do NOT call free(combined_map) anywhere in the timed path or cleanup — let the OS reclaim it on process exit (avoids munmap TLB shootdown on 64 cores for 32MB of faulted pages).",
+    "mini_pool": "Single flat malloc: OrdRow* mini_pool = malloc(MAXTHREADS * NUM_PARTS * MINI_CAP * sizeof(OrdRow)) where MINI_CAP=1024. int32_t* pool_cnt = calloc(pool_bufs, sizeof(int32_t)). Total size: 64*64*1024*8 = 32MB. CRITICAL: do NOT call free(mini_pool) or free(pool_cnt) anywhere — the omp single block after Phase 2b must be EMPTY or removed entirely. Calling munmap(32MB) inside omp single causes a TLB shootdown across all 64 cores (~5-10ms) while all threads wait at the implicit barrier. Let the OS reclaim on exit.",
+    "bloom_filter": "uint8_t bloom[4194304] (4MB, aligned 64B). 65536 blocks × 64B = 1 cache-line per block (512 bits/block). REDUCED TO 4 PROBES (down from 8): use only 4 multiplier primes for 4 bit positions per key. FP rate = (1 - e^(-4*1470000/33554432))^4 ≈ 0.07% — of 27M non-matching rows only ~19K false positives reach combined_map, still negligible. bloom_set_atomic: 4 probes. bloom_check: 4 probes with early-exit. Allocate with aligned_alloc. CRITICAL: do NOT call free(bloom) — let OS reclaim on process exit."
+  },
+  "parallelism": {
+    "strategy": "single_fused_parallel_region",
+    "threads": "auto(nproc)",
+    "structure": "Maintain single fused #pragma omp parallel region from iter_4. Key changes: (1) Remove free(mini_pool)/free(pool_cnt) from inside the omp single after Phase 2b — replace the entire omp single block with an empty placeholder or remove it; leave pool memory alive. (2) Phase 3 loops from shared_li_first_block (not 0) to shared_li_nb with schedule(static) instead of schedule(dynamic,1).",
+    "fused_region_layout": {
+      "dim_filter": "#pragma omp for schedule(static): divide 1500000 customer rows into nthreads equal chunks; each thread writes to non-overlapping qualifying_cust[] range. Implicit barrier at end of for.",
+      "single_setup": "#pragma omp single { (a) compute shared_last_ord_block by scanning orders_zm.zm_min until zone_min[b] >= kOrderDateMax; (b) compute shared_li_nb and shared_li_bs; (c) compute shared_li_first_block = first b in [0, shared_li_nb) where lineitem_zm.zm_max[b] > kShipdateMin (the first block with at least one qualifying row). } Implicit barrier.",
+      "phase_2a_collect": "#pragma omp for schedule(dynamic,1) over orders blocks [0..shared_last_ord_block). For each qualifying row: scatter OrdRow to flat mini_pool[(tid*NUM_PARTS+part)*MINI_CAP + pool_cnt[...]++]. Implicit barrier.",
+      "phase_2b_insert_bloom": "#pragma omp for schedule(static) over 64 partitions (1 per thread). (a) memset 512KB partition (pre-faults pages + zeros for SLOT_SENT). (b) insert all mini_pool entries for this partition from all nthreads source threads via linear probe (no contention). (c) bloom_set_atomic with 4 probes for each inserted key. Store key last with ATOMIC_RELEASE. Implicit barrier.",
+      "no_free_after_phase_2b": "CRITICAL CHANGE from iter_4: the '#pragma omp single { free(mini_pool); free(pool_cnt); }' block is REMOVED. Do not free mini_pool or pool_cnt. The memory is no longer accessed after Phase 2b but munmap on 32MB causes a TLB shootdown across 64 cores while all threads wait — costing ~5-10ms. Remove the omp single block entirely; the implicit barrier from Phase 2b already synchronizes all threads before Phase 3.",
+      "phase_3_main_scan": "#pragma omp for schedule(static) over lineitem blocks [shared_li_first_block..shared_li_nb). CHANGED from schedule(dynamic,1) over [0..li_nb): (a) start from shared_li_first_block — skips the ~294 fully-dead leading blocks entirely (no zone_max check needed for most blocks, just per-row check for partial blocks near boundary); (b) static schedule — active blocks are ~306 contiguous uniform full blocks (100K rows each), 306/64 ≈ 4.8 per thread, near-perfect load balance; lower scheduler overhead than dynamic. Still apply per-row shipdate check for partial blocks (where zone_min[b] <= kShipdateMin). For each qualifying row: (a) compute hv=hash32(l_orderkey[i]); (b) 4-probe bloom_check (1 cache-line + 4 bit tests) — if miss continue; (c) probe combined_map partition (ATOMIC_ACQUIRE key load, linear probe); (d) CAS-add net_price[i] to slot->revenue. Implicit barrier.",
+      "parallel_region_end": "All threads exit. Do NOT free bloom here. bloom, combined_map, mini_pool, pool_cnt are all skipped in cleanup — OS reclaims on exit."
+    },
+    "output_phase": "SEPARATE (outside fused region): #pragma omp parallel for schedule(static) over 64 partitions, thread-local top-10 heap. Single-threaded merge of 64×10 candidates → final top-10 → sort → CSV. Output excluded from timing_ms. Do NOT free combined_map after output — let OS handle."
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "purpose": "skip_blocks — break early when zone_min[b] >= kOrderDateMax (orders sorted ascending)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — compute first active block (shared_li_first_block) in single_setup; Phase 3 starts from there; still apply per-row check for partial boundary blocks"
+    }
+  ],
+  "aggregation": "Direct atomic CAS accumulation into combined_map slot->revenue (union double/uint64_t). Key = l_orderkey (uniquely identifies group). Revenue value = net_price[i] from precomputed extension. No separate aggregation phase.",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "Parallel scan of combined_map (64 threads × 1 partition each = 512KB per thread), thread-local top-10 heap (padded LocalTop10 struct, 256B). Single-threaded merge of 640 candidates → sort_heap → CSV write."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two independent bottlenecks identified in iter_4's 55ms: (1) Category C (work elimination) — free(mini_pool, 32MB) inside #pragma omp single after Phase 2b calls munmap(32MB) which triggers TLB shootdown IPIs to all 64 cores; with MAXTHREADS=64 this costs roughly 5-10ms while all threads wait at the implicit omp single barrier. Similarly, free(combined_map, 32MB) after the output phase (still within timing_ms = total - output) incurs another ~5-10ms TLB shootdown. Since this is a short-lived query binary that exits immediately after writing results, these frees are unnecessary — the OS reclaims all process memory on exit without per-page TLB invalidation. Removing free(mini_pool), free(pool_cnt) from inside the omp single and removing free(combined_map)/free(bloom) from cleanup eliminates ~10-20ms of TLB overhead. (2) Category C (work elimination) — bloom filter uses 8 hash probes per row for 30M rows in Phase 3: 8 x hash32(key*prime_j) ~ 24ns/row x 30M / 64 threads ~ 11ms of compute. Reducing to 4 probes cuts this to ~6ms (FP rate rises from 0.018% to 0.07%, adding ~19K extra combined_map probes out of 27M non-matching rows — negligible). (3) Category A (plan restructuring) — Phase 3 computed shared_li_first_block in single_setup and loop from there with schedule(static), skipping the ~294 leading dead blocks and switching from dynamic to static scheduling for the contiguous 306-block active range (near-perfect load balance, lower overhead). Combined expected improvement: ~15-25ms, targeting timing_ms of 30-40ms.",
+  "correctness_anchors": {
+    "date_literal": "1995-03-15",
+    "revenue_formula": "l_extendedprice*(1-l_discount)"
+  }
+}

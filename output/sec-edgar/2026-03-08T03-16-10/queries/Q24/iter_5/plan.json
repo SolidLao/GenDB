@@ -1,0 +1,117 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "prune_num_blocks_by_ddate",
+    "build_pre_adsh_ranges",
+    "scan_num_filtered",
+    "anti_join_pre_adsh_slice",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh range directory over sorted adsh_tag_version index)",
+      "probe": "num(filtered rows in surviving ddate blocks)",
+      "type": "anti",
+      "strategy": "direct_array",
+      "build_cardinality": 86134,
+      "notes": "Build a dense adsh->rowid-range directory from pre/indexes/adsh_tag_version.rowids.bin and pre/adsh.bin. For each qualifying num row, use adsh to jump directly to the matching pre slice, then binary-search only that slice on (tag,version) instead of global binary-searching all 9.6M pre rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "ddate_zone",
+        "file": "num/indexes/ddate.zone_map.bin",
+        "type": "ZoneRecord<int32_t>",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(395)",
+    "fact_join": "flat_array(86135+1) adsh_offsets + pre_built_index",
+    "aggregation": "compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/ddate.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current anti-join does about 9.0M probes after filtering, and each probe performs a global binary search over a pre membership structure whose rowids plus key columns span about 154 MB, well beyond the 88 MB LLC, so probe time is dominated by cache-miss-heavy comparisons. Strategy category A/B: keep the sequential num scan and ddate block pruning, but restructure the join to exploit the existing sort prefix on pre.adsh by first building a dense direct-array directory from adsh id to [start,end) in the sorted pre rowid index, then probing only that adsh-local slice for (tag,version); this shrinks each lookup from ~23 global comparisons across four large arrays to ~7 comparisons inside an average 111-row slice and removes pre.adsh from the hot probe path.",
+  "correctness_anchors": {}
+}

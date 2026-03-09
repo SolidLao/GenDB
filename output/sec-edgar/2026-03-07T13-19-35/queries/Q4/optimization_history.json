@@ -1,0 +1,103 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 319.24666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 319.24666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.1,
+        "build_joins": 47.72,
+        "main_scan": 121.25,
+        "output": 13.77,
+        "total": 331.19
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 197.99,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 197.99,
+      "validation": "pass",
+      "strategy": "Three root causes diagnosed. (1) Category B: eq_count_map was allocated with FlatCountMap(2200000), which resolves to 8,388,608 slots × 12 bytes = 100.6MB — 2.3× the 44MB LLC, causing every main_scan probe to miss LLC. Fix: FlatCountMap(700000) → 2,097,152 slots × 25.2MB, LLC-resident; 1.06M entries at 50.6% load factor is well within open-addressing limits. (2) Category C: 89% of probes to eq_count_map were from non-qualifying rows (those that pass sic+abstract but not the eq_set). A 2MB bloom filter (16M bits, 7 hash functions, ~0.78% FPR) rejects ~99.2% of these non-qualifying probes before touching the hash table, eliminating wasted LLC-miss memory traffic. (3) Category D: merge_aggregates was fully single-threaded and consumed ~150ms (the largest single phase, invisible because it had no GENDB_PHASE timer). Fix: parallel binary-tree reduction — 6 rounds where active threads merge in pairs, cutting the merge to O(log 64) depth with each round fully parallelized. CIK tracking changed from unordered_set<int32_t> (expensive heap allocation per group) to sorted vector<int32_t> (insert via lower_bound dedup, merge via std::merge+unique), dramatically reducing allocation overhead and making cik-set merges branchless and cache-friendly.",
+      "operation_timings": {
+        "data_loading": 0.11,
+        "build_joins": 70.16,
+        "main_scan": 49.41,
+        "merge_aggregates": 35.54,
+        "output": 20.55,
+        "total": 214.22
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 163.97,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 163.97,
+      "validation": "pass",
+      "strategy": "Two root causes diagnosed. (1) Category A — logical plan restructuring: the previous plan built eq_count_map from ALL pre rows with stmt='EQ' (~1.06M entries, 25MB, 2M slots), but 96% of those have non-qualifying SIC codes. Fix: build a 10KB adsh_qualifying_bitset from sub_sic during preprocessing; during the parallel pre scan, check bitset[pre_adsh_code] AND stmt==eq_code before emitting a key. This reduces eq_count_map entries from 1.06M to ~42K, shrinking the map from 25MB (LLC-resident) to 786KB (L2/L3-resident). Single-threaded insert drops from ~32ms (1.06M x 30ns LLC access) to <1ms (42K x 3ns L2 access). The bloom filter is eliminated entirely — a 786KB map is already effectively cache-resident. (2) Category B — algorithm change for CIK tracking: the previous sorted vector<int32_t> approach required O(log k) lower_bound + O(k) insert per row, and std::merge + std::unique + heap allocation during tree-reduction merges. Since only CIK values from adsh_codes with sic 4000-4999 can qualify (at most 3445 distinct CIKs), we remap qualifying CIKs to indices [0, N_ciks) and track them with a compact uint64_t bitset (54 words = 432 bytes per group). Insertion becomes a single bit-set (O(1), no allocation); merge becomes 54 bitwise OR operations (vs std::merge+unique+allocation); final count uses __builtin_popcountll. The adsh_to_cik_idx array (86135 x uint16_t = 172KB, LLC-resident) provides O(1) lookup from adsh_code to CIK remap index. Expected speedup: build_joins 70ms -> ~15ms, merge_aggregates 36ms -> ~8ms, main_scan 49ms -> ~38ms (eq_count_map probe now L2-resident, no bloom computation), total target ~80-90ms.",
+      "operation_timings": {
+        "data_loading": 0.11,
+        "dim_filter": 1.14,
+        "build_joins": 17.33,
+        "main_scan": 83.7,
+        "merge_aggregates": 41.72,
+        "output": 20.08,
+        "total": 179.41
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "Root cause (Category B — algorithm change): iter_2 regressed main_scan from 49ms to 84ms and merge_aggregates from 36ms to 42ms despite a smaller eq_count_map. The culprit is std::unordered_map<uint64_t, AggState> where AggState embeds a vector<uint64_t> cik_bits. This creates two levels of heap indirection on every aggregation operation: (1) the unordered_map node is heap-allocated with linked-list chaining, and (2) AggState.cik_bits is a heap-allocated 432-byte array (assign(54, 0) triggered on each new group). With ~100 new groups per thread, this produces ~100 small allocations scattered across the heap, making every subsequent cik_data access a random cache miss. The fix is a custom FlatAggMap using SoA layout — keys[cap], sums[cap], cnts[cap], cik_data[cap*cik_words] — where all arrays are pre-allocated and zeroed at construction. No per-group heap allocation ever occurs; the cik_data access is cik_data[slot*cik_words+word] with no pointer indirection. Memory: cap=1024 per worker thread → 466KB/thread; 64 threads = 29.8MB total (fits in 44MB LLC). Thread_maps[0] uses cap=8192 (3.73MB, L3-resident) to accumulate all groups after tree-reduction. Additionally, the 256KB bloom filter is eliminated: with ~42K entries probing a 786KB FlatCountMap, the FPR is ~10^-7 (essentially zero), so the bloom's 7 hash computations per qualifying row produce no filtering benefit — pure wasted cycles. Expected: main_scan ~35ms, merge_aggregates ~8ms, total ~65ms.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "TIMEOUT: Query Optimizer failed for Q4: Agent \"Query Optimizer\" timed out after 30m 0s",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 408.7866666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 408.7866666666667,
+      "validation": "pass",
+      "strategy": "Root cause: three compounding problems. (1) Bloom filter included in code despite plan saying to remove it — 7 hash ops × ~5ns × 523K rows = 18ms+ wasted in main_scan on a filter with ~0% FPR benefit for a 786KB cache-resident map. (2) unordered_map::reserve(4096) but N_groups >> 4096 (confirmed by iter_3 timeout with 4096-safe-slot FlatAggMap) → multiple rehashes during main_scan = O(N^2) behavior. (3) Lazy heap allocation for cik_bits vector per group and hash-node heap allocation per unordered_map entry cause double pointer-chase per qualifying row + scattered heap. Strategy (Category B + C): pre-enumerate N_groups unique (sic,tagver) groups from eq_count_map slots and build slot_to_group_idx[65536] (256KB, L3-resident) during build_joins; in main_scan use direct array local_agg[group_idx] (N_groups×16B per thread, no hashing, no allocation); collect (group_idx, cik_idx) pairs in sequential cik_buf; after scan, parallel element-wise sum/cnt reduction replaces 6-round tree merge of hash maps (saves ~37ms); post-scan CIK counting via counting-sort + per-group L1-resident bitset (432B) avoids all large cik structures. No bloom filter anywhere.",
+      "operation_timings": {
+        "data_loading": 0.1,
+        "dim_filter": 1.05,
+        "build_joins": 21.44,
+        "main_scan": 343.76,
+        "sum_cnt_reduction": 6.91,
+        "cik_counting": 17.81,
+        "output": 1.71,
+        "total": 406.05
+      }
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "runId": "2026-03-08T20-58-56",
+  "workload": "sec-edgar",
+  "startedAt": "2026-03-08T20:58:56.937Z",
+  "status": "completed",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/sec-edgar/data/sf3",
+  "gendbDir": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/gendb",
+  "scaleFactor": 3,
+  "maxIterations": 5,
+  "model": "gpt-5.3-codex",
+  "agentProvider": "codex",
+  "optimizationTarget": "hot",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-03-08T20:58:56.950Z",
+        "completedAt": "2026-03-08T21:01:10.363Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-03-08T21:01:10.364Z",
+        "completedAt": "2026-03-08T21:06:01.087Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-03-08T21:06:01.087Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-03-08T21:06:01.087Z"
+      }
+    },
+    "completedAt": "2026-03-08T21:10:08.596Z"
+  },
+  "phase2": {
+    "status": "completed",
+    "queries": [
+      "Q1",
+      "Q2",
+      "Q3",
+      "Q4",
+      "Q6",
+      "Q24"
+    ],
+    "maxConcurrent": 22,
+    "pipelines": {
+      "Q1": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q1/iter_0/q1.cpp",
+        "iterations": 0
+      },
+      "Q2": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q2/iter_3/q2.cpp",
+        "iterations": 3
+      },
+      "Q3": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q3/iter_4/q3.cpp",
+        "iterations": 4
+      },
+      "Q4": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q4/iter_4/q4.cpp",
+        "iterations": 4
+      },
+      "Q6": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q6/iter_2/q6.cpp",
+        "iterations": 2
+      },
+      "Q24": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/sec-edgar/2026-03-08T20-58-56/queries/Q24/iter_3/q24.cpp",
+        "iterations": 3
+      }
+    },
+    "completedAt": "2026-03-08T22:08:00.722Z"
+  },
+  "completedAt": "2026-03-08T22:08:06.992Z"
+}

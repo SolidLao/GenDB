@@ -1,0 +1,60 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "zone_map_prune",
+    "scan_filter",
+    "aggregate"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.1667
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "selectivity": 0.2222
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.65
+    },
+    {
+      "table": "lineitem",
+      "predicate": "combined",
+      "selectivity": 0.024
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(600)",
+    "fact_join": "none",
+    "aggregation": "thread_local_double_sum"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "64"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_discount_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_quantity_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

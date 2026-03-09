@@ -1,0 +1,98 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "candidate_density_precheck",
+    "scan_shipdate_compact_candidates",
+    "probe_discount_quantity_compact_survivors",
+    "late_materialize_extendedprice_sum",
+    "output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.161
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7 AND l_quantity < 2400",
+      "selectivity": 0.149
+    },
+    {
+      "table": "lineitem",
+      "predicate": "(l_shipdate >= 8766 AND l_shipdate < 9131) AND (l_discount >= 5 AND l_discount <= 7) AND l_quantity < 2400",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential shipdate scan per thread, then monotonic sparse probes into discount/quantity and finally extendedprice for compacted survivor row ids"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600) candidate-density precheck only",
+    "fact_join": "thread-local row_id vector for shipdate candidates, then thread-local survivor row_id vector plus compact discount payload; no join",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc) with static contiguous row partitions and thread-local compaction/reduction"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "precheck candidate density only; bypass block-pruning path when all 600 blocks overlap"
+    },
+    {
+      "index": "lineitem_discount_zone_map",
+      "purpose": "precheck candidate density only; do not drive the hot loop when overlap is dense"
+    },
+    {
+      "index": "lineitem_quantity_zone_map",
+      "purpose": "precheck candidate density only; do not drive the hot loop when overlap is dense"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current fused scan does work that is badly out of proportion to the output, streaming about 1.60 GiB per execution and reading `l_extendedprice` for 97.6% of rows that fail the predicates, while also paying to touch `l_discount` and `l_quantity` for 83.9% of rows rejected by the cheap 4-byte `l_shipdate` filter. Strategy Category A/C: reorder the scan to filter on `l_shipdate` first, compact qualifying row ids in thread-local vectors, probe `l_discount` and `l_quantity` only for those monotonically increasing candidates, compact final survivors with their small discount payload, and late-materialize `l_extendedprice` only for the final survivor list before reducing into thread-local sums. Keep the three 600-entry zone maps only as a density precheck and bypass block-pruning on this hot path, avoiding the prior dense-bitmap and tiny-tile regressions while cutting expected bytes touched to roughly 1.00 GiB.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 5,
+    "discount_hi": 7,
+    "quantity_hi": 2400,
+    "revenue_formula": "SUM(l_extendedprice * l_discount)",
+    "revenue_scale_divisor": 10000.0
+  }
+}

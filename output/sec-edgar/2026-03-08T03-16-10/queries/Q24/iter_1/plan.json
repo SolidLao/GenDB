@@ -1,0 +1,114 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "prune_num_blocks",
+    "build_pre_bloom",
+    "scan_num_filtered",
+    "verify_pre_hits",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version)",
+      "probe": "num(filtered)",
+      "type": "anti",
+      "strategy": "bloom_filter",
+      "build_cardinality": 9600799,
+      "notes": "Build a shared blocked bloom filter over pre(adsh,tag,version); during the num scan, probe the bloom first and only binary-search pre/indexes/adsh_tag_version.rowids.bin for bloom positives."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 1.0
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.9493670886075949
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(395)",
+    "fact_join": "blocked_bloom_filter + pre_built_index",
+    "aggregation": "compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num/indexes/ddate.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current anti-join performs random binary searches into a pre membership structure whose rowids plus key columns are about 154 MB, well beyond the 88 MB LLC, so the main scan is dominated by cache-miss-heavy lookup latency. Strategy category B/C: keep the sequential num scan and zone-map pruning, but build a shared blocked bloom filter over pre(adsh,tag,version) so most probe rows are rejected from a cache-resident structure and only bloom positives pay the exact binary-search verification against the existing sorted pre index; keep tag/version as integer group keys and defer string decode to final output.",
+  "correctness_anchors": {}
+}

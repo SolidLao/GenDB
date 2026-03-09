@@ -1,0 +1,100 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "classify_shipdate_blocks",
+    "scan_accept_blocks",
+    "scan_boundary_blocks",
+    "merge_partial_groups",
+    "sort_output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential block scan; accepted blocks never read l_shipdate rows, boundary blocks read l_shipdate first then payload columns only for qualifying rows"
+  },
+  "data_structures": {
+    "dim_filter": "zone_map(mins,maxs) over 100000-row blocks with three block modes: skip, accept_all, boundary_check",
+    "fact_join": "none",
+    "aggregation": "thread_local compact_hash_map(pre_sized=16, key=uint16_t((l_returnflag<<8)|l_linestatus)) with compact final merge map sized to output groups"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "skip blocks with mins > 10471 and fast-accept blocks with maxs <= 10471 so row-level shipdate checks are limited to boundary blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the iter_0 plan uses 64 thread-local direct arrays with 65536 aggregate slots each, so the runtime allocates and zero-initializes about 256 MiB of aggregation state to produce only about 6 groups; that cache-exceeding, mostly unused state dominates total time even though the actual scan is already fast. Strategy category B/C: keep the zone-map pruning plan, but replace the oversized direct array with a tiny cache-resident thread-local hash table sized to the actual group count, split accepted blocks from boundary blocks so accepted blocks never touch row-level shipdate values, and merge only touched groups before the final sort.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "sum_disc_price_scaled_formula": "accumulate l_extendedprice * (100 - l_discount); final output divides by 10000",
+    "sum_charge_scaled_formula": "accumulate l_extendedprice * (100 - l_discount) * (100 + l_tax); final output divides by 1000000",
+    "avg_qty_scaled_formula": "sum_qty / count_order with scale-2 decode",
+    "avg_price_scaled_formula": "sum_base_price / count_order with scale-2 decode",
+    "avg_disc_scaled_formula": "sum_discount / count_order with scale-2 decode"
+  }
+}

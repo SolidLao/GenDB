@@ -1,0 +1,115 @@
+{
+  "query_id": "Q24",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 149.85666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 149.85666666666665,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.2,
+        "dim_filter": 0.01,
+        "build_joins": 0.02,
+        "main_scan": 123.36,
+        "output": 5.41,
+        "total": 153.73
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 302.7133333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 302.7133333333333,
+      "validation": "pass",
+      "strategy": "Root cause: the current anti-join performs random binary searches into a pre membership structure whose rowids plus key columns are about 154 MB, well beyond the 88 MB LLC, so the main scan is dominated by cache-miss-heavy lookup latency. Strategy category B/C: keep the sequential num scan and zone-map pruning, but build a shared blocked bloom filter over pre(adsh,tag,version) so most probe rows are rejected from a cache-resident structure and only bloom positives pay the exact binary-search verification against the existing sorted pre index; keep tag/version as integer group keys and defer string decode to final output.",
+      "operation_timings": {
+        "data_loading": 0.2,
+        "dim_filter": 0.01,
+        "build_joins": 160.9,
+        "main_scan": 123.66,
+        "output": 1.57,
+        "total": 302.08
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 314.75,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 314.75,
+      "validation": "pass",
+      "strategy": "Root cause: the current main scan performs about 9.0M filtered-row anti-join probes, each as a random binary search into pre key columns and rowids whose working set exceeds the 88 MB LLC, so time is dominated by cache-miss latency. Strategy category B/A: first scan num.uom and num.ddate sequentially to build a 39.4M-row qualifying bitmap, then walk num/indexes/adsh_tag_version.rowids.bin and pre/indexes/adsh_tag_version.rowids.bin as a forward merge anti-join on (adsh,tag,version), checking the bitmap to skip non-qualifying num rowids and aggregating only unmatched qualifying rows; this replaces repeated random probes with one ordered pass over the existing indexes while keeping final GROUP BY on integer (tag,version) ids.",
+      "operation_timings": {
+        "data_loading": 0.29,
+        "dim_filter": 158.34,
+        "build_joins": 0.19,
+        "main_scan": 90.84,
+        "output": 74.05,
+        "total": 385.86
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 116.90333333333332,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 116.90333333333332,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan does substantial unnecessary work because it opens and prefetches all large num fact columns before checking zone maps, even though the 2023 ddate predicate has zero selectivity on this dataset and should eliminate every block. Strategy category A/C: restructure execution so the query first resolves USD, scans only the tiny uom/ddate zone maps, and treats an empty surviving-block set as a terminal fast path that writes the CSV header and exits without loading num fact columns, building aggregation state, or opening the pre anti-join index; only if blocks survive should it late-load the needed columns and run the existing anti-join plus aggregation logic.",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "dim_filter": 0.01,
+        "build_joins": 0.1,
+        "main_scan": 100.12,
+        "output": 0.97,
+        "total": 115.96
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 118.72333333333331,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 118.72333333333331,
+      "validation": "pass",
+      "strategy": "Root cause: iteration 3 still performs unnecessary work before the empty-result fast path by opening and prefetching num base columns even though the 2023 date predicate has zero selectivity and the tiny ddate zone map alone can prove that no block qualifies. Strategy category A/C: reorder filters so execution first scans only num/indexes/ddate.zone_map.bin, exits immediately with header-only output when that scan finds no overlap with [19358,19722], and delays USD dictionary resolution, uom zone-map access, num column mmaps, pre index access, and aggregation until after at least one date-qualified block exists.",
+      "operation_timings": {
+        "data_loading": 0.01,
+        "dim_filter": 0,
+        "build_joins": 0.19,
+        "main_scan": 101.31,
+        "output": 0.89,
+        "total": 117.27
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 78.34,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 78.34,
+      "validation": "pass",
+      "strategy": "Root cause: the current anti-join does about 9.0M probes after filtering, and each probe performs a global binary search over a pre membership structure whose rowids plus key columns span about 154 MB, well beyond the 88 MB LLC, so probe time is dominated by cache-miss-heavy comparisons. Strategy category A/B: keep the sequential num scan and ddate block pruning, but restructure the join to exploit the existing sort prefix on pre.adsh by first building a dense direct-array directory from adsh id to [start,end) in the sorted pre rowid index, then probing only that adsh-local slice for (tag,version); this shrinks each lookup from ~23 global comparisons across four large arrays to ~7 comparisons inside an average 111-row slice and removes pre.adsh from the hot probe path.",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "dim_filter": 0.01,
+        "build_joins": 15.43,
+        "main_scan": 45.73,
+        "output": 1.06,
+        "total": 76.86
+      }
+    }
+  ]
+}

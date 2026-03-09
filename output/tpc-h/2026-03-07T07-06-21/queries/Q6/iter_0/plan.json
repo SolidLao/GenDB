@@ -1,0 +1,102 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "parallel_filter_scan", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.019,
+      "enforcement": "zone_map_block_skip_then_row_filter",
+      "notes": "Primary filter; zone map eliminates ~98.1% of 600 blocks. Qualifying blocks are contiguous — use binary search on zone min/max to find [block_lo, block_hi) window."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.21,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied per-row inside qualifying blocks."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "selectivity": 0.47,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied per-row inside qualifying blocks."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "num_blocks": 600,
+    "columns_read": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+    "column_files": {
+      "l_shipdate":      "lineitem/l_shipdate.bin",
+      "l_discount":      "lineitem/l_discount.bin",
+      "l_quantity":      "lineitem/l_quantity.bin",
+      "l_extendedprice": "lineitem/l_extendedprice.bin"
+    },
+    "column_types": {
+      "l_shipdate":      "int32_t",
+      "l_discount":      "int8_t",
+      "l_quantity":      "int8_t",
+      "l_extendedprice": "double"
+    },
+    "estimated_qualifying_blocks": 12,
+    "estimated_rows_after_zone_map": 1140000,
+    "estimated_rows_after_all_filters": 113700
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "layout": {
+        "header": "uint32_t num_blocks (4B) + uint32_t block_size (4B)",
+        "entries": "ZoneEntry[num_blocks] where ZoneEntry = { int32_t min_date; int32_t max_date; } (8B each)",
+        "total_size_bytes": 4808
+      },
+      "usage": "Load entire zone map at startup (fits in L1 cache). Binary search on zone entry min_date/max_date to find contiguous window of qualifying blocks [block_lo, block_hi). Skip any block where zone.max_date < 8766 OR zone.min_date >= 9131.",
+      "date_constants": {
+        "LO": 8766,
+        "HI": 9131,
+        "LO_label": "1994-01-01",
+        "HI_label": "1995-01-01"
+      }
+    }
+  ],
+  "data_structures": {
+    "zone_map": "flat_array(600 entries, loaded once, L1-resident)",
+    "thread_accumulator": "double (per-thread local, no atomics)",
+    "final_reduction": "sequential sum of 64 thread-local doubles"
+  },
+  "aggregation": {
+    "type": "single_scalar",
+    "output_column": "revenue",
+    "expression": "SUM(l_extendedprice[i] * (l_discount[i] * 0.01))",
+    "accumulator_type": "double",
+    "strategy": "thread_local_accumulate_then_reduce",
+    "notes": "Each thread accumulates into a local double. No hash table needed. Final result = sum of all thread-local accumulators."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_count_hint": 64,
+    "partition_unit": "row_range within qualifying block window",
+    "notes": "Divide the row range [block_lo*block_size, block_hi*block_size) evenly across 64 threads. Each thread applies zone-entry check per block it touches, then per-row triple filter, then accumulates revenue. No synchronization during scan — only a single reduction barrier at end."
+  },
+  "inner_loop": {
+    "description": "Per-row logic within qualifying blocks",
+    "filter_order": ["l_shipdate (int32)", "l_discount (int8)", "l_quantity (int8)"],
+    "compute": "revenue_local += l_extendedprice[i] * (l_discount[i] * 0.01)",
+    "notes": "Apply cheapest/most selective checks first. l_shipdate is int32 with highest selectivity (1.9%); discount and quantity are int8 (no decode). extendedprice (double) read only when all three filters pass."
+  },
+  "output": {
+    "columns": ["revenue"],
+    "order_by": [],
+    "limit": null,
+    "format": "single_row_double"
+  },
+  "execution_target": "cpp"
+}

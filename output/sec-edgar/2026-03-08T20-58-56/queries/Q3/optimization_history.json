@@ -1,0 +1,115 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 83.17333333333335,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 83.17333333333335,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 2.4,
+        "dim_filter": 0.41,
+        "build_joins": 0,
+        "main_scan": 56.43,
+        "output": 15.77,
+        "total": 96.56
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 348.18666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 348.18666666666667,
+      "validation": "fail",
+      "strategy": "Root cause is plan/implementation mismatch: Iter 0 still pays full-table fact scan and per-row hash aggregation despite available posting indexes, so main_scan dominates. Strategy Category A/C: reorder to filter sub(fy=2022) first and drive fact access through num_adsh_fk_hash postings, apply USD via a compact rowid bitset built from num_uom_hash, and replace per-row hash updates with thread-local direct arrays over filtered sub keys before a small final rollup; this removes unnecessary row touches and hot-path hash work while preserving query semantics.",
+      "operation_timings": {
+        "data_loading": 2.52,
+        "dim_filter": 0.55,
+        "build_joins": 82.52,
+        "main_scan": 220.27,
+        "output": 44.17,
+        "total": 384.29
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 291.9866666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 291.9866666666667,
+      "validation": "pass",
+      "strategy": "Root cause is that iter_0 still performs too much per-row hot-path work: a full 39.4M-row fact loop plus two hash-map updates for each qualifying row. Strategy Category C (work elimination) with cache-fit array aggregation: drive scan from the USD posting list so only USD rowids are touched, map adsh codes through a dense filtered-index array, accumulate into thread-local fixed arrays keyed by filtered sub rows, and defer hash aggregation to a small post-scan rollup over filtered rows; this removes one entire per-row aggregation path and replaces random hash updates with contiguous array writes while preserving exact query semantics.",
+      "operation_timings": {
+        "data_loading": 3.52,
+        "dim_filter": 1.48,
+        "build_joins": 210.42,
+        "main_scan": 21.48,
+        "output": 16.01,
+        "total": 303.05
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 64.89999999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 64.89999999999999,
+      "validation": "pass",
+      "strategy": "Root cause is wasted work in the previous direction: build_joins became dominant by materializing USD rowids from a cache-exceeding posting tail before any selective join. Strategy Category A/C: reorder to filter sub by fy first, then use the existing num.adsh.triple_ranges representation to scan only fact ranges for matching adsh keys and apply uom/value predicates inside those ranges; keep aggregation as cache-friendly direct arrays with a small final rollup for HAVING and top-k.",
+      "operation_timings": {
+        "data_loading": 1.77,
+        "dim_filter": 0.74,
+        "build_joins": 4.2,
+        "main_scan": 38.46,
+        "output": 7.2,
+        "total": 70.68
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 60.82333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 60.82333333333333,
+      "validation": "pass",
+      "strategy": "Root cause is logical/physical overwork in fact access: the current plan uses num.adsh.triple_ranges over a tag-version posting structure even though Q3 joins only on adsh, adding avoidable per-entry indirection inside the hot scan. Strategy Category A/C: restructure join probing to use num_adsh_fk_hash directly from filtered sub(adsh, fy=2022), scan only those posting rowids, and keep per-thread direct-array aggregation with a small final rollup for HAVING and top-k.",
+      "operation_timings": {
+        "data_loading": 1.78,
+        "dim_filter": 0.6,
+        "build_joins": 2.9,
+        "main_scan": 36.41,
+        "output": 4.95,
+        "total": 61.16
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 61.63666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 61.63666666666666,
+      "validation": "pass",
+      "strategy": "Root cause is a physical access-pattern mismatch: probing filtered adsh posting lists drives cache-miss-heavy random reads into num.value/num.uom (working set >> 88MB LLC), so main_scan remains dominant. Strategy Category B/A: replace posting-driven probes with one fused sequential fact pass over num.adsh/uom/value, use a dense adsh->filtered_sub_idx direct lookup from filtered sub(fy=2022), and keep cache-friendly thread-local direct-array aggregation before a small final rollup for HAVING and top-k.",
+      "operation_timings": {
+        "data_loading": 2.32,
+        "dim_filter": 0.81,
+        "build_joins": 0.34,
+        "main_scan": 39.56,
+        "output": 13.55,
+        "total": 73.66
+      }
+    }
+  ]
+}

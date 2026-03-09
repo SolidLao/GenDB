@@ -1,0 +1,162 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "num.adsh_tag_version.runs",
+      "action": "built_new",
+      "files": {
+        "adsh": "column_versions/num.adsh_tag_version.runs/adsh.bin",
+        "adsh_format": "uint32_t[unique_keys]",
+        "tag": "column_versions/num.adsh_tag_version.runs/tag.bin",
+        "tag_format": "uint32_t[unique_keys]",
+        "version": "column_versions/num.adsh_tag_version.runs/version.bin",
+        "version_format": "uint32_t[unique_keys]",
+        "offsets": "column_versions/num.adsh_tag_version.runs/offsets.bin",
+        "offsets_format": "uint64_t[unique_keys + 1]",
+        "adsh_offsets": "column_versions/num.adsh_tag_version.runs/adsh_offsets.bin",
+        "adsh_offsets_format": "uint64_t[max_adsh + 2]"
+      },
+      "usage": "mmap the unique-key arrays and adsh_offsets; for each qualifying adsh from sub, scan only that adsh's sorted num key range and use offsets[i]:offsets[i+1] as the rowid run in num/indexes/adsh_tag_version.rowids.bin"
+    },
+    {
+      "id": "pre.adsh_tag_version.runs",
+      "action": "built_new",
+      "files": {
+        "adsh": "column_versions/pre.adsh_tag_version.runs/adsh.bin",
+        "adsh_format": "uint32_t[unique_keys]",
+        "tag": "column_versions/pre.adsh_tag_version.runs/tag.bin",
+        "tag_format": "uint32_t[unique_keys]",
+        "version": "column_versions/pre.adsh_tag_version.runs/version.bin",
+        "version_format": "uint32_t[unique_keys]",
+        "offsets": "column_versions/pre.adsh_tag_version.runs/offsets.bin",
+        "offsets_format": "uint64_t[unique_keys + 1]",
+        "adsh_offsets": "column_versions/pre.adsh_tag_version.runs/adsh_offsets.bin",
+        "adsh_offsets_format": "uint64_t[max_adsh + 2]"
+      },
+      "usage": "mmap the unique-key arrays and adsh_offsets; for each qualifying adsh from sub, merge its sorted pre key range against the num key range, then materialize only matching pre rowid runs to test stmt='IS' and read plabel"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "locate_adsh_key_ranges",
+    "merge_key_runs",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub.adsh_to_rowid(fy=2023,name)",
+      "probe": "num.adsh_tag_version.runs and pre.adsh_tag_version.runs via adsh_offsets",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612,
+      "notes": "Use the dense sub lookup first; only adsh values surviving fy=2023 drive any downstream key-range scans."
+    },
+    {
+      "build": "pre unique-key runs within qualifying adsh values",
+      "probe": "num unique-key runs within the same adsh values",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 2655125,
+      "notes": "Within each qualifying adsh, both run directories are sorted by (tag,version); merge the two ranges and materialize row payloads only for equal keys."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.844
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num+pre adsh_tag_version run directories",
+    "rows": 5276477,
+    "columns": [
+      {
+        "name": "num_run_adsh",
+        "file": "column_versions/num.adsh_tag_version.runs/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_run_tag",
+        "file": "column_versions/num.adsh_tag_version.runs/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_run_version",
+        "file": "column_versions/num.adsh_tag_version.runs/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_run_adsh",
+        "file": "column_versions/pre.adsh_tag_version.runs/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_run_tag",
+        "file": "column_versions/pre.adsh_tag_version.runs/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_run_version",
+        "file": "column_versions/pre.adsh_tag_version.runs/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_id->sub_rowid) with sub.name side array",
+    "fact_join": "sorted_unique_key_runs over the existing num/pre sorted rowid indexes, plus dense adsh_offsets directories to restrict merge work to fy=2023 adsh ranges",
+    "aggregation": "compact_hash_map keyed by (name_id, stmt_id, tag_id, plabel_id), sized to observed matching keys and updated only after late materialization of matching rowid runs"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: iteration 1 still pays for two cache-unfriendly phases, a 550k-entry runtime pre hash build and roughly 550k double binary searches against the 39.4M-row num permutation. Strategy category E: build persistent sorted unique-key run directories for num and pre over the existing (adsh,tag,version) rowid indexes, then use the dense sub adsh filter to restrict work to 2023 filings and merge only those per-adsh key ranges. This replaces runtime structure construction and repeated index searches with sequential key-range scans, and it defers random row payload reads to the much smaller set of equal-key runs where uom, stmt, value, and plabel are actually needed.",
+  "correctness_anchors": {}
+}

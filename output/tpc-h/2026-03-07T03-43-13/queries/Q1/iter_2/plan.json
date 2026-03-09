@@ -1,0 +1,93 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_filter_aggregate",
+    "merge_partial_groups",
+    "sort_output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.9859393480337729
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential contiguous row-range scan over all lineitem rows; inline l_shipdate cutoff check in the hot loop; no zone-map block classification or atomic morsel scheduling"
+  },
+  "data_structures": {
+    "dim_filter": "none; direct inline comparison on l_shipdate[row] <= 10471",
+    "fact_join": "none",
+    "aggregation": "thread_local direct_array(4 slots) with shared dense_key_lut[65536] mapping (l_returnflag<<8)|l_linestatus for AF,NF,NO,RF to slot ids; merge exactly 4 slots per thread"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan assumes shipdate zone-map pruning will help, but all 600 lineitem shipdate blocks are boundary blocks, so the runtime still performs a full 59.99M-row scan while paying extra block classification, atomic block scheduling, and per-row compact-hash probes to produce only 4 groups. Strategy category A/D: remove the ineffective zone-map-driven accept/boundary path from the hot loop, scan contiguous row ranges directly with the l_shipdate <= 10471 predicate inline, map the four observed (l_returnflag,l_linestatus) combinations to dense ids with a tiny lookup table, aggregate into a 4-slot thread-local direct array that fits in L1, then merge 4 slots per thread and sort the 4 output rows.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "sum_disc_price_scaled_formula": "accumulate l_extendedprice * (100 - l_discount); final output divides by 10000",
+    "sum_charge_scaled_formula": "accumulate l_extendedprice * (100 - l_discount) * (100 + l_tax); final output divides by 1000000",
+    "avg_qty_scaled_formula": "sum_qty / count_order with scale-2 decode",
+    "avg_price_scaled_formula": "sum_base_price / count_order with scale-2 decode",
+    "avg_disc_scaled_formula": "sum_discount / count_order with scale-2 decode"
+  }
+}

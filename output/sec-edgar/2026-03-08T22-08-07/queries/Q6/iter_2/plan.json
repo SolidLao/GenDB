@@ -1,0 +1,145 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version.partitioned_exact_p19",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/offsets.bin",
+        "offsets_format": "uint64_t[524289]",
+        "keys": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/keys.bin",
+        "keys_format": "TripleKey[row_count] where TripleKey={uint32_t a, uint32_t b, uint32_t c}"
+      },
+      "usage": "mmap offsets.bin and keys.bin; use hash_triple(adsh, tag, version) >> 45 to route sub-filtered num tuples into morsel-local partitions, then exact-match against the tiny contiguous key slice for that partition instead of probing pre_adsh_tag_version_groups.hash.bin. Build one aligned uint32_t group-index permutation at startup so each matched partitioned key can jump to pre_adsh_tag_version_groups.offsets/rowids for payload lookup."
+    }
+  ],
+  "pipeline": [
+    "resolve_dict_codes",
+    "build_sub_2023_dense_name",
+    "build_pre_is_group_payload",
+    "scan_num_usd_postings",
+    "partition_num_survivors_by_pre_hash",
+    "join_pre_partition_slices",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023) dense adsh->name array",
+      "probe": "num(uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26616,
+      "notes": "Materialize a filtered dense lookup once from sub_fy_postings so the hot loop does one cache-resident adsh lookup that already encodes the fy=2023 predicate and returns name_code directly."
+    },
+    {
+      "build": "pre(adsh,tag,version partitioned exact directory + IS-only group payload)",
+      "probe": "num_join_sub(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Use the existing 19-bit partitioned exact triple directory for cache-sized exact matching; keep an aligned partitioned group-index vector plus compact group->IS-plabel payload derived from pre_stmt_postings so matching avoids the 768 MB global hash and only touches stmt='IS' presentation rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.1841
+    }
+  ],
+  "scan": {
+    "table": "num_uom_postings('USD')",
+    "rows": 33234006,
+    "columns": [
+      {
+        "name": "rowid",
+        "file": "indexes/num/num_uom_postings.rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "Sequential USD-postings scan with random-but-cache-resident sub lookup, then morsel-local partitioning of surviving tuples by pre triple hash so the pre join becomes an offsets lookup plus a tiny contiguous exact-key scan and IS-only payload walk."
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(filtered_sub_name_by_adsh) built from sub_fy_postings + sub.adsh + sub.name; kEmpty32 means fy!=2023 or missing filing",
+    "fact_join": "pre_built_index(pre.adsh_tag_version.partitioned_exact_p19 offsets+keys) + runtime uint32_t partitioned_group_index aligned to keys.bin + compact group_is_offsets/group_is_plabels derived from pre_stmt_postings and pre_adsh_tag_version_groups.offsets/rowids",
+    "aggregation": "compact_hash_map(thread_local or morsel_local, key=(name_code, tag_code, plabel_code), value=(sum, count))"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "drive the scan from the USD slice instead of reading all num rows"
+    },
+    {
+      "index": "sub_fy_postings",
+      "purpose": "enumerate fy=2023 sub rowids once and materialize the filtered dense adsh->name lookup used by every num probe"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "enumerate only stmt='IS' pre rowids and build compact per-group IS payloads so the hot join never scans non-IS presentation rows"
+    },
+    {
+      "index": "pre_adsh_tag_version_groups",
+      "purpose": "provide stable group_index->rowid payload mapping for matched triples after the cache-friendly exact-partition lookup resolves the group"
+    },
+    {
+      "index": "pre.adsh_tag_version.partitioned_exact_p19",
+      "purpose": "replace random probes into the 33554432-bucket global hash with a 4.1 MB partition directory and tiny contiguous exact-key slices"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after the successful sub-first reorder, the hot path is still dominated by about 10.3M surviving USD facts probing `pre_adsh_tag_version_groups.hash.bin`, whose 33554432 open-addressed 24-byte buckets occupy about 768 MiB on disk / about 805 MB in memory, far beyond the 88 MB LLC, so the join is latency-bound on random cache misses. Strategy category B: replace that cache-exceeding probe pattern with cache-sized partitioned exact matching using the existing `pre.adsh_tag_version.partitioned_exact_p19` storage extension, where the 4.1 MB offsets directory is LLC-resident and each partition holds only about 16.5 triples on average (37 max). The revised plan also eliminates wasted work by materializing a filtered dense `sub` lookup for `fy=2023` and compact `stmt='IS'` group payloads from `pre_stmt_postings`, so the hot loop touches only qualifying sub rows and only IS presentation payloads while aggregating."
+,
+  "correctness_anchors": {}
+}

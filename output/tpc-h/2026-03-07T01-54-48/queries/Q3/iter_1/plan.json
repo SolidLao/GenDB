@@ -1,0 +1,133 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders via orders_custkey_hash on o_custkey",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 330000,
+      "notes": "Use customer_mktsegment_hash to enumerate BUILDING customer rowids, map to c_custkey, then probe orders_custkey_hash and apply o_orderdate < 9204 before emitting qualifying order rows."
+    },
+    {
+      "build": "orders_after_customer_date(project: o_orderkey,o_orderdate,o_shippriority)",
+      "probe": "lineitem via lineitem_orderkey_hash on l_orderkey",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1461923,
+      "notes": "For each qualifying orderkey, probe lineitem_orderkey_hash bucket slice, validate key equality, then apply l_shipdate > 9204 and accumulate revenue."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.535
+    }
+  ],
+  "scan": {
+    "table": "orders+lineitem(index-driven)",
+    "rows": 7450523,
+    "columns": [
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_lookup_then_short_sequential_bucket_walk"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "pre_built_index",
+    "aggregation": "compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_custkey_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "lineitem_orderkey_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is logical-plan mismatch (Category A) with substantial wasted work (Category C): the current implementation scans large filtered table regions and builds a runtime orders hash map even though selective pre-built hash indexes exist on both join keys. The revised plan replaces scan-plus-build with index-driven nested-loop joins from filtered customer keys to orders and then to lineitem, applies date predicates before downstream work, and keeps only aggregation state for qualifying rows to cut build_joins time and total rows touched.",
+  "correctness_anchors": {}
+}

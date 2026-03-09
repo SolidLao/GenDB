@@ -1,0 +1,142 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_dim",
+    "build_pre_is_hash",
+    "probe_num_runs",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub.adsh_to_rowid(fy=2023,name)",
+      "probe": "pre sequential scan with stmt zone-map pruning",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26612,
+      "notes": "Use the dense sub lookup first so only 2023 adsh values enter the pre hash build."
+    },
+    {
+      "build": "filtered pre IS hash on (adsh,tag,version) -> inline single plabel/count or overflow list",
+      "probe": "num.adsh_tag_version.runs within qualifying adsh values",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 547506,
+      "notes": "Build only keys that survive fy=2023 and stmt='IS'; then probe sequential num key runs and materialize num row payloads only on hash hits."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.844
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "pre base columns + num adsh_tag_version runs",
+    "rows": 12222099,
+    "columns": [
+      {
+        "name": "pre_adsh",
+        "file": "pre/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_tag",
+        "file": "pre/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_version",
+        "file": "pre/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "pre_stmt",
+        "file": "pre/stmt.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "pre_plabel",
+        "file": "pre/plabel.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_run_tag",
+        "file": "column_versions/num.adsh_tag_version.runs/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_run_version",
+        "file": "column_versions/num.adsh_tag_version.runs/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num_run_offsets",
+        "file": "column_versions/num.adsh_tag_version.runs/offsets.bin",
+        "type": "uint64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_id->sub_rowid) with sub.name side array",
+    "fact_join": "compact_hash_map keyed by (adsh,tag,version) built from pre rows that pass fy=2023 and stmt='IS'; store the common case as inline (plabel,count) payload and spill rare multi-plabel keys to a side vector",
+    "aggregation": "compact_hash_map keyed by (name_id, stmt_id, tag_id, plabel_id), pre-sized for ~200k groups and updated only after a successful pre hash hit and USD-qualified num run reduction"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre/indexes/stmt.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "column_versions/num.adsh_tag_version.runs/adsh_offsets.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the remaining 99 ms main scan does work out of proportion to output by materializing pre payload rows for all 2.62M matched (adsh,tag,version) keys even though only about 547k keys survive stmt='IS', while almost every surviving key carries exactly one plabel. Strategy category C with plan restructuring: scan pre sequentially with stmt zone-map pruning and the dense sub adsh filter, build a cache-resident hash on only surviving IS keys with an inline single-plabel fast path, then scan the qualifying num run directory sequentially and probe that hash so random num rowid/value access happens only on hits and the 79% of negative pre keys disappear from the hot path.",
+  "correctness_anchors": {}
+}

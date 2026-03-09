@@ -1,0 +1,100 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_dicts",
+    "build_fy2023_bitmap",
+    "single_thread_build_is_map",
+    "parallel_scan_num_with_zone_maps",
+    "merge_thread_local_agg",
+    "hash_reaggregate_decode_topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "sub(direct_array, all rows)",
+      "probe": "num via adsh_code index",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "Load sub/fy.bin as flat int16_t[86135] array (172KB, L1-resident). Build fy2023_bits DenseBitmap(86135): mark adsh_codes where sub_fy==2023. ~26612 qualifying adsh_codes (30.9%)."
+    },
+    {
+      "build": "pre(filtered: stmt='IS' AND adsh_code in fy2023_bits)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 550374,
+      "notes": "Build is_map in SINGLE-THREADED sequential pre scan. CompactHashMap(600000) -> cap=1048576 slots x 16B = 16MB: fits in L3 (44MB) with room. No parallel-collect + serial-merge — eliminates the 3654ms serial merge bottleneck. For 0.7% of keys with duplicate (adsh,tagver) IS+fy2023 pre rows: store the first (smallest) pre_row encountered during the sequential scan; forward-scan pre during main_scan for additional duplicates."
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom_code == usd_code", "selectivity": 0.87, "method": "zone_map_block_skip + per_row_check"},
+    {"table": "num", "predicate": "tagver_code != -1", "selectivity": 0.99},
+    {"table": "num", "predicate": "value IS NOT NULL (std::isnan check)", "selectivity": 0.999},
+    {"table": "sub", "predicate": "fy == 2023", "selectivity": 0.309, "notes": "26612/86135 = 30.9% pass; checked via fy_ptr[adsh] == 2023 direct array"},
+    {"table": "pre", "predicate": "stmt_code == is_code AND adsh_code in fy2023_bitmap", "selectivity": 0.058, "notes": "Applied during single-threaded pre scan to build is_map"}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_fy_array":     "int16_t[86135] direct array (172KB, L1-resident) indexed by adsh_code",
+    "fy2023_bitmap":    "DenseBitmap(86135) = 10.8KB, L1-resident; set for adsh_codes where sub_fy==2023",
+    "is_map":           "CompactHashMap<uint64_t,uint32_t>(600000) -> cap=1048576 x 16B = 16MB, L3-resident. Key=(adsh_code<<32|tagver_code), value=first pre_row in IS+fy2023 scan order. Built single-threaded to avoid collect+merge overhead. CRITICAL: expected=600000 NOT 1048576 — passing 1048576 to CompactHashMap causes cap=2097152 (32MB), evicted from L3 by prior 86MB pre scan, causing DRAM-speed random access and 3654ms merge time.",
+    "thread_local_agg": "CompactHashMap<uint64_t,AggEntry>(8192) per thread -> cap=16384 x 28B = 458KB per thread. 64 x 458KB = 29MB total fits in L3. CRITICAL FIX: was CompactHashMap(32768) -> cap=65536 x 28B = 1.8MB per thread x 64 = 115MB total >> L3 (44MB) causing DRAM access on every agg probe. Key=(adsh_code<<32|pre_row), value={double sum, int64_t cnt}.",
+    "merged_agg":       "CompactHashMap<uint64_t,AggEntry>(150000) -> cap=262144 x 28B = 7.3MB, L3-resident. Merged from all thread-local maps.",
+    "final_reagg":      "CompactHashMap<uint64_t,ReAggEntry>(250000) -> cap=524288 x 32B ~= 16.8MB, L3-resident. Key=FNV-64 hash of (name_sv + tag_string_sv + plabel_sv). No string allocation during aggregation — avoids 600K string heap ops. ReAggEntry={double sum_value, int64_t cnt, uint32_t sample_adsh_code, uint32_t sample_pre_row} = 24 bytes (entry=32B with key+dist+occupied+pad). After re-agg, decode strings only for top-200 rows from sample fields."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "build_phase": "SINGLE-THREADED: sequential scan of pre (9.6M rows x 9B = 86MB) -> direct insert into is_map. No OMP parallel collect + serial merge. Sequential access pattern lets hardware prefetcher saturate memory bandwidth. Expected: ~20-30ms vs 3654ms serial merge.",
+    "scan_phase": "PARALLEL OMP: morsel-driven over 395 num blocks (100K rows each), atomic next_block counter. Thread-local agg maps are L2-resident (458KB each) for fast updates.",
+    "shared_read_only": ["sub_fy_array", "fy2023_bitmap", "is_map (16MB)", "num columns", "pre columns for duplicate forward scan"],
+    "thread_private": ["thread_local_agg (458KB each, L2-resident)"]
+  },
+  "build_phase_detail": {
+    "is_map_build": "Single-threaded sequential loop over all pre_N rows. For row i: if pre_stmt[i]==is_code AND fy2023_bits.test(pre_adsh[i]): key=(uint64_t)(uint32_t)pre_adsh[i]<<32 | (uint32_t)pre_tagver[i]; if key not in is_map: is_map.insert(key, (uint32_t)i). Correct sizing: CompactHashMap<uint64_t,uint32_t>(600000) -> cap=1048576 (NOT 2097152). Pre columns have MADV_SEQUENTIAL set by MmapColumn for hardware prefetcher.",
+    "duplicate_handling": "During main_scan, after finding first_pre_row = *is_map.find(is_key), forward-scan pre from first_pre_row+1 while pre_adsh[r]==adsh AND pre_tagver[r]==tagver AND pre_stmt[r]==is_code to process all duplicate IS+fy2023 pre rows. Pre is sorted by (adsh_code, tagver_code) so duplicates are contiguous."
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "condition": "zm[b].min_uom > usd_code || zm[b].max_uom < usd_code",
+      "layout": "uint32_t n_blocks; then n_blocks x ZoneMap{int8_t min_uom, int8_t max_uom, [2-byte pad], int32_t min_ddate, int32_t max_ddate} = 12 bytes each"
+    }
+  ],
+  "aggregation": "two_phase_hash_group_by",
+  "aggregation_detail": {
+    "phase1_key": "uint64_t packed as (uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)pre_row",
+    "phase1_accumulators": ["double sum_value", "int64_t cnt"],
+    "phase1_estimated_groups": 600000,
+    "phase2_key": "uint64_t FNV-64 hash of composite string (name_sv + 0x01 + tag_STRING + 0x01 + plabel_sv). Computed inline: start with FNV offset_basis=14695981039346656037ULL; for each byte c: hash = (hash ^ c) * 1099511628211ULL. CORRECTNESS: tag_STRING decoded from tag_data[tag_offsets[tagver_code]..] where tagver_code=ptv_ptr[pre_row] — merges rows with same tag but different versions. Hash collisions extremely rare (P~2e-9 for 600K groups in 64-bit space).",
+    "phase2_accumulators": ["double sum_value", "int64_t cnt", "uint32_t sample_adsh_code", "uint32_t sample_pre_row"],
+    "phase2_estimated_groups_after_merge": 200000,
+    "phase2_note": "After re-aggregation into final_reagg, collect all entries into a vector<ReAggEntry2> then use std::partial_sort or nth_element for top-200 by total_value DESC. Decode strings (name, tag, plabel) only for the final 200 rows using sample_adsh_code and sample_pre_row."
+  },
+  "output": {
+    "decode": [
+      "For each of top-200 entries: name = sub_name_data[sub_name_offsets[sample_adsh_code]..sub_name_offsets[sample_adsh_code+1]]",
+      "stmt = fixed string 'IS'",
+      "tag = tag_data[tag_offsets[ptv_ptr[sample_pre_row]]..tag_offsets[ptv_ptr[sample_pre_row]+1]] where ptv_ptr=pre_tagver_code.data",
+      "plabel = plabel_data[plabel_offsets[sample_pre_row]..plabel_offsets[sample_pre_row+1]]"
+    ],
+    "order_by": ["total_value DESC"],
+    "limit": 200,
+    "topk_strategy": "std::partial_sort on collected ReAggEntry2 vector (size ~200K), sort only top 200"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A+B): Three compounding issues caused the 5240ms stall. (1) The dominant bottleneck — serial_merge at 3654ms — arises from the two-phase parallel-collect-then-serial-merge architecture: CompactHashMap(1048576) computes cap=2097152 (NOT 1048576), creating a 32MB table; the preceding parallel OMP phase reads 86MB of pre data, completely evicting this 32MB from L3; the serial merge then performs 550K find+insert operations against a cold table at DRAM latency (~100ns/miss) instead of L3 speed (~10ns/miss). Fix: replace with a single-threaded sequential pre scan that builds is_map directly — 86MB sequential read at memory bandwidth speed (~10ms) + 550K inserts into a correctly-sized L3-resident 16MB map. CompactHashMap(600000) gives cap=1048576 x 16B = 16MB, which remains L3-resident throughout. (2) thread_local_agg oversizing: CompactHashMap(32768) creates 65536 x 28B = 1.8MB per thread x 64 threads = 115MB total — far exceeding L3 (44MB) and causing DRAM-speed agg probes on every update. Fix: reduce to expected=8192 giving 458KB per thread (fits in L2 per core), 29MB total (fits in L3). (3) String-keyed final re-aggregation: unordered_map<string, FinalEntry> with 600K composite string key allocations (heap fragmentation, slow hashing) accounts for most of the 457ms decode phase. Fix: replace with CompactHashMap<uint64_t, ReAggEntry> keyed on FNV-64 hash of the composite string — no heap allocation, inline hashing. Decode strings only for the final 200 output rows using stored sample_adsh_code and sample_pre_row. Expected total: ~150-200ms, a 26x improvement.",
+  "correctness_anchors": {}
+}

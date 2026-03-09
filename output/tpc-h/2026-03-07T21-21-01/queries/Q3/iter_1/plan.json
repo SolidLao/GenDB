@@ -1,0 +1,127 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "decode_segment_dictionary",
+    "fetch_building_customers",
+    "fused_orders_to_lineitems",
+    "merge_topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment='BUILDING')",
+      "probe": "orders",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Use customer_segment_postings to enumerate BUILDING customer rowids, load c_custkey, and probe orders_cust_postings directly."
+    },
+    {
+      "build": "orders(filtered by customer join and o_orderdate < 1995-03-15)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1459230,
+      "notes": "For each surviving order, immediately traverse lineitem_order_postings, apply l_shipdate > 1995-03-15, and emit one aggregated order result without materializing a global qualifying-orders array."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.485963
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.547105
+    }
+  ],
+  "scan": {
+    "table": "customer(filtered via postings) -> orders(postings expansion) -> lineitem(postings expansion)",
+    "rows": 300276,
+    "columns": [
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential within postings slices"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(customer_rowids) + flat_array(c_custkeys)",
+    "fact_join": "pre_built_index(customer_segment_postings, orders_cust_postings, lineitem_order_postings)",
+    "aggregation": "register_accumulator(per-order revenue in fused loop) + fixed_min_heap(10) per thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_segment_postings",
+      "purpose": "resolve BUILDING customers without scanning customer table"
+    },
+    {
+      "index": "orders_cust_postings",
+      "purpose": "expand filtered customer keys to candidate orders"
+    },
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "expand qualifying orders to matching lineitems only"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category A plan mismatch. The current implementation spends most time in build_joins materializing and copying a 1.46M-row qualifying-orders intermediate, then rereads it in main_scan to reach lineitems. Replace that two-phase flow with a fused index-nested-loop pipeline: enumerate BUILDING customers from postings, expand orders through orders_cust_postings, apply o_orderdate immediately, traverse lineitem_order_postings for each surviving order, apply l_shipdate, accumulate revenue in registers, and push positive results straight into thread-local top-k state before a final merge.",
+  "correctness_anchors": {}
+}

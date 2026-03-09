@@ -1,0 +1,189 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_arrays_and_build_cik_remap",
+    "build_eq_count_map_from_pre_with_sic_prefilter",
+    "parallel_scan_num_with_zone_maps_flat_agg",
+    "parallel_tree_merge_flat_agg_maps",
+    "decode_tlabel_re_aggregate",
+    "having_filter_sort_limit"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic[], cik[]) — full arrays loaded; adsh_qualifying_bitset and adsh_to_cik_idx built",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub_sic (172KB) and sub_cik (344KB) fully loaded. adsh_qualifying_bitset = bitset<86135> (~10KB, L1-resident): set bit i if sub_sic[i] BETWEEN 4000-4999. adsh_to_cik_idx[i] = cik_remap_index (uint16_t) for qualifying adsh_codes, UINT16_MAX otherwise."
+    },
+    {
+      "build": "tag(abstract[]) — full array loaded",
+      "probe": "num.tagver_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1070662,
+      "notes": "tag_abstract (1MB) fully loaded; O(1) by tagver_code; abstract==0 ~95% pass"
+    },
+    {
+      "build": "eq_count_map (FlatCountMap, 65536 slots, 786KB) — SIC-pre-filtered EQ pairs only",
+      "probe": "num composite key (adsh_code << 32 | tagver_code)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 42000,
+      "notes": "Pre scan filters by adsh_qualifying_bitset AND stmt==eq_code: ~42K keys. FlatCountMap cap_hint=25000 -> 65536 slots x 12B = 786KB (L2/L3-resident). NO bloom filter — with 42K entries in 65536 slots, direct probe is cache-resident and FPR of any bloom would be ~0%, making bloom computation pure waste."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.35,
+      "notes": "Zone maps skip entire 100K-row blocks; row-level check applied first"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.04,
+      "notes": "Most selective — applied after uom+tagver checks via O(1) bitset lookup (adsh_qualifying_bits, ~10KB, L1-resident)"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract == 0",
+      "selectivity": 0.95
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == eq_code AND adsh_qualifying (sic 4000-4999)",
+      "selectivity": 0.0044,
+      "notes": "Direct eq_count_map probe (786KB, L2/L3-resident). NO bloom filter step."
+    }
+  ],
+  "predicate_order_per_num_row": [
+    "1. uom_code == usd_code (zone map at block level, then row check)",
+    "2. tagver_code != -1 (int32_t tv = tagver[i]; if (tv < 0) continue)",
+    "3. sic BETWEEN 4000-4999 via adsh_qualifying_bits (~10KB, L1-resident)",
+    "4. tag_abstract[tagver_code] == 0 (array O(1))",
+    "5. eq_count_map.get(key) != 0 (786KB, L2/L3-resident, NO bloom pre-check)"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_sic_array":          "flat_array(86135 x int16_t) — direct indexed by adsh_code",
+    "sub_cik_array":          "flat_array(86135 x int32_t) — direct indexed by adsh_code",
+    "adsh_qualifying_bitset": "bitset of 86135 bits (~10KB, L1-resident)",
+    "adsh_to_cik_idx":        "flat_array(86135 x uint16_t = 172KB): maps qualifying adsh_code -> CIK remap index [0, N_ciks); UINT16_MAX for non-qualifying",
+    "cik_remap":              "vector<int32_t> idx_to_cik (N_ciks <= 3445 entries)",
+    "tag_abstract_array":     "flat_array(1070662 x int8_t) — direct indexed by tagver_code",
+    "eq_count_map":           "FlatCountMap(cap_hint=25000) -> 65536 slots x 12B = 786KB (L2/L3-resident); ~42K entries",
+    "bloom_filter":           "ELIMINATED — 42K entries in 65536-slot FlatCountMap means direct probe is L2/L3-resident; bloom adds 7 hash computations per row with ~0% FPR benefit; pure overhead removed",
+    "thread_local_agg":       "FlatAggMap — custom SoA open-addressing hash map with NO per-group heap allocation. Layout: keys[cap](uint64_t), sums[cap](double), cnts[cap](int64_t), cik_data[cap * cik_words](uint64_t flat). All pre-allocated at construction, zeroed once. No vector<uint64_t> pointer indirection per group.",
+    "thread_agg_cap":         "cap=1024 for worker threads (per thread: 8+8+8+442 = 466KB, L3-resident; 64 threads x 466KB = 29.8MB, fits in 44MB LLC). cap=8192 for thread_maps[0] (accumulates all groups: 3.73MB, L3-resident).",
+    "aggregation":            "FlatAggMap per thread; merge via parallel binary-tree reduction (6 rounds for 64 threads). CIK merge = iterate src.keys array (8KB, L1-resident), for each occupied slot s: OR cik_data[d*cw..d*cw+cw] |= cik_data[s*cw..s*cw+cw]."
+  },
+  "flat_agg_map_spec": {
+    "description": "Custom SoA open-addressing hash map eliminating double heap indirection",
+    "key_type": "uint64_t",
+    "empty_sentinel": "UINT64_MAX",
+    "fields": ["keys[cap]", "sums[cap]", "cnts[cap]", "cik_data[cap * cik_words]"],
+    "construction": "Allocate all arrays once; keys filled with EMPTY; sums/cnts/cik_data zeroed. No per-group allocation ever.",
+    "find_or_insert": "hash(key) & mask -> linear probe keys[] -> return slot index",
+    "accumulate": "slot=find_or_insert(key); sums[slot]+=v; cnts[slot]+=c; cik_data[slot*cw + (cik_idx>>6)] |= 1ULL<<(cik_idx&63)",
+    "merge_from_src": "for s in [0,src.cap): if src.keys[s]!=EMPTY: d=find_or_insert(src.keys[s]); sums[d]+=src.sums[s]; cnts[d]+=src.cnts[s]; for j in [0,cw): cik_data[d*cw+j] |= src.cik_data[s*cw+j]",
+    "cap_worker_threads": 1024,
+    "cap_accumulator_thread0": 8192,
+    "memory_per_worker_kb": 466,
+    "memory_thread0_kb": 3733,
+    "total_64threads_mb": 29.8
+  },
+  "preprocessing": {
+    "load_dicts": [
+      "usd_code = load_dict('indexes/uom_codes.bin')['USD']  // int8_t",
+      "eq_code  = load_dict('indexes/stmt_codes.bin')['EQ']  // int8_t"
+    ],
+    "load_sub_arrays_and_build_cik_remap": [
+      "sub_sic[86135]: int16_t — mmap sub/sic.bin (172KB)",
+      "sub_cik[86135]: int32_t — mmap sub/cik.bin (344KB)",
+      "Build adsh_qualifying_bits[86135] (~10KB): for i in [0,SUB_N): if sub_sic[i] BETWEEN 4000-4999, set bit i",
+      "Build cik_to_idx map and idx_to_cik vector: for each qualifying i, assign remap index to sub_cik[i]",
+      "Build adsh_to_cik_idx[86135]: uint16_t, UINT16_MAX for non-qualifying; qualifying i -> cik_remap_index",
+      "cik_words = ceil(N_ciks / 64)  // typically ceil(3445/64) = 54"
+    ],
+    "build_eq_count_map_with_sic_prefilter": {
+      "source": "pre/adsh_code.bin, pre/tagver_code.bin, pre/stmt_code.bin (9,600,799 rows)",
+      "strategy": "parallel scan; thread-local key vectors; single-threaded insert into FlatCountMap",
+      "per_thread_filter": "if (stmt==eq_code) AND (adsh_qualifying_bits[ac] is set): emit key=((uint64_t)ac<<32)|(uint32_t)tagver; skip if key==UINT64_MAX",
+      "merge_into_map": "single-threaded insert of ~42K keys into 786KB FlatCountMap (<1ms)",
+      "no_bloom_build": "Do NOT build any bloom filter"
+    }
+  },
+  "aggregation": {
+    "strategy": "FlatAggMap per thread (SoA, no heap allocation per group) + parallel binary-tree reduction",
+    "group_key": "packed uint64: ((uint64_t)(uint16_t)sic << 32) | (uint32_t)tagver_code",
+    "accumulators_in_flat_map": [
+      "sums[slot]: double — accumulates val * eq_cnt",
+      "cnts[slot]: int64_t — accumulates eq_cnt",
+      "cik_data[slot * cik_words + (cik_idx >> 6)]: uint64_t bitset word — OR-set bit (cik_idx & 63)"
+    ],
+    "cik_insert": "cik_data[slot * cik_words + (ci >> 6)] |= 1ULL << (ci & 63)  // O(1), no allocation, no pointer follow",
+    "thread_local_maps": true,
+    "worker_cap": 1024,
+    "accumulator_cap": 8192,
+    "merge_strategy": "parallel binary-tree reduction (6 rounds for 64 threads). For each src slot: find dst slot; sums[d]+=src.sums[s]; cnts[d]+=src.cnts[s]; OR cik_data words. No heap allocation, no pointer following.",
+    "having": "popcount over cik_data[slot * cik_words .. slot * cik_words + cik_words] >= 2",
+    "post_having_decode": "iterate global FlatAggMap (thread_maps[0]); for each non-empty slot: decode tlabel from tlabel_offsets+tlabel_data[tagver_code]; re-aggregate by (sic, tlabel) string key with bitwise-OR CIK merge; then popcount for final count; HAVING+sort+limit"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "num_morsels": 395,
+    "zone_map_filter": true,
+    "thread_local_aggregation": true,
+    "merge_strategy": "parallel binary-tree reduction (6 rounds for 64 threads); CIK merge is inline bitwise OR over cik_data flat array — O(cik_words) per group, no heap allocation"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "usage": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code; struct ZoneMap { int8_t min_uom, max_uom; int32_t min_ddate, max_ddate; } sizeof=12 (2-byte pad)"
+    },
+    {
+      "index": "uom_codes dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "code_lookup"
+    },
+    {
+      "index": "stmt_codes dict",
+      "file": "indexes/stmt_codes.bin",
+      "purpose": "code_lookup"
+    }
+  ],
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt (constant 'EQ')", "COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "tlabel_decode": "after primary FlatAggMap tree-merge, iterate global map slots; decode tlabel for each non-empty slot from tlabel_offsets+tlabel_data by tagver_code; re-aggregate by (sic, tlabel) string into a secondary unordered_map; CIK merge via bitwise OR; popcount for final cik count; HAVING cik_count>=2; sort by total_value DESC; limit 500"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — algorithm change): iter_2 regressed main_scan from 49ms to 84ms and merge_aggregates from 36ms to 42ms despite a smaller eq_count_map. The culprit is std::unordered_map<uint64_t, AggState> where AggState embeds a vector<uint64_t> cik_bits. This creates two levels of heap indirection on every aggregation operation: (1) the unordered_map node is heap-allocated with linked-list chaining, and (2) AggState.cik_bits is a heap-allocated 432-byte array (assign(54, 0) triggered on each new group). With ~100 new groups per thread, this produces ~100 small allocations scattered across the heap, making every subsequent cik_data access a random cache miss. The fix is a custom FlatAggMap using SoA layout — keys[cap], sums[cap], cnts[cap], cik_data[cap*cik_words] — where all arrays are pre-allocated and zeroed at construction. No per-group heap allocation ever occurs; the cik_data access is cik_data[slot*cik_words+word] with no pointer indirection. Memory: cap=1024 per worker thread → 466KB/thread; 64 threads = 29.8MB total (fits in 44MB LLC). Thread_maps[0] uses cap=8192 (3.73MB, L3-resident) to accumulate all groups after tree-reduction. Additionally, the 256KB bloom filter is eliminated: with ~42K entries probing a 786KB FlatCountMap, the FPR is ~10^-7 (essentially zero), so the bloom's 7 hash computations per qualifying row produce no filtering benefit — pure wasted cycles. Expected: main_scan ~35ms, merge_aggregates ~8ms, total ~65ms.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

@@ -1,0 +1,145 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_building_dict_code",
+    "build_customer_membership_bitset",
+    "scan_orders_and_mark_qualifying_rows",
+    "scan_lineitem_groups_with_shipdate_zone_pruning",
+    "late_materialize_positive_order_payload",
+    "topk_10_by_revenue"
+  ],
+  "join_order": [
+    {
+      "build": "customer_mktsegment_postings(BUILDING -> c_custkey bitset)",
+      "probe": "orders(sequential scan with orderdate zone pruning)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 300276,
+      "notes": "Resolve the runtime BUILDING code, build a dense customer-membership bitset keyed by c_custkey, then scan only o_custkey and o_orderdate sequentially to mark qualifying order rows in ascending order-row order."
+    },
+    {
+      "build": "qualifying_order_rows(bitset keyed by orders row id)",
+      "probe": "lineitem_orderkey_groups(sequential row-aligned scan with shipdate block states)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1478979,
+      "notes": "Scan lineitem_orderkey_groups in order-row order; for set bits, use lineitem_shipdate_zone_map on the run's containing block to skip zero-result runs, fast-accept whole runs without l_shipdate loads, and fall back to row-level checks only for mixed blocks. Fetch o_orderkey, o_orderdate, and o_shippriority only for positive-revenue rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.487702
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.511
+    }
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_starts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_starts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_counts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_counts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001) customer membership plus bitset(15000000) qualifying order rows",
+    "fact_join": "direct_array(row-aligned lineitem_orderkey_groups with 600-entry lineitem shipdate block-state array)",
+    "aggregation": "array_direct(per-order scalar revenue accumulation with sparse late materialization and thread-local topk heaps)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_postings",
+      "purpose": "enumerate BUILDING customer rows and populate the dense customer-membership bitset"
+    },
+    {
+      "index": "orders_orderdate_zone_map",
+      "purpose": "skip and fast-accept order blocks while building the qualifying-order bitset from a sequential orders scan"
+    },
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "scan row-aligned contiguous lineitem runs in order-row order without hashing or re-scanning l_orderkey"
+    },
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "classify each 100000-row lineitem block as skip, accept, or fallback so shipdate checks and payload loads are only done when necessary"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the best current plan still does lineitem work that is not proportional to output, because every BUILDING-plus-orderdate qualifying order descends into its lineitem run and performs row-level shipdate checks even when lineitem_shipdate_zone_map can prove the whole surrounding block rejects or accepts, and it eagerly streams order payload columns that only surviving rows need. Strategy category C (work elimination): keep the successful cache-resident customer bitset and sequential orders filtering path, materialize a compact qualifying-order bitset, then scan row-aligned lineitem_orderkey_groups sequentially while using lineitem_shipdate_zone_map to skip zero-result runs, fast-accept whole runs without l_shipdate loads, and late-materialize o_orderkey, o_orderdate, and o_shippriority only for positive-revenue rows. This removes unnecessary per-row lineitem checks and unnecessary order payload reads while preserving sequential access on the large structures.",
+  "correctness_anchors": {}
+}

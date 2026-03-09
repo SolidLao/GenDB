@@ -1,0 +1,137 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "build_filtered_sub_lookup",
+    "filter_num_usd_blocks",
+    "probe_filtered_sub_lookup",
+    "probe_pre_eq_sorted_index",
+    "probe_tag_version_hash_for_tlabel",
+    "partition_qualifying_rows",
+    "aggregate_partitions",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = 'USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Materialize one dense adsh->packed(sic,cik) lookup containing only qualifying sub rows so the hot loop does a single direct lookup instead of rowid lookup plus sic and cik fetches."
+    },
+    {
+      "build": "pre(indexed by adsh_tag_version_sorted, filtered at probe time to stmt = 'EQ')",
+      "probe": "num(post sub filter)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 979282,
+      "notes": "Keep the existing sorted pre index probe and per-thread key cache; the failed count-hash direction is not retried."
+    },
+    {
+      "build": "tag(tag_version_hash projected to tlabel)",
+      "probe": "num(post sub+pre filter)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Use the existing (tag,version) hash only to fetch tlabel after surviving rows are known; treat abstract=0 as a no-op predicate for this dataset and avoid a separate abstract read in the hot path."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "filtered direct_array built from sub/indexes/adsh_to_rowid.bin into dense adsh->packed(sic,cik) payload with empty sentinel for non-qualifying rows",
+    "fact_join": "pre/indexes/adsh_tag_version.rowids.bin for binary-search + contiguous-run stmt counting, plus tag/indexes/tag_version_hash.{tag,version,rowid}.bin for deferred (tag,version)->tlabel lookup",
+    "aggregation": "scan-time radix/hash partition buffers on final group_key=(sic,tlabel) carrying {group_key,cik,scaled_value,pre_count}; then per-partition compact_hash_map for sums/counts plus per-partition distinct_pair_set(group_key,cik)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "seed the build of a cache-resident filtered adsh lookup so the hot loop touches one dense payload array instead of multiple sub columns"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "binary-search (adsh,tag,version) and scan only the matching contiguous rowid run instead of building a runtime pre hash table"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "lookup tag rowid and fetch tlabel only after sub and pre have already filtered the probe stream"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after the aggregation redesign in iteration 2, the remaining gap is dominated by wasted per-row dimension work in the main scan rather than another large build phase: every surviving USD fact still pays for a rowid lookup into sub plus extra random sic/cik fetches, and then a separate abstract check on tag even though abstract = 0 has selectivity 1.0 for this dataset. Strategy category C: eliminate that wasted work by building one cache-resident filtered sub direct array that stores only qualifying sic/cik payloads, probing it first to collapse three dependent accesses into one, and using the deferred tag hash probe purely to fetch tlabel while keeping the proven sorted pre probe and partitioned aggregation unchanged.",
+  "correctness_anchors": {}
+}

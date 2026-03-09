@@ -1,0 +1,115 @@
+{
+  "query_id": "Q24",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 140.98666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 140.98666666666665,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 40.27,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 98.14,
+        "output": 0.28,
+        "total": 138.73
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 470.78000000000003,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 470.78000000000003,
+      "validation": "pass",
+      "strategy": "Root cause: main_scan was dominated by unnecessary per-row anti-join lookup work before exploiting the highly selective date window; this is primarily a work-elimination issue (Category C) with plan restructuring. The revised plan performs zonemap pruning and predicate-only scanning first to materialize candidate rowids, then applies anti-join only to candidates with a cache-resident bloom prefilter before exact index lookup, and aggregates only surviving rows. This reduces random pre-index probes and late-loads join/group columns only when needed.",
+      "operation_timings": {
+        "data_loading": 36.25,
+        "dim_filter": 0,
+        "build_joins": 192.91,
+        "main_scan": 233.99,
+        "output": 1.63,
+        "total": 464.82
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 98.38999999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 98.38999999999999,
+      "validation": "pass",
+      "strategy": "Root cause: most hot time comes from touching wide num columns and initializing anti-join resources before establishing whether the 2023 ddate window yields any rows; this is a Category C work-elimination fix with plan restructuring. The plan now makes ddate the first-stage scan key, materializes candidate rowids, applies uom/value only on candidates, and defers loading/using pre anti-join structures and join key columns unless survivors exist, eliminating unnecessary random lookups and reducing loaded bytes on likely-empty windows.",
+      "operation_timings": {
+        "data_loading": 35.55,
+        "dim_filter": 0,
+        "main_scan": 61.12,
+        "build_joins": 0.13,
+        "output": 175.74,
+        "total": 272.57
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 67.45666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 67.45666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: remaining hot-path cost is dominated by startup work that is not proportional to output, especially unconditional mmap/prefetch and dictionary loading before confirming any qualifying 2023 rows. Strategy category C (work elimination) with plan restructuring: first read only the ddate zonemap to determine overlap, immediately return empty output when no blocks overlap, defer loading all large columns, anti-join index, and tag/version dictionaries until survivors exist, and avoid whole-column prefetch in hot runs so memory traffic is paid only for blocks and rows that can contribute to final groups.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0,
+        "main_scan": 63.79,
+        "build_joins": 0.05,
+        "output": 157.19,
+        "total": 221.13
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 724.6166666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 724.6166666666667,
+      "validation": "pass",
+      "strategy": "Root cause: hot time is dominated by main_scan doing row-wise predicate evaluation across most of num because ddate zonemap pruning is coarse, so work is not proportional to rows reaching anti-join/output. Strategy category C (work elimination) with plan restructuring: drive the scan from num_uom_hash posting rowids for USD, prune those rowids by zonemap candidate blocks before touching ddate/value, and fuse ddate+value filtering with anti-join probe and aggregation in one pass to remove intermediate survivor materialization and reduce memory traffic and scheduling overhead.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "dim_filter": 238.33,
+        "build_joins": 67.49,
+        "main_scan": 346.33,
+        "output": 14.69,
+        "total": 675.51
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 87.73666666666668,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 87.73666666666668,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level pruning ceiling: the existing ddate zonemap block granularity is too coarse, so many mixed-date blocks still force row-wise ddate checks in main_scan. Strategy category E (storage extension): build and register a reusable fine-grained num.ddate zonemap at 4096-row blocks, use it as the first pruning structure with the same deferred-load anti-join pipeline from iter 3, and keep pre index and join-key column loading conditional on survivor presence so scan work is reduced without reintroducing heavy posting-index setup overhead.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0.1,
+        "main_scan": 85.48,
+        "build_joins": 0.06,
+        "output": 172.74,
+        "total": 258.47
+      }
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_lineitem_orderkey_groups",
+    "filter_having_sum_quantity",
+    "lookup_orders_by_pk",
+    "materialize_order_payload_and_sum_qty",
+    "topk_100_on_order_columns",
+    "lookup_customers_by_pk",
+    "late_fetch_c_name"
+  ],
+  "join_order": [
+    {
+      "build": "lineitem_orderkey_groups(filtered)",
+      "probe": "orders_pk_dense",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Use qualifying group_keys as order keys; fetch orders row ids through dense PK index."
+    },
+    {
+      "build": "top100 qualified orders",
+      "probe": "customer_pk_dense",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100,
+      "notes": "Delay customer lookup until after topk; output c_custkey from o_custkey and fetch c_name only for surviving rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem_orderkey_groups",
+      "predicate": "sum_quantity > 30000",
+      "selectivity": 0.0000416
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(orderkey,row_start,row_count,sum_quantity)",
+    "fact_join": "pre_built_index(orders_pk_dense,customer_pk_dense)",
+    "aggregation": "none(use precomputed sum_quantity from grouped runs)",
+    "topk": "fixed_min_heap(100) on (o_totalprice DESC, o_orderdate ASC)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(min(32,nproc))"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "filter HAVING SUM(l_quantity) > 300 and carry precomputed sum_quantity per order"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "precomputed_group_by",
+  "late_materialization": {
+    "defer_columns": [
+      "customer.c_name"
+    ],
+    "customer_lookup_after_limit": true
+  },
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,138 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "filter_dim",
+    "build_green_partsupp_lookup",
+    "build_dense_dim_arrays",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "partsupp(postings on ps_partkey)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 108782,
+      "notes": "Iterate only the posting slices for green part keys and materialize (partkey,suppkey)->supplycost into a compact lookup."
+    },
+    {
+      "build": "green_partsupp_lookup",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 435128,
+      "notes": "Apply the green-part bitset first, then probe the LLC-resident green partsupp lookup instead of the raw postings and partsupp columns."
+    },
+    {
+      "build": "supplier(pk dense) -> nation(pk dense)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Keep supplier-to-nation as a dense direct array keyed by s_suppkey."
+    },
+    {
+      "build": "orders(pk dense)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Precompute orderkey->year once and reuse during the fact scan."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_partkey IN green_part_filter",
+      "selectivity": 0.054386796769068234
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_partkey",
+        "file": "lineitem/l_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_suppkey",
+        "file": "lineitem/l_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(2000001)",
+    "fact_join": "compact_hash_map(pre_sized_to_green_partsupp) plus direct_array(order_to_year and supplier_to_nation)",
+    "aggregation": "compact_hash_map(pre_sized_256)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_part_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the hot path still performs millions of random probes into the cache-exceeding raw partsupp posting payloads, while iteration 1 regressed because it paid a large build cost to materialize the lookup from too much data. Strategy category A/B: first build the green-part bitset, then use the existing partsupp_part_postings index once to gather only the approximately 435k green partsupp pairs into a compact LLC-resident (partkey,suppkey)->supplycost lookup, keep supplier->nation and orderkey->year as dense arrays, and run a single sequential lineitem scan that probes only cache-resident structures before aggregating.",
+  "correctness_anchors": {}
+}

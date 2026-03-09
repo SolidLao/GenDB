@@ -1,0 +1,104 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "load_pure_code",
+    "load_zone_maps",
+    "load_fy_array",
+    "single_pass_aggregate_and_collect",
+    "post_filter_sort_topk",
+    "string_decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub.fy direct array (86135 int16_t entries, 172KB)",
+      "probe": "num scan (pure blocks, single thread)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row index; O(1) lookup fy_col[adsh_code] == 2022; applied during single scan"
+    },
+    {
+      "build": "compact_hash_map<uint64_t,double> 65536 slots (1MB) — built during single scan, max aggregation for fy=2022 adsh codes only",
+      "probe": "in-memory candidate buffer post-scan",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 18913,
+      "notes": "Restricting aggregation to fy=2022 adsh codes is semantically identical to full subquery: n.adsh=m.adsh means the same adsh appears in both, so fy[adsh] is fixed. Map is 1MB — fits in L3. No thread-local maps, no merge."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == pure_code",
+      "selectivity": 0.0024,
+      "mechanism": "zone_map skip (skips ~394/395 blocks); per-row check on remaining"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99,
+      "mechanism": "per-row check after uom filter"
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2022",
+      "selectivity": 0.20,
+      "mechanism": "direct array lookup fy_col[adsh_code]; applied during single scan before hash insert"
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map skip; only ~1 block range read (~100K rows, ~1.7MB)"
+  },
+  "data_structures": {
+    "fy_array": "mmap sub/fy.bin → int16_t[86135]; direct index by adsh_code; 172KB fits in L2",
+    "max_val_map": "single global compact_hash_map, MAP_CAP=65536 (2^16), MAP_MASK=65535; key=uint64_t pack_key(adsh_code,tagver_code), value=double MAX; size=65536×16B=1MB; NO thread-local maps, NO merge",
+    "candidate_buffer": "std::vector<Candidate> collecting (value, adsh_code, tagver_code) for all rows passing uom+tagver+fy filters; ~18913 entries × 12B = ~227KB"
+  },
+  "parallelism": {
+    "strategy": "single_threaded",
+    "threads": 1,
+    "notes": "Only ~1 valid block (~94K rows) passes zone-map filter. Previous 64-thread impl allocated 64×4MB=256MB of anonymous mmap causing ~65K page faults (~80ms overhead). Single-threaded: zero thread-init cost, single 1MB global map (~256 page faults, negligible), no merge step. Actual scan work is <2MB data, completes in <5ms."
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "purpose": "skip_blocks — skips ~394/395 blocks per scan; pure rows contiguous due to (uom_code,ddate) sort"
+    },
+    {
+      "index": "uom_codes",
+      "purpose": "resolve 'pure' string to int8_t code at startup; never hardcode numeric value"
+    }
+  ],
+  "aggregation": "hash_group_by during single scan; key=(adsh_code<<32|tagver_code), compute MAX(value); restricted to fy=2022 adsh codes for smaller map footprint",
+  "output": {
+    "order_by": ["value DESC", "name ASC", "tag ASC"],
+    "limit": 100,
+    "post_filter": "iterate candidate_buffer, keep rows where value == max_val_map[pack_key(adsh_code,tagver_code)]",
+    "sort": "std::sort on post-filtered candidates (expected ~500 rows), then take top 100",
+    "string_decode": {
+      "name": {
+        "offsets_file": "sub/name_offsets.bin",
+        "data_file": "sub/name_data.bin",
+        "index_by": "adsh_code",
+        "timing": "deferred — decode only for final 100 result rows"
+      },
+      "tag": {
+        "offsets_file": "tag/tag_offsets.bin",
+        "data_file": "tag/tag_data.bin",
+        "index_by": "tagver_code",
+        "timing": "deferred — decode only for final 100 result rows"
+      }
+    }
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the iter_0 plan allocated 64 thread-local hash maps of 4MB each (256MB total anonymous mmap), triggering ~65,536 page faults during parallel initialization — this unaccounted overhead consumed ~80ms of the 90ms total, while actual scan work was only 5ms. Additionally, the two-pass design forced two sequential scans of the same ~100K-row block. Fix (Category A+D): collapse to a single-threaded single-pass design. One scan over the ~1 valid block simultaneously builds a 1MB global MAX map (65536 slots) keyed on (adsh_code, tagver_code) and collects candidates — both restricted to fy[adsh_code]==2022 rows, which is semantically equivalent to the full subquery because n.adsh=m.adsh pins each outer row to one adsh_code with fixed fy. Post-scan, candidates are post-filtered against the max map (expected ~500 pass), sorted, and top-100 decoded. Single-threaded eliminates all thread-init and merge overhead; 1MB map generates negligible page faults; one scan instead of two halves memory traffic.",
+  "correctness_anchors": {}
+}

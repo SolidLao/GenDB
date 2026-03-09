@@ -1,0 +1,139 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_building_dict_code",
+    "scan_customer_segment_postings",
+    "build_qualifying_order_row_bitset_via_orders_custkey_postings",
+    "scan_lineitem_orderkey_groups_in_order_row_order",
+    "aggregate_revenue_for_bitset_selected_orders",
+    "topk_10_by_revenue"
+  ],
+  "join_order": [
+    {
+      "build": "customer_mktsegment_postings(BUILDING -> c_custkey)",
+      "probe": "orders_custkey_postings(with orders_orderdate_zone_map block tests)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Use the existing customer segment postings to enumerate BUILDING customers, then traverse orders_custkey_postings to set a compact qualifying-order-row bitset. Consult orders_orderdate_zone_map by order-row block first: skip whole blocks when mins >= 9204, accept whole blocks when maxs < 9204, and read o_orderdate only for fallback blocks."
+    },
+    {
+      "build": "qualifying_order_rows(bitset keyed by orders row id)",
+      "probe": "lineitem_orderkey_groups(sequential row-aligned scan)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1478979,
+      "notes": "Because lineitem_orderkey_groups aligns one group per orders row, scan groups sequentially in order-row order and touch lineitem payload columns only when the qualifying-order bitset is set. Fetch o_orderkey, o_orderdate, and o_shippriority sparsely for surviving rows only."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.487702
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.511
+    }
+  ],
+  "scan": {
+    "table": "lineitem_orderkey_groups",
+    "rows": 15000000,
+    "columns": [
+      {
+        "name": "lineitem_group_row_starts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_starts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "lineitem_group_row_counts",
+        "file": "lineitem/indexes/lineitem_orderkey_groups.row_counts.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "int64_t",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(15000000) qualifying order rows built from customer_mktsegment_postings -> c_custkey -> orders_custkey_postings with orders_orderdate_zone_map block states",
+    "fact_join": "pre_built_index(lineitem_orderkey_groups row-aligned to orders row ids)",
+    "aggregation": "array_direct(per-order scalar revenue accumulation with thread-local topk heaps)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_postings",
+      "purpose": "enumerate BUILDING customer rows"
+    },
+    {
+      "index": "orders_custkey_postings",
+      "purpose": "enumerate only orders belonging to BUILDING customers instead of scanning all 15M orders"
+    },
+    {
+      "index": "orders_orderdate_zone_map",
+      "purpose": "skip or fast-accept order-row blocks before any row-level o_orderdate load during bitset construction"
+    },
+    {
+      "index": "lineitem_orderkey_groups",
+      "purpose": "scan row-aligned lineitem runs sequentially and aggregate only bitset-selected orders"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: iteration 1 still performs unnecessary full-table work on orders by reading o_custkey and usually o_orderdate for all 15M rows even though the existing postings indexes can identify a much smaller candidate set first; only about 300K BUILDING customers and about 1.48M orders survive the customer-plus-date predicates. Strategy category A (plan restructuring): switch to a hybrid indexed plan that traverses customer_mktsegment_postings and orders_custkey_postings to build a compact 15M-row qualifying-order bitset, using orders_orderdate_zone_map to avoid row-level date loads for whole blocks, then scan the row-aligned lineitem_orderkey_groups sequentially and touch order payload and lineitem payload columns only for bitset-selected rows. This keeps the compact selection structure cache-resident, removes the full orders metadata scan, and preserves sequential access for the expensive lineitem aggregation step.",
+  "correctness_anchors": {}
+}

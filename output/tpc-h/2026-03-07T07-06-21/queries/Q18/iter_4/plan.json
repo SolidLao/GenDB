@@ -1,0 +1,95 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_lineitem_scan_aggregate",
+    "build_is_big_bool_array",
+    "pass2_orders_scan_filter",
+    "join_orders_to_customer",
+    "assemble_result_structs",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(is_big_bool_array)",
+      "probe": "orders(o_orderkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2520,
+      "notes": "is_big[] dense char array size 60000001 (~57MB); O(1) membership test per orders row; accessed sequentially during orders scan so prefetcher works well"
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index)",
+      "probe": "qualifying_orders(o_custkey)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Dense array 5.7MB fully L3-resident; only ~2520 lookups total — negligible cost"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000042,
+      "notes": "Applied after Pass 1 merge; ~2520 qualifying orderkeys from 15M distinct"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderkey IN qualifying_orderkeys",
+      "selectivity": 0.000168,
+      "notes": "Evaluated via is_big[o_orderkey] direct array lookup; ~2520 rows survive from 15M"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity",  "file": "lineitem/l_quantity.bin",  "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "pass1_qty_accumulator": "dense_array(int32_t, size=60000001, ~229MB each) — EXACTLY 8 thread-local arrays (hardcoded, NOT nproc); merge reads 7×229MB=1.6GB at 200GB/s ≈ 8ms; versus iter_0's 64 threads producing 63×229MB=14.4GB ≈ 72ms merge",
+    "qualifying_filter": "dense_array(char, size=60000001, ~57MB); derived from merged qty accumulator after 8-thread merge; built in same parallel pass as merge; 57MB < 44MB LLC after warmup",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)",
+    "final_results": "flat_vector(Q18Result structs, ~2520 entries)"
+  },
+  "pass1_reuse_optimization": {
+    "description": "SUM(l_quantity) per l_orderkey computed in Pass 1 is identical to the outer query's SUM(l_quantity) per group (since GROUP BY key includes o_orderkey which 1:1 maps to l_orderkey in qualifying rows). qty_merged[okey] from Pass 1 gives the correct sum_qty directly — no second lineitem scan needed.",
+    "lineitem_scans": 1
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_lineitem_scan": "FIXED 8 threads (not nproc) for Pass 1 scan and merge. Each of the 8 threads owns one calloc'd int32_t[60000001] partial array. 8 threads scan 60M lineitem rows in parallel (each handles 60M/8=7.5M rows). After scan: parallel 8-thread merge — each merge thread handles a key-space slice of 60M/8=7.5M keys, reads from 7 source arrays, accumulates into tl_qty[0], builds is_big[] in the same pass. Merge data volume: 7×229MB=1.6GB reads + 229MB writes ≈ 9.6ms at 200GB/s. This is 8× less merge traffic than iter_0's 64 threads (14.4GB).",
+    "pass2_orders_scan": "Full nproc threads for parallel morsel scan of all orders columns (o_orderkey, o_custkey, o_orderdate, o_totalprice); each thread collects local Q18Result vector for qualifying rows where is_big[okey]>0; merge vectors after scan. 15M×24bytes=360MB at 200GB/s ≈ 1.8ms.",
+    "sort": "single-threaded partial_sort on ~2520 elements (trivially fast)"
+  },
+  "indexes": [
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "File: customer/customer_by_custkey.bin. Dense int32_t[1500001], array[c_custkey]=row_index. 5.7MB, L3-resident. Called ~2520 times — negligible."
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries; trivial"
+  },
+  "result_struct": {
+    "fields": [
+      {"name": "c_name",       "type": "char[26]",  "source": "customer/c_name.bin via customer_by_custkey[o_custkey]"},
+      {"name": "c_custkey",    "type": "int32_t",   "source": "customer/c_custkey.bin via customer_by_custkey[o_custkey]"},
+      {"name": "o_orderkey",   "type": "int32_t",   "source": "orders/o_orderkey.bin"},
+      {"name": "o_orderdate",  "type": "int32_t",   "source": "orders/o_orderdate.bin (days_since_epoch; decode to YYYY-MM-DD for output)"},
+      {"name": "o_totalprice", "type": "double",    "source": "orders/o_totalprice.bin"},
+      {"name": "sum_qty",      "type": "int32_t",   "source": "qty_merged[o_orderkey] from Pass 1 (tl_qty[0] after merge)"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause identified as excessive merge traffic from iter_0's 64 thread-local int32_t[60M] arrays (Category D — parallelism tuning). The merge reads (nthreads-1)×229MB per-thread-array: with 64 threads that is 63×229MB=14.4GB≈72ms at 200GB/s, which accounts for essentially the entire 66ms hot time. The scan itself (300MB lineitem at 200GB/s) takes only ~1.5ms regardless of thread count since aggregate bandwidth is fixed. The fix is to hardcode Pass 1 thread count to 8 instead of nproc=64: merge traffic drops to 7×229MB=1.6GB≈8ms, a 9× reduction. Scan parallelism stays efficient with 8 threads (each handles 7.5M rows sequentially). Pass 2 remains a full parallel orders scan (360MB≈1.8ms) like iter_0 — no sorted column, no index lookup, avoiding the correctness pitfalls that caused iter_3 to regress. Sum_qty is reused from Pass 1 merge array (no second lineitem scan). Expected total hot time: ~12ms versus 66ms baseline.",
+  "correctness_anchors": {}
+}

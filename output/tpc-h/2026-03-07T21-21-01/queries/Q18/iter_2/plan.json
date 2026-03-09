@@ -1,0 +1,90 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "scan_postings_offsets_for_having",
+    "filter_having_sum_qty_gt_300",
+    "semi_join_orders_by_dense_pk",
+    "join_customer_by_dense_pk",
+    "aggregate_outer_sum_from_contiguous_lineitem_ranges",
+    "topk_order_by_totalprice_date"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(streamed from lineitem_order_postings.offsets with HAVING SUM(l_quantity) > 300)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Partition the orderkey domain, use offsets[k]..offsets[k+1] as each order's contiguous lineitem row range, and resolve surviving keys through orders_pk_dense."
+    },
+    {
+      "build": "customer_pk_dense",
+      "probe": "orders(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1500000,
+      "notes": "Resolve o_custkey to customer row ids via dense direct addressing."
+    },
+    {
+      "build": "orders+customer(filtered)",
+      "probe": "lineitem contiguous ranges from lineitem_order_postings.offsets",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 624,
+      "notes": "Recompute outer SUM(l_quantity) from the same contiguous row ranges without rescanning full lineitem or touching postings rowids."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) over each orderkey range from lineitem_order_postings.offsets > 300",
+      "selectivity": 0.0000416
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "offsets_driven_stream_aggregate(lineitem_order_postings.offsets -> contiguous l_quantity row ranges) with thread-local qualifying key vectors",
+    "fact_join": "pre_built_index(orders_pk_dense, customer_pk_dense, lineitem_order_postings.offsets)",
+    "aggregation": "topk_heap(100) after per-order outer sum from contiguous ranges"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "skip redundant l_orderkey scan and derive contiguous lineitem ranges for HAVING and outer aggregation"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "customer_pk_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "sorted_group_by",
+  "output": {
+    "order_by": [
+      "o_totalprice DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after iteration 1, nearly all remaining hot time was still in the HAVING phase because the plan scanned lineitem/l_orderkey.bin only to rediscover order boundaries that already exist in lineitem_order_postings.offsets, adding roughly 240 MB of redundant sequential input to the hot path. Strategy category C: eliminate that wasted work by partitioning the orderkey domain over the postings offsets array, summing l_quantity over each order's contiguous row range, emitting only the 624 qualifying order keys, and reusing the same contiguous ranges for the sparse outer SUM while keeping order and customer lookups on the existing dense PK arrays."
+}

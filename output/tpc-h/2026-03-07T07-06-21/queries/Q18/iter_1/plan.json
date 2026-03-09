@@ -1,0 +1,95 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_lineitem_scan_aggregate_atomic",
+    "build_is_big_bool_array",
+    "pass2_orders_scan_filter",
+    "join_orders_to_customer",
+    "assemble_result_structs",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(is_big_bool_array)",
+      "probe": "orders(o_orderkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2520,
+      "notes": "is_big[] dense char array size 60000001 (~57MB); O(1) membership test per orders row"
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index)",
+      "probe": "qualifying_orders(o_custkey)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Dense array index 5.7MB fully L3-resident; only ~2,520 lookups total — negligible cost"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000042,
+      "notes": "HAVING filter after atomic accumulation; ~2,520 qualifying orderkeys"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderkey IN qualifying_orderkeys",
+      "selectivity": 0.000168,
+      "notes": "Evaluated via is_big[o_orderkey] direct char array lookup; ~2,520 rows survive from 15M"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "int8_t", "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "pass1_qty_accumulator": "shared_atomic_array(std::atomic<int16_t>, size=60000001, ~120MB, mmap MAP_ANONYMOUS|MAP_PRIVATE zero-init); all 64 threads do relaxed fetch_add directly; no per-thread copies, no merge phase; int16_t sufficient since max sum per orderkey = 7 lineitems x 50 qty = 350 < 32767",
+    "qualifying_filter": "dense_array(char, size=60000001, ~57MB); built with single parallel sequential scan of shared accumulator after Pass 1: is_big[k] = (qty_by_order[k].load(relaxed) > 300)",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)",
+    "final_results": "flat_vector(Q18Result structs, ~2520 entries)"
+  },
+  "pass1_reuse_optimization": {
+    "description": "The subquery SUM(l_quantity) per l_orderkey and the outer query SUM(l_quantity) per group are identical. The shared atomic accumulator built in Pass 1 already contains correct final sum_qty values. No second lineitem scan is needed.",
+    "lineitem_scans": 1
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_lineitem_scan": "all nthreads share one std::atomic<int16_t>[60000001] array; each thread processes its morsel stripe; uses memory_order_relaxed fetch_add; no merge step after scan completes",
+    "build_is_big": "parallel scan of shared accumulator: each thread fills its key-space slice of is_big[] with (qty > 300) check; also builds a small vector of qualifying orderkeys for result assembly",
+    "pass2_orders_scan": "parallel morsel scan of orders columns (o_orderkey, o_custkey, o_orderdate, o_totalprice); each thread collects local Q18Result vector for qualifying rows; merge vectors after scan",
+    "sort": "single-threaded partial_sort on ~2520 elements"
+  },
+  "indexes": [
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "Resolves o_custkey -> customer row in O(1); 5.7MB fully L3-resident; invoked ~2,520 times"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries"
+  },
+  "result_struct": {
+    "fields": [
+      {"name": "c_name",       "type": "char[26]",  "source": "customer/c_name.bin via customer_by_custkey[o_custkey]"},
+      {"name": "c_custkey",    "type": "int32_t",   "source": "customer/c_custkey.bin via customer_by_custkey[o_custkey]"},
+      {"name": "o_orderkey",   "type": "int32_t",   "source": "orders/o_orderkey.bin"},
+      {"name": "o_orderdate",  "type": "int32_t",   "source": "orders/o_orderdate.bin (days_since_epoch; decode to YYYY-MM-DD for output only)"},
+      {"name": "o_totalprice", "type": "double",    "source": "orders/o_totalprice.bin"},
+      {"name": "sum_qty",      "type": "int32_t",   "source": "qty_by_order[o_orderkey].load(relaxed) from Pass 1 shared atomic accumulator, cast to int32_t"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — algorithm change): iter_0 allocates 64 thread-local int32_t accumulators of 229 MB each (14.7 GB total), then merges them with a parallel element-wise reduction that reads 63 × 229 MB = 14.4 GB of memory traffic — the dominant cost in the hot case at ~73ms on a 200 GB/s system. The fix replaces all thread-local arrays with a single shared std::atomic<int16_t>[60000001] array (120 MB total, mmap MAP_ANONYMOUS for zero-init). All 64 threads write directly to this shared array using memory_order_relaxed fetch_add, eliminating the merge phase entirely. int16_t is correct because the maximum sum per orderkey is 7 lineitems × 50 max_qty = 350, well within int16_t range (32767). The halved element size (2 vs 4 bytes) also improves cache efficiency: 120 MB / 64 bytes = 1.875M cache lines vs 3.75M for int32_t, with 32 entries per cache line giving better temporal locality for orders with nearby orderkeys. Atomic contention is negligible: P(two threads hitting the same key) ≈ 64²/15M ≈ 0.03%. All other phases (Pass 2 orders scan, customer join, sort) are unchanged from iter_0."
+}

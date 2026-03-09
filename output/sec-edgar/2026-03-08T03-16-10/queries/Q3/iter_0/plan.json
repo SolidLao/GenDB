@@ -1,0 +1,68 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "resolve_usd_code",
+    "filter_sub_fy",
+    "scan_num_with_optional_uom_zone_pruning",
+    "direct_join_sub_on_adsh",
+    "aggregate_cik_and_name_cik_in_one_pass",
+    "finalize_avg_sub_total",
+    "apply_having",
+    "topk_total_value_desc",
+    "decode_name"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num(filtered uom='USD')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Use adsh_to_rowid dense lookup; share joined stream across threshold and outer aggregation."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.317
+    },
+    {
+      "table": "joined(num,sub)",
+      "predicate": "n.adsh = s.adsh AND s.fy = 2022 after n.uom = 'USD'",
+      "selectivity": 0.251
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(86135 rows) for fy=2022 plus dense adsh_id->sub_rowid validation",
+    "fact_join": "direct_array(sub/indexes/adsh_to_rowid.bin)",
+    "aggregation": "compact_hash_map(cik->sum) and compact_hash_map(name_id,cik->sum), both pre_sized"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,76 @@
+{
+  "query_id": "Q24",
+  "pipeline": ["load_anti_set", "zone_map_scan_num", "anti_join_probe", "aggregate_tagver", "having_filter", "topk_sort", "decode_strings"],
+  "join_order": [
+    {
+      "build": "pre(indexes/pre_adsh_tagver_set.bin)",
+      "probe": "num(filtered)",
+      "type": "anti",
+      "strategy": "hash_set",
+      "build_cardinality": 8631890,
+      "notes": "Load pre-built sorted array of 8,631,890 unique uint64 keys into unordered_set<uint64_t> reserved at 2x capacity (~130MB). Probe with key = ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code. Row passes anti-join if key is ABSENT from set. tagver_code=-1 casts to 0xFFFFFFFF — valid non-matching key, always passes."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.05,
+      "method": "zone_map_block_skip + row_filter",
+      "notes": "usd_code loaded from indexes/uom_codes.bin — never hardcoded. Zone map: skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code."
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.033,
+      "method": "zone_map_block_skip + row_filter",
+      "notes": "Zone map: skip block b if zm[b].max_ddate < 20230101 || zm[b].min_ddate > 20231231. Applied jointly with uom zone map — combined skip is very aggressive (~0.17% rows survive ≈ 67K rows)."
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "row_filter",
+      "notes": "Check value != NaN after ddate+uom filters pass. Applied before anti-join probe."
+    }
+  ],
+  "data_structures": {
+    "anti_set": "unordered_set<uint64_t>(reserve=8631890*2)",
+    "aggregation_cnt": "direct_array<int32_t>[1070663] zero-initialized, indexed by tagver_code",
+    "aggregation_sum": "direct_array<double>[1070663] zero-initialized, indexed by tagver_code",
+    "thread_local_agg": "each thread owns private cnt[] and sum[] arrays (1070663 entries each, ~17MB/thread); merged into global arrays after scan",
+    "zone_maps": "loaded once from indexes/num_zone_maps.bin — 395 ZoneMap structs (12 bytes each, struct layout: int8 min_uom@0, int8 max_uom@1, [pad@2-3], int32 min_ddate@4, int32 max_ddate@8)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "granularity": "block (100,000 rows per morsel)",
+    "notes": "Each thread takes a block morsel, applies zone-map check (skip entire block if filtered), then row-level uom+ddate+value+anti-join filters, then accumulates into thread-local direct arrays. Master thread merges all thread-local arrays element-wise after scan completes. Post-scan steps (HAVING, sort, decode) are single-threaded — result set is tiny."
+  },
+  "indexes": [
+    {
+      "index": "pre_adsh_tagver_set",
+      "file": "indexes/pre_adsh_tagver_set.bin",
+      "purpose": "anti_join_set — read header uint64_t n_unique, bulk-load n_unique uint64_t keys, insert into reserved unordered_set"
+    },
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks — dual filter on uom_code and ddate ranges before row-level scan"
+    },
+    {
+      "index": "uom_codes_dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "dict_lookup — resolve 'USD' string to int8_t usd_code at startup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_notes": "Group by tagver_code (int32_t, range [0, 1070662]). Use tagver_code directly as array index into cnt[]/sum[] direct arrays. After merge, iterate array to collect entries where cnt > 10 (HAVING). tagver_code=-1 treated as uint32_t index 0xFFFFFFFF — out of range, skip safely (these rows always pass anti-join but cannot be grouped; handle by guard: if (tagver_code < 0 || tagver_code >= TAG_COUNT) skip group accumulation).",
+  "output": {
+    "having": "cnt > 10",
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": "After top-100 selection, decode tag and version strings using tag/tag_offsets.bin + tag/tag_data.bin and tag/version_offsets.bin + tag/version_data.bin indexed by tagver_code"
+  },
+  "execution_target": "cpp"
+}

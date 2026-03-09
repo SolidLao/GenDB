@@ -1,0 +1,120 @@
+{
+  "query_id": "Q24",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version.partitioned_exact_p19",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/offsets.bin",
+        "offsets_format": "uint64_t[524289]",
+        "keys": "column_versions/pre.adsh_tag_version.partitioned_exact_p19/keys.bin",
+        "keys_format": "TripleKey[8631890] where TripleKey={uint32_t a, uint32_t b, uint32_t c}"
+      },
+      "usage": "mmap offsets.bin and keys.bin; compute partition = hash_triple(adsh, tag, version) >> 45, then linearly scan keys[offsets[partition] .. offsets[partition + 1]) for an exact anti-join existence check"
+    }
+  ],
+  "pipeline": [
+    "merge_date_postings_rowid_order",
+    "uom_dense_filter",
+    "value_non_null_filter",
+    "anti_probe_pre_partitioned_exact_index",
+    "hash_aggregate_tag_version",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version partitioned exact index)",
+      "probe": "num(filtered: ddate range via merged postings, uom=USD via dense column, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Keep the existing cache-friendly pre partitioned exact index, but feed it from a globally rowid-ordered 2023 candidate stream produced by merging the 12 date postings runs instead of probing from date-group order with a 33.2M-row USD bitset."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 10700045,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "Use num_ddate_postings as 12 sorted rowid runs for the 2023 dates, k-way merge them into one globally ascending rowid stream, then check num/uom.bin directly for USD and read value/adsh/tag/version in the same rowid order so dense num columns are consumed almost sequentially before probing pre."
+  },
+  "data_structures": {
+    "dim_filter": "12-way min_heap or loser_tree over num_ddate_postings rowid runs plus direct dense equality on num/uom.bin",
+    "fact_join": "pre_built_index(hash_partitioned_exact_triples_p19) using uint64_t partition offsets plus contiguous TripleKey slices",
+    "aggregation": "compact_hash_map(thread_local, pre_sized) keyed by packed(tag,version) -> {count_rows,sum_value}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidates as 12 sorted rowid runs that can be merged into global rowid order"
+    },
+    {
+      "index": "pre.adsh_tag_version.partitioned_exact_p19",
+      "purpose": "exact anti-join membership on (adsh, tag, version) with tiny per-partition scans"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC",
+      "tag ASC",
+      "version ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan chooses the 2023 date postings as the driver but then materializes a 33.2M-row USD membership bitset and processes the 12 date posting groups in date-value order, which turns the hot path into partially random gathers across num columns. Strategy category A: restructure the scan so the 12 date posting runs are k-way merged into one globally rowid-ordered stream, test uom by directly reading the 75 MB num/uom.bin column instead of building a postings bitset, and keep the existing partitioned exact pre anti-join plus thread-local (tag,version) aggregation. This removes the expensive dim_filter build and converts the surviving column reads into near-sequential bandwidth-friendly access. ",
+  "correctness_anchors": {}
+}

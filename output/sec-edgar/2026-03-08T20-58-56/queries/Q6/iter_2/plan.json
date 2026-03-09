@@ -1,0 +1,128 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "filter_sub",
+    "locate_triple_ranges",
+    "merge_num_pre_triples",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2023)",
+      "probe": "pre_adsh_tag_version_hash(adsh-range)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 26612,
+      "notes": "Use fy-pruned adsh keys to restrict both fact indexes to contiguous per-adsh ranges before any row-level work."
+    },
+    {
+      "build": "pre triples(stmt='IS' via pre_stmt_hash)",
+      "probe": "num_adsh_tag_version_hash(range-merge on same adsh/tag/version)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1862555,
+      "notes": "Merge matching triple entries per adsh and scan only matched num posting lists to apply uom='USD' and value IS NOT NULL."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.308975445
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.194
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num_pre_triple_indexes",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "num.adsh_tag_version postings",
+        "file": "num/indexes/num_adsh_tag_version_hash.bin",
+        "type": "TripleKey+posting",
+        "bytes_per_row": 24
+      },
+      {
+        "name": "pre.adsh_tag_version postings",
+        "file": "pre/indexes/pre_adsh_tag_version_hash.bin",
+        "type": "TripleKey+posting",
+        "bytes_per_row": 24
+      },
+      {
+        "name": "num.uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "pre.plabel",
+        "file": "pre/plabel.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(sub_adsh_pk_hash) + compact_vector(filtered_adsh)",
+    "fact_join": "pre_built_index(pre_stmt_hash + pre_adsh_tag_version_hash + num_adsh_tag_version_hash)",
+    "aggregation": "thread_local_compact_hash_map<key(name_code,stmt_code,tag_code,plabel_code), agg(sum_f64,count_u64)>"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is hardware-mismatch plus wasted work (Category B/C): iteration 1 performs many random binary probes into cache-exceeding triple index structures and also loads/prefetches data not needed for the final join path. The revised plan drives from fy-filtered sub keys, restricts both triple posting indexes to contiguous per-adsh ranges, merge-joins triple entries to avoid per-row random probes, scans only matched num posting lists for USD/non-null checks, and keeps runtime state limited to filtered key vectors and aggregation maps.",
+  "correctness_anchors": {}
+}

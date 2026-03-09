@@ -1,0 +1,81 @@
+{
+  "query_id": "Q2",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 129.44000000000003,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 129.44000000000003,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 55.04,
+        "dim_filter": 0.15,
+        "build_joins": 41.03,
+        "main_scan": 5.59,
+        "output": 0.61,
+        "total": 127.2
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 68.55333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 68.55333333333334,
+      "validation": "pass",
+      "strategy": "Root cause: the prior plan used a logical path that reconstructs pure-row candidates from a uom posting index built on 32-bit words, forcing broad entry scans, rowid materialization, sorting, and expensive hash-map build/merge work before useful filtering. Strategy category A/C: reorder to filter sub.fy first, drive fact access through num_adsh_fk_hash postings for only relevant filings, and perform uom/value filtering plus (adsh,tag)->max aggregation on that reduced stream; this removes the heavy pure_rowids preprocessing and cuts wasted build work while preserving exact max-equality semantics.",
+      "operation_timings": {
+        "data_loading": 5.5,
+        "dim_filter": 0.45,
+        "build_joins": 36.53,
+        "main_scan": 0.21,
+        "output": 0.57,
+        "total": 64.78
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 53.63,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 53.63,
+      "validation": "pass",
+      "strategy": "Root cause: build_joins dominates because many index-probed fact rows are materialized and re-probed through extra hash/row-vector passes after join order selection. Strategy category A/C: keep the empirically best join order (sub[fy=2022] -> num_adsh postings, validated by sampling: 79.6ms vs 121.9ms/138.3ms alternatives) and eliminate wasted work by deduplicating sub adsh keys, aggregating max(value) per (adsh,tag) directly on the posting stream, and emitting eq-max candidates without a separate filtered_num materialization pass.",
+      "operation_timings": {
+        "data_loading": 5.2,
+        "dim_filter": 0.61,
+        "build_joins": 23.84,
+        "main_scan": 5.01,
+        "output": 0.62,
+        "total": 51.57
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 47.42666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 47.42666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan still performs two full passes over the same adsh-driven posting stream (first to build (adsh,tag)->max, second to re-probe for n.value=max), so build_joins remains dominant from repeated random fact-column touches and extra hash-map merge/probe work. Strategy category A/C: keep the validated join order (sub fy filter then num_adsh posting probes) but fuse aggregation and eq-max emission into a single per-adsh traversal using thread-local tag states that track max and tie rows, removing the global max_map build/merge and the second posting pass while preserving exact MAX equality semantics.",
+      "operation_timings": {
+        "data_loading": 6.38,
+        "dim_filter": 0.65,
+        "build_joins": 0.26,
+        "main_scan": 20.79,
+        "output": 0.78,
+        "total": 46
+      }
+    }
+  ]
+}

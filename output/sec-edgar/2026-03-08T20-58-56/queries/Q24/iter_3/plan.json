@@ -1,0 +1,111 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "probe_ddate_zonemap",
+    "early_exit_if_no_overlap",
+    "scan_overlap_blocks_ddate_value_uom",
+    "anti_join_pre_on_survivors",
+    "aggregate_tag_version",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version)",
+      "probe": "num(survivors after ddate+uom+value)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Open and probe pre_adsh_tag_version_hash only when survivor_count > 0; skip join entirely otherwise."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.0001
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.99
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(num_blocks_from_ddate_zonemap) + selection_vector(rowids)",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_hash)",
+    "aggregation": "compact_hash_map(pre_sized_to_survivors)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "pre_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: remaining hot-path cost is dominated by startup work that is not proportional to output, especially unconditional mmap/prefetch and dictionary loading before confirming any qualifying 2023 rows. Strategy category C (work elimination) with plan restructuring: first read only the ddate zonemap to determine overlap, immediately return empty output when no blocks overlap, defer loading all large columns, anti-join index, and tag/version dictionaries until survivors exist, and avoid whole-column prefetch in hot runs so memory traffic is paid only for blocks and rows that can contribute to final groups.",
+  "correctness_anchors": {}
+}

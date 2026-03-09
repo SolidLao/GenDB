@@ -1,0 +1,130 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_discount.u8",
+      "action": "built_new",
+      "files": {
+        "values": "column_versions/lineitem.l_discount.u8/values.bin",
+        "values_format": "uint8_t[row_count]"
+      },
+      "usage": "mmap values.bin; use values[row] as l_discount in the fused scan instead of the original int64_t column"
+    },
+    {
+      "id": "lineitem.l_quantity.u16",
+      "action": "built_new",
+      "files": {
+        "values": "column_versions/lineitem.l_quantity.u16/values.bin",
+        "values_format": "uint16_t[row_count]"
+      },
+      "usage": "mmap values.bin; use values[row] as l_quantity in the fused scan instead of the original int64_t column"
+    },
+    {
+      "id": "lineitem.l_extendedprice.u32",
+      "action": "built_new",
+      "files": {
+        "values": "column_versions/lineitem.l_extendedprice.u32/values.bin",
+        "values_format": "uint32_t[row_count]"
+      },
+      "usage": "mmap values.bin; use values[row] as l_extendedprice in the fused scan instead of the original int64_t column and widen to int64_t only for the multiply-accumulate"
+    }
+  ],
+  "pipeline": [
+    "candidate_density_precheck",
+    "fused_scan_filter_aggregate_narrow",
+    "output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.161
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.03
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 2400",
+      "selectivity": 0.8
+    },
+    {
+      "table": "lineitem",
+      "predicate": "(l_shipdate >= 8766 AND l_shipdate < 9131) AND (l_discount >= 5 AND l_discount <= 7) AND l_quantity < 2400",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount",
+        "file": "column_versions/lineitem.l_discount.u8/values.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "column_versions/lineitem.l_quantity.u16/values.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "column_versions/lineitem.l_extendedprice.u32/values.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600) candidate-density precheck only",
+    "fact_join": "none",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc) with static contiguous row ranges and no manual thread cap"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zone_map",
+      "purpose": "optional density precheck; bypass block-pruning path when all 600 blocks overlap"
+    },
+    {
+      "index": "lineitem_discount_zone_map",
+      "purpose": "optional density precheck; bypass block-pruning path when all 600 blocks overlap"
+    },
+    {
+      "index": "lineitem_quantity_zone_map",
+      "purpose": "optional density precheck; bypass block-pruning path when all 600 blocks overlap"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: this query is now fundamentally bandwidth-bound by a storage-level mismatch, because the hot path streams three decimal columns stored as int64_t even though their actual ranges fit in much smaller types, so the executor reads 28 bytes per row for a single scalar aggregate and leaves performance on the table even with the logically correct fused scan. Strategy Category E: use persistent narrow encodings for l_discount (uint8), l_quantity (uint16), and l_extendedprice (uint32), keep the scan as one fused sequential pass with thread-local scalar reduction, and retain the 600-entry zone maps only as an optional density precheck; this cuts the scan payload from 28 bytes per row to 11 bytes per row and attacks the remaining gap at the storage layer instead of adding more passes or branching.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 5,
+    "discount_hi": 7,
+    "quantity_hi": 2400,
+    "revenue_formula": "SUM(l_extendedprice * l_discount)",
+    "revenue_scale_divisor": 10000.0
+  }
+}

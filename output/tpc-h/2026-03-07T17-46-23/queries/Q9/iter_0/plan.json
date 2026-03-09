@@ -1,0 +1,96 @@
+{
+  "query_id": "Q9",
+  "pipeline": ["load_nation", "load_supplier_nationkey", "filter_part", "parallel_scan_lineitem_join_aggregate"],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 109600,
+      "probe_cardinality": 59986052,
+      "surviving_rows": 3287000,
+      "notes": "partkey max ~2M, bitset fits in 250KB (L1-friendly)"
+    },
+    {
+      "build": "partsupp",
+      "probe": "lineitem(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Use partsupp_pk_index dense_range, scan ~4 entries per partkey to match suppkey"
+    },
+    {
+      "build": "orders",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use orders_orderkey_lookup dense index → o_orderdate → extract year"
+    },
+    {
+      "build": "supplier + nation",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Pre-build nationkey_for_supplier[suppkey] = s_nationkey[suppkey-1], then map to nation index"
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0548,
+      "method": "memmem on varlen_string offsets_plus_data"
+    }
+  ],
+  "data_structures": {
+    "nation_names": "std::string[25] indexed by n_nationkey",
+    "supplier_nationkey": "int32_t[max_suppkey+1] direct array, loaded from s_nationkey using supplier_suppkey_lookup or direct s_nationkey[suppkey-1]",
+    "part_filter": "bitset(2000001) — set bit for each partkey matching '%green%'",
+    "partsupp_index": "dense_range index from partsupp_pk_index.bin — struct{uint32_t start, count}[max_partkey+1]",
+    "partsupp_suppkey": "mmap ps_suppkey.bin for linear scan within range",
+    "partsupp_supplycost": "mmap ps_supplycost.bin for value retrieval",
+    "orders_lookup": "dense_lookup from orders_orderkey_lookup.bin — int32_t[max_orderkey+1]",
+    "orders_orderdate": "mmap o_orderdate.bin",
+    "aggregation": "thread-local double[25][8] direct 2D array (nation × year_offset), year_offset = year - 1992"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "partition_by": "lineitem row ranges",
+    "thread_local_aggregation": true,
+    "merge": "sum thread-local arrays into global double[25][8]"
+  },
+  "indexes": [
+    {"index": "partsupp_pk_index", "file": "indexes/partsupp_pk_index.bin", "purpose": "partsupp lookup by l_partkey, scan ~4 entries for matching l_suppkey"},
+    {"index": "orders_orderkey_lookup", "file": "indexes/orders_orderkey_lookup.bin", "purpose": "o_orderkey → row_index → o_orderdate → extract year"},
+    {"index": "supplier_suppkey_lookup", "file": "indexes/supplier_suppkey_lookup.bin", "purpose": "l_suppkey → row_index → s_nationkey (or use direct suppkey-1 if contiguous)"}
+  ],
+  "aggregation": {
+    "strategy": "array_direct",
+    "dimensions": {"nation": 25, "year": 8},
+    "key_mapping": "nation_index = s_nationkey (0..24), year_index = extracted_year - 1992 (0..7)",
+    "value": "SUM(amount) as double",
+    "total_groups": 175
+  },
+  "lineitem_scan": {
+    "columns_sequential": ["l_partkey"],
+    "columns_conditional": ["l_suppkey", "l_orderkey", "l_extendedprice", "l_discount", "l_quantity"],
+    "access_pattern": "scan l_partkey sequentially, probe bitset; on match load other columns for that row",
+    "qualifying_rows": 3287000
+  },
+  "computation": {
+    "amount": "l_extendedprice * (1.0 - l_discount) - ps_supplycost * l_quantity",
+    "year_extraction": "year_from_days(o_orderdate[row]) using reverse days_from_civil algorithm"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "format": "nation (string), o_year (int), sum_profit (double, 2 decimal places)",
+    "estimated_rows": 175
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,70 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "date_postings_range",
+    "uom_postings_membership",
+    "value_non_null_filter",
+    "anti_probe_pre_triple_index",
+    "hash_aggregate_tag_version",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version groups)",
+      "probe": "num(filtered: ddate range, uom=USD, value IS NOT NULL)",
+      "type": "anti",
+      "strategy": "hash_join",
+      "build_cardinality": 8631890,
+      "notes": "Probe the persisted pre_adsh_tag_version_groups open-addressed hash index; surviving probe misses feed aggregation."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(39401761) for num_uom_postings membership; drive from num_ddate_postings range rowids",
+    "fact_join": "pre_built_index(pre_adsh_tag_version_groups)",
+    "aggregation": "compact_hash_map(thread_local, pre_sized) keyed by packed(tag,version) -> {count_rows,sum_value}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidate rowids via postings range scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "apply USD membership filter before anti-join probes"
+    },
+    {
+      "index": "pre_adsh_tag_version_groups",
+      "purpose": "exact anti-join lookup on (adsh, tag, version)"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,122 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "subquery_scan_aggregate",
+    "filter_qualifying_orderkeys",
+    "index_lookup_orders",
+    "index_lookup_customer",
+    "sort_and_limit"
+  ],
+  "phases": [
+    {
+      "phase": 1,
+      "name": "subquery_scan_aggregate",
+      "description": "Sequential scan lineitem (sorted by l_orderkey) to compute SUM(l_quantity) per orderkey, keep orderkeys with sum > 300",
+      "inputs": ["l_orderkey", "l_quantity"],
+      "approach": "sorted_sequential_scan",
+      "output": "qualifying_orderkeys_with_sum_qty",
+      "estimated_input_rows": 59986052,
+      "estimated_output_rows": 15000,
+      "selectivity": 0.001,
+      "store_sum_qty": true
+    },
+    {
+      "phase": 2,
+      "name": "index_lookup_orders",
+      "description": "For each qualifying orderkey, lookup orders row via dense index to get o_custkey, o_orderdate, o_totalprice",
+      "inputs": ["orders_orderkey_lookup", "o_custkey", "o_orderdate", "o_totalprice"],
+      "approach": "direct_array_lookup",
+      "estimated_input_rows": 15000,
+      "estimated_output_rows": 15000
+    },
+    {
+      "phase": 3,
+      "name": "index_lookup_customer",
+      "description": "For each qualifying order, lookup customer row via dense index to get c_custkey (c_name deferred to final output)",
+      "inputs": ["customer_custkey_lookup", "c_custkey"],
+      "approach": "direct_array_lookup",
+      "estimated_input_rows": 15000,
+      "estimated_output_rows": 15000
+    },
+    {
+      "phase": 4,
+      "name": "sort_and_limit",
+      "description": "Sort ~15K results by o_totalprice DESC, o_orderdate ASC; take top 100; decode c_name only for top 100",
+      "approach": "full_sort_then_limit",
+      "estimated_input_rows": 15000,
+      "limit": 100,
+      "late_materialize": ["c_name"]
+    }
+  ],
+  "join_order": [
+    {
+      "build": "lineitem(subquery_aggregated → qualifying_orderkeys)",
+      "probe": "orders(via dense index lookup)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "Subquery produces ~15K qualifying orderkeys; orders_orderkey_lookup gives O(1) access"
+    },
+    {
+      "build": "orders(qualifying rows)",
+      "probe": "customer(via dense index lookup)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "customer_custkey_lookup gives O(1) row access by custkey"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING > 300",
+      "selectivity": 0.001,
+      "phase": "subquery"
+    }
+  ],
+  "data_structures": {
+    "subquery_aggregation": "sorted_sequential_accumulate (no hash table needed — l_orderkey sorted)",
+    "qualifying_results": "flat_array<struct{int32_t orderkey, double sum_qty, int32_t order_row_idx, int32_t cust_row_idx, double o_totalprice, int32_t o_orderdate}>",
+    "orders_lookup": "dense_lookup_array (mmap orders_orderkey_lookup.bin)",
+    "customer_lookup": "dense_lookup_array (mmap customer_custkey_lookup.bin)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_partitioning": "partition lineitem rows into equal-sized ranges across threads; each thread scans sequentially and must handle orderkey boundaries (align morsel starts to orderkey group boundaries using l_orderkey sorted order)",
+    "phase2_onwards": "single_thread (only ~15K rows)"
+  },
+  "indexes": [
+    {
+      "index": "orders_orderkey_lookup",
+      "file": "indexes/orders_orderkey_lookup.bin",
+      "purpose": "O(1) lookup: qualifying orderkey → orders row index"
+    },
+    {
+      "index": "customer_custkey_lookup",
+      "file": "indexes/customer_custkey_lookup.bin",
+      "purpose": "O(1) lookup: o_custkey → customer row index"
+    }
+  ],
+  "aggregation": "sorted_sequential_accumulate",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"]
+  },
+  "late_materialization": {
+    "c_name": "Only decode c_name (varlen string from offsets+data files) for final top-100 rows"
+  },
+  "column_files": {
+    "l_orderkey": "lineitem/l_orderkey.bin",
+    "l_quantity": "lineitem/l_quantity.bin",
+    "o_orderkey": "orders/o_orderkey.bin",
+    "o_custkey": "orders/o_custkey.bin",
+    "o_orderdate": "orders/o_orderdate.bin",
+    "o_totalprice": "orders/o_totalprice.bin",
+    "c_custkey": "customer/c_custkey.bin",
+    "c_name_offsets": "customer/c_name_offsets.bin",
+    "c_name_data": "customer/c_name_data.bin"
+  },
+  "execution_target": "cpp"
+}

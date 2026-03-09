@@ -1,0 +1,43 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 64.10666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 64.10666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.3,
+        "dim_filter": 0,
+        "main_scan": 32.95,
+        "build_joins": 26.65,
+        "output": 0.74,
+        "total": 63.17
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 36.080000000000005,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 36.080000000000005,
+      "validation": "pass",
+      "strategy": "Root cause: the current COUNT(DISTINCT adsh) path materializes one packed (group,adsh) key per input row and then sorts/uniques it twice, so the hot phases spend most of their time moving and sorting about 9.6M 64-bit keys (76.8 MB raw, with thread-local plus global copies) even though the GROUP BY domain is tiny. Strategy category B: replace the cache-unfriendly sort-based distinct with a cache-resident direct-array plan. Aggregate COUNT(*) and SUM(line) in a 27-slot direct array indexed by (stmt_code,rfile_code), and maintain exact DISTINCT state as a thread-local dense uint32_t mask array over the 86,136-code global adsh domain; each row ORs its group bit into mask[adsh]. Finalization reduces thread-local arrays by sum/OR and computes num_filings by popcounting the reduced masks, eliminating the large sort/unique phases and keeping the working set inside cache.",
+      "operation_timings": {
+        "data_loading": 0.1,
+        "dim_filter": 0,
+        "main_scan": 14.51,
+        "build_joins": 2.9,
+        "output": 2.29,
+        "total": 33.76
+      }
+    }
+  ]
+}

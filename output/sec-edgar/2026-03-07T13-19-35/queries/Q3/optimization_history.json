@@ -1,0 +1,60 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 316.61333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 316.61333333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 7.79,
+        "pass1_scan_aggregate_cik": 205.02,
+        "pass2_scan_aggregate_adsh": 92.8,
+        "having_filter": 0.12,
+        "topk_sort": 0.02,
+        "output": 0.34,
+        "total": 315.44
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 55.27333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 55.27333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: two problems in the logical plan. First, pass 1 (cik aggregation for HAVING threshold) was single-threaded despite 64 available cores, consuming 205ms. The sequential constraint was unnecessary because avg_threshold is used only in a > comparison where floating-point accumulation order at the margin is inconsequential. Second, two separate full-table scans (298ms total) over identical data with identical filters, when both accumulators can be computed in a single fused pass. Strategy: Category A (plan restructuring) — fuse pass 1 and pass 2 into one single parallel scan that simultaneously accumulates local_group_sum (for output) and local_cik_sum (for threshold), both as flat arrays indexed by pre-built compact integer keys. Category B (algorithm change) — replace CompactHashMap probing with direct flat array indexing: adsh_group_id[ac] (0..n_groups-1) already is a compact index; build adsh_cik_idx[ac] (0..n_ciks-1) during data_loading. Thread-local flat arrays (400KB long double for groups + 136KB double for ciks = 536KB/thread × 64 = 34MB) fit within the 44MB L3, giving cache-resident random-access updates with zero hash overhead. Post-scan element-wise merge of small flat arrays is trivially fast. Expected outcome: single parallel scan replaces two (one sequential + one parallel), with direct array accumulators eliminating hash probing entirely.",
+      "operation_timings": {
+        "data_loading": 1.93,
+        "build_joins": 6.28,
+        "main_scan": 25.58,
+        "output": 0.41,
+        "total": 52.63
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 40.406666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 40.406666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: two problems identified post-iteration-1. (1) Merge bottleneck (~21ms unaccounted): the group_sum merge used OMP parallel-for with groups as outer loop and threads as inner loop — a column-major traversal of a row-major matrix (all_grp[t*n_groups+g]), generating 1.6M random L3 accesses with stride 200KB. Fix (Category B): swap to t-outer-g-inner sequential scan; each thread's 200KB block is read sequentially, converting random L3 access to 12.8MB streaming reads (~0.3ms at 50 GB/s). (2) Redundant cik accumulation in scan (Category C): the hot loop did 2 random writes per qualifying row (lg[gid] and lc[cik_idx]). Since cik_sum = sum of group_sum values per cik, it can be computed from group_sum in O(n_groups)=O(17K) post-merge instead of O(34M) in-scan, eliminating the lc[] write and the 5.1MB all_cik allocation entirely. (3) Faster group_map (Category A): replace std::unordered_map<string,int32_t> with unordered_map<uint64_t,int32_t> using key=(cik<<32)|fnv1a32(name) — integer key hash/compare eliminates string allocation and is ~4x faster. (4) Explicit prefetch: software prefetch gid_ptr 16 rows ahead to overlap L3 latency for data-dependent random lookups. Expected: merge ~21ms->~2ms, build_joins ~6ms->~2ms, scan ~26ms->~21ms, total ~25ms.",
+      "operation_timings": {
+        "data_loading": 1.49,
+        "build_joins": 3.4,
+        "main_scan": 17.02,
+        "output": 1.64,
+        "total": 39.87
+      }
+    }
+  ]
+}

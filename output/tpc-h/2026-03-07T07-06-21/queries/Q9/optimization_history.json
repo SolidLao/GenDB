@@ -1,0 +1,73 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause (Q2 — physical implementation vs hardware): the hot path's two dominant random-access structures both greatly exceed the 44MB LLC. The prebuilt partsupp_hash_index is 256MB (5.8× LLC) and the two-level orders lookup (orders_by_orderkey 240MB + o_orderdate 57MB = 297MB, 6.7× LLC) together produce ~9.9M LLC cache misses for the 3.3M qualifying lineitem rows. Strategy Category B: replace the prebuilt 256MB partsupp hash with a compact runtime-built open-addressing hash covering only the ~440K green-part partsupp entries (2^20 = 1M slots × 16 bytes = 16MB), which fits within the 44MB L3 and converts all partsupp lookups from LLC misses to L3 hits. Strategy Category C: replace the two-level orders dereference (two int32_t random accesses into 297MB) with a single int8_t okey_yearoff[60000001] = 60MB direct array built at startup, halving the orders cache miss count and reducing the per-access transfer from 8 bytes (two int32_t) to 1 byte. Together these reduce the combined hot-path random-access footprint from ~553MB to ~76MB (16MB L3-resident partsupp + 60MB orders), making partsupp lookups fully L3-resident and cutting orders miss frequency by ~50%.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause: two bottlenecks identified. (1) Category A — plan restructuring: the dim_filter phase in iter_0 runs entirely single-threaded, doing a 107MB fread of p_name.bin followed by a serial strstr scan of 2M parts while all 64 worker threads sit idle; this costs ~13ms of sequential preprocessing. Fix: use mmap for p_name.bin and p_partkey.bin, then launch all nthreads threads to scan p_name in parallel (safe since p_partkey is a PK, all write indices to green_part[] are unique). Also build year_by_orderrow in parallel during the same phase. (2) Category C — work elimination: the orders lookup chain has a two-level DRAM access (orders_by_orderkey[l_orderkey[i]] -> o_orderdate[orow] -> extract_year), costing 2 DRAM misses per qualifying row. Fix: precompute uint8_t year_by_orderrow[15000001] indexed by order row — 15MB fits in 44MB LLC (unlike iter_1's 60MB okey_yearoff indexed by orderkey which exceeded LLC). Total L3 hot budget: green_part(2MB)+year_by_orderrow(15MB)+suppkey_to_nationrow(0.4MB)=17.4MB, well within 44MB. The pre-built partsupp_hash_index is kept as-is (no runtime build) to avoid iter_1's mistake of adding ~121MB build I/O overhead that exceeded the savings. Software prefetch for orders_by_orderkey added to hide the one remaining DRAM latency chain.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Category E storage extension to eliminate the two-level orders DRAM bottleneck. Root cause (Q2): in iter_0's hot path, each of the ~3.3M qualifying lineitem rows incurs 2 DRAM random misses for orders (orders_by_orderkey[l_orderkey]->orow into 240MB, then o_orderdate[orow] into 57MB) plus 1 DRAM miss for partsupp (256MB hash). The 297MB orders structures cannot fit in the 44MB L3. Previous iterations failed because they tried to build replacement structures at query startup, adding cold-AND-hot overhead that exceeded the savings. Category E fixes this: the nibble-packed year_by_orderkey array (year_nibbles.bin, 28.6MB) is built ONCE offline and stored persistently, so hot-run cost is just mmap — zero startup computation. On the hot path, year_off = (year_nibbles[lorderkey>>1] >> ((lorderkey&1)<<2)) & 0xF replaces the two-level 297MB random lookup with a single 1-byte access into a 28.6MB array that fits in the 44MB L3 alongside green_part (2MB) and suppkey_to_nationrow (0.4MB) for a total L3 budget of 31MB. This eliminates 2 DRAM misses per qualifying row (6.6M total misses eliminated across 64 threads), saving an estimated ~6-8ms on the hot 38ms baseline. The dim_filter and partsupp lookup are unchanged from iter_0, preserving the simplicity that made iter_0 faster than iter_1 and iter_2.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Categories B + E. Root cause: (1) iter_3 REGRESSED because it used long double (80-bit x87) for profit accumulation — 3-4x slower than SSE2 double — negating the nibble optimization savings; (2) two structures remain DRAM-exceeding: orders chain (297MB, 6.7x LLC) and partsupp hash (256MB, 5.8x LLC). Strategy: use existing year_nibbles.bin (Category E) with MADV_WILLNEED pre-warming to eliminate the 2-DRAM-miss orders chain (28.6MB, L3-resident); build a compact partsupp flat array at runtime (Category B) — read ps_partkey/ps_suppkey/ps_supplycost (122MB total, ~1.2ms from page cache), produce partkey_to_compact uint16_t[2M]=4MB + compact_suppkeys int32_t[110K][4]=1.76MB + compact_costs double[110K][4]=3.52MB totaling 9.28MB — which replaces all 256MB partsupp_hash_index random access with direct L3-resident 4-entry linear scan. Combined L3 hot budget is 40.3MB, within the 44MB LLC. Iter_1 failed because its 16MB compact hash + 60MB orders array = 76MB exceeded LLC; this iteration's 40.3MB fits. The critical fix from iter_3 is using double (not long double) for profit accumulation.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause (Q2): the hot path's orders lookup is a 2-DRAM-miss serial dependency chain — orders_by_orderkey[l_orderkey] (240MB, DRAM miss) then o_orderdate[orow] (57MB, DRAM miss dependent on first) — totaling ~200ns per qualifying row. The pre-built year_nibbles.bin (28.6MB) already exists and collapses this chain to a single L3-resident nibble access (~10ns). Strategy: Category E (use_existing) — mmap year_nibbles.bin with MADV_WILLNEED to pre-warm into LLC before the scan starts; on the hot path use the nibble formula instead of the orders two-level lookup; eliminate all opens of orders_by_orderkey.bin and o_orderdate.bin entirely. The partsupp hash (256MB) remains as in iter_0 but gains a software prefetch for its hash slot 16 rows ahead to hide the remaining DRAM latency. CRITICAL: profit accumulation MUST use `double` (64-bit IEEE 754) — NOT `long double` (80-bit x87) — for all per-thread profit arrays and the global reduce. Using long double was the root cause of iter_3's regression. L3 hot budget: green_part 2MB + suppkey_to_nationrow 0.4MB + year_nibbles 28.6MB = 31MB, well within the 44MB LLC. No runtime structure building is performed.",
+      "operation_timings": {}
+    }
+  ]
+}

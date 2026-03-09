@@ -1,0 +1,115 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 65.99333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 65.99333333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "dim_filter": 0.02,
+        "build_joins": 0.01,
+        "main_scan": 34.66,
+        "output": 5.38,
+        "total": 69.09
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 69.28333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 69.28333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: Category B algorithm change. The current 100000-row zone maps prune 0 of 600 blocks, so the hot path degenerates into a branch-heavy full scan with sparse random probes into cache-exceeding 480 MB discount and quantity columns; that access pattern is latency-bound and wastes the 88 MB LLC. Replace the block-oriented kernel with a contiguous row-range plan: first stream l_shipdate once and write a 59986052-bit qualifying bitmap, then stream l_discount and l_quantity sequentially to clear non-qualifying bits while compacting surviving row ids plus discount values into thread-local buffers, and finally late-materialize l_extendedprice only for the final survivors and reduce with thread-local sums. Keep the existing zone maps only as a cheap precheck and bypass them entirely when candidate density is 100%.",
+      "operation_timings": {
+        "data_loading": 0.29,
+        "dim_filter": 6.46,
+        "build_joins": 10.93,
+        "main_scan": 2.37,
+        "output": 0.13,
+        "total": 59.4
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 50.723333333333336,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 50.723333333333336,
+      "validation": "pass",
+      "strategy": "Root cause: the current plan is logically wrong for this data because the independent 100000-row zone maps prune zero blocks, so the block-candidate pipeline adds metadata work, dynamic scheduling overhead, and branch-heavy per-block specialization without eliminating any scan work; the prior bitmap/compaction attempt also regressed by turning a bandwidth problem into extra write-heavy passes. Strategy Category A: replace both paths with one fused, bandwidth-oriented scan over contiguous row ranges that streams the four fixed-width lineitem columns in lockstep, evaluates all predicates inline, and accumulates directly into thread-local scalar sums; keep the tiny zone maps only as a cheap 600-block density precheck so the executor can fall back to pruning only when overlap is sparse, but on this query's hot path it should bypass indexes entirely and maximize sequential memory throughput.",
+      "operation_timings": {
+        "data_loading": 0.2,
+        "dim_filter": 0.01,
+        "build_joins": 0,
+        "main_scan": 19.64,
+        "output": 1.01,
+        "total": 50.23
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 60.26333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 60.26333333333334,
+      "validation": "pass",
+      "strategy": "Root cause: the current hot loop is still a cache-mismatched sparse-probe plan, not a true lockstep stream; after reading shipdate it conditionally jumps into 457 MiB discount, quantity, and extendedprice columns, so the working set far exceeds the 88 MiB LLC and the dependent loads become latency-bound instead of bandwidth-bound. Strategy Category B/C: switch to a cache-sized tiled scan with 8192-row tiles so the four-column tile footprint is about 224 KiB and fits in L2, stream shipdate/discount/quantity sequentially to build a tiny tile-local survivor selection vector, then late-materialize extendedprice only for those survivors while the tile slice is still cache-resident; keep the existing 600-block zone maps only as a cheap density precheck and use static contiguous tile partitioning across all cores.",
+      "operation_timings": {
+        "data_loading": 0.13,
+        "dim_filter": 0.01,
+        "build_joins": 0,
+        "main_scan": 20.41,
+        "output": 0.33,
+        "total": 51.94
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 67.33999999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 67.33999999999999,
+      "validation": "pass",
+      "strategy": "Root cause: the current fused scan does work that is badly out of proportion to the output, streaming about 1.60 GiB per execution and reading `l_extendedprice` for 97.6% of rows that fail the predicates, while also paying to touch `l_discount` and `l_quantity` for 83.9% of rows rejected by the cheap 4-byte `l_shipdate` filter. Strategy Category A/C: reorder the scan to filter on `l_shipdate` first, compact qualifying row ids in thread-local vectors, probe `l_discount` and `l_quantity` only for those monotonically increasing candidates, compact final survivors with their small discount payload, and late-materialize `l_extendedprice` only for the final survivor list before reducing into thread-local sums. Keep the three 600-entry zone maps only as a density precheck and bypass block-pruning on this hot path, avoiding the prior dense-bitmap and tiny-tile regressions while cutting expected bytes touched to roughly 1.00 GiB.",
+      "operation_timings": {
+        "data_loading": 0.36,
+        "dim_filter": 0.02,
+        "build_joins": 0,
+        "main_scan": 33.72,
+        "output": 0.12,
+        "total": 66.14
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 32.876666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 32.876666666666665,
+      "validation": "pass",
+      "strategy": "Root cause: this query is now fundamentally bandwidth-bound by a storage-level mismatch, because the hot path streams three decimal columns stored as int64_t even though their actual ranges fit in much smaller types, so the executor reads 28 bytes per row for a single scalar aggregate and leaves performance on the table even with the logically correct fused scan. Strategy Category E: use persistent narrow encodings for l_discount (uint8), l_quantity (uint16), and l_extendedprice (uint32), keep the scan as one fused sequential pass with thread-local scalar reduction, and retain the 600-entry zone maps only as an optional density precheck; this cuts the scan payload from 28 bytes per row to 11 bytes per row and attacks the remaining gap at the storage layer instead of adding more passes or branching.",
+      "operation_timings": {
+        "data_loading": 0.15,
+        "dim_filter": 0.01,
+        "build_joins": 0,
+        "main_scan": 12.26,
+        "output": 0.98,
+        "total": 29.68
+      }
+    }
+  ]
+}

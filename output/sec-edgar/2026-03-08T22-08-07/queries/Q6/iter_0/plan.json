@@ -1,0 +1,84 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "resolve_dict_codes",
+    "filter_sub_2023",
+    "build_sub_adsh_to_name_array",
+    "filter_pre_is",
+    "build_pre_triple_hash",
+    "scan_num_usd",
+    "join_sub",
+    "join_pre",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2023)->dense adsh_to_name array",
+      "probe": "num(uom='USD', value IS NOT NULL)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26616
+    },
+    {
+      "build": "pre(stmt='IS')->compact triple hash on (adsh, tag, version) with plabel payload",
+      "probe": "num⋈sub stream",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1767507
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.1841
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array(max_adsh_code+1 -> name_code_or_sentinel)",
+    "fact_join": "compact_hash_map(pre_sized, TripleKey -> compact_plabel_list)",
+    "aggregation": "compact_hash_map(thread_local, key=(name_code, tag_code, plabel_code), value=(sum, count), stmt_code constant=is_code)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_postings",
+      "purpose": "extract 2023 rowids to build dense adsh->name payload array"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "scan only USD rowids from num"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "extract IS rowids to build filtered pre triple hash"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp"
+}

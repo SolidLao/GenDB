@@ -1,0 +1,129 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "decode_segment_dictionary",
+    "fetch_building_customers",
+    "expand_orders_via_cust_postings",
+    "sort_qualifying_orders_by_orderkey",
+    "probe_lineitems_in_orderkey_order",
+    "merge_topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered c_mktsegment='BUILDING')",
+      "probe": "orders(via orders_cust_postings)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300276,
+      "notes": "Use customer_segment_postings to enumerate BUILDING customer rowids, load c_custkey, and expand only matching customers through orders_cust_postings instead of scanning all 15M orders."
+    },
+    {
+      "build": "orders(filtered by customer join and o_orderdate < 1995-03-15, sorted by o_orderkey)",
+      "probe": "lineitem(via lineitem_order_postings in ascending order key)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1459230,
+      "notes": "Materialize a compact qualifying-order array of {o_orderkey,o_orderdate,o_shippriority}, sort it by o_orderkey, then walk lineitem postings in that order so rowid and payload accesses become streaming across lineitem."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < DATE '1995-03-15'",
+      "selectivity": 0.485963
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > DATE '1995-03-15'",
+      "selectivity": 0.547105
+    }
+  ],
+  "scan": {
+    "table": "customer(filtered via postings) -> orders(postings expansion) -> qualifying_orders(sorted by o_orderkey) -> lineitem(postings expansion)",
+    "rows": 1459230,
+    "columns": [
+      {
+        "name": "c_custkey",
+        "file": "customer/c_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "selective index expansion on customer and orders, then ordered traversal of lineitem_order_postings and lineitem payloads in ascending o_orderkey to keep rowid and payload access near-sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(customer_rowids) + flat_array(c_custkeys)",
+    "fact_join": "pre_built_index(customer_segment_postings, orders_cust_postings, lineitem_order_postings) + compact_sorted_array(qualifying orders)",
+    "aggregation": "sorted_group_by with per-order register accumulator + fixed_min_heap(10) per thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_segment_postings",
+      "purpose": "enumerate BUILDING customer rowids without scanning customer"
+    },
+    {
+      "index": "orders_cust_postings",
+      "purpose": "expand only BUILDING customers to candidate orders instead of scanning all orders"
+    },
+    {
+      "index": "lineitem_order_postings",
+      "purpose": "walk matching lineitem slices for qualifying orders after sorting them by order key"
+    }
+  ],
+  "aggregation": "sorted_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category A plan mismatch. Iteration 2 still scans all 15M orders even though customer_segment_postings and orders_cust_postings can cut the order work down to the 300k BUILDING customers and roughly 1.46M surviving orders; iteration 3 showed that replacing this with a 15M-key dense order-state table is too expensive to build. The revised plan expands only BUILDING customers through orders_cust_postings, filters o_orderdate immediately, materializes a compact qualifying-order array that fits in LLC, sorts it by o_orderkey, and then probes lineitem_order_postings in that order so the rowid and payload accesses become streaming rather than scattered.",
+  "correctness_anchors": {}
+}

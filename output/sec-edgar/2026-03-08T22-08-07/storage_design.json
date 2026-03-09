@@ -1,0 +1,97 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "gendb" },
+  "tables": {
+    "sub": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id", "encoding": "global_dict_u32" },
+        { "name": "cik", "cpp_type": "int32_t", "semantic_type": "company_id", "encoding": "plain_i32" },
+        { "name": "name", "cpp_type": "uint32_t", "semantic_type": "company_name", "encoding": "dict_u32" },
+        { "name": "sic", "cpp_type": "int32_t", "semantic_type": "industry_code", "encoding": "plain_i32" },
+        { "name": "countryba", "cpp_type": "uint16_t", "semantic_type": "country_code", "encoding": "dict_u16" },
+        { "name": "stprba", "cpp_type": "uint16_t", "semantic_type": "state_code", "encoding": "dict_u16" },
+        { "name": "cityba", "cpp_type": "uint64_t", "semantic_type": "city_name", "encoding": "varlen_utf8" },
+        { "name": "countryinc", "cpp_type": "uint16_t", "semantic_type": "incorporation_country", "encoding": "dict_u16" },
+        { "name": "form", "cpp_type": "uint16_t", "semantic_type": "filing_form", "encoding": "dict_u16" },
+        { "name": "period", "cpp_type": "int32_t", "semantic_type": "report_period", "encoding": "date_days_i32" },
+        { "name": "fy", "cpp_type": "int16_t", "semantic_type": "fiscal_year", "encoding": "plain_i16" },
+        { "name": "fp", "cpp_type": "uint16_t", "semantic_type": "fiscal_period", "encoding": "dict_u16" },
+        { "name": "filed", "cpp_type": "int32_t", "semantic_type": "filed_date", "encoding": "date_days_i32" },
+        { "name": "accepted", "cpp_type": "uint64_t", "semantic_type": "accepted_timestamp", "encoding": "varlen_utf8" },
+        { "name": "prevrpt", "cpp_type": "int8_t", "semantic_type": "previous_report_flag", "encoding": "plain_i8" },
+        { "name": "nciks", "cpp_type": "int16_t", "semantic_type": "registrant_count", "encoding": "plain_i16" },
+        { "name": "afs", "cpp_type": "uint16_t", "semantic_type": "accelerated_filer_status", "encoding": "dict_u16" },
+        { "name": "wksi", "cpp_type": "int8_t", "semantic_type": "well_known_seasoned_issuer_flag", "encoding": "plain_i8" },
+        { "name": "fye", "cpp_type": "uint16_t", "semantic_type": "fiscal_year_end_mmdd", "encoding": "dict_u16" },
+        { "name": "instance", "cpp_type": "uint64_t", "semantic_type": "instance_document", "encoding": "varlen_utf8" }
+      ],
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh", "cik", "name", "sic", "countryba", "stprba", "cityba", "countryinc", "form", "period", "fy", "fp", "filed", "accepted", "prevrpt", "nciks", "afs", "wksi", "fye", "instance"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "86135",
+      "indexes": [
+        { "name": "sub_adsh_dense_lookup", "type": "hash", "columns": ["adsh"] },
+        { "name": "sub_fy_postings", "type": "hash", "columns": ["fy"] },
+        { "name": "sub_sic_postings", "type": "sorted", "columns": ["sic"] }
+      ]
+    },
+    "num": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id", "encoding": "global_dict_u32" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag", "encoding": "global_dict_u32" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version", "encoding": "global_dict_u32" },
+        { "name": "ddate", "cpp_type": "int32_t", "semantic_type": "fact_date", "encoding": "date_days_i32" },
+        { "name": "qtrs", "cpp_type": "int8_t", "semantic_type": "quarters", "encoding": "plain_i8" },
+        { "name": "uom", "cpp_type": "uint16_t", "semantic_type": "unit_of_measure", "encoding": "dict_u16" },
+        { "name": "coreg", "cpp_type": "uint32_t", "semantic_type": "coregistrant", "encoding": "dict_u32" },
+        { "name": "value", "cpp_type": "double", "semantic_type": "numeric_fact", "encoding": "plain_f64" },
+        { "name": "footnote", "cpp_type": "uint64_t", "semantic_type": "fact_footnote", "encoding": "varlen_utf8" }
+      ],
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh", "tag", "version", "ddate", "qtrs", "uom", "coreg", "value", "footnote"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "39401761",
+      "indexes": [
+        { "name": "num_uom_postings", "type": "hash", "columns": ["uom"] },
+        { "name": "num_ddate_postings", "type": "sorted", "columns": ["ddate"] },
+        { "name": "num_adsh_tag_version_groups", "type": "sorted", "columns": ["adsh", "tag", "version"] }
+      ]
+    },
+    "tag": {
+      "columns": [
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag", "encoding": "global_dict_u32" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version", "encoding": "global_dict_u32" },
+        { "name": "custom", "cpp_type": "int8_t", "semantic_type": "custom_flag", "encoding": "plain_i8" },
+        { "name": "abstract", "cpp_type": "int8_t", "semantic_type": "abstract_flag", "encoding": "plain_i8" },
+        { "name": "datatype", "cpp_type": "uint16_t", "semantic_type": "data_type", "encoding": "dict_u16" },
+        { "name": "iord", "cpp_type": "uint16_t", "semantic_type": "instant_or_duration", "encoding": "dict_u16" },
+        { "name": "crdr", "cpp_type": "uint16_t", "semantic_type": "credit_or_debit", "encoding": "dict_u16" },
+        { "name": "tlabel", "cpp_type": "uint32_t", "semantic_type": "tag_label", "encoding": "dict_u32" },
+        { "name": "doc", "cpp_type": "uint64_t", "semantic_type": "tag_documentation", "encoding": "varlen_utf8" }
+      ],
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag", "version", "custom", "abstract", "datatype", "iord", "crdr", "tlabel", "doc"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "1070662",
+      "indexes": [
+        { "name": "tag_tag_version_hash", "type": "hash", "columns": ["tag", "version"] }
+      ]
+    },
+    "pre": {
+      "columns": [
+        { "name": "adsh", "cpp_type": "uint32_t", "semantic_type": "filing_id", "encoding": "global_dict_u32" },
+        { "name": "report", "cpp_type": "int32_t", "semantic_type": "report_number", "encoding": "plain_i32" },
+        { "name": "line", "cpp_type": "int32_t", "semantic_type": "line_number", "encoding": "plain_i32" },
+        { "name": "stmt", "cpp_type": "uint16_t", "semantic_type": "statement_type", "encoding": "dict_u16" },
+        { "name": "inpth", "cpp_type": "int8_t", "semantic_type": "parenthetical_flag", "encoding": "plain_i8" },
+        { "name": "rfile", "cpp_type": "uint16_t", "semantic_type": "render_source", "encoding": "dict_u16" },
+        { "name": "tag", "cpp_type": "uint32_t", "semantic_type": "xbrl_tag", "encoding": "global_dict_u32" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "taxonomy_version", "encoding": "global_dict_u32" },
+        { "name": "plabel", "cpp_type": "uint32_t", "semantic_type": "presentation_label", "encoding": "dict_u32" },
+        { "name": "negating", "cpp_type": "int8_t", "semantic_type": "negating_flag", "encoding": "plain_i8" }
+      ],
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh", "report", "line", "stmt", "inpth", "rfile", "tag", "version", "plabel", "negating"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "9600799",
+      "indexes": [
+        { "name": "pre_stmt_postings", "type": "hash", "columns": ["stmt"] },
+        { "name": "pre_adsh_tag_version_groups", "type": "sorted", "columns": ["adsh", "tag", "version"] }
+      ]
+    }
+  },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t" },
+  "date_encoding": "days_since_epoch_1970",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "88", "disk_type": "hdd", "total_memory_gb": "376" }
+}

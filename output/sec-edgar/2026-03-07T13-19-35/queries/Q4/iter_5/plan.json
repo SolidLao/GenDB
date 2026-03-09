@@ -1,0 +1,181 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_build_cik_remap",
+    "build_eq_count_map_then_enumerate_groups",
+    "parallel_scan_num_direct_array_agg_plus_cik_buffer",
+    "parallel_sum_cnt_reduction",
+    "cik_counting_via_counting_sort",
+    "output_having_decode_sort_limit"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic[], cik[]) — full arrays; adsh_qualifying_bitset + adsh_to_cik_idx built",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub_sic (172KB) and sub_cik (344KB) fully loaded. adsh_qualifying_bits[86135 bits = ~10KB, L1]: set bit i if sub_sic[i] BETWEEN 4000-4999. adsh_to_cik_idx[86135 × uint16_t = 172KB]: maps qualifying adsh_code → cik remap index [0,N_ciks), UINT16_MAX for non-qualifying."
+    },
+    {
+      "build": "tag(abstract[]) — full array, 1MB",
+      "probe": "num.tagver_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1070662,
+      "notes": "tag_abstract (1MB) fully loaded; O(1) by tagver_code."
+    },
+    {
+      "build": "eq_count_map (FlatCountMap, 65536 slots, 786KB) then slot_to_group_idx[65536] (256KB)",
+      "probe": "num composite key (adsh_code << 32 | tagver_code); returns slot index + eq_cnt",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 42000,
+      "notes": "Pre scan filters by adsh_qualifying_bits AND stmt==eq_code: ~42K keys. After building, enumerate N_groups unique (sic,tagver) groups from eq_count_map slots and build slot_to_group_idx[65536 × uint32_t = 256KB]. slot_to_group_idx[s] = group_idx for occupied slot s, UINT32_MAX for empty slots. This enables O(1) group lookup from slot index without any hash map access during main_scan."
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom_code == usd_code", "selectivity": 0.35, "notes": "Zone maps skip entire 100K-row blocks where min_uom > usd_code || max_uom < usd_code"},
+    {"table": "num", "predicate": "tagver_code != -1", "selectivity": 0.99},
+    {"table": "sub", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.04, "notes": "Applied via adsh_qualifying_bits (~10KB L1-resident bitset) — most selective after USD filter"},
+    {"table": "tag", "predicate": "abstract == 0", "selectivity": 0.95},
+    {"table": "pre", "predicate": "stmt_code == eq_code AND sic-qualifying (adsh_qualifying_bits)", "selectivity": 0.0044, "notes": "eq_count_map probe via FlatCountMap::probe() returning slot index and count simultaneously"}
+  ],
+  "predicate_order_per_num_row": [
+    "1. zone_map block skip: if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code: skip entire block",
+    "2. uom_code == usd_code (row-level check)",
+    "3. tagver_code != -1",
+    "4. adsh_qualifying_bits[ac >> 6] bit test (~10KB, L1-resident) — 4% pass",
+    "5. tag_abstract[tagver_code] == 0 (1MB, L3-resident) — 95% pass",
+    "6. FlatCountMap::probe(eq_key, &slot, &eq_cnt) — 786KB L3-resident, NO BLOOM FILTER",
+    "7. if eq_cnt == 0: continue",
+    "8. group_idx = slot_to_group_idx[slot] — 256KB, L3-resident O(1) lookup",
+    "9. local_agg[group_idx].sum += val * eq_cnt; local_agg[group_idx].cnt += eq_cnt",
+    "10. cik_buf.push_back((uint32_t)(group_idx << 16) | cik_idx_arr[ac])"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "adsh_qualifying_bits":    "uint64_t[(86135+63)/64] = 1346 words ≈ 10.8KB (L1-resident): bit i set iff sic[i] BETWEEN 4000-4999",
+    "adsh_to_cik_idx":         "uint16_t[86135] = 172KB: maps qualifying adsh_code → cik remap index [0,N_ciks); UINT16_MAX for non-qualifying",
+    "tag_abstract_array":      "int8_t[1070662] = 1MB (L3-resident): direct indexed by tagver_code",
+    "eq_count_map":            "FlatCountMap(cap_hint=25000) → 65536 slots × 12B = 786KB (L3-resident). MUST add FlatCountMap::probe(key, *slot_out, *count_out) method returning bool. probe() returns slot index so main_scan can use slot_to_group_idx directly.",
+    "slot_to_group_idx":       "uint32_t[65536] = 256KB (L3-resident): built after eq_count_map is fully populated. For each occupied slot s of eq_count_map: compute group_key = pack(sub_sic[adsh_code_from_slot], tagver_from_slot) → assign group_idx via unordered_map lookup/insert → slot_to_group_idx[s] = group_idx. UINT32_MAX for empty slots.",
+    "group_sic":               "int16_t[N_groups]: sic value for each group_idx (built during slot enumeration)",
+    "group_tagver":            "int32_t[N_groups]: tagver_code for each group_idx (built during slot enumeration)",
+    "local_agg_per_thread":    "struct SumCnt { double sum; int64_t cnt; } local_agg[N_groups] per thread — allocated as calloc(N_groups, sizeof(SumCnt)). N_groups ≤ 42K → 42K×16B = 672KB per thread × 64 threads = 43MB total (fits in 44MB LLC). Direct indexed by group_idx — NO hash map, NO allocation per group.",
+    "cik_buf_per_thread":      "vector<uint32_t> per thread: each entry = (group_idx << 16) | cik_idx packed in uint32_t. group_idx ≤ 42K < 65536 fits in 16 bits; cik_idx ≤ 3445 < 65536 fits in 16 bits. Sequential write, cache-friendly. ~9K entries per thread × 4B = 36KB per thread.",
+    "no_bloom_filter":         "ABSOLUTELY NO BLOOM FILTER. The eq_count_map is 786KB (L3-resident). With FlatCountMap::probe() returning slot index directly, the probe costs ~8-10ns (no pre-filter needed or beneficial). Adding 7 hash computations for bloom would cost more than the miss savings."
+  },
+  "preprocessing": {
+    "load_dicts": [
+      "usd_code = load_dict('indexes/uom_codes.bin')['USD']  // int8_t",
+      "eq_code  = load_dict('indexes/stmt_codes.bin')['EQ']  // int8_t"
+    ],
+    "load_sub_build_cik_remap": [
+      "sub_sic[86135]: int16_t — mmap sub/sic.bin (172KB)",
+      "sub_cik[86135]: int32_t — mmap sub/cik.bin (344KB)",
+      "Build adsh_qualifying_bits[86135 bits as uint64_t words ~10.8KB]: for i in [0,SUB_N): if sub_sic[i] BETWEEN 4000-4999 set bit i",
+      "Build cik_to_idx unordered_map and idx_to_cik vector: for each qualifying i, look up sub_cik[i]; assign next cik remap index if new. N_ciks = idx_to_cik.size() ≤ 3445",
+      "Build adsh_to_cik_idx[86135]: uint16_t array init to UINT16_MAX; for qualifying i: adsh_to_cik_idx[i] = cik_to_idx[sub_cik[i]]",
+      "cik_words = (N_ciks + 63) / 64  // ≤ 54 uint64_ts"
+    ],
+    "build_eq_count_map_then_enumerate_groups": {
+      "step1_parallel_pre_scan": "parallel scan pre/adsh_code.bin + pre/stmt_code.bin + pre/tagver_code.bin. For each pre row: if stmt==eq_code AND adsh_qualifying_bits[adsh] is set: emit key = ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code into thread-local key buffer. Skip key==UINT64_MAX.",
+      "step2_insert": "single-threaded insert all collected keys into FlatCountMap eq_count_map(25000) → 65536 slots × 12B = 786KB.",
+      "step3_enumerate_groups": [
+        "Iterate all 65536 slots of eq_count_map:",
+        "  For each occupied slot s (eq_count_map.slots[s].key != EMPTY):",
+        "    uint64_t k = eq_count_map.slots[s].key",
+        "    uint32_t adsh_code = (uint32_t)(k >> 32)",
+        "    uint32_t tagver_code = (uint32_t)(k & 0xFFFFFFFF)",
+        "    int16_t sic = sub_sic.data[adsh_code]",
+        "    uint64_t group_key = ((uint64_t)(uint16_t)sic << 32) | tagver_code",
+        "    auto [it, inserted] = group_key_to_idx.emplace(group_key, (uint32_t)N_groups)",
+        "    if (inserted): group_sic.push_back(sic); group_tagver.push_back((int32_t)tagver_code); N_groups++",
+        "    slot_to_group_idx[s] = it->second",
+        "N_groups is now known (≤ 42K). slot_to_group_idx[s] = UINT32_MAX for empty slots (pre-init).",
+        "Allocate: global_sum[N_groups] = double[] zeroed; global_cnt[N_groups] = int64_t[] zeroed"
+      ]
+    }
+  },
+  "aggregation": {
+    "strategy": "direct_array_with_post_scan_cik_counting",
+    "group_key": "pre-enumerated group_idx [0, N_groups) via slot_to_group_idx — no hashing during main_scan",
+    "thread_local_structures": {
+      "local_agg": "SumCnt local_agg[N_groups] per thread (calloc-zeroed). SumCnt = { double sum; int64_t cnt; }. Indexed directly by group_idx. No hash map, no collision handling, no per-group allocation.",
+      "cik_buf": "vector<uint32_t> per thread. Each entry = (uint32_t)(group_idx << 16) | (uint32_t)cik_idx. Sequential push_back — always cache-line friendly."
+    },
+    "sum_cnt_reduction": {
+      "strategy": "parallel element-wise reduction across all threads",
+      "description": "After main_scan: 64 threads each own a partition of group indices [tid×N_groups/T .. (tid+1)×N_groups/T). Each thread iterates ALL 64 thread-local local_agg[] arrays and accumulates into global_sum[g] and global_cnt[g] for groups in its partition. Sequential read from each thread-local array for the owned range. No hash operations, no merging of maps.",
+      "memory_access": "Each thread reads 64 arrays × (N_groups/64) × 16B = N_groups × 16B = 672KB per thread. All reads from LLC-resident per-thread arrays. Fast."
+    },
+    "cik_counting": {
+      "strategy": "counting_sort_plus_per_group_bitset",
+      "step1_gather": "Collect all per-thread cik_buf vectors. Total entries ≈ 600K × 4B = 2.4MB.",
+      "step2_counting_sort": "Count-sort by group_idx (high 16 bits of each uint32_t entry) to group entries by group_idx: (a) count[N_groups]=0; for entry in all_cik_pairs: count[entry>>16]++; (b) prefix_sum(count) → offsets[N_groups+1]; (c) scatter entries to sorted_pairs[offsets[g]++]. Result: sorted_pairs grouped by group_idx, within group sorted by cik_idx is NOT needed.",
+      "step3_per_group_bitset": "Allocate uint64_t local_bits[cik_words] = {0} (≤432 bytes, L1-resident). For each group g in [0,N_groups): (a) memset(local_bits, 0, cik_words×8); (b) for pair in sorted_pairs[offsets[g]..offsets[g+1]]: uint16_t ci = pair & 0xFFFF; local_bits[ci>>6] |= 1ULL<<(ci&63); (c) cik_count[g] = popcount over local_bits[0..cik_words). (d) This loop can be parallelized: each thread handles a range of group indices.",
+      "output": "cik_count[N_groups]: uint32_t array giving COUNT(DISTINCT cik) for each group_idx"
+    },
+    "having": "HAVING cik_count[g] >= 2 applied during output phase"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven for main_scan; partition_parallel for sum_cnt_reduction and cik_step3",
+    "threads": "auto(nproc) capped at 64",
+    "morsel_size": 100000,
+    "num_morsels": 395,
+    "zone_map_filter": true,
+    "thread_local_aggregation": "sum_local+cnt_local via direct arrays (no hash map); cik_buf via sequential push_back",
+    "merge_strategy": "parallel element-wise array reduction (no tree merge of hash maps)"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "usage": "struct ZoneMap { int8_t min_uom, max_uom; int32_t min_ddate, max_ddate; } sizeof=12 (2-byte pad between max_uom and min_ddate). Skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code."
+    },
+    {"index": "uom_codes dict", "file": "indexes/uom_codes.bin", "purpose": "code_lookup"},
+    {"index": "stmt_codes dict", "file": "indexes/stmt_codes.bin", "purpose": "code_lookup"}
+  ],
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt (constant EQ)", "COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "post_cik_counting": [
+      "Iterate group_idx g in [0, N_groups):",
+      "  if cik_count[g] < 2: skip (HAVING)",
+      "  Decode tlabel: off0 = tlabel_offsets[group_tagver[g]], off1 = tlabel_offsets[group_tagver[g]+1]; string tlabel_str(tlabel_data+off0, off1-off0)",
+      "  Aggregate into final_agg[{group_sic[g], tlabel_str}]: sum+=global_sum[g]; cnt+=global_cnt[g]; cik_count_final = max(cik_count_final, cik_count[g]) -- OR re-track distinct CIKs per (sic,tlabel) by ORing per-group cik bitsets if multiple group_idxes share same (sic,tlabel)",
+      "NOTE: (sic, tlabel) may map to multiple group_idxes (same tag different tagver). Must merge cik sets. Use bitset OR as in previous iterations: for groups with same (sic,tlabel), OR their cik bitsets then popcount.",
+      "SIMPLEST CORRECT: for groups passing HAVING, build final_agg<(sic,tlabel), AggState2> where AggState2 = {double sum; int64_t cnt; vector<uint64_t> cik_bits(cik_words);}. For each g: merge sum,cnt; OR cik_bits from cik_buf entries for this group (OR into final group's cik_bits). Then popcount final cik_bits for COUNT(DISTINCT cik).",
+      "Sort by total_value DESC, limit 500, write CSV."
+    ],
+    "tlabel_decode": "after parallel reduction, single-threaded pass over N_groups entries building final_agg by (sic,tlabel) string key with bitwise-OR cik merge and popcount for exact cik count"
+  },
+  "critical_implementation_notes": [
+    "FlatCountMap MUST gain a probe() method: 'inline bool probe(uint64_t key, size_t* slot_out, uint32_t* cnt_out) const { size_t idx = mix(key) & mask_; while (slots[idx].key != EMPTY && slots[idx].key != key) idx=(idx+1)&mask_; if (slots[idx].key!=key) return false; *slot_out=idx; *cnt_out=slots[idx].val; return true; }'",
+    "slot_to_group_idx must be pre-initialized to UINT32_MAX for ALL 65536 slots, then populated only for occupied slots.",
+    "local_agg arrays MUST be allocated with calloc or vector initialized to zero before main_scan. Size = N_groups (dynamic, not fixed). Do NOT use a fixed cap -- N_groups can exceed 4096.",
+    "cik_buf entries: pack as (uint32_t)((uint32_t)group_idx << 16) | (uint32_t)cik_idx_arr[ac]. group_idx <= 42K < 65536, cik_idx <= 3445 < 65536 -- both fit in uint16_t.",
+    "ABSOLUTELY NO BLOOM FILTER anywhere in the code. The bloom filter in iter_2 and iter_4 is overhead with zero benefit for a 786KB cache-resident hash map.",
+    "Do NOT use unordered_map for per-row aggregation during main_scan. Only use direct array indexing: local_agg[group_idx].",
+    "The output phase re-aggregates by (sic,tlabel) which requires re-tracking CIK union across multiple group_idxes that share the same tlabel. Use a cik_bits vector<uint64_t>(cik_words) per (sic,tlabel) entry in final_agg, reconstructed from the per-group cik_buf entries. Alternatively: during cik_counting step3, instead of cik_count[], produce cik_bits_per_group[N_groups][cik_words] -- but this is 42K*432B=18MB. Instead, do the final (sic,tlabel) aggregation DURING cik_counting step3: for each group g, merge cik bits into final_agg[(sic,tlabel)].cik_bits directly."
+  ],
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: three compounding problems. (1) Bloom filter included in code despite plan saying to remove it — 7 hash ops × ~5ns × 523K rows = 18ms+ wasted in main_scan on a filter with ~0% FPR benefit for a 786KB cache-resident map. (2) unordered_map::reserve(4096) but N_groups >> 4096 (confirmed by iter_3 timeout with 4096-safe-slot FlatAggMap) → multiple rehashes during main_scan = O(N^2) behavior. (3) Lazy heap allocation for cik_bits vector per group and hash-node heap allocation per unordered_map entry cause double pointer-chase per qualifying row + scattered heap. Strategy (Category B + C): pre-enumerate N_groups unique (sic,tagver) groups from eq_count_map slots and build slot_to_group_idx[65536] (256KB, L3-resident) during build_joins; in main_scan use direct array local_agg[group_idx] (N_groups×16B per thread, no hashing, no allocation); collect (group_idx, cik_idx) pairs in sequential cik_buf; after scan, parallel element-wise sum/cnt reduction replaces 6-round tree merge of hash maps (saves ~37ms); post-scan CIK counting via counting-sort + per-group L1-resident bitset (432B) avoids all large cik structures. No bloom filter anywhere.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

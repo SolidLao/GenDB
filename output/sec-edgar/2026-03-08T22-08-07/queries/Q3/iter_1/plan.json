@@ -1,0 +1,95 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_sub_2022",
+    "build_adsh_to_filing_gid",
+    "scan_num_sequential",
+    "aggregate_by_filing",
+    "rollup_inner",
+    "compute_avg_sub_total",
+    "rollup_outer",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num(full sequential scan)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 27331,
+      "notes": "Build a dense adsh_code -> filtered_filing_gid array from sub_fy_postings and sub_adsh_dense_lookup, then probe it during one sequential num scan."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(adsh_code_to_filing_gid, invalid=-1) plus filing_gid_to_outer_gid and filing_gid_to_inner_gid built from sub_fy_postings + sub_adsh_dense_lookup",
+    "fact_join": "direct_array probe on adsh_code_to_filing_gid",
+    "aggregation": "direct_array(thread_local_filing_sums pre_sized to filtered filings, then roll up reduced filing totals into inner and outer direct arrays)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_dense_lookup",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current 65 ms main scan is dominated by a low-value postings-driven fact pass over 33.2M USD rowids and by doing outer-group and inner-group updates directly in the hot loop. That plan keeps an extra 151 MB rowid stream in flight and uses per-thread aggregate state of roughly 325 KB, which spills beyond a 256 KB L2. Strategy Category A: replace the postings-driven probe with one fused sequential scan of num(uom, adsh, value), build a dense adsh_code->filtered_filing_gid map once, aggregate each qualifying fact row first into a filing-granularity direct array, then roll up the reduced filing totals into cik and (name,cik) groups after the scan. This removes the rowid indirection, cuts hot-loop updates from four arrays to one cache-resident array, and keeps join/filter/aggregation fully branch-light and bandwidth-efficient.",
+  "correctness_anchors": {}
+}

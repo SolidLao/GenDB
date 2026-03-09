@@ -1,0 +1,103 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "zone_map_prune",
+    "selection_cascade_scan",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.1667
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 0.05 AND l_discount <= 0.07",
+      "selectivity": 0.2222
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24.0",
+      "selectivity": 0.65
+    },
+    {
+      "table": "lineitem",
+      "predicate": "combined",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600)",
+    "fact_join": "none",
+    "aggregation": "thread_local_double_sum + selection_vectors(uint32)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_discount_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_quantity_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC"
+    ],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: work is highly disproportional to output (about 97.6% of rows are rejected) while the current scalar row-at-a-time path still pays heavy branch and column-touch overhead in main_scan; strategy category C applies by switching to a selection-cascade plan that first filters with cheap predicates into compact row-id vectors and only then touches later columns, with late materialization of l_extendedprice and thread-local reduction to minimize unnecessary memory traffic and hot-loop control cost.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 0.05,
+    "discount_hi": 0.07,
+    "quantity_hi": 24.0,
+    "revenue_formula": "SUM(l_extendedprice * l_discount)"
+  }
+}

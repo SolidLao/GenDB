@@ -1,0 +1,176 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_arrays",
+    "load_tag_arrays",
+    "build_eq_count_map_and_bloom_from_pre",
+    "parallel_scan_num_with_zone_maps",
+    "parallel_tree_merge_aggregates",
+    "having_filter",
+    "decode_tlabel_re_aggregate",
+    "sort_limit"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic[], cik[]) — full arrays loaded into memory",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub_sic (172KB) and sub_cik (344KB) fully loaded; O(1) lookup by adsh_code; sic BETWEEN 4000-4999 selectivity ~4%"
+    },
+    {
+      "build": "tag(abstract[]) — full array loaded",
+      "probe": "num.tagver_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1070662,
+      "notes": "tag_abstract (1MB) fully loaded; O(1) by tagver_code; abstract==0 ~95% pass"
+    },
+    {
+      "build": "eq_count_map (FlatCountMap, 2M slots, 25MB) + bloom filter (2MB, 7-hash, ~0.78% FPR)",
+      "probe": "num composite key (adsh_code << 32 | tagver_code)",
+      "type": "inner",
+      "strategy": "bloom_filter + hash_join",
+      "build_cardinality": 1056088,
+      "notes": "Bloom filter checked first: rejects ~99.2% of non-qualifying probes without touching eq_count_map. Bloom misses then probe eq_count_map (25MB, LLC-resident). FlatCountMap sized with cap_hint=700000 → 2,097,152 slots × 12 bytes = 25.2MB < 44MB LLC."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.35,
+      "notes": "Zone maps skip entire 100K-row blocks; row-level check applied first"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.04,
+      "notes": "Most selective — applied before abstract and eq_count checks"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract == 0",
+      "selectivity": 0.95
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == eq_code",
+      "selectivity": 0.11,
+      "notes": "Bloom filter pre-check then eq_count_map probe; applied last"
+    }
+  ],
+  "predicate_order_per_num_row": [
+    "1. uom_code == usd_code (zone map at block level, then row check)",
+    "2. tagver_code != -1 (int32_t tv = tagver[i]; if (tv < 0) continue)",
+    "3. sub_sic[adsh_code] BETWEEN 4000 AND 4999 (most selective, array O(1))",
+    "4. tag_abstract[tagver_code] == 0 (array O(1))",
+    "5. bloom_filter check: 7 hashes into 2MB bitset — reject if any bit is 0",
+    "6. eq_count_map.get(key) != 0 (LLC-resident 25MB hash table)"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",   "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",  "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code","file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",      "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_sic_array": "flat_array(86135 × int16_t) — direct indexed by adsh_code",
+    "sub_cik_array": "flat_array(86135 × int32_t) — direct indexed by adsh_code",
+    "tag_abstract_array": "flat_array(1070662 × int8_t) — direct indexed by tagver_code",
+    "bloom_filter": "bitset(16777216 bits = 2MB); 7 independent hash functions; built from eq_count_map keys during pre-scan; used to reject non-qualifying num rows before eq_count_map probe",
+    "eq_count_map": "FlatCountMap with cap_hint=700000 → 2,097,152 slots × 12 bytes = 25.2MB (fits in 44MB LLC); key=((uint64_t)(uint32_t)adsh_code<<32)|(uint32_t)tagver_code; value=uint32_t count of EQ pre rows",
+    "agg_map_per_thread": "unordered_map<uint64_t, AggState> per thread; AggState = {double sum, int64_t cnt, vector<int32_t> ciks_sorted}; reserve(2048) per thread; ciks_sorted kept in sorted order for O(log n) dedup insert during scan",
+    "aggregation": "thread-local hash maps merged via parallel binary-tree reduction (6 rounds for 64 threads)"
+  },
+  "preprocessing": {
+    "load_dicts": [
+      "usd_code = load_dict('indexes/uom_codes.bin')['USD']  // int8_t",
+      "eq_code  = load_dict('indexes/stmt_codes.bin')['EQ']  // int8_t"
+    ],
+    "load_sub_arrays": [
+      "sub_sic[86135] : int16_t — mmap sub/sic.bin (172KB)",
+      "sub_cik[86135] : int32_t — mmap sub/cik.bin (344KB)"
+    ],
+    "load_tag_arrays": [
+      "tag_abstract[1070662] : int8_t — mmap tag/abstract.bin (~1MB)",
+      "tlabel_offsets[1070663]: uint32_t — mmap tag/tlabel_offsets.bin",
+      "tlabel_data: char[] — mmap tag/tlabel_data.bin"
+    ],
+    "build_eq_count_map_and_bloom": {
+      "source": "pre/adsh_code.bin, pre/tagver_code.bin, pre/stmt_code.bin (9,600,799 rows)",
+      "strategy": "parallel scan into thread-local key vectors; single-threaded insert into FlatCountMap; then bloom filter construction from populated map slots",
+      "threads": "auto(nproc)",
+      "per_thread": "vector<uint64_t> local_keys; push key when pre_stmt_code[i]==eq_code; key=((uint64_t)(uint32_t)pre_adsh_code[i]<<32)|(uint32_t)pre_tagver_code[i]; skip if key==UINT64_MAX",
+      "merge_into_map": "single-threaded loop over thread vectors calling eq_count_map.increment(k); estimated ~1.06M insertions into 2M-slot table",
+      "bloom_build": "after map is built, iterate over all occupied slots in eq_count_map and set bits in bloom_filter for each key using 7 hash functions; bloom_filter = vector<uint64_t>(262144) = 2MB = 16M bits",
+      "estimated_entries": 1056088,
+      "eq_count_map_memory_mb": 25,
+      "bloom_memory_mb": 2
+    }
+  },
+  "aggregation": {
+    "strategy": "hash_group_by with parallel tree-reduction merge",
+    "group_key": "packed uint64: ((uint64_t)(uint16_t)sic << 32) | (uint32_t)tagver_code",
+    "accumulators": [
+      "sum_value: double",
+      "cnt_value: int64_t",
+      "ciks_sorted: vector<int32_t> kept sorted; insert via lower_bound+check to avoid duplicates"
+    ],
+    "thread_local_maps": true,
+    "merge_strategy": "parallel binary-tree reduction: in each of 6 rounds, threads with stride s merge thread[i] into thread[i-s] in parallel (s=1,2,4,8,16,32); final result in thread_maps[0]. For each merged entry: sum+=src.sum; cnt+=src.cnt; merge ciks_sorted vectors using std::merge+std::unique inplace.",
+    "having": "retain groups where ciks_sorted.size() >= 2",
+    "post_having_decode": "iterate global_agg[0], decode tlabel, re-aggregate by (sic,tlabel) string key, then HAVING+sort+limit"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "num_morsels": 395,
+    "zone_map_filter": true,
+    "thread_local_aggregation": true,
+    "merge_strategy": "parallel binary-tree reduction (6 rounds for 64 threads, O(log n) depth)",
+    "notes": "64 cores; merge_aggregates phase was ~150ms single-threaded — tree reduction brings this to ~6 parallel rounds of ~25ms peak = ~15ms"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "usage": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code; struct ZoneMap { int8_t min_uom, max_uom; int32_t min_ddate, max_ddate; } sizeof=12 (2-byte pad)"
+    },
+    {
+      "index": "uom_codes dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "code_lookup"
+    },
+    {
+      "index": "stmt_codes dict",
+      "file": "indexes/stmt_codes.bin",
+      "purpose": "code_lookup"
+    }
+  ],
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt (constant 'EQ')", "COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "tlabel_decode": "after primary aggregation merge, decode tlabel for each group from tlabel_offsets+tlabel_data by tagver_code; re-aggregate by (sic, tlabel) string to merge groups sharing the same tlabel; then HAVING cik_count>=2, sort, limit 500"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Three root causes diagnosed. (1) Category B: eq_count_map was allocated with FlatCountMap(2200000), which resolves to 8,388,608 slots × 12 bytes = 100.6MB — 2.3× the 44MB LLC, causing every main_scan probe to miss LLC. Fix: FlatCountMap(700000) → 2,097,152 slots × 25.2MB, LLC-resident; 1.06M entries at 50.6% load factor is well within open-addressing limits. (2) Category C: 89% of probes to eq_count_map were from non-qualifying rows (those that pass sic+abstract but not the eq_set). A 2MB bloom filter (16M bits, 7 hash functions, ~0.78% FPR) rejects ~99.2% of these non-qualifying probes before touching the hash table, eliminating wasted LLC-miss memory traffic. (3) Category D: merge_aggregates was fully single-threaded and consumed ~150ms (the largest single phase, invisible because it had no GENDB_PHASE timer). Fix: parallel binary-tree reduction — 6 rounds where active threads merge in pairs, cutting the merge to O(log 64) depth with each round fully parallelized. CIK tracking changed from unordered_set<int32_t> (expensive heap allocation per group) to sorted vector<int32_t> (insert via lower_bound dedup, merge via std::merge+unique), dramatically reducing allocation overhead and making cik-set merges branchless and cache-friendly.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

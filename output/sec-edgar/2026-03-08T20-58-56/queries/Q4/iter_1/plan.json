@@ -1,0 +1,134 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_pre_stmt",
+    "join_num_from_pre_triple",
+    "filter_num_usd_notnull",
+    "join_sub_pk_and_sic",
+    "join_tag_pk",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(filtered: stmt='EQ')",
+      "probe": "num via num_adsh_tag_version_hash postings",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 979282,
+      "notes": "Empirically best join driver from sampling_join_order.cpp: pre->num avoids runtime pre triple hash build."
+    },
+    {
+      "build": "sub(pk lookup with sic BETWEEN 4000 AND 4999)",
+      "probe": "stream after pre->num",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Use sub_adsh_pk_hash direct lookup; apply SIC predicate at probe time."
+    },
+    {
+      "build": "tag(pk on (tag,version), filtered abstract=0)",
+      "probe": "stream after sub join",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Late tag join after selective pre+sub+num filters to minimize probes."
+    }
+  ],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "rows": 979282,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "pre/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "pre/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "pre/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(sub_adsh_pk_hash LUT)",
+    "fact_join": "pre_built_index(pre_stmt_hash + num_adsh_tag_version_hash postings)",
+    "aggregation": "compact_hash_map((sic,tlabel,stmt) -> {sum,count,distinct_cik_hash_set})"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_tag_version_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "tag_tag_version_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a plan/physical mismatch: iter_0 spends 321ms in build_joins by constructing large runtime hash tables (pre triple counts and tag PK map) that collectively exceed LLC and repeat work already representable by existing posting indexes. Strategy Category A (plan restructuring) with hardware-aware simplification: use pre_stmt_hash as the selective driver and probe num_adsh_tag_version_hash directly (empirically fastest join order from sampling), then apply num filters, sub PK SIC filter, and late tag join before aggregation; this removes the dominant pre runtime build path and shifts work to index-driven probes proportional to filtered rows.",
+  "correctness_anchors": {
+    "threshold_constant": [
+      4000,
+      4000,
+      100000
+    ]
+  }
+}

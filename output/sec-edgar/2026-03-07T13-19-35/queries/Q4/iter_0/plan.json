@@ -1,0 +1,165 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_arrays",
+    "load_tag_arrays",
+    "build_eq_set_from_pre",
+    "parallel_scan_num_with_zone_maps",
+    "thread_local_aggregate",
+    "merge_aggregates",
+    "having_filter",
+    "decode_tlabel",
+    "sort_limit"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic[], cik[]) — full arrays loaded into memory",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub arrays (sic: 172KB, cik: 344KB) fully loaded; lookup is O(1) via sub_sic[adsh_code] and sub_cik[adsh_code]; sic BETWEEN 4000 AND 4999 selectivity ~4% → ~3,445 passing adsh values"
+    },
+    {
+      "build": "tag(abstract[], tlabel deferred) — full arrays loaded into memory",
+      "probe": "num.tagver_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1070662,
+      "notes": "tag_abstract array (1MB) fully loaded; lookup is O(1) via tag_abstract[tagver_code]; abstract==0 selectivity ~95% pass; tlabel decoded only for post-HAVING output rows"
+    },
+    {
+      "build": "eq_set — hash set of (adsh_code, tagver_code) uint64 pairs from pre WHERE stmt='EQ'",
+      "probe": "num composite key (adsh_code, tagver_code)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 1056088,
+      "notes": "Scan pre once (9.6M rows): insert ((uint64_t)(uint32_t)adsh_code<<32)|(uint32_t)tagver_code into eq_set when stmt_code==eq_code; ~11% × 9.6M ≈ 1.06M entries; probe is O(1) hash lookup per num row; stmt output value is constant 'EQ' for all matching rows"
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.35,
+      "notes": "Zone maps on (uom_code, ddate) used to skip entire 100K-row blocks where min_uom > usd_code || max_uom < usd_code; applied first before row-level checks"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99,
+      "notes": "Skip rows with invalid tagver_code before any dimension lookup"
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.04,
+      "notes": "Checked via sub_sic[adsh_code]; most selective predicate — apply before tag and eq_set checks"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract == 0",
+      "selectivity": 0.95,
+      "notes": "Checked via tag_abstract[tagver_code]; high pass rate — applied after sic filter"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == eq_code",
+      "selectivity": 0.11,
+      "notes": "Enforced via eq_set probe using composite key; applied last in filter chain"
+    }
+  ],
+  "predicate_order_per_num_row": [
+    "1. uom_code == usd_code (from zone-map pre-filter at block level, then row check)",
+    "2. tagver_code != -1",
+    "3. sub_sic[adsh_code] BETWEEN 4000 AND 4999  — most selective, cheapest array lookup",
+    "4. tag_abstract[tagver_code] == 0",
+    "5. eq_set.count(((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code)"
+  ],
+  "preprocessing": {
+    "load_dicts": [
+      "usd_code = load_dict('indexes/uom_codes.bin')['USD']  // int8_t",
+      "eq_code  = load_dict('indexes/stmt_codes.bin')['EQ']  // int8_t"
+    ],
+    "load_sub_arrays": [
+      "sub_sic[86135] : int16_t — mmap or read full file sub/sic.bin (172KB)",
+      "sub_cik[86135] : int32_t — mmap or read full file sub/cik.bin (344KB)"
+    ],
+    "load_tag_arrays": [
+      "tag_abstract[1070662] : int8_t  — read full file tag/abstract.bin (~1MB)",
+      "tlabel_offsets[1070663]: uint32_t — read tag/tlabel_offsets.bin (deferred decode)",
+      "tlabel_data: char[]              — mmap tag/tlabel_data.bin (deferred decode)"
+    ],
+    "build_eq_set": {
+      "source": "pre columns: adsh_code.bin, tagver_code.bin, stmt_code.bin (9,600,799 rows each)",
+      "strategy": "parallel_scan_then_merge",
+      "threads": "auto(nproc)",
+      "per_thread": "thread-local unordered_set<uint64_t>; insert when pre_stmt_code[i] == eq_code",
+      "key_construction": "((uint64_t)(uint32_t)pre_adsh_code[i] << 32) | (uint32_t)pre_tagver_code[i]",
+      "merge": "merge thread-local sets into single shared eq_set before num scan",
+      "estimated_entries": 1056088,
+      "estimated_memory_mb": 25
+    }
+  },
+  "data_structures": {
+    "sub_sic_array": "flat_array(86135 × int16_t) — direct indexed by adsh_code",
+    "sub_cik_array": "flat_array(86135 × int32_t) — direct indexed by adsh_code",
+    "tag_abstract_array": "flat_array(1070662 × int8_t) — direct indexed by tagver_code",
+    "eq_set": "unordered_set<uint64_t> — pre-sized for ~1.06M entries (~25MB); shared read-only during num scan",
+    "agg_map_per_thread": "unordered_map<uint64_t, AggState> — key = ((uint64_t)(uint16_t)sic << 32)|(uint32_t)tagver_code; AggState = {double sum, int64 count, unordered_set<int32_t> ciks}",
+    "aggregation": "compact_hash_map(pre_sized) per thread, merged into global map post-scan",
+    "output_sort_buffer": "vector<OutputRow> — populated after HAVING, sorted by total_value DESC"
+  },
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "packed uint64: ((uint64_t)(uint16_t)sic << 32) | (uint32_t)tagver_code",
+    "group_key_note": "stmt is constant 'EQ' for all passing rows — not needed in key",
+    "accumulators": [
+      "sum_value: double (SUM(n.value))",
+      "cnt_value: int64_t (for AVG denominator)",
+      "cik_set: unordered_set<int32_t> (for COUNT DISTINCT s.cik)"
+    ],
+    "thread_local_maps": true,
+    "merge_strategy": "iterate smaller thread maps, merge into largest; union cik_sets",
+    "having": "retain groups where cik_set.size() >= 2",
+    "post_having_decode": "for each surviving group: extract sic (key>>32) and tagver_code (key&0xFFFFFFFF), then decode tlabel from tlabel_offsets[tagver_code..tagver_code+1] and tlabel_data"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "num_morsels": 395,
+    "zone_map_filter": "each thread checks zone map before processing morsel; skip if min_uom > usd_code || max_uom < usd_code",
+    "thread_local_aggregation": true,
+    "pre_scan_parallelism": "parallel scan of pre columns to build eq_set (parallel insert into thread-local sets, merge before num scan)",
+    "notes": "64 cores; num scan dominates — morsel-driven gives good load balance; eq_set is read-only during num scan so no contention"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "usage": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code; layout: uint32_t n_blocks=395, then ZoneMap{int8 min_uom, int8 max_uom, int32 min_ddate, int32 max_ddate} (12 bytes each with 2-byte pad)"
+    },
+    {
+      "index": "uom_codes dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "code_lookup",
+      "usage": "resolve 'USD' → usd_code (int8_t) at startup"
+    },
+    {
+      "index": "stmt_codes dict",
+      "file": "indexes/stmt_codes.bin",
+      "purpose": "code_lookup",
+      "usage": "resolve 'EQ' → eq_code (int8_t) at startup"
+    }
+  ],
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt (constant 'EQ')", "COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "tlabel_decode": "after HAVING, decode tlabel for each surviving group from tlabel_offsets + tlabel_data using tagver_code from group key"
+  },
+  "execution_target": "cpp"
+}

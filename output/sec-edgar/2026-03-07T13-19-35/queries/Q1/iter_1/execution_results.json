@@ -1,0 +1,54 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 49
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q1": {
+          "rows_expected": 14,
+          "rows_actual": 14,
+          "match": false,
+          "error": "1 row(s) differ across 1 column(s)",
+          "column_failures": {
+            "avg_line_num": {
+              "category": "avg",
+              "failure_count": 1,
+              "samples": [
+                {
+                  "expected": "48.27",
+                  "actual": "40.88",
+                  "abs_diff": 7.39,
+                  "rel_diff_pct": 15.3097,
+                  "tolerance": "1%",
+                  "row": 6,
+                  "pattern": "value_mismatch"
+                }
+              ]
+            }
+          },
+          "tie_aware": true,
+          "order_column": "cnt",
+          "mismatch_patterns": {
+            "value_mismatch": 1
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 43.79666666666666,
+  "hot_timing_ms": 43.79666666666666,
+  "operation_timings": {
+    "data_loading": 0.38,
+    "main_scan": 9.01,
+    "output": 0.12,
+    "total": 41.51
+  }
+}

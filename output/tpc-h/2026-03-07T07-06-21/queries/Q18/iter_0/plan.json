@@ -1,0 +1,84 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_lineitem_scan_aggregate",
+    "build_is_big_bool_array",
+    "pass2_orders_scan_filter",
+    "join_orders_to_customer",
+    "assemble_result_structs",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(is_big_bool_array)",
+      "probe": "orders(o_orderkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2520,
+      "notes": "is_big[] dense bool array size 60000001 (~57MB as bool, or 7.5MB as bitset); O(1) membership test per orders row; array fits in L3 cache (44MB) after warm-up"
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index)",
+      "probe": "qualifying_orders(o_custkey)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Dense array index 5.7MB; only ~2,520 lookups total — negligible cost; resolves c_name and c_custkey in one cache-hot load"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000042,
+      "notes": "Pass 1 HAVING filter applied after full lineitem scan; ~2,520 qualifying orderkeys from ~60M distinct values"
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderkey IN qualifying_orderkeys",
+      "selectivity": 0.000168,
+      "notes": "Evaluated via is_big[o_orderkey] direct array lookup; ~2,520 rows survive from 15M"
+    }
+  ],
+  "data_structures": {
+    "pass1_qty_accumulator": "dense_array(int32_t, size=60000001, ~229MB); thread-local partial arrays merged by element-wise sum after parallel scan",
+    "qualifying_filter": "dense_array(bool, size=60000001, ~57MB as char or use bitset 7.5MB); derived from qty_accumulator after merge; fits in L3 cache (44MB) as bitset",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)",
+    "final_results": "flat_vector(Q18Result structs, ~2520 entries)"
+  },
+  "pass1_reuse_optimization": {
+    "description": "The subquery SUM(l_quantity) per l_orderkey and the outer query SUM(l_quantity) per group are identical — both aggregate ALL lineitem rows for qualifying orderkeys. The qty_accumulator built in Pass 1 already contains the correct final sum_qty values. No second lineitem scan is needed for aggregation.",
+    "lineitem_scans": 1
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_lineitem_scan": "parallel morsel scan of l_orderkey + l_quantity; each thread owns a thread-local int32_t partial[60000001]; merge via element-wise sum after all threads finish",
+    "pass2_orders_scan": "parallel morsel scan of orders columns (o_orderkey, o_custkey, o_orderdate, o_totalprice); each thread collects local Q18Result vector for qualifying rows; merge vectors after scan",
+    "sort": "single-threaded partial_sort or nth_element+sort on ~2520 elements (trivially fast)"
+  },
+  "indexes": [
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "Resolves o_custkey -> c_name row in O(1); 5.7MB fully L3-resident; invoked ~2,520 times"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries; trivial"
+  },
+  "result_struct": {
+    "fields": [
+      {"name": "c_name",       "type": "char[26]",  "source": "customer/c_name.bin via customer_by_custkey[o_custkey]"},
+      {"name": "c_custkey",    "type": "int32_t",   "source": "customer/c_custkey.bin via customer_by_custkey[o_custkey]"},
+      {"name": "o_orderkey",   "type": "int32_t",   "source": "orders/o_orderkey.bin"},
+      {"name": "o_orderdate",  "type": "int32_t",   "source": "orders/o_orderdate.bin (days_since_epoch; decode to YYYY-MM-DD for output only)"},
+      {"name": "o_totalprice", "type": "double",    "source": "orders/o_totalprice.bin"},
+      {"name": "sum_qty",      "type": "int32_t",   "source": "qty_accumulator[o_orderkey] from Pass 1"}
+    ]
+  },
+  "execution_target": "cpp"
+}

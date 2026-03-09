@@ -1,0 +1,77 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 183.15666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 183.15666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "output": 0.55,
+        "main_scan": 57.76,
+        "data_loading": 182.04,
+        "total": 182.07
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 131.00666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 131.00666666666666,
+      "validation": "pass",
+      "strategy": "Iter 0 showed data_loading=182ms (of which main_scan=58ms), leaving 124ms of single-threaded setup and 58ms of parallel scan — both need improvement to reach the 38ms target. Root cause analysis: (1) Q2/physical mismatch — the ps_composite_hash (201MB) and o_orderkey_hash (268MB) both greatly exceed the 44MB L3, causing frequent LLC misses on every qualifying row probe; (2) Q1/logical mismatch — setup work (p_name scan, partsupp scan) runs single-threaded when it could use all 64 cores. Strategy is Category B (algorithm change) plus Category E (storage extension). For orders: built a uint8_t direct-indexed array (okey_year_arr[orderkey] = year_idx) stored as a column_version extension; this replaces the 268MB hash probe with a single direct array access, and the working set of distinct cache lines accessed by the ~825K qualifying orders is ~35MB — just under the 44MB L3. For partsupp: instead of probing the pre-built 201MB composite hash, we scan the raw partsupp columns in parallel (128MB sequential) and build a compact runtime hash of only the ~440K green qualifying entries (16MB — fully L3-resident). This shrinks the partsupp lookup working set from 201MB to 16MB. All setup phases (p_name scan + partsupp scan) are parallelized across all threads. The o_orderkey_hash and ps_composite_hash are no longer used.",
+      "operation_timings": {
+        "output": 0.37,
+        "main_scan": 42.07,
+        "build_joins": 69.68,
+        "dim_filter": 75.94,
+        "data_loading": 128.52,
+        "total": 128.54
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 100.53333333333335,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 100.53333333333335,
+      "validation": "pass",
+      "strategy": "Iter 1 timing (exclusive per phase): data_loading=52.6ms, dim_filter=6.3ms, build_joins=27.6ms, main_scan=41.7ms. Three root causes: (1) Category C/B — data_loading overhead from MADV_WILLNEED on 2.16GB lineitem data; only l_partkey needs prefetch since payload columns are accessed for only 5.5% of rows; (2) Category B/E — main_scan is bandwidth-limited at ~51GB/s reading 2.16GB of lineitem data for every row, while 94.5% of rows are rejected after l_partkey check; replacing single-pass with two-pass eliminates reading 1.74GB of payload columns for non-qualifying rows (effective pass 2 bandwidth ~96MB for 3.3M qualifying rows); additionally, okey_year_arr random 60MB access causes LLC misses — eliminated by new lineitem.l_year_idx column version (uint8_t[59986052], sequential access, built in 1.7s); (3) Category D — single-threaded partsupp hash insertion of 440K entries (~22ms) replaced with CAS-based parallel insertion across all 64 threads. Expected new totals: data_loading ~5ms, dim_filter ~6ms, build_joins ~4ms, pass1+sort ~6ms, pass2+agg ~8ms, total ~30ms.",
+      "operation_timings": {
+        "output": 0.48,
+        "main_scan": 39.74,
+        "build_joins": 49,
+        "dim_filter": 54.28,
+        "data_loading": 100.77,
+        "total": 100.78
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 34.25333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 34.25333333333333,
+      "validation": "pass",
+      "strategy": "Three root causes addressed. (1) Category C: data_loading exclusive was 47ms due to MADV_WILLNEED on l_partkey (240MB) — the kernel walks 60K page-table entries even for hot-cache data at ~0.7µs/page = 42ms overhead. Fix: remove l_partkey.prefetch() entirely; the parallel OMP pass-1 scan naturally faults pages in parallel across 64 threads (~1ms added to pass 1 vs 42ms saved). (2) Category E: pass 2 accessed 3 double payload columns (l_extprice, l_discount, l_quantity) each causing ~173MB of unique cache-line fetches at 5.5% qualifying density. New lineitem.l_net_price column version (double[60M], built in 0.45s) precomputes l_extprice*(1-l_discount), replacing two column reads with one — saving 173MB of unique CL from l_discount. (3) Category B: pass 2 was latency-bound (~25GB/s effective) due to irregular-stride random access into 480MB columns; hardware prefetcher cannot detect the variable stride. Fix: explicit software prefetching with PREFETCH_DIST=32 ahead for all 4 payload columns in the pass-2 loop, converting to bandwidth-bound at ~50GB/s. Additionally, selection vector now stores (idx, lp) pairs so l_partkey need not be re-read in pass 2 (saves 142MB unique CL). Budget: data_loading 7ms + dim_filter 5ms + build_joins 9ms + pass1 5ms + pass2 11ms = 37ms target.",
+      "operation_timings": {
+        "data_loading": 0.17,
+        "dim_filter": 6.17,
+        "build_joins": 3.73,
+        "output": 0.39,
+        "main_scan": 15.62,
+        "total": 34.19
+      }
+    }
+  ]
+}

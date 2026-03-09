@@ -1,0 +1,88 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "block_parallel_scan", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.019,
+      "enforcement": "zone_map_block_skip_then_row_filter",
+      "notes": "Zone map eliminates ~98.1% of 600 blocks. Qualifying blocks are contiguous. Use linear scan to find block_lo and block_hi."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.21,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied SECOND in inner loop per iter_0 order."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "selectivity": 0.47,
+      "enforcement": "row_filter_int8",
+      "notes": "int8_t comparison, no decode. Applied THIRD in inner loop per iter_0 order."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential within qualifying block range only",
+    "block_size": 100000,
+    "num_blocks": 600,
+    "estimated_qualifying_blocks": 12,
+    "estimated_rows_after_zone_map": 1140000,
+    "notes": "mmap all four columns without MADV_SEQUENTIAL — do not call madvise at all. Avoids unnecessary kernel readahead on non-qualifying data."
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks",
+      "usage": "Load entire zone map at startup (4808 bytes, L1-resident). Linear scan of 600 entries: skip block b if zones[b].mx < 8766 || zones[b].mn >= 9131. Record block_lo (first qualifying) and block_hi (last qualifying + 1). Qualifying block count N = block_hi - block_lo."
+    }
+  ],
+  "data_structures": {
+    "zone_map": "flat_array(600 entries, loaded once, L1-resident)",
+    "thread_accumulator": "double rev_local (stack variable per thread, no atomics, no padding)",
+    "partial_array": "double partial[N_threads] — N_threads is small (~12), no false sharing concern",
+    "final_reduction": "sequential sum of N_threads thread-local doubles"
+  },
+  "parallelism": {
+    "strategy": "block_parallel",
+    "threads": "min(hardware_concurrency(), num_qualifying_blocks)",
+    "notes": "CRITICAL: Do NOT use hardware_concurrency() threads unconditionally. Compute N = block_hi - block_lo (the number of qualifying blocks, ~12). Spawn exactly min((int)std::thread::hardware_concurrency(), N) threads. Thread t processes blocks: for (int b = (int)block_lo + t; b < (int)block_hi; b += nthreads). Each thread handles one or more complete blocks. No partial-block boundary alignment needed — each block starts at b*block_size and ends at min((b+1)*block_size, total_rows). Thread still does per-block zone check (zones[b].mx < LO || zones[b].mn >= HI) as guard. This reduces thread lifecycle overhead from 64 threads to ~12 threads, saving 4-8ms of thread creation and join cost."
+  },
+  "inner_loop": {
+    "description": "Per-row logic within qualifying blocks — use iter_0 filter order exactly",
+    "filter_order": ["l_shipdate (int32, checked FIRST)", "l_discount (int8, checked SECOND)", "l_quantity (int8, checked THIRD)"],
+    "compute": "rev_local += l_extendedprice[i] * (l_discount[i] * 0.01)",
+    "notes": "Do NOT reorder filters (iter_1 regression). Do NOT split interior/boundary loops (iter_2 regression). Keep the original iter_0 three-filter sequential check order: sd >= 8766 && sd < 9131, then disc in [5,7], then qty < 24."
+  },
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [],
+    "limit": null,
+    "format": "single_row: revenue\\n%.2f\\n",
+    "mkdir_strategy": "Use mkdir(results_dir.c_str(), 0755) syscall directly — do NOT use system('mkdir -p ...'). The system() call forks a shell (fork+execve+wait = 2-5ms per run). Use mkdir() and ignore EEXIST. If the path has multiple components, create each component with mkdir() and ignore EEXIST, or use std::filesystem::create_directories(results_dir) with the -std=c++17 flag. This eliminates 2-5ms of fork+exec overhead from the measured run duration."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category D (parallelism tuning) combined with Category A (plan restructuring for output). Two distinct overheads dominate the 19ms run time. First: the current code spawns hardware_concurrency() = 64 threads unconditionally, but the qualifying zone-map range contains only ~12 blocks. Each thread processes ~18,750 rows — trivially fast compute — while thread creation and join for 64 threads costs ~50-100µs each = 6-12ms of pure lifecycle overhead, dominating actual compute time. Fix: cap thread count at min(hardware_concurrency, N_qualifying_blocks) ≈ 12, so each thread handles one or more complete 100K-row blocks. This reduces thread lifecycle cost from 64× to ~12× and eliminates partial-block boundary alignment complexity. Second: the output phase calls system('mkdir -p ...') which fork+execs a shell, costing 2-5ms. Since run.duration_ms measures full binary execution including output, this appears in the benchmark metric. Fix: replace with direct mkdir() syscall. Combined these two changes target ~7-12ms reduction from 19ms toward the 13ms benchmark. Filter order is kept identical to iter_0 (sd -> disc -> qty); no interior/boundary split is used — both alternatives regressed in previous iterations.",
+  "correctness_anchors": {
+    "LO_date_days": 8766,
+    "HI_date_days": 9131,
+    "LO_label": "1994-01-01",
+    "HI_label": "1995-01-01",
+    "discount_lo_encoded": 5,
+    "discount_hi_encoded": 7,
+    "quantity_threshold": 24,
+    "revenue_formula": "l_extendedprice[i] * (l_discount[i] * 0.01)"
+  }
+}

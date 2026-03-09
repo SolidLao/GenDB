@@ -1,0 +1,62 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["omp_warmup_in_data_loading", "zone_map_prune_with_fast_path", "parallel_scan_simd", "merge_local_aggregates", "emit_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.98,
+      "notes": "kQ1ShipdateMax = 10471 (1998-09-02 days since epoch). Zone map prunes trailing ~12 blocks. Fast path skips per-row check for blocks where zone_max[b] <= 10471 (~588 of 600 blocks)."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_returnflag",    "file": "lineitem/l_returnflag.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_linestatus",    "file": "lineitem/l_linestatus.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "double",  "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8},
+      {"name": "l_tax",           "file": "lineitem/l_tax.bin",           "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "zone_map_file": "lineitem/l_shipdate_zone_map.bin",
+    "zone_map_usage": "Read both zone_min[b] and zone_max[b] arrays. Three-way block classification: (1) zone_min[b] > 10471 => skip block entirely; (2) zone_max[b] <= 10471 => fast path (all rows qualify, no per-row date check, #pragma omp simd); (3) otherwise => slow path with per-row date guard."
+  },
+  "data_structures": {
+    "aggregation": "direct_array[6] with double accumulators — key = l_returnflag * 2 + l_linestatus; 6 slots; one alignas(64) thread-local copy per thread; reduce by summation after parallel scan",
+    "accumulator_type": "double (NOT long double) — eliminates x87 FPU register spilling; 5 doubles + int64_t = 48 bytes/slot; 6 slots = 288 bytes/thread; total 64 threads = 18 KB, fits in L2",
+    "fast_path_inner_loop": "When zone_max[b] <= 10471: inner loop has no date branch. Use #pragma omp simd to vectorize per-row arithmetic (disc_price, charge) and accumulation. Compiler may generate AVX-512 code for the double arithmetic.",
+    "simd_strategy": "For the fast-path block loop: #pragma omp simd reduction applied per accumulator variable (unroll by group key if needed). For the slow-path block loop: keep scalar with per-row date guard as before."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "schedule": "static — with 600 blocks / 64 threads each thread gets ~9 consecutive blocks, improving hardware prefetcher effectiveness vs dynamic per-block dispatch",
+    "omp_warmup": "Inside data_loading phase, BEFORE mmap_prefetch_all: fire a single dummy '#pragma omp parallel {}' to force OMP thread pool creation (creates 64 OS threads). This absorbs the ~34ms OMP init cost into data_loading, where it overlaps with file open and madvise system calls. After warmup, omp_get_max_threads() is instant and the main_scan parallel region launches immediately."
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "Three-way block classification: skip (zone_min > threshold), fast_path (zone_max <= threshold, no per-row check), slow_path (boundary blocks with per-row check)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "emit slots 0..5 in key order; skip slots with count == 0; no runtime sort needed since key = returnflag*2+linestatus is already ascending",
+    "decode": {
+      "l_returnflag": "rf_chars[] = {'A','N','R'} — index by dict code (A=0, N=1, R=2 from encode_returnflag)",
+      "l_linestatus": "ls_chars[] = {'F','O'} — index by dict code (F=0, O=1 from encode_linestatus)"
+    }
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A + C): Two compounding issues in iter_0. First, long double accumulators force x87 FPU usage; with 30 accumulators (5 per slot × 6 slots) vs only 8 x87 registers, the compiler spills 22 accumulators to stack every iteration, generating ~352 extra bytes of memory traffic per row on top of the 38 bytes of column data — this alone roughly doubles effective bandwidth pressure. Switching to double eliminates the spilling, fits 6 slots comfortably in YMM/ZMM registers, and enables AVX-512 vectorization of the arithmetic. Second, the current code never loads zone_max from the zone map, so ALL passing blocks go through the scalar slow path with a per-row date branch; adding the three-way classification (skip/fast-path/slow-path) allows ~588 of 600 blocks to use a branch-free #pragma omp simd inner loop. Third, the ~34ms unaccounted gap in iter_0 is OMP thread pool creation (64 OS threads on first omp_get_max_threads() call, outside any measured phase); firing a dummy parallel region inside data_loading absorbs this cost into a phase that already waits for mmap/madvise syscalls. Combined, these changes target eliminating the x87 spill overhead and enabling SIMD vectorization, with the goal of bringing main_scan from 40ms closer to the memory-bandwidth limit (~20ms at ~55% DRAM efficiency on this NUMA system).",
+  "correctness_anchors": {
+    "revenue_formula": "disc_price * (1.0 + tax[i])"
+  }
+}

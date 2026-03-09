@@ -1,0 +1,135 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "num.adsh.postings_dense",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/num.adsh.postings_dense/offsets.bin",
+        "offsets_format": "uint64_t[max_code + 2] indexed by adsh_code",
+        "rowids": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "rowids_format": "uint32_t[row_count] grouped by adsh_code in input row order"
+      },
+      "usage": "mmap offsets.bin and rowids.bin; iterate only the `num` rowid slices for FY-2023 filing codes, so the hot loop skips non-qualifying filings and does not read `num.adsh` per row"
+    }
+  ],
+  "pipeline": [
+    "resolve_dict_codes",
+    "filter_sub_fy",
+    "build_qualified_pre_is_by_adsh",
+    "scan_num_by_qualified_adsh",
+    "build_per_filing_pre_hash",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "filtered_name_by_adsh + qualifying_adsh_codes from sub_fy_postings(fy=2023)",
+      "probe": "pre(stmt='IS') and num.adsh.postings_dense",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 26616,
+      "notes": "Apply the selective filing filter first, keep a dense name lookup keyed by adsh code, and drive all downstream work only from qualifying filings."
+    },
+    {
+      "build": "tiny per-filing hash_multimap(tag,version -> plabel rows) from pre_is_by_adsh(qualifying adsh only)",
+      "probe": "num rows for the same filing from num.adsh.postings_dense after uom='USD' and value IS NOT NULL",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 546166,
+      "notes": "Rebuild a cache-resident exact map per filing and probe it once per qualifying num row, avoiding repeated linear scans over the same pre slice."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2023",
+      "selectivity": 0.309
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'IS'",
+      "selectivity": 0.1841
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num.adsh.postings_dense(qualifying adsh)",
+    "rows": 12175275,
+    "columns": [
+      {
+        "name": "rowid",
+        "file": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(filtered_name_by_adsh) + vector(sorted_qualifying_adsh_codes)",
+    "fact_join": "flat_array(pre_is_offsets_by_adsh) + compact SoA payload arrays for qualifying stmt='IS' rows + tiny per-filing hash_multimap keyed by (tag,version)",
+    "aggregation": "compact_hash_map keyed by (name_code, tag_code, plabel_code)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num.adsh.postings_dense",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 200
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the iter_3 plan still does Category A/C work that is disproportionate to the selective filing filter, scanning 33.2M USD posting rows and rescanning each qualifying filing's roughly 20.5-row `pre` slice for every surviving `num` row, which yields about 210.7M tag/version comparisons on average. The revised plan switches to a filing-centric execution path: filter `sub` first, keep only the 26,616 qualifying adsh codes, build `pre` payloads only for those filings, and use the existing `num.adsh.postings_dense` storage extension to scan only about 12.2M `num` rows from qualifying filings. Within each filing, build a tiny cache-resident `(tag,version)` multimap over the filtered `pre` rows and probe it once per qualifying `num` row, eliminating repeated scans of the same `pre` slice and removing `num.adsh` loads from the hot loop.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,64 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zone_map_prune", "parallel_scan_filter", "aggregate", "merge_local_aggregates", "sort_output"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 9283",
+      "selectivity": 0.98,
+      "notes": "kQ1ShipdateMax = 9283 (1998-09-02 days since epoch). Zone map skips blocks where zone_min[b] > 9283 (trailing ~2% of 600 blocks). Per-row check within surviving blocks."
+    }
+  ],
+  "data_structures": {
+    "block_skip": "zone_map — skip block b if zone_min[b] > 9283; no lower-bound skip needed (upper-bound filter only)",
+    "aggregation": "direct_array[6] — key = l_returnflag * 2 + l_linestatus; 6 slots fit in a few cache lines; one private array per thread to avoid false sharing",
+    "merge": "reduction over thread-local arrays after parallel scan completes"
+  },
+  "scan": {
+    "table": "lineitem",
+    "columns": ["l_shipdate", "l_returnflag", "l_linestatus", "l_quantity", "l_extendedprice", "l_discount", "l_tax"],
+    "block_size": 100000,
+    "num_blocks": 600,
+    "zone_map_file": "lineitem/l_shipdate_zone_map.bin",
+    "simd": "avx512 — vectorize double arithmetic (extendedprice, discount, tax) using AVX-512F; process 8 doubles/cycle for disc_price and charge computations"
+  },
+  "aggregation_state": {
+    "type": "array_direct",
+    "slots": 6,
+    "key_formula": "l_returnflag * 2 + l_linestatus",
+    "accumulators": [
+      "sum_qty (double)",
+      "sum_base_price (double)",
+      "sum_disc_price (double — extendedprice * (1 - discount))",
+      "sum_charge (double — extendedprice * (1 - discount) * (1 + tax))",
+      "sum_disc_for_avg (double)",
+      "count (int64_t)"
+    ],
+    "post_scan": "avg_qty = sum_qty / count; avg_price = sum_base_price / count; avg_disc = sum_disc_for_avg / count"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "granularity": "block (100,000 rows per morsel)",
+    "threads": "auto(nproc)",
+    "thread_local": "each thread holds its own direct_array[6] accumulator; merge via summation after all morsels complete",
+    "notes": "600 blocks / 64 threads ≈ 9–10 blocks per thread; low coordination overhead"
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — prune entire 100K-row blocks where zone_min[b] > kQ1ShipdateMax; eliminates trailing ~12 blocks (~2% of data)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "emit slots 0..5 in key order; omit slots with count == 0; no runtime sort needed since key = returnflag*2+linestatus is already ascending",
+    "decode": {
+      "l_returnflag": "rf_chars[] = {'A','N','R'} — index by dict code",
+      "l_linestatus": "ls_chars[] = {'F','O'} — index by dict code"
+    }
+  },
+  "execution_target": "cpp"
+}

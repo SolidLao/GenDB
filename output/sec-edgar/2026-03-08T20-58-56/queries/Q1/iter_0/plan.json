@@ -1,0 +1,46 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_pre",
+    "filter_stmt_not_null",
+    "hash_group_by_partial",
+    "merge_group_states",
+    "finalize_aggregates",
+    "sort_by_cnt_desc"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt IS NOT NULL",
+      "selectivity": 0.999
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(256)",
+    "fact_join": "pre_built_index",
+    "aggregation": "compact_hash_map(pre_sized)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "pre_stmt_zonemap",
+      "purpose": "metadata_only_no_pruning_for_is_not_null"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "not_used_for_is_not_null_scan"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

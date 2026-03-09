@@ -1,0 +1,105 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "resolve_runtime_dictionary_codes",
+    "scan_pre_stmt_eq_blocks",
+    "build_pre_eq_count_hash",
+    "scan_num_usd_blocks",
+    "probe_sub_adsh_lookup",
+    "probe_tag_version_hash",
+    "probe_pre_eq_count_hash",
+    "aggregate",
+    "having",
+    "topk",
+    "decode_tlabel"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num(filtered: uom = usd_code, estimated 33164367 rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Use sub/indexes/adsh_to_rowid.bin for adsh->rowid, then row-level sic and cik lookup. Sampled conditional survival after USD filter: 0.0779, estimated 2582997 num rows remain."
+    },
+    {
+      "build": "tag(tag_version_hash, abstract = 0)",
+      "probe": "num(post sub filter, estimated 2582997 rows)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Probe the pre-built (tag,version) hash index and read tlabel. abstract=0 is effectively non-selective for this workload."
+    },
+    {
+      "build": "pre(filtered: stmt = eq_code, stored as compact_hash_map((adsh,tag,version) -> eq_count))",
+      "probe": "num(post sub+tag filters, estimated 2582997 rows)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 979282,
+      "notes": "Build from a sequential pre scan using stmt_zone_map pruning. Store multiplicity per triple to preserve 1:N semantics. Sampled output fanout after sub+tag: 0.2756 joined EQ rows per probe row, estimated 711799 joined rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8417
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "direct_array(sub/indexes/adsh_to_rowid.bin) plus row-level reads of sub.sic and sub.cik",
+    "fact_join": "pre-built tag_version_hash for (tag,version) and runtime compact_hash_map keyed by (adsh,tag,version) with uint16 eq_count payload",
+    "aggregation": "thread-local compact_hash_map keyed by (sic,tlabel,stmt_code) with values {sum_value,count_rows,distinct_cik_hash_set}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "build_phase": "parallel scan of pre stmt-eligible blocks into thread-local pre_eq_count_hash partitions, then merge",
+    "probe_phase": "parallel scan of num blocks surviving uom_zone_map; probe sub lookup, tag hash, and pre_eq_count_hash; aggregate into thread-local group-by state"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip num blocks whose uom range cannot contain usd_code"
+    },
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "direct adsh lookup for sub rowid before sic/cik reads"
+    },
+    {
+      "index": "tag/indexes/tag_version_hash.{tag,version,rowid}.bin",
+      "purpose": "join lookup from (num.tag,num.version) to tag rowid and tlabel"
+    },
+    {
+      "index": "pre/indexes/stmt.zone_map.bin",
+      "purpose": "prune pre blocks before building the filtered EQ hash table"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "having": {
+    "predicate": "COUNT(DISTINCT s.cik) >= 2"
+  },
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,87 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["scan_filter_aggregate", "finalize_output"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_returnflag", "file": "lineitem/l_returnflag.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "l_linestatus", "file": "lineitem/l_linestatus.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_tax", "file": "lineitem/l_tax.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.986
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "layout": {"num_blocks_offset": 0, "block_size_offset": 4, "entries_offset": 8, "entry_size": 8},
+      "skip_condition": "zone_min > 10471"
+    }
+  ],
+  "aggregation": {
+    "strategy": "compact_direct_array",
+    "group_key_encoding": "Map returnflag to index: 'A'->0, 'N'->1, 'R'->2. Map linestatus: 'F'->0, 'O'->1. Compact key = rf_idx * 2 + ls_idx. Use a 256-byte lookup table for each: rf_map['A']=0, rf_map['N']=1, rf_map['R']=2; ls_map['F']=0, ls_map['O']=1.",
+    "array_size": 6,
+    "estimated_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double",
+      "sum_base_price": "double",
+      "sum_disc_price": "double",
+      "sum_charge": "double",
+      "sum_discount": "double",
+      "count": "int64_t"
+    },
+    "accumulator_notes": "Use double (NOT long double). long double uses slow x87 FPU. double gives identical results for this workload and enables SSE/AVX.",
+    "per_row_expressions": {
+      "disc_price": "l_extendedprice * (1.0 - l_discount)",
+      "charge": "disc_price * (1.0 + l_tax)"
+    },
+    "derived_outputs": {
+      "avg_qty": "sum_qty / count",
+      "avg_price": "sum_base_price / count",
+      "avg_disc": "sum_discount / count"
+    }
+  },
+  "data_structures": {
+    "aggregation": "compact_direct_array(6_entries, per_thread, double_accumulators)",
+    "per_thread_footprint": "6 entries × 48 bytes = 288 bytes (fits L1 cache)",
+    "total_footprint": "64 threads × 288 bytes = 18KB (fits L1)",
+    "io_buffers": "mmap_all_columns with MAP_POPULATE and MADV_SEQUENTIAL"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "per_thread_aggregation": true,
+    "merge": "Iterate only 6 entries per thread. Total merge work: 6 × nthreads iterations. Trivial.",
+    "notes": "Each thread has a stack-allocated array of 6 Acc structs. Zero-init is instant. Merge is 384 iterations total instead of 4M."
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "columns": [
+      "l_returnflag", "l_linestatus",
+      "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge",
+      "avg_qty", "avg_price", "avg_disc", "count_order"
+    ],
+    "format_notes": "Reverse-map compact index back to char for output: rf_chars[]={'A','N','R'}, ls_chars[]={'F','O'}. returnflag=rf_chars[key/2], linestatus=ls_chars[key%2]."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B+C): per-thread direct arrays of 65536 entries with 104-byte long-double Acc structs totaled 416MB (64 threads × 6.5MB), far exceeding 44MB LLC. Only 4-6 of 65536 slots were ever used, wasting 306ms on zero-initialization page faults (untimed gap between data_loading and main_scan). Additionally, long double uses slow x87 FPU instead of SSE. Fix: compact group key mapping (rf_idx*2 + ls_idx) reduces array from 65536 to 6 entries. Switch to double accumulators (48 bytes/entry). Per-thread footprint drops from 6.5MB to 288 bytes (fits L1). Total from 416MB to 18KB. Merge drops from 4M iterations to 384. This eliminates the 306ms initialization overhead and accelerates both scan and merge phases.",
+  "correctness_anchors": {
+    "revenue_formula": "disc_price * (1.0 + tax)"
+  }
+}

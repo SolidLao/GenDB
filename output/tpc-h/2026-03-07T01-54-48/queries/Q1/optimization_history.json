@@ -1,0 +1,115 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 128.67999999999998,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 128.67999999999998,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.07,
+        "dim_filter": 0,
+        "main_scan": 55.93,
+        "build_joins": 0,
+        "output": 0.17,
+        "total": 127.19
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 136.31333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 136.31333333333333,
+      "validation": "pass",
+      "strategy": "Root cause is scan-path overhead relative to output (Category C) with high predicate selectivity (0.988), so almost all rows pay per-row filter and arithmetic overhead while producing only 6 groups; plan changes the scan to zone-map-driven block fast paths (if block max <= 10471 aggregate without per-row shipdate branch, otherwise run row filter), keeps direct-array thread-local aggregation, and tightens parallel execution to reduce scheduling overhead and keep sequential bandwidth high.",
+      "operation_timings": {
+        "data_loading": 0.14,
+        "dim_filter": 0,
+        "main_scan": 62.12,
+        "build_joins": 0.01,
+        "output": 1.35,
+        "total": 134.16
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 147.78,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 147.78,
+      "validation": "pass",
+      "strategy": "Root cause is Category C work inflation in the hot scan path: almost all rows pass the predicate, but each row still pays expensive fixed-point conversion and rounding before aggregation even though only six groups are produced. The revised plan keeps the single-pass sequential scan and zone-map block pruning, but switches to FP64 accumulation (with uint64 count) and computes output rounding only at finalize time, while using static partitioned parallel scan to reduce scheduler overhead and improve vectorization-friendly tight loops.",
+      "operation_timings": {
+        "data_loading": 0.2,
+        "dim_filter": 0,
+        "main_scan": 52.38,
+        "build_joins": 0,
+        "output": 0.17,
+        "total": 147.14
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 75.62666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 75.62666666666667,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level encoding mismatch (Category E): the scan path repeatedly reads wide double columns and converts them per row even though aggregation only needs scaled arithmetic and six groups, so the hot path is bandwidth and conversion bound. The plan adds persistent scaled column versions for l_extendedprice and l_tax (reusing existing scaled l_quantity and l_discount), keeps zonemap pruning and direct-array aggregation, and executes a single sequential integer-accumulation scan with finalize-time scaling/averages to reduce bytes read and per-row compute.",
+      "operation_timings": {
+        "data_loading": 0.15,
+        "dim_filter": 0,
+        "main_scan": 38.13,
+        "build_joins": 0,
+        "output": 0.38,
+        "total": 74.11
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 93.17,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 93.17,
+      "validation": "pass",
+      "strategy": "Root cause is Category C work inflation in predicate evaluation: with selectivity 0.988, per-row shipdate loads/branches consume bandwidth and cycles while only ~1.2% rows are rejected. The plan switches filter evaluation to existing shipdate postings-by-day by constructing a compact reject bitset for days above cutoff, removes l_shipdate from the main scan, and keeps a single sequential integer-scaled aggregation pass over the six required columns with direct-array thread-local state and finalize-time scaling to preserve output semantics.",
+      "operation_timings": {
+        "data_loading": 0.13,
+        "dim_filter": 9.1,
+        "main_scan": 49.54,
+        "build_joins": 0,
+        "output": 0.29,
+        "total": 91.91
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 59.89666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 59.89666666666667,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level key-width mismatch in the dominant scan (Category E): grouping by a tiny composite domain still reads two 32-bit dictionary code columns per row, inflating memory traffic in a bandwidth-bound path. The plan adds a persistent row-aligned composite uint8 key for (l_returnflag,l_linestatus), keeps existing scaled numeric columns and zonemap-driven shipdate filtering, and uses direct-array aggregation keyed by combo code with finalize-time keymap decode to preserve grouping and sort semantics while reducing scan bytes.",
+      "operation_timings": {
+        "data_loading": 0.12,
+        "dim_filter": 0,
+        "main_scan": 40.72,
+        "build_joins": 0,
+        "output": 1.08,
+        "total": 60.76
+      }
+    }
+  ]
+}

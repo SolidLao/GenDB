@@ -1,0 +1,80 @@
+{
+  "query_id": "Q18",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause (Category B — algorithm change): iter_0 allocates 64 thread-local int32_t accumulators of 229 MB each (14.7 GB total), then merges them with a parallel element-wise reduction that reads 63 × 229 MB = 14.4 GB of memory traffic — the dominant cost in the hot case at ~73ms on a 200 GB/s system. The fix replaces all thread-local arrays with a single shared std::atomic<int16_t>[60000001] array (120 MB total, mmap MAP_ANONYMOUS for zero-init). All 64 threads write directly to this shared array using memory_order_relaxed fetch_add, eliminating the merge phase entirely. int16_t is correct because the maximum sum per orderkey is 7 lineitems × 50 max_qty = 350, well within int16_t range (32767). The halved element size (2 vs 4 bytes) also improves cache efficiency: 120 MB / 64 bytes = 1.875M cache lines vs 3.75M for int32_t, with 32 entries per cache line giving better temporal locality for orders with nearby orderkeys. Atomic contention is negligible: P(two threads hitting the same key) ≈ 64²/15M ≈ 0.03%. All other phases (Pass 2 orders scan, customer join, sort) are unchanged from iter_0.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Two combined optimizations from iter_0. (1) Category A — plan restructuring: replace the 15M-row sequential orders scan with direct index lookup. After Pass 1, qualifying orderkeys (~2520) are known. The pre-built orders_by_orderkey.bin index (int32_t[60000001], 240MB) maps each orderkey to its orders row in O(1). Iterating over 2520 qualifying keys and issuing direct row lookups costs ~252μs, replacing a 300MB sequential scan plus the 57MB is_big[] char array construction. The is_big[] array (57MB) was also an LLC-miss source in the orders scan since it exceeds L3 (44MB); eliminating both removes ~5-6ms from Pass 2. (2) Category B — algorithm change: switch thread-local accumulators from int32_t (229MB per thread) to int16_t (120MB per thread). int16_t is safe because the maximum sum per orderkey is 7 lineitems × 50 max_qty = 350, well within int16_t range (32767). This halves the physical memory written per thread (~1.83MB vs ~3.66MB) and halves the merge read bandwidth (63 × 1.83MB vs 63 × 3.66MB physical), while keeping per-thread independence and avoiding the atomic false-sharing contention that caused iter_1 to regress. The qualifying_keys collection is folded into the merge pass (single sequential scan of the 120MB merged array), adding only ~0.6ms.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level constraint (Category E): lineitem is physically sorted by l_shipdate, so l_orderkey values appear in random order during any sequential scan. Every approach that uses an accumulator array indexed by l_orderkey (iter_0's 64 × 229MB thread-local arrays, iter_1's shared atomic array, iter_2's int16_t arrays) suffers random-write cache misses into a structure much larger than the 44MB LLC, and must either pay the merge cost (73ms at 200 GB/s) or atomic contention. The fix is a sorted copy of (l_orderkey, l_quantity) ordered by l_orderkey, built once and stored persistently. With sorted input, Pass 1 becomes a streaming group-by: each thread scans its contiguous row range sequentially with only two register variables (cur_key, cur_sum) — no accumulator array, no merge phase. Sequential access at 286MB / 200 GB/s ≈ 1.4ms. The ~64 boundary keys (one per thread boundary, since max 7 lineitems per order) are reconciled in O(1) post-processing. Pass 2 uses the pre-built orders_by_orderkey index for 2520 direct O(1) lookups instead of a 15M-row orders scan, matching the approach attempted in iter_2 but now viable since the dominant merge cost is eliminated. Total expected hot time: ~2-4ms versus 66ms baseline.",
+      "operation_timings": {
+        "data_loading": 0.27,
+        "main_scan": 22.22,
+        "boundary_key_merge": 0.01,
+        "build_joins": 10.76,
+        "topk_sort": 0.03,
+        "output": 0.18
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause identified as excessive merge traffic from iter_0's 64 thread-local int32_t[60M] arrays (Category D — parallelism tuning). The merge reads (nthreads-1)×229MB per-thread-array: with 64 threads that is 63×229MB=14.4GB≈72ms at 200GB/s, which accounts for essentially the entire 66ms hot time. The scan itself (300MB lineitem at 200GB/s) takes only ~1.5ms regardless of thread count since aggregate bandwidth is fixed. The fix is to hardcode Pass 1 thread count to 8 instead of nproc=64: merge traffic drops to 7×229MB=1.6GB≈8ms, a 9× reduction. Scan parallelism stays efficient with 8 threads (each handles 7.5M rows sequentially). Pass 2 remains a full parallel orders scan (360MB≈1.8ms) like iter_0 — no sorted column, no index lookup, avoiding the correctness pitfalls that caused iter_3 to regress. Sum_qty is reused from Pass 1 merge array (no second lineitem scan). Expected total hot time: ~12ms versus 66ms baseline.",
+      "operation_timings": {}
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "pass",
+      "strategy": "Root cause: iter_4 used char is_big[60000001] (57MB) as the orders scan filter, which exceeds L3 (44MB). During the 15M-row parallel orders scan, each probe is_big[o_orderkey[j]] is a random access into a 57MB working set with ~23% L3 miss rate; 15M × 23% miss × 64 threads × 64B/line = ~14GB of DRAM traffic at 200 GB/s → ~70ms, causing the regression. Strategy Category C (work elimination via smarter data structure): replace the 57MB char array with std::bitset<60000001> (7.5MB, 8x smaller), which fits in the 44MB L3 (117K cache lines vs 687K L3 capacity). After the bitset is warmed in L3 on the first thread pass, all 15M probe accesses hit L3 at ~1ns each instead of DRAM at ~100ns. Pass 1 retains the sorted streaming scan from iter_3/iter_4: 64 threads scan sorted_orderkey.bin + sorted_quantity.bin (286MB sequential at 200 GB/s ≈ 1.4ms) with register-only accumulators — no merge phase, no heap allocation. The ~64 boundary key partials are reconciled in O(nthreads) single-threaded work. Pass 2 scans all 4 orders columns together (285MB sequential at 200 GB/s ≈ 1.4ms) to avoid 2520 random DRAM lookups into orders_by_orderkey (240MB >> L3, ~11ms in iter_3). Sum_qty is looked up from a 2520-entry unordered_map (L1/L2). Expected hot time: ~3-5ms vs 66ms baseline.",
+      "operation_timings": {}
+    }
+  ]
+}

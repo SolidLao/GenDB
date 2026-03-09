@@ -1,0 +1,115 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "filter_part_green",
+    "semi_join_partsupp_on_green_parts",
+    "probe_lineitem_by_partsupp_composite",
+    "lookup_supplier_nation_and_order_year",
+    "aggregate_profit_by_nation_year",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered: p_name LIKE '%green%')",
+      "probe": "partsupp",
+      "type": "semi",
+      "strategy": "bloom_filter",
+      "build_cardinality": 100000,
+      "notes": "Bloom on p_partkey to prune partsupp to green parts only."
+    },
+    {
+      "build": "partsupp(filtered green, key=(ps_partkey,ps_suppkey))",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 400000,
+      "notes": "Use lineitem_partsupp_hash multi-value index to fetch matching lineitem rowids per composite key."
+    },
+    {
+      "build": "supplier",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Materialize suppkey->nationkey direct array once; per-row lookup is O(1)."
+    },
+    {
+      "build": "nation",
+      "probe": "supplier(mapped)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "Materialize nationkey->n_name_code direct array and decode dictionary at finalize."
+    },
+    {
+      "build": "orders",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Materialize orderkey->o_year direct array once to avoid hash lookups on hot path."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0523
+    },
+    {
+      "table": "partsupp",
+      "predicate": "ps_partkey IN green_partkeys",
+      "selectivity": 0.0523
+    },
+    {
+      "table": "lineitem",
+      "predicate": "(l_partkey,l_suppkey) IN green_partsupp_keys",
+      "selectivity": 0.048
+    },
+    {
+      "table": "lineitem",
+      "predicate": "join consistency with supplier/orders/nation",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(2000000) + bloom_filter(100000_keys)",
+    "fact_join": "pre_built_index(lineitem_partsupp_hash) + compact_key_buffer(400000)",
+    "aggregation": "direct_array(25x7)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partsupp_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "partsupp_pk_hash",
+      "purpose": "optional_validation_lookup"
+    },
+    {
+      "index": "supplier_pk_hash",
+      "purpose": "fallback_join_lookup"
+    },
+    {
+      "index": "orders_pk_hash",
+      "purpose": "fallback_join_lookup"
+    },
+    {
+      "index": "nation_pk_hash",
+      "purpose": "fallback_join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

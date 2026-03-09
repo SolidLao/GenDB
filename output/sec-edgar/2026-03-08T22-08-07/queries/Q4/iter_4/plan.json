@@ -1,0 +1,148 @@
+{
+  "query_id": "Q4",
+  "storage_extensions": [
+    {
+      "id": "num.adsh.postings_dense",
+      "action": "use_existing",
+      "files": {
+        "offsets": "column_versions/num.adsh.postings_dense/offsets.bin",
+        "offsets_format": "uint64_t[max_code + 2] indexed by adsh_code",
+        "rowids": "column_versions/num.adsh.postings_dense/rowids.bin",
+        "rowids_format": "uint32_t[row_count] grouped by adsh_code in input row order"
+      },
+      "usage": "mmap offsets.bin and rowids.bin; after filtering sub to qualifying SIC rows, enumerate only those num rowid spans whose adsh code appears in the qualifying set, and use the postings-group adsh as the join key instead of scanning the full USD postings stream"
+    }
+  ],
+  "pipeline": [
+    "filter_sub_sic_via_postings",
+    "materialize_qualifying_adsh_metadata",
+    "count_reachable_pre_eq_rows",
+    "build_filtered_pre_eq_triple_counts",
+    "derive_reachable_tag_pairs_from_triples",
+    "materialize_filtered_tag_tlabel_map",
+    "scan_num_for_qualifying_adsh_postings",
+    "filter_num_uom_and_value",
+    "probe_filtered_pre_counts",
+    "probe_filtered_tag_map",
+    "aggregate_at_company_grain",
+    "roll_up_groups_apply_having_topk",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered sic range; adsh -> {sub_rowid,sic,cik,dense_cik})",
+      "probe": "pre(filtered stmt='EQ')",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 5242,
+      "notes": "Use sub_sic_postings to materialize the qualifying filing set first; keep a direct adsh lookup for pre filtering and a compact vector of qualifying adsh codes for the num postings driver."
+    },
+    {
+      "build": "pre(filtered stmt='EQ' and adsh in qualifying sub set; (adsh,tag,version) -> eq_count)",
+      "probe": "num(filtered later by qualifying adsh postings and uom='USD')",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 64656,
+      "notes": "Scan pre_stmt_postings twice as before, but size the compact triple-count map to the actual reachable EQ domain only."
+    },
+    {
+      "build": "tag(filtered to unique reachable (tag,version) pairs; (tag,version) -> tlabel where abstract=0)",
+      "probe": "num ⨝ pre(filtered)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 15963,
+      "notes": "Derive unique reachable pairs from occupied filtered-pre triple buckets, then probe tag_tag_version_hash once per pair to materialize a small cache-resident tag map."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.0609
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.1294
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num(adsh_postings_dense restricted to qualifying filings)",
+    "rows": 2968289,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "group-sequential via selected adsh postings spans, preserving row order within each filing"
+  },
+  "data_structures": {
+    "dim_filter": "direct_array(max_adsh_code+1, value=sub_rowid_or_sentinel) plus compact vector of qualifying adsh metadata {adsh, sub_rowid, sic, cik, dense_cik, num_rowid_begin, num_rowid_end}",
+    "fact_join": "compact_hash_map(pre_sized by reachable EQ triples, key=(adsh_u32,tag_u32,version_u32), value=eq_count_u32); then compact_hash_map(pre_sized by reachable unique tag/version pairs, key=(tag_u32,version_u32), value=tlabel_u32)",
+    "aggregation": "compact_hash_map(thread_local, key=(sic_i32,tlabel_u32,stmt_u16,cik_i32), value={sum_value:f64,count_rows:u64}); merge once, roll up to (sic_i32,tlabel_u32,stmt_u16), and derive COUNT(DISTINCT cik) from one company-grain entry per key"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_sic_postings",
+      "purpose": "enumerate qualifying sub rows in the SIC range and seed both the adsh lookup and the qualifying adsh vector"
+    },
+    {
+      "index": "pre_stmt_postings",
+      "purpose": "enumerate only EQ pre rows to count reachable rows and then build the compact filtered triple-count map"
+    },
+    {
+      "index": "tag_tag_version_hash",
+      "purpose": "resolve each unique reachable (tag,version) pair once during build_joins"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category A/C. After iteration 3, the plan still drives the hot path from the full USD postings stream and touches 33234006 USD num rows even though the SIC filter reduces the reachable filing domain to 5242 adsh codes whose dense postings contain only 2968289 num rows, or 2564680 after the local USD filter, so the main scan still performs about 11x-13x more fact-row work than necessary. The revised plan keeps the selective sub->pre->tag build side, uses the existing num.adsh.postings_dense storage extension to enumerate only qualifying filing spans, checks uom='USD' and value-not-null inside those spans, balances parallel work by postings-slice cardinality, and preserves the compact filtered pre triple map plus derived tag map so the smaller num stream reaches the same join and aggregation logic with much less wasted scanning.",
+  "correctness_anchors": {}
+}

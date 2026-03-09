@@ -1,0 +1,127 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zone_map_prune", "parallel_dual_path_scan", "aggregate_reduce"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.019,
+      "enforcement": "zone_map_block_skip_then_row_filter_boundary_only",
+      "notes": "Zone map eliminates ~98.1% of 600 blocks. For INTERIOR blocks (zone.mn >= 8766 && zone.mx < 9131), ALL rows pass — do NOT load or check l_shipdate. For BOUNDARY blocks only (zone.mn < 8766 || zone.mx >= 9131), apply the per-row shipdate check."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_discount >= 5 AND l_discount <= 7",
+      "selectivity": 0.21,
+      "enforcement": "row_filter_int8",
+      "notes": "Applied in BOTH interior and boundary inner loops. int8_t comparison, no decode needed."
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_quantity < 24",
+      "selectivity": 0.47,
+      "enforcement": "row_filter_int8",
+      "notes": "Applied in BOTH interior and boundary inner loops. int8_t comparison, no decode needed."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "total_rows": 59986052,
+    "block_size": 100000,
+    "num_blocks": 600,
+    "columns_read": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+    "column_files": {
+      "l_shipdate":      "lineitem/l_shipdate.bin",
+      "l_discount":      "lineitem/l_discount.bin",
+      "l_quantity":      "lineitem/l_quantity.bin",
+      "l_extendedprice": "lineitem/l_extendedprice.bin"
+    },
+    "column_types": {
+      "l_shipdate":      "int32_t",
+      "l_discount":      "int8_t",
+      "l_quantity":      "int8_t",
+      "l_extendedprice": "double"
+    },
+    "estimated_qualifying_blocks": 12,
+    "estimated_interior_blocks": 10,
+    "estimated_boundary_blocks": 2,
+    "estimated_rows_after_zone_map": 1140000,
+    "estimated_rows_after_all_filters": 113700
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "file": "lineitem/l_shipdate_zone_map.bin",
+      "purpose": "skip_blocks_and_classify_interior",
+      "layout": {
+        "header": "uint32_t num_blocks (4B) + uint32_t block_size (4B)",
+        "entries": "ZoneEntry[num_blocks] where ZoneEntry = { int32_t min_date; int32_t max_date; } (8B each)",
+        "total_size_bytes": 4808
+      },
+      "usage": "Load entire zone map at startup (fits in L1 cache). For each qualifying block b: if (zones[b].mx < LO || zones[b].mn >= HI) skip. Then classify: if (zones[b].mn >= LO && zones[b].mx < HI) => interior block (dispatch fast inner loop, no shipdate load); else => boundary block (dispatch full inner loop with shipdate check).",
+      "date_constants": {
+        "LO": 8766,
+        "HI": 9131,
+        "LO_label": "1994-01-01",
+        "HI_label": "1995-01-01"
+      }
+    }
+  ],
+  "data_structures": {
+    "zone_map": "flat_array(600 entries, loaded once, L1-resident)",
+    "thread_accumulator": "double rev_local (stack variable per thread, no atomics)",
+    "partial_array": "std::vector<double>(nthreads, 0.0) — no cache-line padding",
+    "final_reduction": "sequential sum of nthreads thread-local doubles"
+  },
+  "inner_loop": {
+    "description": "Two specialized inner loop variants selected per block",
+    "interior_loop": {
+      "condition": "zones[b].mn >= LO && zones[b].mx < HI",
+      "columns_read": ["l_discount", "l_quantity", "l_extendedprice"],
+      "filter_order": ["l_discount (int8, [5,7])", "l_quantity (int8, <24)"],
+      "compute": "rev_local += l_extendedprice[i] * (disc * 0.01)",
+      "notes": "l_shipdate NOT loaded or checked — zone guarantees all rows pass. Compiler can vectorize int8 checks across rows more aggressively without the int32 outlier column."
+    },
+    "boundary_loop": {
+      "condition": "zones[b].mn < LO || zones[b].mx < HI (block straddles a boundary)",
+      "columns_read": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+      "filter_order": ["l_shipdate (int32, [8766,9131))", "l_discount (int8, [5,7])", "l_quantity (int8, <24)"],
+      "compute": "rev_local += l_extendedprice[i] * (disc * 0.01)",
+      "notes": "Full three-filter check. Shipdate checked first because at block boundaries it is genuinely selective (filters rows before/after 1994 window). Original iter_0 filter order preserved."
+    }
+  },
+  "aggregation": {
+    "type": "single_scalar",
+    "output_column": "revenue",
+    "expression": "SUM(l_extendedprice[i] * (l_discount[i] * 0.01))",
+    "accumulator_type": "double",
+    "strategy": "thread_local_accumulate_then_reduce",
+    "notes": "Each thread accumulates into a stack-local double. Reduction after join is a sequential sum over nthreads partial values."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "thread_count_hint": 64,
+    "partition_unit": "equal row-ranges within [row_lo, row_hi)",
+    "notes": "Divide qualifying row range evenly across hardware_concurrency() threads. Each thread determines its block range and dispatches interior vs boundary inner loop per block. No madvise calls of any kind — rely on OS page cache for hot runs."
+  },
+  "output": {
+    "columns": ["revenue"],
+    "order_by": [],
+    "limit": null,
+    "format": "single_row_double"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category C (work elimination): iter_0 applies a uniform three-filter inner loop to ALL qualifying blocks, including interior blocks where the zone map already guarantees every row passes the l_shipdate predicate. For the ~10 interior blocks (~83% of qualifying rows, ~1M rows), the code needlessly loads 4 bytes of l_shipdate per row and evaluates a branch that always succeeds, wasting ~4 MB of column reads and ~1M redundant branches. The fix is to split the per-block inner loop into two specialized variants: an interior loop (for blocks where zone.mn >= LO && zone.mx < HI) that reads only l_discount and l_quantity and skips l_shipdate entirely, and a boundary loop (for the ~2 blocks straddling 1994 date boundaries) that applies the full three-filter check in the original shipdate-first order. This directly eliminates the wasted work and also gives the compiler a cleaner int8-only hot path to vectorize. Deliberately avoids all changes from iter_1 (no MADV calls, no filter reordering in boundary loop, no cache-line padding on partial[]) to prevent re-introducing the regression.",
+  "correctness_anchors": {
+    "LO": 8766,
+    "HI": 9131,
+    "LO_label": "1994-01-01",
+    "HI_label": "1995-01-01",
+    "discount_lo": 5,
+    "discount_hi": 7,
+    "quantity_threshold": 24,
+    "revenue_formula": "l_extendedprice[i] * (l_discount[i] * 0.01)"
+  }
+}

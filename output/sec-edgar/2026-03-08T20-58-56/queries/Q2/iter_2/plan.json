@@ -1,0 +1,117 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "filter_sub_fy",
+    "dedup_sub_adsh",
+    "probe_num_by_adsh_index",
+    "aggregate_max_per_adsh_tag",
+    "emit_eq_max_candidates",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub[fy=2022] distinct adsh",
+      "probe": "num via num_adsh_fk_hash postings",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 27333,
+      "notes": "empirically fastest join order from sampling_join_order.cpp"
+    },
+    {
+      "build": "max_map=(filtered_num GROUP BY (adsh,tag) -> max(value))",
+      "probe": "same posting stream for eq-max emission",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 3362,
+      "notes": "fuse with posting traversal and avoid materializing full filtered_num vector"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.001
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.996
+    },
+    {
+      "table": "n_join_m",
+      "predicate": "n.value = m.max_value",
+      "selectivity": 0.43
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 11544074,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_driven_posting_scan"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(sub_rows) + distinct_adsh_vector(filtered)",
+    "fact_join": "pre_built_index(num_adsh_fk_hash)",
+    "aggregation": "compact_hash_map(key=(adsh,tag), value=max_double)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "value DESC",
+      "name ASC",
+      "tag ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: build_joins dominates because many index-probed fact rows are materialized and re-probed through extra hash/row-vector passes after join order selection. Strategy category A/C: keep the empirically best join order (sub[fy=2022] -> num_adsh postings, validated by sampling: 79.6ms vs 121.9ms/138.3ms alternatives) and eliminate wasted work by deduplicating sub adsh keys, aggregating max(value) per (adsh,tag) directly on the posting stream, and emitting eq-max candidates without a separate filtered_num materialization pass.",
+  "correctness_anchors": {}
+}

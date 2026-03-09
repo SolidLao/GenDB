@@ -1,0 +1,175 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "load_dicts",
+    "load_sub_arrays_and_build_cik_remap",
+    "build_eq_count_map_from_pre_with_sic_prefilter",
+    "parallel_scan_num_with_zone_maps",
+    "parallel_tree_merge_aggregates",
+    "having_filter",
+    "decode_tlabel_re_aggregate",
+    "sort_limit"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic[], cik[]) — full arrays loaded; adsh_qualifying_bitset and adsh_to_cik_idx built",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "sub_sic (172KB) and sub_cik (344KB) fully loaded. adsh_qualifying_bitset = bitset<86135> (~10KB, L1-resident): set bit i if sub_sic[i] BETWEEN 4000-4999. adsh_to_cik_idx[i] = cik_remap_index (uint16_t) for qualifying adsh_codes, UINT16_MAX otherwise."
+    },
+    {
+      "build": "tag(abstract[]) — full array loaded",
+      "probe": "num.tagver_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1070662,
+      "notes": "tag_abstract (1MB) fully loaded; O(1) by tagver_code; abstract==0 ~95% pass"
+    },
+    {
+      "build": "eq_count_map (FlatCountMap, 65536 slots, 786KB) — SIC-pre-filtered EQ pairs only",
+      "probe": "num composite key (adsh_code << 32 | tagver_code)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 42000,
+      "notes": "Pre scan filters by adsh_qualifying_bitset AND stmt==eq_code: ~42K keys (vs 1.06M before). FlatCountMap cap_hint=25000 -> 65536 slots x 12B = 786KB (L2/L3-resident). No bloom filter needed — direct probe is cache-resident. Single-threaded insert: ~42K x 3ns = <1ms (vs 1.06M x 30ns = 32ms before)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.35,
+      "notes": "Zone maps skip entire 100K-row blocks; row-level check applied first"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99
+    },
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.04,
+      "notes": "Most selective — applied after uom+tagver checks via O(1) sub_sic[adsh_code] array lookup"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract == 0",
+      "selectivity": 0.95
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt_code == eq_code AND adsh_qualifying (sic 4000-4999)",
+      "selectivity": 0.0044,
+      "notes": "eq_count_map now only contains SIC-qualified EQ pairs (~42K entries). Direct map probe (786KB, L2/L3-resident). Bloom filter eliminated."
+    }
+  ],
+  "predicate_order_per_num_row": [
+    "1. uom_code == usd_code (zone map at block level, then row check)",
+    "2. tagver_code != -1 (int32_t tv = tagver[i]; if (tv < 0) continue)",
+    "3. sub_sic[adsh_code] BETWEEN 4000 AND 4999 (most selective, array O(1))",
+    "4. tag_abstract[tagver_code] == 0 (array O(1))",
+    "5. eq_count_map.get(key) != 0 (786KB, L2/L3-resident, no bloom pre-check needed)"
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",    "file": "num/uom_code.bin",    "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",   "file": "num/adsh_code.bin",   "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code", "file": "num/tagver_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "value",       "file": "num/value.bin",       "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with zone-map block skipping"
+  },
+  "data_structures": {
+    "sub_sic_array":          "flat_array(86135 x int16_t) — direct indexed by adsh_code",
+    "sub_cik_array":          "flat_array(86135 x int32_t) — direct indexed by adsh_code",
+    "adsh_qualifying_bitset": "bitset of 86135 bits (~10KB, L1-resident): bit i set iff sub_sic[i] BETWEEN 4000-4999; used during pre scan to pre-filter eq_count_map entries",
+    "adsh_to_cik_idx":        "flat_array(86135 x uint16_t = 172KB): for qualifying adsh_codes maps to CIK remap index [0, N_ciks); UINT16_MAX for non-qualifying; built during sub scan",
+    "cik_remap":              "vector<int32_t> idx_to_cik (N_ciks entries, N_ciks <= 3445): maps remap index -> original CIK value; built during sub scan by collecting distinct CIK values with sic 4000-4999",
+    "tag_abstract_array":     "flat_array(1070662 x int8_t) — direct indexed by tagver_code",
+    "eq_count_map":           "FlatCountMap with cap_hint=25000 -> 65536 slots x 12B = 786KB (L2/L3-resident); key=((uint64_t)(uint32_t)adsh_code<<32)|(uint32_t)tagver_code; value=uint32_t count of EQ pre rows; SIC-pre-filtered so only ~42K entries",
+    "agg_map_per_thread":     "unordered_map<uint64_t, AggState> per thread; AggState = {double sum, int64_t cnt, vector<uint64_t> cik_bits(cik_words)}; cik_bits is a compact bitset of N_ciks bits (ceil(N_ciks/64) uint64_t words); reserve(1024) per thread",
+    "aggregation":            "thread-local hash maps merged via parallel binary-tree reduction (6 rounds for 64 threads); CIK merge is bitwise OR over cik_words uint64_ts — no allocation, no sorting, no std::merge"
+  },
+  "preprocessing": {
+    "load_dicts": [
+      "usd_code = load_dict('indexes/uom_codes.bin')['USD']  // int8_t",
+      "eq_code  = load_dict('indexes/stmt_codes.bin')['EQ']  // int8_t"
+    ],
+    "load_sub_arrays_and_build_cik_remap": [
+      "sub_sic[86135]: int16_t — mmap sub/sic.bin (172KB)",
+      "sub_cik[86135]: int32_t — mmap sub/cik.bin (344KB)",
+      "Build adsh_qualifying_bitset[86135] (~10KB): for i in [0,SUB_N): if sub_sic[i] BETWEEN 4000-4999, set bit i",
+      "Build cik_to_idx unordered_map and idx_to_cik vector: for each qualifying adsh_code i, look up sub_cik[i]; if not seen, assign next index. N_ciks = idx_to_cik.size() <= 3445",
+      "Build adsh_to_cik_idx[86135]: uint16_t array, initialized to UINT16_MAX; for qualifying adsh i: adsh_to_cik_idx[i] = cik_to_idx[sub_cik[i]]",
+      "cik_words = (N_ciks + 63) / 64  // typically ceil(3445/64) = 54 uint64_ts = 432 bytes"
+    ],
+    "build_eq_count_map_with_sic_prefilter": {
+      "source": "pre/adsh_code.bin, pre/tagver_code.bin, pre/stmt_code.bin (9,600,799 rows)",
+      "strategy": "parallel scan with adsh_qualifying_bitset pre-filter AND stmt==eq_code; thread-local key vectors; single-threaded insert into FlatCountMap",
+      "threads": "auto(nproc)",
+      "per_thread_filter": "for each pre row i: if (pre_stmt_code[i] == eq_code) AND (adsh_qualifying_bitset[pre_adsh_code[i]] is set): emit key = ((uint64_t)(uint32_t)pre_adsh_code[i]<<32)|(uint32_t)pre_tagver_code[i]; skip if key==UINT64_MAX",
+      "merge_into_map": "single-threaded loop over thread vectors calling eq_count_map.increment(k); ~42K insertions into 786KB L2/L3-resident map (<1ms vs 32ms before)",
+      "no_bloom_filter": "bloom filter eliminated — eq_count_map at 786KB is L2/L3-resident; direct probe latency <3ns vs 30ns for old 25MB map",
+      "estimated_entries": 42000,
+      "eq_count_map_memory_kb": 786
+    }
+  },
+  "aggregation": {
+    "strategy": "hash_group_by with parallel tree-reduction merge",
+    "group_key": "packed uint64: ((uint64_t)(uint16_t)sic << 32) | (uint32_t)tagver_code",
+    "accumulators": [
+      "sum_value: double",
+      "cnt_value: int64_t",
+      "cik_bits: vector<uint64_t>(cik_words) — compact bitset of N_ciks bits; set bit adsh_to_cik_idx[adsh_code] for each qualifying num row"
+    ],
+    "cik_insert": "g.cik_bits[cik_idx >> 6] |= 1ULL << (cik_idx & 63)  // O(1), no allocation, no sort",
+    "thread_local_maps": true,
+    "merge_strategy": "parallel binary-tree reduction (6 rounds for 64 threads). For each merged entry: sum+=src.sum; cnt+=src.cnt; for j in [0,cik_words): dst.cik_bits[j] |= src.cik_bits[j]. Bitwise OR replaces std::merge+std::unique+allocation.",
+    "having": "retain groups where popcount(cik_bits) >= 2  (popcount over cik_words uint64_ts)",
+    "cik_count_for_output": "__builtin_popcountll over cik_bits vector gives exact COUNT(DISTINCT cik)",
+    "post_having_decode": "iterate global_agg[0], decode tlabel via tlabel_offsets+tlabel_data[tagver_code], re-aggregate by (sic,tlabel) string key (CIK merge via bitwise OR on cik_bits), then popcount for final count, HAVING+sort+limit"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "num_morsels": 395,
+    "zone_map_filter": true,
+    "thread_local_aggregation": true,
+    "merge_strategy": "parallel binary-tree reduction (6 rounds for 64 threads); CIK merge is bitwise OR — O(cik_words) = O(54) per group, no heap allocation"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "usage": "skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code; struct ZoneMap { int8_t min_uom, max_uom; int32_t min_ddate, max_ddate; } sizeof=12 (2-byte pad)"
+    },
+    {
+      "index": "uom_codes dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "code_lookup"
+    },
+    {
+      "index": "stmt_codes dict",
+      "file": "indexes/stmt_codes.bin",
+      "purpose": "code_lookup"
+    }
+  ],
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt (constant 'EQ')", "COUNT(DISTINCT cik)", "SUM(value)", "AVG(value)"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "tlabel_decode": "after primary aggregation merge, decode tlabel for each group from tlabel_offsets+tlabel_data by tagver_code; re-aggregate by (sic, tlabel) string to merge groups sharing the same tlabel; CIK merge via bitwise OR on cik_bits; then popcount for exact cik count, HAVING cik_count>=2, sort by total_value DESC, limit 500"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two root causes diagnosed. (1) Category A — logical plan restructuring: the previous plan built eq_count_map from ALL pre rows with stmt='EQ' (~1.06M entries, 25MB, 2M slots), but 96% of those have non-qualifying SIC codes. Fix: build a 10KB adsh_qualifying_bitset from sub_sic during preprocessing; during the parallel pre scan, check bitset[pre_adsh_code] AND stmt==eq_code before emitting a key. This reduces eq_count_map entries from 1.06M to ~42K, shrinking the map from 25MB (LLC-resident) to 786KB (L2/L3-resident). Single-threaded insert drops from ~32ms (1.06M x 30ns LLC access) to <1ms (42K x 3ns L2 access). The bloom filter is eliminated entirely — a 786KB map is already effectively cache-resident. (2) Category B — algorithm change for CIK tracking: the previous sorted vector<int32_t> approach required O(log k) lower_bound + O(k) insert per row, and std::merge + std::unique + heap allocation during tree-reduction merges. Since only CIK values from adsh_codes with sic 4000-4999 can qualify (at most 3445 distinct CIKs), we remap qualifying CIKs to indices [0, N_ciks) and track them with a compact uint64_t bitset (54 words = 432 bytes per group). Insertion becomes a single bit-set (O(1), no allocation); merge becomes 54 bitwise OR operations (vs std::merge+unique+allocation); final count uses __builtin_popcountll. The adsh_to_cik_idx array (86135 x uint16_t = 172KB, LLC-resident) provides O(1) lookup from adsh_code to CIK remap index. Expected speedup: build_joins 70ms -> ~15ms, merge_aggregates 36ms -> ~8ms, main_scan 49ms -> ~38ms (eq_count_map probe now L2-resident, no bloom computation), total target ~80-90ms.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

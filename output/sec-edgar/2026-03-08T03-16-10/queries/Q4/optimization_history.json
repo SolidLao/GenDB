@@ -1,0 +1,110 @@
+{
+  "query_id": "Q4",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 359.53,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 359.53,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.19,
+        "dim_filter": 0.01,
+        "build_joins": 182.61,
+        "main_scan": 31.44,
+        "output": 1.55,
+        "total": 357.93
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [
+        "join_sampling"
+      ],
+      "timing_ms": 188.22,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 188.22,
+      "validation": "pass",
+      "strategy": "Root cause: the prior plan was logically wrong for this hardware because it ignored the existing pre sorted index and spent 182.61ms building a large runtime pre hash table, including 64 thread-local hash maps whose combined working set pushes into LLC pressure for work that can be eliminated entirely. Strategy category A: restructure the plan to use the empirically best sampled join order sub->pre->tag, keep the cheap selective sub direct-array lookup first, use index nested-loop probes into pre/indexes/adsh_tag_version.rowids.bin to test stmt='EQ' without any pre build phase, and defer the tag hash probe until after the pre filter has reduced candidates.",
+      "operation_timings": {
+        "data_loading": 0.15,
+        "dim_filter": 0.01,
+        "build_joins": 0.35,
+        "main_scan": 50.05,
+        "output": 2.49,
+        "total": 184.86
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 107.62333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 107.62333333333333,
+      "validation": "pass",
+      "strategy": "Root cause: after the iteration-1 join fix, the remaining gap is no longer in join probing but in aggregation state layout; the thread-local group map plus thread-local distinct set are replicated across 64 threads, and their combined footprint exceeds the 88 MB LLC before growth, so the post-scan merge becomes the dominant cache-miss-heavy phase. Strategy category B: keep the proven sub->pre->tag join order, but replace replicated thread-local aggregation with scan-time partitioning of qualifying rows by final group key and aggregate one cache-sized partition at a time, using per-partition sum/count and distinct-(group_key,cik) structures so dedup and merge happen locally instead of through one large 64-way merge.",
+      "operation_timings": {
+        "data_loading": 0.21,
+        "dim_filter": 0.01,
+        "build_joins": 0.47,
+        "main_scan": 81.17,
+        "output": 3.18,
+        "total": 108.3
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 108.75,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 108.75,
+      "validation": "pass",
+      "strategy": "Root cause: the remaining 81.17 ms hot phase is a storage-level mismatch in the pre join path, because probing pre through a sorted rowid permutation requires an O(log N) binary search plus a run scan over a nearly unique 9.23M-key space inside the main num scan, creating cache-miss-heavy random access that dominates runtime. Strategy category E: build and use a persistent composite hash index on pre(adsh,tag,version,stmt) that stores the exact multiplicity for each key, keep the proven sub->pre->tag join order and existing partitioned aggregation, and replace the hot-loop pre probe with one direct hash lookup that returns pre_count immediately.",
+      "operation_timings": {
+        "data_loading": 0.3,
+        "dim_filter": 0.02,
+        "build_joins": 0.66,
+        "main_scan": 74.46,
+        "output": 2.77,
+        "total": 110.38
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 114.50666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 114.50666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: after the aggregation redesign in iteration 2, the remaining gap is dominated by wasted per-row dimension work in the main scan rather than another large build phase: every surviving USD fact still pays for a rowid lookup into sub plus extra random sic/cik fetches, and then a separate abstract check on tag even though abstract = 0 has selectivity 1.0 for this dataset. Strategy category C: eliminate that wasted work by building one cache-resident filtered sub direct array that stores only qualifying sic/cik payloads, probing it first to collapse three dependent accesses into one, and using the deferred tag hash probe purely to fetch tlabel while keeping the proven sorted pre probe and partitioned aggregation unchanged.",
+      "operation_timings": {
+        "data_loading": 0.21,
+        "dim_filter": 0.93,
+        "build_joins": 0.48,
+        "main_scan": 85.81,
+        "output": 2.23,
+        "total": 113.65
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": null,
+      "cold_timing_ms": null,
+      "hot_timing_ms": null,
+      "validation": "skipped",
+      "strategy": "CRASHED: Agent \"Code Generator\" failed: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Mar 8th, 2026 4:16 AM.",
+      "operation_timings": {}
+    }
+  ]
+}

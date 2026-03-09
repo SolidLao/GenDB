@@ -1,0 +1,91 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_lineitem",
+    "filter_shipdate",
+    "aggregate_by_returnflag_linestatus",
+    "sort_groups"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY",
+      "selectivity": 0.985939
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "per-thread key_to_slot[65536] uint8_t table initialized to 0xFF plus compact AggState slots[8] and populated_keys[8]; use packed uint16(returnflag,linestatus) for O(1) slot lookup and merge only populated slots"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The root cause is a physical hot-loop mismatch: after removing the oversized 65536-state aggregates, the replacement 8-slot fixed map made every one of the 59.1M qualifying rows pay a branchy linear search before aggregation, which dominates the sequential scan even though the output has only about 6 groups. Strategy category B: keep the fused contiguous scan and inline shipdate predicate, but replace lookup_or_insert with a cache-resident per-thread direct key-to-slot table over the packed uint16 group id, aggregate into compact slots, and merge only populated groups so the scan stays O(1) per row without reintroducing the 256 MiB merge problem.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(gendb::date_str_to_epoch_days(\"1998-12-01\"), -90)",
+    "revenue_formula": "disc_price * (1.0L + static_cast<long double>(tax)"
+  }
+}

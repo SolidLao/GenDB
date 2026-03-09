@@ -1,0 +1,51 @@
+{
+  "query_id": "Q1",
+  "storage_extensions": [
+    {
+      "id": "pre.line.int16",
+      "action": "built_new",
+      "files": {
+        "line_int16": "column_versions/pre.line.int16/line_int16.bin",
+        "line_int16_format": "int16_t[9600799]"
+      },
+      "usage": "mmap line_int16.bin; read as int16_t per row instead of original line.bin (int8_t). Treat line==0 as NULL (excluded from AVG). All other values 1-482 are valid line numbers. Row order matches pre/adsh_code.bin exactly."
+    }
+  ],
+  "pipeline": ["load_dicts", "parallel_scan_aggregate", "merge", "output_sort"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != null_stmt_code",
+      "selectivity": 0.97,
+      "note": "null_stmt_code is code for empty string '' from indexes/stmt_codes.bin; sentinel -99 means accept all"
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns": [
+      {"name": "stmt_code",  "file": "pre/stmt_code.bin",  "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "rfile_code", "file": "pre/rfile_code.bin", "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "adsh_code",  "file": "pre/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4},
+      {"name": "line",       "file": "column_versions/pre.line.int16/line_int16.bin", "type": "int16_t", "bytes_per_row": 2}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "aggregation": "per-thread direct array cnt[n_groups], sum_line[n_groups], cnt_line[n_groups] indexed by group_id (0..13); tiny — fits in L1 cache",
+    "distinct_adsh": "shared atomic bitset: n_groups × ceil(86135/64) uint64_t words = 14 × 1347 × 8 bytes = 150KB total; threads do fetch_or(word, mask, relaxed) to set bits; no per-thread bitsets — eliminates 43MB per-thread allocation overhead",
+    "group_map": "flat uint8_t[256][256] precomputed at startup for (stmt_code, rfile_code) → group_id; 0xFF = invalid"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "per_thread_state": "cnt[14] + sum_line[14] + cnt_line[14] — 336 bytes total, always cache-resident",
+    "shared_state": "atomic_bitset[14][1347] for COUNT(DISTINCT adsh) — 150KB, fits in L2/LLC"
+  },
+  "aggregation": "hash_group_by",
+  "output": {"order_by": ["cnt DESC"], "limit": null},
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (correctness): the original line.bin stores int8_t, which truncates line values >= 128 via C signed overflow — (int8_t)300 = 44, (int8_t)256 = 0. The code read line as uint8_t, giving 40.88 for SI,H instead of the correct 48.27. A new int16_t column version was built from pre.csv preserving full values (range 1-482). Category E fix: mmap line_int16.bin, read as int16_t, treat 0 as null. Performance root cause (Category B): the iter_0 code allocates 64 per-thread ThreadState objects each containing bitset<86135>[64] ≈ 685KB, totaling ~44MB of page-faulted memory outside any timed phase, adding ~33ms overhead on top of a 9ms actual scan. Fix: replace per-thread bitsets with a single shared atomic uint64_t bitset (14 groups × 1347 words = 150KB); per-thread state shrinks to 336 bytes (always cache-resident). Expected result: correctness fixed; hot time should drop from 42ms to ~10-12ms by eliminating the large allocation overhead."
+}

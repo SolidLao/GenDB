@@ -1,0 +1,94 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "resolve_pure_code",
+    "load_pure_rowids",
+    "build_fy2022_lookup",
+    "pass1_hash_aggregate_max",
+    "pass2_probe_max_and_topk",
+    "decode_top100"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy = 2022)",
+      "probe": "num(uom = 'pure' AND value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Materialize fy2022-only adsh->sub_rowid direct lookup from sub_fy_postings and sub.adsh; probe before reading tag/value for rejected rows."
+    },
+    {
+      "build": "max_map((adsh, tag) -> max_value) over semijoin-qualified pure num rows",
+      "probe": "num(uom = 'pure' AND value IS NOT NULL AND adsh IN fy2022)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 110000,
+      "notes": "Two-pass plan: pass 1 computes MAX(value) per packed (adsh,tag); pass 2 keeps rows where value equals max_map[key]."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.0346
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN sub(fy = 2022)",
+      "selectivity": 0.1448
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "flat_array<uint32_t>(86136, UINT32_MAX) mapping qualifying adsh code -> sub rowid for fy=2022 only",
+    "fact_join": "compact_hash_map<uint64_t,double>(pre_sized=131072) keyed by packed ((uint64_t)adsh << 32) | tag; thread-local in pass 1, merged read-only for pass 2",
+    "aggregation": "compact_hash_map<uint64_t,double>(MAX value per (adsh,tag))",
+    "topk": "thread_local min_heap<100> on (value DESC, name_code ASC, tag_code ASC), then merge to global top 100"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel": "scan the pure-rowid postings slice in contiguous rowid ranges",
+    "pass1": "parallel rowid-range scan with thread-local max maps; merge maps after scan",
+    "pass2": "parallel rowid-range scan with shared read-only max map and thread-local top-k heaps"
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_fy_postings",
+      "purpose": "materialize fy=2022 qualifying sub rowids"
+    },
+    {
+      "index": "sub_adsh_dense_lookup",
+      "purpose": "direct_array domain sizing / fallback adsh->rowid lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": [
+      "s.name",
+      "n.tag",
+      "n.value"
+    ],
+    "order_by": [
+      "n.value DESC",
+      "s.name ASC",
+      "n.tag ASC"
+    ],
+    "limit": 100,
+    "decode": "carry name and tag as codes through both passes and the top-k merge; decode only final 100 rows"
+  },
+  "execution_target": "cpp"
+}

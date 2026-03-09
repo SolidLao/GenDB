@@ -1,0 +1,116 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 172.39000000000001,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 172.39000000000001,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "load_nation": 0.06,
+        "load_supplier": 0.38,
+        "filter_part": 80.78,
+        "main_scan": 37.65,
+        "output": 1.03,
+        "total": 170.1
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 103.50999999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 103.50999999999999,
+      "validation": "pass",
+      "strategy": "Root cause: Category D (parallelism). filter_part consumed 81ms (47% of 172ms total) running single-threaded over 2M varlen strings. With 64 cores available, parallelizing this with OpenMP should reduce it to ~2ms. Secondary fix (Category C): remove unnecessary max_partkey scan (partkeys are contiguous 1..n_parts), and change lineitem column madvise from MADV_RANDOM to MADV_SEQUENTIAL — columns are accessed at sequential index i (with 5.48% qualifying density), so readahead is beneficial. These changes should bring total from 172ms to ~40-45ms.",
+      "operation_timings": {
+        "load_nation": 0.08,
+        "filter_part": 10,
+        "main_scan": 34.18,
+        "output": 1.68,
+        "total": 98.2
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 207,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 207,
+      "validation": "pass",
+      "strategy": "Root cause: Category B+C. The 52ms unaccounted gap (53% of 98ms total) came from mmapping 2.4GB across 17 files between phases, with destructive madvise flips (MADV_SEQUENTIAL then MADV_RANDOM on 240MB orders_orderkey_lookup and 91MB partsupp columns). Fix: (1) Pre-build a dense year_for_orderkey[60M] uint8_t array by sequentially scanning o_orderkey + o_orderdate — eliminates the 240MB orders_orderkey_lookup.bin entirely plus the 57MB o_orderdate random access and per-row year_from_days computation; (2) Pre-build a compact partsupp_compact[2M] struct array (48B per partkey with 4 suppkeys+costs together) by sequentially scanning partsupp — replaces 3 separate random-access arrays (107MB) with 1 cache-line-aligned lookup; (3) Use schedule(static) for filter_part to eliminate OpenMP dynamic scheduling overhead (10ms → ~2ms); (4) mmap all files upfront and call prefetch() on lineitem columns to overlap OS readahead with pre-build computation. No madvise flip needed since all pre-build scans are sequential. Expected: mmap+prefetch(1ms) + filter(2ms) + prebuild(5ms) + main_scan(25ms) + output(2ms) = ~35ms.",
+      "operation_timings": {
+        "load_nation": 0.01,
+        "build_supplier": 0.17,
+        "filter_part": 8.98,
+        "prebuild_orders_year": 10.66,
+        "prebuild_partsupp_compact": 4.08,
+        "main_scan": 25.88,
+        "output": 0.51,
+        "total": 200.68
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 53.696666666666665,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 53.696666666666665,
+      "validation": "pass",
+      "strategy": "Root cause: Category C (work elimination) + D (parallelism). 52ms (53% of total) is spent between phases on serial minor page faults when first accessing ~2.5GB of mmapped column files (640K pages x 200ns each). Fix: (1) mmap ALL files at program start, then parallel pre-fault all pages using OpenMP with 64 cores — reduces 52ms serial faults to ~2ms parallel. (2) Remove advise_random() on o_orderdate — lineitem is sorted by l_orderkey so orders access is sequential, MADV_SEQUENTIAL enables kernel prefetching and eliminates ~3.3M cache misses. (3) Use schedule(static) for both filter_part and main_scan to eliminate OpenMP dynamic scheduling overhead. (4) Do NOT add large heap allocations — iter_2 regressed from 104ms to 207ms because 156MB of std::vector zero-fill triggered ~120ms of anonymous page faults. Keep iter_1's proven algorithm (bitset filter + direct index lookups) but with pre-faulted pages and correct madvise settings.",
+      "operation_timings": {
+        "prefault_pages": 23.1,
+        "load_nation": 0.01,
+        "filter_part": 2.56,
+        "main_scan": 26.97,
+        "output": 0.98,
+        "total": 54.14
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 55.123333333333335,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 55.123333333333335,
+      "validation": "pass",
+      "strategy": "Root cause: Category B+E. prefault_pages=23ms and main_scan=27ms together account for 93% of 54ms. The main_scan is latency-limited by random cache misses: each of 3.3M qualifying rows requires ~5 dependent random accesses (ps_index, ps_suppkey, ps_supplycost, orders_lookup, o_orderdate) plus year_from_days computation. Two fixes: (E) Built a storage extension orders.orderkey_year.direct_lookup — a dense uint8_t[max_orderkey+1] array mapping orderkey directly to year_offset, eliminating orders_orderkey_lookup.bin (229MB) and o_orderdate.bin (57MB) and year_from_days(). This removes 229MB from the mmap working set and eliminates one level of pointer indirection per qualifying row. (B) Block-based scan with software prefetching — process lineitem in 4096-row blocks with a selection vector: Pass 1 filters l_partkey via bitset, Pass 2 issues prefetches for all random-access targets of qualifying rows, Pass 3 processes qualifying rows with data already in cache. The prefetch-to-use distance (~225 qualifying rows × ~2ns compute each ≈ 450ns) covers the ~100-200ns DRAM latency. Together these reduce random access latency in main_scan and shrink the prefault working set.",
+      "operation_timings": {
+        "prefault_pages": 21.22,
+        "load_nation": 0.01,
+        "filter_part": 2.66,
+        "main_scan": 29.17,
+        "output": 1.22,
+        "total": 54.95
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 35.843333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 35.843333333333334,
+      "validation": "fail",
+      "strategy": "Category B+E. Two root causes: (1) prefault_pages=23ms from serial minor page faults across 2.6GB of mmapped files — fix: use MAP_POPULATE flag on mmap() which pre-populates PTEs in-kernel during mmap for hot (page-cache-resident) data, eliminating the separate parallel prefault phase entirely. (2) main_scan=27ms bottlenecked by 3 random cache misses per qualifying row (ps_index + ps_suppkey + ps_supplycost at 3 separate memory locations, totaling 112MB) — fix: built partsupp.pk_flat.dense_array storage extension that packs all 4 (suppkey,supplycost) pairs for each partkey into a contiguous 48-byte struct, reducing 3 random cache misses to 1 contiguous read. Additionally, use the existing orders.orderkey_year.direct_lookup extension to replace double-indirection through orders_orderkey_lookup (229MB) + o_orderdate (60MB) + year_from_days() with a single uint8_t lookup. Net working set reduction: 401MB removed (5 files eliminated), 156MB added (2 extensions) = 245MB less to page-fault. Combined effect: eliminate 23ms prefault overhead and reduce per-qualifying-row latency in main_scan by ~40%.",
+      "operation_timings": {
+        "prefault_pages": 4.42,
+        "load_nation": 0.01,
+        "filter_part": 6.6,
+        "main_scan": 23.51,
+        "output": 0.68,
+        "total": 35.98
+      }
+    }
+  ]
+}

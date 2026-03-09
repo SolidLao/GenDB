@@ -1,0 +1,110 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_orderkey.year_idx",
+      "action": "built_new",
+      "files": {
+        "year_idx": "column_versions/orders.o_orderkey.year_idx/year_idx.bin",
+        "year_idx_format": "int32_t max_okey (4-byte header) followed by uint8_t[max_okey+1]; value = (year-1992) for valid keys (0-6), 0xFF for unused"
+      },
+      "usage": "mmap year_idx.bin; read int32_t max_okey from first 4 bytes; okey_year_arr = (const uint8_t*)(mmap_ptr + 4); then year_idx = okey_year_arr[l_orderkey] (no hash probe, no JDN conversion needed). Replaces o_orderkey_hash entirely."
+    }
+  ],
+  "pipeline": [
+    "parallel_build_green_bitset",
+    "parallel_build_compact_ps_hash",
+    "load_nation_suppnat_arrays",
+    "mmap_okey_year_extension",
+    "scan_lineitem_parallel",
+    "merge_aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(p_name LIKE '%green%')",
+      "probe": "lineitem.l_partkey",
+      "type": "semi",
+      "strategy": "bloom_filter",
+      "build_cardinality": 110600,
+      "notes": "Parallel scan of p_name.bin (112MB, stride=56) across all threads, each thread handles its chunk. Build shared is_green[2000001] bool bitset (250KB, fits in L2). Rejects 94.5% of lineitem rows."
+    },
+    {
+      "build": "partsupp(filtered to green ps_partkey only)",
+      "probe": "lineitem.(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 440000,
+      "notes": "After is_green is built, scan raw partsupp columns in parallel (ps_partkey.bin 32MB + ps_suppkey.bin 32MB + ps_supplycost.bin 64MB = 128MB). Keep only rows where is_green[ps_partkey]. Build compact runtime hash: capacity 1048576 (2^20), key=int64((ps_partkey<<32)|ps_suppkey), value=double ps_supplycost. Size = 1M slots x 16 bytes = 16MB, fits entirely in L3 (44MB). Load factor ~44K/1M = 0.42. Replaces 201MB ps_composite_hash."
+    },
+    {
+      "build": "supplier(direct array suppkey->nationkey)",
+      "probe": "lineitem.l_suppkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Build uint8_t supp_nat[100001] from s_suppkey.bin + s_nationkey.bin. Direct indexed lookup, 100KB, L1 cache resident."
+    },
+    {
+      "build": "orders(year_idx extension)",
+      "probe": "lineitem.l_orderkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use okey_year_arr from storage extension. Direct uint8_t lookup, no hash probing, no JDN calculation. Max key 60M so array is 60MB but only ~825K distinct keys accessed by qualifying rows (35MB of unique cache lines, fits in 44MB L3 after warmup)."
+    },
+    {
+      "build": "nation(all)",
+      "probe": "supplier.s_nationkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "char nation_names[25][26] from n_name.bin, 650 bytes, L1 cache."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "strstr(p_name_buf + row*56, 'green') != nullptr",
+      "selectivity": 0.0553,
+      "output_cardinality": 110600
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",      "file": "lineitem/l_partkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey",      "file": "lineitem/l_suppkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey",     "file": "lineitem/l_orderkey.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice","file": "lineitem/l_extendedprice.bin","type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",     "file": "lineitem/l_discount.bin",     "type": "double",  "bytes_per_row": 8},
+      {"name": "l_quantity",     "file": "lineitem/l_quantity.bin",     "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "notes": "Only l_partkey is touched for 94.5% of rows (rejected by is_green filter). l_suppkey, l_orderkey, l_extprice, l_discount, l_quantity only accessed for qualifying ~5.5% of rows. Do NOT mmap_prefetch payload columns; rely on hardware prefetch and kernel readahead."
+  },
+  "data_structures": {
+    "part_filter": "uint8_t is_green[2000001] — 2MB bool array indexed by p_partkey, built by parallel p_name scan; shared read-only across threads",
+    "compact_ps_hash": "runtime flat hash: uint64_t keys[1048576] (sentinel=0xFFFFFFFFFFFFFFFF), double values[1048576]; key=(int64(ps_partkey)<<32|uint32(ps_suppkey)); 16MB total, L3-resident; built in parallel from raw partsupp columns after is_green is ready",
+    "supplier_lookup": "uint8_t supp_nat[100001] direct array indexed by s_suppkey, 100KB, L1-resident",
+    "orders_lookup": "uint8_t okey_year_arr[max_okey+1] from storage extension mmap; direct index by l_orderkey; 60MB but ~35MB unique cache lines accessed by qualifying rows (fits in 44MB L3)",
+    "nation_lookup": "char nation_names[25][26] from n_name.bin; 650 bytes, L1-resident",
+    "aggregation": "double thread_agg[25][7] per thread (1400 bytes, L1-resident); year_idx = okey_year_arr[l_orderkey]; nation_idx = supp_nat[l_suppkey]"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Phase 1 (setup): use nthreads for parallel p_name scan and parallel partsupp scan. Phase 2 (lineitem scan): morsel-driven over 60M rows. Thread-local agg[25][7] avoids synchronization. Reduce after all morsels complete."
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Iter 0 showed data_loading=182ms (of which main_scan=58ms), leaving 124ms of single-threaded setup and 58ms of parallel scan — both need improvement to reach the 38ms target. Root cause analysis: (1) Q2/physical mismatch — the ps_composite_hash (201MB) and o_orderkey_hash (268MB) both greatly exceed the 44MB L3, causing frequent LLC misses on every qualifying row probe; (2) Q1/logical mismatch — setup work (p_name scan, partsupp scan) runs single-threaded when it could use all 64 cores. Strategy is Category B (algorithm change) plus Category E (storage extension). For orders: built a uint8_t direct-indexed array (okey_year_arr[orderkey] = year_idx) stored as a column_version extension; this replaces the 268MB hash probe with a single direct array access, and the working set of distinct cache lines accessed by the ~825K qualifying orders is ~35MB — just under the 44MB L3. For partsupp: instead of probing the pre-built 201MB composite hash, we scan the raw partsupp columns in parallel (128MB sequential) and build a compact runtime hash of only the ~440K green qualifying entries (16MB — fully L3-resident). This shrinks the partsupp lookup working set from 201MB to 16MB. All setup phases (p_name scan + partsupp scan) are parallelized across all threads. The o_orderkey_hash and ps_composite_hash are no longer used.",
+  "correctness_anchors": {}
+}

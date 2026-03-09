@@ -1,0 +1,83 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer",
+    "filter_orders",
+    "join_customer_orders",
+    "join_orders_lineitem",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders(filtered: o_orderdate < 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 300276,
+      "notes": "Build hash/bitset on c_custkey from customer_mktsegment_hash matches; probe sequential orders scan pruned by orders_orderdate_zonemap."
+    },
+    {
+      "build": "orders_after_customer_date(project: o_orderkey,o_orderdate,o_shippriority)",
+      "probe": "lineitem(filtered: l_shipdate > 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1461923,
+      "notes": "Build compact hash table keyed by o_orderkey; probe sequential lineitem scan pruned by lineitem_shipdate_zonemap; aggregate revenue on match."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.200184
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.4859628
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.5390295
+    },
+    {
+      "table": "lineitem JOIN orders_after_customer_date",
+      "predicate": "l_orderkey = o_orderkey",
+      "selectivity": 0.00963
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "compact_hash_map(pre_sized: 2M, key=o_orderkey, payload=o_orderdate,o_shippriority)",
+    "aggregation": "compact_hash_map(pre_sized)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp"
+}

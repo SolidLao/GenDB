@@ -1,0 +1,134 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_dim",
+    "filter_orders",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment='BUILDING')",
+      "probe": "orders(filtered: o_orderdate < 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 330000,
+      "notes": "Use customer_mktsegment_hash to enumerate BUILDING customers and build c_custkey bitset; sequential zonemap-pruned orders scan marks qualifying orderkeys and stores o_orderdate/o_shippriority in dense arrays keyed by o_orderkey."
+    },
+    {
+      "build": "orders_after_customer_date(dense by o_orderkey)",
+      "probe": "lineitem(filtered: l_shipdate > 9204)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1461923,
+      "notes": "Sequential zonemap-pruned lineitem scan probes order_qual[o_orderkey] and accumulates revenue into orderkey-partitioned direct arrays with local run-combine to avoid per-row hash probes and global atomic hot spots."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "selectivity": 0.22
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 9204",
+      "selectivity": 0.489
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.535
+    }
+  ],
+  "scan": {
+    "table": "orders+lineitem",
+    "rows": 74986052,
+    "columns": [
+      {
+        "name": "o_orderkey",
+        "file": "orders/o_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_custkey",
+        "file": "orders/o_custkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_orderdate",
+        "file": "orders/o_orderdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "o_shippriority",
+        "file": "orders/o_shippriority.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(1500001)",
+    "fact_join": "flat_array",
+    "aggregation": "direct_array"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "customer_mktsegment_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_orderdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "revenue DESC",
+      "o_orderdate ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a physical hot-path mismatch (Category B) with wasted per-row synchronization work (Category C): the runtime orders hash map and atomic revenue updates create cache-miss and contention overhead that dominates build_joins. The revised plan keeps sequential scans and selective zonemap pruning, but replaces runtime hash structures with dense arrays keyed by o_orderkey (qualifier flag + order payload + direct revenue state), then uses partitioned direct aggregation with local run-combine over sorted lineitem orderkeys so qualifying work stays proportional and synchronization-heavy probes are removed.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,156 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "part.p_name.token_bitmap",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/part.p_name.token_bitmap/bitmaps.bin",
+        "codes_format": "uint64_t[unique_tokens * ceil((max_partkey + 1) / 64)]"
+      },
+      "usage": "mmap token_offsets.bin, token_data.bin, and bitmaps.bin; binary-search token dictionary for \"green\" and use the matching bitmap as the partkey membership filter instead of rescanning part/p_name varlen strings"
+    }
+  ],
+  "pipeline": [
+    "load_green_token_bitmap",
+    "build_green_partsupp_payload_from_postings",
+    "select_lineitem_rows",
+    "join_fact_order_partitioned",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "part.p_name.token_bitmap(token='green')",
+      "probe": "partsupp_part_postings",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 108782,
+      "notes": "Use the prebuilt token bitmap keyed by partkey to enumerate qualifying green parts without scanning part/p_name."
+    },
+    {
+      "build": "partsupp(filtered by green-part postings)",
+      "probe": "lineitem(filtered by green part bitmap)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 435128,
+      "notes": "Walk only posting slices for green partkeys, read ps_suppkey and ps_supplycost for those rowids in rowid order, and materialize a compact per-part payload keyed by direct partkey offset/count arrays."
+    },
+    {
+      "build": "supplier(pk dense) -> nation(row/code)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Keep supplier-to-nation as a dense array keyed by s_suppkey; map to a dense 25-row nation domain for array aggregation."
+    },
+    {
+      "build": "orders(sorted by o_orderkey)",
+      "probe": "lineitem(selected rows, sorted by l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Preserve orderkey-aligned partitions so each thread advances one sequential orders cursor across its selected lineitem rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name token bitmap contains 'green'",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "partsupp",
+      "predicate": "ps_partkey IN green_part_bitmap",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_partkey IN green_part_bitmap",
+      "selectivity": 0.054386796769068234
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_partkey",
+        "file": "lineitem/l_partkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_suppkey",
+        "file": "lineitem/l_suppkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_orderkey",
+        "file": "lineitem/l_orderkey.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "token_bitmap(partkey domain) + direct_array(partkey_to_payload_offset) + direct_array(partkey_to_payload_count)",
+    "fact_join": "compact_payload(sorted (suppkey,supplycost_cents) pairs for green parts) + direct_array(supplier_to_nation_row) + selection_vector(rowids)",
+    "aggregation": "direct_array(25 x 7 year buckets)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_part_postings",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "partition_boundary_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the remaining gap is now dominated by a storage-level mismatch on part.p_name, which still forces a 2M-row varlen substring scan every run, plus unnecessary build work from rescanning all 8M partsupp rows to rebuild a lookup for only 5.4% green parts. Strategy category E/B/C: build a reusable token-bitmap extension for part.p_name so the green predicate becomes one bitmap lookup, use partsupp_part_postings to gather only green (partkey,suppkey)->supplycost pairs into a compact cache-resident payload, and run the fact phase with lineitem late materialization and orderkey-aligned partitions so only qualifying rows touch wide columns and aggregation stays in a tiny direct array.",
+  "correctness_anchors": {
+    "revenue_formula": "extprice_cents * (100 - discount_pct)"
+  }
+}

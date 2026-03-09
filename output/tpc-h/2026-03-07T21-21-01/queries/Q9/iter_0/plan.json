@@ -1,0 +1,94 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "scan_part_build_green_filter",
+    "scan_lineitem_probe_green_parts",
+    "lookup_supplier_and_nation",
+    "lookup_orders_year",
+    "probe_partsupp_postings",
+    "aggregate_profit",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 108782,
+      "notes": "Build a boolean filter on p_partkey; sampled lineitem selectivity 0.054387."
+    },
+    {
+      "build": "supplier(pk dense) -> nation(pk dense)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Dense PK lookup on s_suppkey followed by dense nation lookup on s_nationkey."
+    },
+    {
+      "build": "orders(pk dense)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Dense PK lookup on o_orderkey, then derive o_year from o_orderdate."
+    },
+    {
+      "build": "partsupp(postings on ps_partkey)",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 435128,
+      "notes": "Use ps_partkey posting slice and check ps_suppkey == l_suppkey; sampled fanout 4.0 postings with exact-match rate 1.0."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.054391
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_partkey IN green_part_filter",
+      "selectivity": 0.054386796769068234
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(2000001)",
+    "fact_join": "pre_built_index(dense_pk_arrays + partsupp_part_postings)",
+    "aggregation": "compact_hash_map(pre_sized_256)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "supplier_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "nation_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "orders_pk_dense",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "partsupp_part_postings",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "nation ASC",
+      "o_year DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

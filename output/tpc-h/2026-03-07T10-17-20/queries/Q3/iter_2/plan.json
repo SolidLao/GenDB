@@ -1,0 +1,100 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "dim_filter",
+    "parallel_collect_and_partition_orders",
+    "parallel_insert_combined_map",
+    "parallel_scan_lineitem_aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(filtered: c_mktsegment == 1)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "notes": "bool qualifying_cust[1500001] indexed by c_custkey (1-based [1..1500000]); ~1.5MB; L3-resident. Single-threaded build over 1.5M rows."
+    },
+    {
+      "build": "orders(filtered: o_orderdate < 8015 AND o_custkey in qualifying_cust)",
+      "probe": "lineitem(filtered: l_shipdate > 8015)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1470000,
+      "notes": "Combined orders+aggregation map: 2M slots x 16 bytes = 32MB, partitioned into 64 sub-maps of capacity 32768 each (512KB per sub-map). Partition index = hash32(okey) & 63; within-partition start slot = (hash32(okey) >> 6) & 32767. Using different bit ranges prevents clustering. Serves dual purpose: join filter AND revenue accumulator. Eliminates the separate aggregation merge phase entirely."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == 1",
+      "selectivity": 0.20,
+      "output_cardinality": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate < 8015",
+      "selectivity": 0.49,
+      "output_cardinality": 7350000,
+      "index": "o_orderdate_zone_map",
+      "index_note": "break loop early when zone_min[b] >= 8015 (orders sorted ascending by o_orderdate; all subsequent blocks also fail)"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 8015",
+      "selectivity": 0.51,
+      "output_cardinality": 30593000,
+      "index": "l_shipdate_zone_map",
+      "index_note": "skip leading blocks where zone_max[b] <= 8015; omit per-row shipdate check for blocks where zone_min[b] > 8015 (entire block passes)"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "prefetch": "mmap_prefetch_all on all four lineitem columns at startup (HDD readahead)"
+  },
+  "data_structures": {
+    "customer_filter": "bool qualifying_cust[1500001] indexed directly by c_custkey value; ~1.5MB; L3-resident; single-threaded build",
+    "mini_bufs": "2D layout of OrdRow vectors — std::vector<OrdRow> mini_bufs[MAXTHREADS * 64] (or equivalent 2D structure), where OrdRow = {int32_t okey, int16_t odate, int8_t spri, uint8_t _pad} = 8 bytes. During parallel_collect phase, thread tid pushes qualifying orders to mini_bufs[tid * 64 + part] where part = hash32(okey) & 63. Each per-thread partition sub-buffer averages ~360 entries. No inter-thread writes during this phase.",
+    "combined_map": "Single flat array of 2,097,152 (2^21) CombinedSlot entries = 32MB total. CombinedSlot layout: {int32_t key (sentinel = INT32_MIN = 0x80000000), int16_t orderdate, int8_t shippriority, uint8_t _pad, double revenue} = 16 bytes. alignas(16) on CombinedSlot. Logically partitioned into 64 sub-maps: partition i occupies combined_map[i*32768 .. (i+1)*32768-1]. Partition index = hash32(key) & 63; within-partition linear-probe start = (hash32(key) >> 6) & 32767; mask = 32767. Serves as both the orders join filter AND the aggregation accumulator. At 32MB it fits entirely in the 44MB L3, making probes and atomic updates L3-latency (~10-30ns) rather than RAM-latency (~100ns)."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_1_dim_filter": "single-threaded; scan 1.5M customer rows; ~6ms",
+    "phase_2a_parallel_collect": "64 threads, morsel-driven over orders blocks. Apply zone-map: break when zone_min[b] >= kOrderDateMax (orders sorted ascending). For each qualifying row (o_orderdate < 8015 AND qualifying_cust[o_custkey]): compute part = hash32(o_orderkey) & 63; push OrdRow{okey, (int16_t)odate, (int8_t)spri} to mini_bufs[tid*64 + part]. No shared writes. Expected ~6ms.",
+    "phase_2b_parallel_insert": "64 threads, thread i exclusively owns partition i of combined_map. Steps: (1) zero-initialize partition i: memset INT32_MIN pattern over 32768 slots × 16 bytes = 512KB — NOTE: INT32_MIN = 0x80000000, so use a fill loop setting key field to INT32_MIN rather than memset 0xFF; (2) iterate mini_bufs[0*64+i], mini_bufs[1*64+i], ..., mini_bufs[(nthreads-1)*64+i]; for each OrdRow: find slot with within-partition linear probe using start = (hash32(okey) >> 6) & 32767 and mask 32767; write orderdate, shippriority, revenue=0.0, then store key LAST using __atomic_store_n(..., __ATOMIC_RELEASE) so probe-side ACQUIRE loads see fully initialized slot. Zero inter-thread contention — each thread writes only its partition. Expected ~0.5ms total.",
+    "phase_3_main_scan": "64 threads, morsel-driven over lineitem blocks. Zone-map: skip blocks where zone_max[b] <= kShipdateMin; omit per-row check where zone_min[b] > kShipdateMin. For each qualifying row: (a) compute part = hash32(l_orderkey) & 63, start = (hash32(l_orderkey) >> 6) & 32767; (b) probe combined_map partition using ACQUIRE load on key field for slot visibility; (c) if key matches l_orderkey: compute revenue = l_extendedprice * (1.0 - l_discount); atomic-add to slot->revenue via CAS loop: union {double d; uint64_t u} old_u, new_u; do { old_u.d = slot->revenue (relaxed load); new_u.d = old_u.d + revenue; } while (!__atomic_compare_exchange_n((uint64_t*)&slot->revenue, &old_u.u, new_u.u, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)); No per-thread aggregation maps. No merge phase. Combined_map (32MB) is L3-resident; CAS operates at L3 latency. Expected ~20ms.",
+    "phase_4_output": "single-threaded sequential scan of all 2M slots in combined_map; collect entries where key != INT32_MIN into result vector; std::partial_sort top-10 by (revenue DESC, orderdate ASC). Expected ~3ms."
+  },
+  "indexes": [
+    {
+      "index": "o_orderdate_zone_map",
+      "purpose": "skip_blocks — break early when zone_min[b] >= kOrderDateMax (sorted ascending)"
+    },
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip leading blocks where zone_max[b] <= kShipdateMin; omit per-row shipdate check where zone_min[b] > kShipdateMin"
+    }
+  ],
+  "aggregation": "direct in-place accumulation into combined_map — key = l_orderkey (int32, uniquely identifies the group since each order has exactly one o_orderdate and one o_shippriority); revenue accumulated atomically via CAS loop; no separate aggregation data structure; no merge phase",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "sequential scan of 2M combined_map slots, collect non-empty into std::vector<ResultRow>, std::partial_sort top-10"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Iter 1's catastrophic regression (290ms) was caused by the parallel CAS merge phase: 64 threads atomically updating a shared 4M-slot × 24-byte = ~100MB global agg map that vastly exceeded the 44MB L3 cache, so every atomic CAS incurred ~100ns RAM latency plus coherency-storm overhead across 64 cores — accounting for the ~218ms gap between summed phase times (85ms) and total (303ms) (Category B root cause). The fix eliminates the merge phase entirely by consolidating the orders join filter and aggregation accumulator into a single combined_map of 2M slots × 16 bytes = 32MB, which fits in the 44MB L3 cache; during the parallel lineitem scan each thread probes the combined_map and atomically accumulates revenue in-place via a CAS loop (union double/uint64_t), with CAS latency at L3 speed (~15-30ns) rather than RAM speed (~100ns), and contention per key is negligible given 3M hits spread over 1.47M distinct slots across 64 threads (Category B fix). Additionally, the 22ms serial orders insert bottleneck is eliminated by a partition-scatter parallel insert: during the parallel orders collect phase each thread scatters qualifying OrdRow entries to per-thread per-partition mini-buffers using hash32(okey) & 63 as the partition index, then all 64 threads simultaneously insert into their exclusively-owned 512KB partition of combined_map with no contention, reducing the serial 22ms insert to ~0.5ms parallel (Category A fix). Partition uses bits 0-5 of hash32(key) and within-partition linear-probe start uses bits 6-20 (>> 6 shift), ensuring independent bit ranges and uniform slot distribution within each partition.",
+  "correctness_anchors": {
+    "date_literal": "1995-03-15",
+    "revenue_formula": "l_extendedprice*(1-l_discount)"
+  }
+}

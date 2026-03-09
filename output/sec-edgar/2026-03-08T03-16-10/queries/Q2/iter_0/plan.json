@@ -1,0 +1,72 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "build_fy2022_adsh_filter",
+    "scan_num_filter_and_aggregate_max",
+    "rescan_num_probe_max_and_fetch_name",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy=2022 projected adsh,name)",
+      "probe": "num(uom='pure')",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 27333
+    },
+    {
+      "build": "max_by_adsh_tag(filtered num grouped by adsh,tag)",
+      "probe": "num(uom='pure' semi_joined_with_sub)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 3362
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.03464058370386034
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173204858652116
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN sub(fy=2022)",
+      "selectivity": 0.11368085574034728
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(86135) + direct_array(name_id_by_adsh)",
+    "fact_join": "compact_hash_map(pre_sized=4096, key=(adsh,tag), value=max_value)",
+    "aggregation": "compact_hash_map(thread_local_then_merge, key=(adsh,tag), value=max(value))"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(64)"
+  },
+  "indexes": [
+    {
+      "index": "sub/indexes/adsh_to_rowid.bin",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "value DESC",
+      "name ASC",
+      "tag ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

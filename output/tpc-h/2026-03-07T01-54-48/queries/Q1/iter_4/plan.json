@@ -1,0 +1,143 @@
+{
+  "query_id": "Q1",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_quantity.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_quantity*100)"
+      },
+      "usage": "mmap codes.bin; use quantity_scaled[row] for SUM(l_quantity) and AVG(l_quantity) accumulation"
+    },
+    {
+      "id": "lineitem.l_discount.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_discount*100)"
+      },
+      "usage": "mmap codes.bin; use discount_scaled[row] for (100-discount) arithmetic and AVG(l_discount) accumulation"
+    },
+    {
+      "id": "lineitem.l_extendedprice.int32_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_extendedprice.int32_scaled_by_100/codes.bin",
+        "codes_format": "uint32_t[row_count], value=round(l_extendedprice*100)"
+      },
+      "usage": "mmap codes.bin; use extendedprice_scaled[row] for SUM(base), SUM(disc_price), SUM(charge), AVG(base)"
+    },
+    {
+      "id": "lineitem.l_tax.int16_scaled_by_100",
+      "action": "use_existing",
+      "files": {
+        "codes": "column_versions/lineitem.l_tax.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count], value=round(l_tax*100)"
+      },
+      "usage": "mmap codes.bin; use tax_scaled[row] for SUM(charge) arithmetic"
+    },
+    {
+      "id": "lineitem.l_shipdate.postings_by_day",
+      "action": "use_existing",
+      "files": {
+        "row_ids": "column_versions/lineitem.l_shipdate.postings_by_day/row_ids.bin",
+        "row_ids_format": "uint32_t[row_count] grouped by shipdate day",
+        "offsets": "column_versions/lineitem.l_shipdate.postings_by_day/offsets.bin",
+        "offsets_format": "int32_t min_day, int32_t max_day, uint64_t offsets[(max_day-min_day)+2]"
+      },
+      "usage": "mmap postings; build reject_mask bitset by marking row_ids for shipdate days > 10471, then run one sequential scan over measure/group columns and skip rows where reject_mask[row]=1"
+    }
+  ],
+  "pipeline": [
+    "filter_dim",
+    "join_fact",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.988
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_quantity_scaled",
+        "file": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_extendedprice_scaled",
+        "file": "column_versions/lineitem.l_extendedprice.int32_scaled_by_100/codes.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount_scaled",
+        "file": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_tax_scaled",
+        "file": "column_versions/lineitem.l_tax.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(row_count) reject_mask built from postings_by_day rows where shipdate > 10471",
+    "fact_join": "none",
+    "aggregation": "direct_array(thread_local)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(min(nproc,32))"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_postings_by_day",
+      "purpose": "skip_rows"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": 10
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is Category C work inflation in predicate evaluation: with selectivity 0.988, per-row shipdate loads/branches consume bandwidth and cycles while only ~1.2% rows are rejected. The plan switches filter evaluation to existing shipdate postings-by-day by constructing a compact reject bitset for days above cutoff, removes l_shipdate from the main scan, and keeps a single sequential integer-scaled aggregation pass over the six required columns with direct-array thread-local state and finalize-time scaling to preserve output semantics.",
+  "correctness_anchors": {
+    "shipdate_cutoff_days_since_epoch": 10471,
+    "shipdate_predicate": "l_shipdate <= 10471",
+    "avg_qty_formula": "sum_qty / count_order",
+    "avg_price_formula": "sum_base_price / count_order",
+    "avg_disc_formula": "sum_disc / count_order",
+    "group_by": "(l_returnflag, l_linestatus)",
+    "order_by": "l_returnflag ASC, l_linestatus ASC"
+  }
+}

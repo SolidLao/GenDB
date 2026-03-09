@@ -1,0 +1,84 @@
+{
+  "query_id": "Q9",
+  "pipeline": ["mmap_all_files", "parallel_prefault_pages", "load_nation_supplier", "parallel_filter_part", "parallel_scan_lineitem_join_aggregate"],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 109600,
+      "probe_cardinality": 59986052,
+      "surviving_rows": 3287000,
+      "notes": "Bitset indexed by partkey-1 (0-based), partkeys contiguous 1..n_parts."
+    },
+    {
+      "build": "partsupp",
+      "probe": "lineitem(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Use partsupp_pk_index dense_range, scan ~4 entries per partkey to match suppkey."
+    },
+    {
+      "build": "orders",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use orders_orderkey_lookup dense index -> o_orderdate -> extract year. DO NOT call advise_random() on o_orderdate — access IS sequential because lineitem is sorted by l_orderkey, so keep the default MADV_SEQUENTIAL from MmapColumn constructor."
+    },
+    {
+      "build": "supplier + nation",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "s_nationkey[suppkey - 1] gives nationkey directly (suppkey is 1-based contiguous)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0548,
+      "method": "memmem on varlen_string offsets_plus_data, PARALLEL with OpenMP schedule(static)"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey", "file": "lineitem/l_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "nation_names": "std::string[25] indexed by n_nationkey",
+    "supplier_nationkey": "Direct access: s_nationkey[suppkey - 1] gives nationkey. No separate array needed.",
+    "part_filter": "bitset using uint64_t[(n_parts/64)+1], partkeys contiguous 1..n_parts",
+    "partsupp_index": "dense_range index from partsupp_pk_index.bin",
+    "aggregation": "thread-local double[25][8] direct 2D array (nation x year_offset), year_offset = year - 1992"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "CRITICAL OPTIMIZATIONS: (1) Mmap ALL files at program start BEFORE any computation phase — do not interleave mmap calls with computation. (2) After all mmaps, add a PARALLEL PAGE PRE-FAULT phase: use #pragma omp parallel for schedule(static) to touch every 4096th byte of all large mmapped files (lineitem 6 cols, partsupp 2 cols, orders_orderkey_lookup, o_orderdate, ps_index). This pre-populates page table entries in ~2ms with 64 cores instead of ~50ms of serial minor faults during computation. Implementation: collect all (base_ptr, file_size) pairs into an array, compute prefix sums of page counts, then parallel-for over total pages with each iteration touching ranges[r].base[local_page * 4096]. (3) Use schedule(static) for BOTH filter_part and main_scan — no dynamic scheduling. (4) DO NOT call advise_random() on o_orderdate or orders_orderkey_lookup — lineitem is sorted by l_orderkey so these accesses are sequential, keep MADV_SEQUENTIAL. (5) DO NOT call advise_sequential() on lineitem columns — constructor already sets it. (6) DO call advise_random() on ps_suppkey and ps_supplycost only — these are truly random access. (7) DO NOT allocate large heap arrays (no std::vector for pre-built lookup tables) — iter_2 regressed because 156MB of anonymous heap zero-fill caused ~120ms of page faults. Keep the same direct index-based lookups as iter_1."
+  },
+  "indexes": [
+    {"index": "partsupp_pk_index", "file": "indexes/partsupp_pk_index.bin", "purpose": "partsupp lookup by l_partkey, scan ~4 entries for matching l_suppkey"},
+    {"index": "orders_orderkey_lookup", "file": "indexes/orders_orderkey_lookup.bin", "purpose": "o_orderkey -> row_index -> o_orderdate -> extract year. Access is SEQUENTIAL (not random) because lineitem is sorted by l_orderkey."}
+  ],
+  "aggregation": "array_direct",
+  "output": {"order_by": ["nation ASC", "o_year DESC"], "limit": null},
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category C (work elimination) + D (parallelism). 52ms (53% of total) is spent between phases on serial minor page faults when first accessing ~2.5GB of mmapped column files (640K pages x 200ns each). Fix: (1) mmap ALL files at program start, then parallel pre-fault all pages using OpenMP with 64 cores — reduces 52ms serial faults to ~2ms parallel. (2) Remove advise_random() on o_orderdate — lineitem is sorted by l_orderkey so orders access is sequential, MADV_SEQUENTIAL enables kernel prefetching and eliminates ~3.3M cache misses. (3) Use schedule(static) for both filter_part and main_scan to eliminate OpenMP dynamic scheduling overhead. (4) Do NOT add large heap allocations — iter_2 regressed from 104ms to 207ms because 156MB of std::vector zero-fill triggered ~120ms of anonymous page faults. Keep iter_1's proven algorithm (bitset filter + direct index lookups) but with pre-faulted pages and correct madvise settings.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice * (1 - l_discount)"
+  }
+}

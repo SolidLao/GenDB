@@ -1,0 +1,135 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_dict_uom",
+    "load_sub_arrays",
+    "pass1_scan_aggregate_cik",
+    "compute_avg_threshold",
+    "pass2_scan_aggregate_adsh",
+    "having_filter",
+    "decode_names",
+    "topk_sort"
+  ],
+  "passes": [
+    {
+      "id": "pass1",
+      "description": "HAVING subquery: SUM(value) per cik, compute AVG as threshold",
+      "scan": {
+        "table": "num",
+        "columns": ["uom_code", "adsh_code", "value"],
+        "block_size": 100000,
+        "total_blocks": 395,
+        "zone_map_filter": "skip block if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code"
+      },
+      "row_filter": [
+        "uom_code == usd_code",
+        "sub_fy[adsh_code] == 2022"
+      ],
+      "input_cardinality": 39401761,
+      "post_filter_cardinality": 6860000,
+      "aggregation": {
+        "key": "sub_cik[adsh_code]",
+        "key_type": "int32_t",
+        "accumulator": "double sum",
+        "output": "cik_sum map + scalar total_sum + scalar group_count"
+      },
+      "output": "avg_threshold = total_sum / group_count (scalar double)"
+    },
+    {
+      "id": "pass2",
+      "description": "Main query: SUM(value) per adsh_code (uniquely determines name+cik)",
+      "scan": {
+        "table": "num",
+        "columns": ["uom_code", "adsh_code", "value"],
+        "block_size": 100000,
+        "total_blocks": 395,
+        "zone_map_filter": "skip block if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code"
+      },
+      "row_filter": [
+        "uom_code == usd_code",
+        "sub_fy[adsh_code] == 2022"
+      ],
+      "input_cardinality": 39401761,
+      "post_filter_cardinality": 6860000,
+      "aggregation": {
+        "key": "adsh_code",
+        "key_type": "int32_t",
+        "accumulator": "double sum",
+        "estimated_groups": 17000
+      }
+    }
+  ],
+  "join_order": [
+    {
+      "build": "sub_fy (flat array, 86135 × int16_t)",
+      "probe": "num.adsh_code",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code IS the sub row index; O(1) array lookup sub_fy[adsh_code] == 2022. No hash join needed."
+    },
+    {
+      "build": "sub_cik (flat array, 86135 × int32_t)",
+      "probe": "num.adsh_code",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "O(1) lookup sub_cik[adsh_code] for pass1 group key."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.87,
+      "notes": "usd_code loaded from indexes/uom_codes.bin at startup"
+    },
+    {
+      "table": "sub",
+      "predicate": "sub_fy[adsh_code] == 2022",
+      "selectivity": 0.20,
+      "notes": "sub_fy flat array (172KB) fits in L1 cache; array lookup per num row"
+    }
+  ],
+  "data_structures": {
+    "sub_fy_array": "flat_array(int16_t[86135]) — loaded once, reused both passes",
+    "sub_cik_array": "flat_array(int32_t[86135]) — loaded once, reused both passes",
+    "sub_name_offsets": "flat_array(uint32_t[86136]) — loaded once, decoded at output",
+    "sub_name_data": "char[] — loaded once, indexed via name_offsets at output",
+    "pass1_cik_sum": "compact_hash_map<int32_t, double>(pre_sized 17000) — thread-local, merged",
+    "pass2_adsh_sum": "compact_hash_map<int32_t, double>(pre_sized 17000) — thread-local, merged"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Both passes use block-level morsels (395 blocks each). Each thread owns a thread-local hash map; maps are merged after scan. Zone map check is single-threaded pre-scan to build skip-list."
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks",
+      "predicate": "min_uom > usd_code || max_uom < usd_code",
+      "notes": "Applied identically in both passes; precompute block skip-list once and reuse"
+    },
+    {
+      "index": "uom_codes",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "dict_lookup",
+      "notes": "Load at startup to resolve usd_code (int8_t)"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "having": {
+    "predicate": "adsh_sum[a] > avg_threshold",
+    "threshold_source": "pass1 scalar output",
+    "estimated_survivors": 500
+  },
+  "output": {
+    "decode_step": "for each surviving adsh_code: name = name_data[name_offsets[a]..name_offsets[a+1]], cik = sub_cik[a]",
+    "order_by": ["total_value DESC"],
+    "limit": 100,
+    "sort_strategy": "partial_sort (nth_element + sort on ~500 survivors)"
+  },
+  "execution_target": "cpp"
+}

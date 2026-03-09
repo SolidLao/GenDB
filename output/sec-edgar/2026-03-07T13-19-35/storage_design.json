@@ -1,0 +1,131 @@
+{
+  "persistent_storage": {
+    "format": "binary_columnar",
+    "base_dir_name": "gendb"
+  },
+  "tables": {
+    "sub": {
+      "estimated_rows": "86135",
+      "sort_order": ["adsh"],
+      "block_size": 100000,
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"] },
+      "columns": [
+        {"name": "adsh",      "cpp_type": "char[20]", "semantic_type": "string_fixed", "encoding": "fixed-width 20-char padded, row_i = adsh_code_i (dict key)", "role": "PK/join-key"},
+        {"name": "cik",       "cpp_type": "int32_t",  "semantic_type": "integer",      "encoding": "raw int32_t", "role": "GROUP BY (Q3)"},
+        {"name": "name",      "cpp_type": "varlen",   "semantic_type": "string",       "encoding": "offset+data (uint32_t offsets + char data)", "role": "SELECT/GROUP BY (Q2,Q3,Q6)"},
+        {"name": "sic",       "cpp_type": "int16_t",  "semantic_type": "integer",      "encoding": "raw int16_t (range 0-8900)", "role": "SELECT/GROUP BY/filter (Q4)"},
+        {"name": "fy",        "cpp_type": "int16_t",  "semantic_type": "integer",      "encoding": "raw int16_t (range 2021-2024)", "role": "filter (Q2,Q3,Q6)"},
+        {"name": "form",      "cpp_type": "int8_t",   "semantic_type": "dict_code",    "encoding": "dict-encoded: 10-K=0,10-Q=1,...", "role": "payload"},
+        {"name": "period",    "cpp_type": "int32_t",  "semantic_type": "integer",      "encoding": "raw int32_t YYYYMMDD", "role": "payload"},
+        {"name": "filed",     "cpp_type": "int32_t",  "semantic_type": "integer",      "encoding": "raw int32_t YYYYMMDD", "role": "payload"}
+      ],
+      "indexes": [
+        {"name": "adsh_dict", "type": "sorted_array", "columns": ["adsh"],
+         "file": "indexes/adsh_dict.bin",
+         "layout": "uint32_t N, then N entries of {char[20] adsh, int32_t code} sorted by adsh",
+         "usage": "query startup: translate adsh string filter → int32_t code; O(log N) binary search"}
+      ]
+    },
+    "num": {
+      "estimated_rows": "39401761",
+      "sort_order": ["uom_code", "ddate"],
+      "block_size": 100000,
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"] },
+      "columns": [
+        {"name": "adsh_code",   "cpp_type": "int32_t", "semantic_type": "dict_code", "encoding": "adsh dict index (0..86134); direct array index into sub columns", "role": "join (Q2,Q3,Q4,Q6,Q24)"},
+        {"name": "tagver_code", "cpp_type": "int32_t", "semantic_type": "dict_code", "encoding": "tag table row index (0..1070661); enables O(1) join to tag and pre", "role": "join (Q4,Q6,Q24)"},
+        {"name": "ddate",       "cpp_type": "int32_t", "semantic_type": "integer",   "encoding": "raw YYYYMMDD integer (range 19320731..20231031)", "role": "filter (Q24)"},
+        {"name": "qtrs",        "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (values: 0,1,2,4,8)", "role": "payload"},
+        {"name": "uom_code",    "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "uom dict index (0..29); USD=code loaded from uom_codes.bin at query startup", "role": "filter (Q2,Q3,Q4,Q6,Q24)"},
+        {"name": "value",       "cpp_type": "double",  "semantic_type": "decimal",   "encoding": "raw IEEE 754 double, NaN for NULL", "role": "aggregate (Q2,Q3,Q4,Q6,Q24)"}
+      ],
+      "indexes": [
+        {"name": "num_zone_maps", "type": "zone_map", "columns": ["uom_code","ddate"],
+         "file": "indexes/num_zone_maps.bin",
+         "layout": "uint32_t N_blocks; then N_blocks × {int8_t min_uom, int8_t max_uom, int32_t min_ddate, int32_t max_ddate} (10 bytes each)",
+         "usage": "Q2: skip blocks where [min_uom,max_uom] excludes pure_code; Q24: skip blocks where [min_uom,max_uom] excludes usd_code OR [min_ddate,max_ddate] excludes [20230101,20231231]"},
+        {"name": "uom_codes", "type": "dict_file", "columns": ["uom_code"],
+         "file": "indexes/uom_codes.bin",
+         "layout": "uint8_t N_uom; then N_uom × {int8_t code, char[24] uom_string}",
+         "usage": "query startup: load 'USD','pure','shares' → int8_t code; used in zone map and row-level filter"}
+      ]
+    },
+    "tag": {
+      "estimated_rows": "1070662",
+      "sort_order": ["tagver_code"],
+      "block_size": 100000,
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"] },
+      "columns": [
+        {"name": "tag_str",       "cpp_type": "varlen",  "semantic_type": "string",    "encoding": "offset+data; row i = tag string for tagver_code i", "role": "SELECT/GROUP BY (Q2,Q24)"},
+        {"name": "version_str",   "cpp_type": "varlen",  "semantic_type": "string",    "encoding": "offset+data; row i = version string for tagver_code i", "role": "GROUP BY (Q24)"},
+        {"name": "abstract",      "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (0=concrete, 1=abstract)", "role": "filter (Q4)"},
+        {"name": "custom",        "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (0=standard, 1=custom)", "role": "payload"},
+        {"name": "datatype_code", "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "dict-encoded: monetary=0, shares=1, ...", "role": "payload"},
+        {"name": "iord",          "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "I=0, D=1", "role": "payload"},
+        {"name": "crdr",          "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "C=0, D=1, empty=2", "role": "payload"},
+        {"name": "tlabel",        "cpp_type": "varlen",  "semantic_type": "string",    "encoding": "offset+data; tag human-readable label", "role": "SELECT/GROUP BY (Q4)"}
+      ],
+      "indexes": [
+        {"name": "tagver_dict", "type": "sorted_array", "columns": ["tag","version"],
+         "file": "indexes/tagver_dict.bin",
+         "layout": "uint32_t N; then N entries of {int32_t code, uint16_t tag_len, uint16_t ver_len, char tag_bytes[], char ver_bytes[]} sorted by (tag,version)",
+         "usage": "ingest-time only: translate (tag_str,ver_str) → tagver_code for num/pre; not needed at query time since no tag/version filter in workload"}
+      ]
+    },
+    "pre": {
+      "estimated_rows": "9600799",
+      "sort_order": ["adsh_code", "tagver_code"],
+      "block_size": 100000,
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"] },
+      "columns": [
+        {"name": "adsh_code",   "cpp_type": "int32_t", "semantic_type": "dict_code", "encoding": "adsh dict index", "role": "join (Q1→via scan, Q4,Q6,Q24)"},
+        {"name": "tagver_code", "cpp_type": "int32_t", "semantic_type": "dict_code", "encoding": "tag table row index", "role": "join (Q4,Q6,Q24)"},
+        {"name": "stmt_code",   "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "BS=0,CF=1,CI=2,EQ=3,IS=4,HP=5,... (sorted alpha)", "role": "SELECT/GROUP BY/filter (Q1,Q4,Q6)"},
+        {"name": "rfile_code",  "cpp_type": "int8_t",  "semantic_type": "dict_code", "encoding": "H=0,R=1 (100% H in this dataset)", "role": "SELECT (Q1)"},
+        {"name": "report",      "cpp_type": "int16_t", "semantic_type": "integer",   "encoding": "raw int16_t", "role": "payload"},
+        {"name": "line",        "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (range 1-115)", "role": "aggregate AVG (Q1)"},
+        {"name": "inpth",       "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (0 or 1)", "role": "payload"},
+        {"name": "negating",    "cpp_type": "int8_t",  "semantic_type": "integer",   "encoding": "raw int8_t (0 or 1)", "role": "payload"},
+        {"name": "plabel",      "cpp_type": "varlen",  "semantic_type": "string",    "encoding": "offset+data; presentation label", "role": "SELECT/GROUP BY (Q6)"}
+      ],
+      "indexes": [
+        {"name": "pre_adsh_tagver_set", "type": "sorted_array", "columns": ["adsh_code","tagver_code"],
+         "file": "indexes/pre_adsh_tagver_set.bin",
+         "layout": "uint64_t N_unique; then N_unique uint64_t keys = ((uint64_t)adsh_code<<32)|tagver_code, sorted ascending",
+         "usage": "Q24 anti-join: load into unordered_set<uint64_t>; for each num row check membership; Q4/Q6: scan pre.stmt_code, collect matching adsh_code+tagver_code, build hash map, probe with num rows"},
+        {"name": "stmt_codes", "type": "dict_file", "columns": ["stmt_code"],
+         "file": "indexes/stmt_codes.bin",
+         "layout": "uint8_t N_stmt; then N_stmt × {int8_t code, char[4] stmt_string}",
+         "usage": "query startup: load 'EQ','IS','BS','CF' → int8_t code for filter comparison"}
+      ]
+    }
+  },
+  "type_mappings": {
+    "INTEGER": "int32_t",
+    "SMALLINT": "int16_t",
+    "TINYINT": "int8_t",
+    "DECIMAL": "double",
+    "DATE_YYYYMMDD": "int32_t",
+    "VARCHAR_SHORT": "int8_t (dict code)",
+    "VARCHAR_MEDIUM": "int32_t (dict code or varlen)",
+    "TEXT": "varlen (uint32_t offsets + char data)"
+  },
+  "date_encoding": "YYYYMMDD_as_int32 (no epoch conversion; range predicates work directly on integer comparison)",
+  "varlen_string_format": "uint32_t offsets[N+1] in <col>_offsets.bin; char data[] in <col>_data.bin; string_i = data[offsets[i]..offsets[i+1]]",
+  "hardware_config": {
+    "cpu_cores": "64",
+    "l3_cache_mb": "44",
+    "disk_type": "hdd",
+    "total_memory_gb": "376",
+    "avx512": true,
+    "notes": "HDD I/O is bottleneck for large files; parallel table parsing limited to independent tables; in-memory sort safe for 39M rows (945MB); 376GB RAM allows full dataset in memory during ingest"
+  },
+  "encoding_rationale": {
+    "adsh_code": "86135 unique adsh strings; dict-encoded to int32_t enables O(1) sub lookup (sub row_i = adsh_code_i) and compact join keys; saves ~16 bytes/row in num (39M rows = 629MB savings)",
+    "tagver_code": "1.07M unique (tag,version) pairs; single int32_t encodes composite FK; enables direct tag-table row access without hash lookup at query time; saves ~276 bytes/row in num and pre",
+    "uom_code": "30 distinct values; int8_t vs 20-byte string saves 19 bytes/row × 39M = 741MB; zone maps on sorted-by-uom num enable block skipping for pure/USD filters",
+    "stmt_code": "7 distinct values; int8_t filter in Q1,Q4,Q6; sequential scan of stmt_code.bin (9.6MB) is fast even on HDD",
+    "sort_num_by_uom_ddate": "Groups all USD rows (87%) in first 34M rows; pure rows (0.24%) in ~95K contiguous rows; zone maps skip 99.76% of blocks for Q2 pure filter; combined uom+ddate zone maps skip non-2023 USD blocks for Q24",
+    "sort_pre_by_adsh_tagver": "Enables O(N log N) construction of pre hash set; sequential read for building join structures; pre_adsh_tagver_set.bin built once, used by Q4/Q6/Q24 for anti-join and hash join setup"
+  }
+}

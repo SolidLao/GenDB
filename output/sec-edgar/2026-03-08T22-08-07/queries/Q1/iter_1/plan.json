@@ -1,0 +1,69 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "scan_pre",
+    "reduce_thread_local_states",
+    "count_distinct_from_adsh_masks",
+    "final_sort",
+    "decode_output"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns": [
+      {
+        "name": "stmt",
+        "file": "pre/stmt.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "rfile",
+        "file": "pre/rfile.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "adsh",
+        "file": "pre/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "line",
+        "file": "pre/line.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "direct_array over stmt_code x rfile_code domain (pre_stmt dict entries=9, pre_rfile dict entries=3, 27 slots total) with thread-local cnt:uint64_t[27], sum_line:int64_t[27], plus thread-local adsh_group_mask:uint32_t[86136] keyed by global_adsh code; reduce by summing arrays and OR-ing masks, then popcount mask bits into num_filings"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current COUNT(DISTINCT adsh) path materializes one packed (group,adsh) key per input row and then sorts/uniques it twice, so the hot phases spend most of their time moving and sorting about 9.6M 64-bit keys (76.8 MB raw, with thread-local plus global copies) even though the GROUP BY domain is tiny. Strategy category B: replace the cache-unfriendly sort-based distinct with a cache-resident direct-array plan. Aggregate COUNT(*) and SUM(line) in a 27-slot direct array indexed by (stmt_code,rfile_code), and maintain exact DISTINCT state as a thread-local dense uint32_t mask array over the 86,136-code global adsh domain; each row ORs its group bit into mask[adsh]. Finalization reduces thread-local arrays by sum/OR and computes num_filings by popcounting the reduced masks, eliminating the large sort/unique phases and keeping the working set inside cache.",
+  "correctness_anchors": {}
+}

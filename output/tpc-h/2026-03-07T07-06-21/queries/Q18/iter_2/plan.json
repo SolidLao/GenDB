@@ -1,0 +1,88 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "pass1_lineitem_scan_aggregate_int16",
+    "merge_thread_local_arrays_collect_qualifying_keys",
+    "direct_index_lookup_orders",
+    "join_orders_to_customer",
+    "topk_sort"
+  ],
+  "join_order": [
+    {
+      "build": "qualifying_orderkeys(vector<int32_t>, ~2520 entries from merged int16_t array)",
+      "probe": "orders_by_orderkey(dense_array_index, 240MB)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 2520,
+      "notes": "Direct O(1) index lookup for each of the ~2520 qualifying orderkeys. orders_by_orderkey[okey] = row index into orders column files. Completely eliminates the 15M-row sequential orders scan and the 57MB is_big[] char array."
+    },
+    {
+      "build": "customer_by_custkey(pre_built_index, 5.7MB, L3-resident)",
+      "probe": "qualifying_orders(o_custkey, ~2520 rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Dense array index 5.7MB fully L3-resident; only ~2,520 lookups — negligible cost."
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING SUM > 300",
+      "selectivity": 0.000042,
+      "notes": "Pass 1 HAVING filter; ~2,520 qualifying orderkeys identified after parallel merge of int16_t thread-local arrays."
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity",  "file": "lineitem/l_quantity.bin", "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "pass1_qty_accumulator": "thread_local_array(int16_t, size=60000001, 120MB virtual per thread); parallel morsel scan; no atomics; int16_t sufficient because max merged value per orderkey = 7 lineitems × 50 qty = 350 < 32767; 32 entries per 64-byte cache line vs 16 for int32_t, halving cache-line pressure and merge bandwidth",
+    "qualifying_keys": "std::vector<int32_t>(~2520 entries); built during merge phase by scanning merged int16_t[60000001] array (120MB sequential, ~0.6ms); each merge thread appends qualifying keys from its key-space slice to a thread-local vector, then all vectors are concatenated",
+    "orders_direct_lookup": "orders_by_orderkey dense_array(int32_t[60000001], 240MB, mmap O_RDONLY + MADV_RANDOM); orders_by_orderkey[okey] = row index into orders column files; 2520 random accesses into page-cached index replaces 300MB sequential orders scan",
+    "orders_customer_join": "pre_built_index(customer_by_custkey, dense int32_t array, 5.7MB, L3-resident)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_lineitem_scan": "parallel morsel scan; each thread owns thread-local int16_t[60000001] (calloc); each thread accumulates l_quantity into its local array indexed by l_orderkey; no atomics, no shared state; wait for all threads before merge",
+    "merge_and_collect": "parallel element-wise merge into tl_qty[0]: each merge thread handles a key-space slice [lo, hi); within its slice it adds tl_qty[1..nthreads-1] into tl_qty[0], then scans tl_qty[0] in [lo, hi) and appends qualifying keys (value > 300) to a thread-local qualifying_keys vector; after parallel phase, concatenate all per-thread qualifying_keys vectors",
+    "pass2_direct_lookup": "sequential over ~2520 qualifying keys; no parallelism needed (trivial work)"
+  },
+  "indexes": [
+    {
+      "index": "orders_by_orderkey",
+      "purpose": "join_lookup",
+      "notes": "File: orders/orders_by_orderkey.bin. Layout: int32_t[60000001], array[okey] = row index into orders column files, sentinel -1 for unused. Used for direct O(1) lookup of qualifying orders rows. 240MB file; MADV_RANDOM; 2520 cache-miss accesses = 252μs total. In page cache for hot runs."
+    },
+    {
+      "index": "customer_by_custkey",
+      "purpose": "join_lookup",
+      "notes": "File: customer/customer_by_custkey.bin. Layout: int32_t[1500001], array[ckey] = row index into customer column files, sentinel -1. 5.7MB, fully L3-resident. 2520 lookups total."
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "sort_strategy": "std::partial_sort on ~2520 Q18Result entries; trivial"
+  },
+  "result_struct": {
+    "fields": [
+      {"name": "c_name",       "type": "char[26]",  "source": "customer/c_name.bin via customer_by_custkey[o_custkey]"},
+      {"name": "c_custkey",    "type": "int32_t",   "source": "customer/c_custkey.bin via customer_by_custkey[o_custkey]"},
+      {"name": "o_orderkey",   "type": "int32_t",   "source": "qualifying_keys[i]"},
+      {"name": "o_orderdate",  "type": "int32_t",   "source": "orders/o_orderdate.bin[orders_by_orderkey[okey]] (days_since_epoch; decode to YYYY-MM-DD for output only)"},
+      {"name": "o_totalprice", "type": "double",    "source": "orders/o_totalprice.bin[orders_by_orderkey[okey]]"},
+      {"name": "sum_qty",      "type": "int32_t",   "source": "cast(tl_qty[0][okey], int32_t) from merged int16_t array"}
+    ]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Two combined optimizations from iter_0. (1) Category A — plan restructuring: replace the 15M-row sequential orders scan with direct index lookup. After Pass 1, qualifying orderkeys (~2520) are known. The pre-built orders_by_orderkey.bin index (int32_t[60000001], 240MB) maps each orderkey to its orders row in O(1). Iterating over 2520 qualifying keys and issuing direct row lookups costs ~252μs, replacing a 300MB sequential scan plus the 57MB is_big[] char array construction. The is_big[] array (57MB) was also an LLC-miss source in the orders scan since it exceeds L3 (44MB); eliminating both removes ~5-6ms from Pass 2. (2) Category B — algorithm change: switch thread-local accumulators from int32_t (229MB per thread) to int16_t (120MB per thread). int16_t is safe because the maximum sum per orderkey is 7 lineitems × 50 max_qty = 350, well within int16_t range (32767). This halves the physical memory written per thread (~1.83MB vs ~3.66MB) and halves the merge read bandwidth (63 × 1.83MB vs 63 × 3.66MB physical), while keeping per-thread independence and avoiding the atomic false-sharing contention that caused iter_1 to regress. The qualifying_keys collection is folded into the merge pass (single sequential scan of the 120MB merged array), adding only ~0.6ms."
+}

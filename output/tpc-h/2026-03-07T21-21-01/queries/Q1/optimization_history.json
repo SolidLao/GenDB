@@ -1,0 +1,115 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 266.67,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 266.67,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.31,
+        "dim_filter": 0,
+        "main_scan": 58.36,
+        "build_joins": 33.45,
+        "output": 0.38,
+        "total": 261.22
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 152.69333333333336,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 152.69333333333336,
+      "validation": "pass",
+      "strategy": "The root cause is a plan and working-set mismatch: the shipdate zone map skips no blocks for Q1, so the current prune phase and block bookkeeping add work without reducing the scan, and the 65536-entry per-thread aggregate inflates the aggregation state to about 256 MiB across 64 threads for an output of only about 6 groups. Strategy category A/C: replace the zonemap-driven morsel plan with one fused sequential scan over contiguous row partitions, apply the shipdate predicate inline, aggregate into a tiny per-thread fixed map keyed by the packed two-byte group id, and merge only populated groups before the final sort.",
+      "operation_timings": {
+        "data_loading": 0.39,
+        "dim_filter": 0,
+        "main_scan": 101.58,
+        "build_joins": 0.01,
+        "output": 0.2,
+        "total": 146.69
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 89.37333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 89.37333333333333,
+      "validation": "pass",
+      "strategy": "The root cause is a physical hot-loop mismatch: after removing the oversized 65536-state aggregates, the replacement 8-slot fixed map made every one of the 59.1M qualifying rows pay a branchy linear search before aggregation, which dominates the sequential scan even though the output has only about 6 groups. Strategy category B: keep the fused contiguous scan and inline shipdate predicate, but replace lookup_or_insert with a cache-resident per-thread direct key-to-slot table over the packed uint16 group id, aggregate into compact slots, and merge only populated groups so the scan stays O(1) per row without reintroducing the 256 MiB merge problem.",
+      "operation_timings": {
+        "data_loading": 0.24,
+        "dim_filter": 0,
+        "main_scan": 42.8,
+        "build_joins": 0.04,
+        "output": 4.88,
+        "total": 86.44
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 87.79333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 87.79333333333334,
+      "validation": "pass",
+      "strategy": "The root cause is wasted predicate work in the scan hot loop: the current plan still loads l_shipdate and evaluates a row-level cutoff branch for essentially every row even though selectivity is 98.5939% and the grouping state already fits comfortably in cache. Strategy category C: use the existing shipdate zone map not to prune by min_value, which failed previously, but to classify 131072-row blocks by max/min so blocks with max_value <= cutoff run through a no-predicate fast path that never touches l_shipdate, only mixed blocks perform row checks, and only min_value > cutoff blocks are skipped entirely; keep the cache-resident direct key-to-slot aggregation and parallelize over block morsels to preserve sequential access while reducing per-row work.",
+      "operation_timings": {
+        "data_loading": 0.41,
+        "dim_filter": 0.01,
+        "main_scan": 40.58,
+        "build_joins": 0.02,
+        "output": 0.18,
+        "total": 81.66
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 89.39666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 89.39666666666666,
+      "validation": "pass",
+      "strategy": "The root cause is a logical-plan and scheduling mismatch: the shipdate zonemap is completely non-selective for this dataset (all 458 blocks are mixed, with 0 full-pass and 0 skipped), so the classify-and-morsel path adds extra block-list construction, loop control, and dynamic scheduling without eliminating any payload work. Strategy category A/D: remove the zonemap phase entirely, return to one fused sequential scan over static contiguous row partitions, keep the cache-resident per-thread direct key-to-slot table for the tiny 6-group aggregation, and let each thread stream its own contiguous slice so hardware prefetch and bandwidth dominate instead of scheduler overhead.",
+      "operation_timings": {
+        "data_loading": 0.38,
+        "dim_filter": 0,
+        "main_scan": 44.13,
+        "build_joins": 0.02,
+        "output": 0.18,
+        "total": 86.3
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 99.82000000000001,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 99.82000000000001,
+      "validation": "pass",
+      "strategy": "The root cause is a parallel scan bandwidth bottleneck after earlier fixes removed the oversized aggregation state: Q1 still streams about 2.28 GB of column data for 59.99M rows, and the remaining gap is dominated by page placement, thread scheduling, and memory-channel saturation rather than hash lookup or block pruning. Strategy category D: drop the non-selective zonemap path, keep the tiny cache-resident direct aggregation table, and run one static contiguous-partition scan with a fixed bandwidth-oriented thread count and parallel prefault/first-touch so each worker faults and scans the same slice, reducing remote-memory traffic and scheduler overhead while preserving the validated date arithmetic and revenue formula.",
+      "operation_timings": {
+        "data_loading": 0.4,
+        "dim_filter": 0,
+        "main_scan": 59.6,
+        "build_joins": 0.01,
+        "output": 0.15,
+        "total": 98.38
+      }
+    }
+  ]
+}

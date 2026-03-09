@@ -1,0 +1,93 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "load_usd_code",
+    "binary_search_usd_range",
+    "binary_search_2023_range_within_usd",
+    "mmap_num_columns_madvise_qualifying_rows",
+    "mmap_anti_array_sequential",
+    "collect_probe_entries",
+    "sort_probes_by_key",
+    "merge_anti_join_sequential",
+    "aggregate_tagver",
+    "having_sort_topk",
+    "decode_strings_output"
+  ],
+  "join_order": [
+    {
+      "build": "pre(indexes/pre_adsh_tagver_set.bin — pre-sorted uint64_t array, 8,631,890 unique keys, 69MB)",
+      "probe": "num(USD-2023 rows collected into ProbeEntry buffer, then sorted by key)",
+      "type": "anti",
+      "strategy": "sort_merge_join",
+      "build_cardinality": 8631890,
+      "notes": "Both the anti-join array (on disk, pre-sorted) and the probe buffer (sorted in memory before merge) are sorted ascending by the same uint64_t key = ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code. Single-pass merge: advance probe pointer and anti pointer together, O(n_anti + n_probes) = O(8.6M + 67K). Sequential scan of 69MB at ~50GB/s ≈ 1-2ms vs 1.5M random accesses in binary search approach. madvise(MADV_SEQUENTIAL) on the anti-join mmap so hardware prefetch kicks in immediately."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.05,
+      "method": "binary_search_sort_order",
+      "notes": "num is sorted (uom_code ASC, ddate ASC). mmap uom_code.bin, std::lower_bound + std::upper_bound to find exact [r_usd_start, r_usd_end). No row-level filter needed in the scan loop — row range is exact."
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.0034,
+      "method": "binary_search_sort_order",
+      "notes": "Within USD range, ddate is sorted ASC. mmap ddate.bin, std::lower_bound(20230101) + std::upper_bound(20231231) on [r_usd_start, r_usd_end) to find exact [r_2023_start, r_2023_end). Combined selectivity ~0.17% ≈ 67K rows. No ddate row-level filter needed."
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "row_filter_during_collect",
+      "notes": "std::isnan(v) check in the collect phase. Skip row if true."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",   "file": "num/uom_code.bin",   "type": "int8_t",  "bytes_per_row": 1, "access": "binary_search_only"},
+      {"name": "ddate",      "file": "num/ddate.bin",      "type": "int32_t", "bytes_per_row": 4, "access": "binary_search_only"},
+      {"name": "adsh_code",  "file": "num/adsh_code.bin",  "type": "int32_t", "bytes_per_row": 4, "access": "sequential_r2023_range"},
+      {"name": "tagver_code","file": "num/tagver_code.bin","type": "int32_t", "bytes_per_row": 4, "access": "sequential_r2023_range"},
+      {"name": "value",      "file": "num/value.bin",      "type": "double",  "bytes_per_row": 8, "access": "sequential_r2023_range"}
+    ],
+    "access_pattern": "binary_search_row_range_then_sequential_subrange",
+    "prefetch_strategy": "After finding r_2023_start/r_2023_end via binary search, call madvise(MADV_WILLNEED) on the [r_2023_start, r_2023_end) byte ranges for adsh_code.bin, tagver_code.bin, value.bin. Byte range for row range [lo, hi) in column with element_size E: offset = lo * E, length = (hi - lo) * E. The uom_code and ddate mmaps are used only for binary search (top-level nodes fit in L3 after binary search) — no explicit madvise needed for them."
+  },
+  "data_structures": {
+    "probe_buffer": "vector<ProbeEntry> where ProbeEntry = {uint64_t key; int32_t tagver_code; double value;}. Capacity reserved to r_2023_end - r_2023_start (≈67K). Size ≈ 67K × 20B = 1.3MB — fits in L2 cache. Filled in a single sequential pass over [r_2023_start, r_2023_end), skipping NaN values and invalid tagver_codes. Sorted by key before merge.",
+    "anti_join": "mmap indexes/pre_adsh_tagver_set.bin with MADV_SEQUENTIAL. Header: uint64_t n_unique (8 bytes). Data: n_unique × uint64_t sorted ascending. Probe via single-pass merge scan (advance anti pointer alongside sorted probe pointer). NO random access, NO binary search, NO build_joins pre-fault phase.",
+    "aggregation": "unordered_map<int32_t, pair<int32_t,double>> with reserve(512). Key: tagver_code. Updated for each anti-join survivor (rows not found in anti array). Expected ~a few thousand survivors, ~200 groups. Fits in L1/L2 cache."
+  },
+  "parallelism": {
+    "strategy": "single_threaded",
+    "threads": 1,
+    "notes": "Only ~67K rows to scan. Thread creation + join overhead for 64 threads (~5-10ms) dominates at this row count. The merge-join itself (sequential 69MB scan) is inherently single-pass. No merge of thread-local aggregation maps needed."
+  },
+  "indexes": [
+    {
+      "index": "pre_adsh_tagver_set",
+      "file": "indexes/pre_adsh_tagver_set.bin",
+      "purpose": "sort_merge_anti_join — header is uint64_t n_unique (8 bytes), followed by n_unique sorted uint64_t keys. mmap with MADV_SEQUENTIAL. Merge with sorted probe buffer in a single pass. Key construction: ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code. tagver_code=-1 casts to 0xFFFFFFFF (valid non-matching key)."
+    },
+    {
+      "index": "uom_codes_dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "dict_lookup — resolve USD to int8_t usd_code. Layout: uint8_t N; N x {int8_t code, uint8_t slen, char[slen]}. NEVER hardcode usd_code."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "having": "cnt > 10",
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": "After top-100 selection by cnt DESC: mmap tag/tag_offsets.bin (uint32_t[TAG_COUNT+1]), tag/tag_data.bin (char[]), tag/version_offsets.bin (uint32_t[TAG_COUNT+1]), tag/version_data.bin (char[]). tag_str = tag_data[tag_offsets[tc] .. tag_offsets[tc+1]). ver_str = version_data[version_offsets[tc] .. version_offsets[tc+1])."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category B — algorithm change): main_scan consumed 76% of total time (54ms) because 64-thread parallel binary search performed 67K × 23 = 1.5M random accesses into the 69MB pre_adsh_tagver_set sorted array, which exceeds the 44MB LLC. Even with pre-faulting (5ms build_joins), the binary search bottom-levels miss L3 and hit DRAM at random offsets. Fix: replace random binary search with sort-merge anti-join. Collect all ~67K valid probe entries {uint64_t key, int32_t tagver_code, double value} (1.3MB total, L2-resident) in a single sequential pass; sort by key (~0.5ms, fully in-cache); then single-pass merge with the sorted anti array — a sequential 69MB read at memory bandwidth (~1-2ms with MADV_SEQUENTIAL and hardware prefetch). Also eliminate the build_joins pre-fault phase (5ms) since the sequential merge naturally triggers hardware prefetch on a hot page cache. Switch to single-threaded: 67K rows is trivial and thread overhead dominated at this scale. Expected: collect+sort+merge = ~3ms, total ~5-10ms."
+}

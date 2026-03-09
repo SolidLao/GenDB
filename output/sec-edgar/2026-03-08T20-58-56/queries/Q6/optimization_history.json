@@ -1,0 +1,115 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 919.88,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 919.88,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 129.47,
+        "dim_filter": 0.95,
+        "build_joins": 196.69,
+        "main_scan": 492.62,
+        "output": 3.68,
+        "total": 823.46
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 360.03000000000003,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 360.03000000000003,
+      "validation": "pass",
+      "strategy": "Root cause is logical-plan mismatch (Category A): the current plan spends major time building and probing a large runtime pre triple hash map even though persistent posting indexes already provide direct lookup paths. The revised plan removes runtime pre join-build entirely, drives execution from selective sub.fy=2023 keys, fetches only matching num rows through num_adsh postings, probes pre triple postings directly, applies stmt='IS' through a compact pre-row marker, and keeps only final aggregation state as mutable runtime structure.",
+      "operation_timings": {
+        "data_loading": 134.99,
+        "dim_filter": 1.97,
+        "build_joins": 12.26,
+        "main_scan": 199.41,
+        "output": 7.17,
+        "total": 355.83
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 299.71,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 299.71,
+      "validation": "pass",
+      "strategy": "Root cause is hardware-mismatch plus wasted work (Category B/C): iteration 1 performs many random binary probes into cache-exceeding triple index structures and also loads/prefetches data not needed for the final join path. The revised plan drives from fy-filtered sub keys, restricts both triple posting indexes to contiguous per-adsh ranges, merge-joins triple entries to avoid per-row random probes, scans only matched num posting lists for USD/non-null checks, and keeps runtime state limited to filtered key vectors and aggregation maps.",
+      "operation_timings": {
+        "data_loading": 127.97,
+        "dim_filter": 0.24,
+        "build_joins": 12.29,
+        "main_scan": 148.29,
+        "output": 6.23,
+        "total": 295.06
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 303.6933333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 303.6933333333333,
+      "validation": "pass",
+      "strategy": "Root cause is cache-miss-heavy random lookup overhead (Category E): each filtered adsh currently triggers repeated binary searches over cache-exceeding triple-entry arrays. I added persistent compact storage extensions mapping adsh to contiguous triple-entry spans for both pre and num indexes, then revised the plan to drive joins via direct range lookups and in-range merge processing so main-scan work stays sequential and avoids high-latency random probes.",
+      "operation_timings": {
+        "data_loading": 123.95,
+        "dim_filter": 0.27,
+        "build_joins": 19.53,
+        "main_scan": 154.74,
+        "output": 6.16,
+        "total": 304.69
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 443.0433333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 443.0433333333333,
+      "validation": "pass",
+      "strategy": "Root cause is a physical-plan/hardware mismatch (Category B/C): the prior path still depends on very large triple posting structures whose entry arrays exceed LLC and add high load/probe overhead relative to useful output work. This plan removes triple-index dependency from the hot path, uses sub.fy=2023 as an early semi-join to prune pre stmt postings, builds a cache-resident runtime hash on filtered pre triples, then probes it from num adsh postings while applying USD and non-null checks before aggregation; it also defers wide string decoding to final top-k output so data loading and random access are reduced.",
+      "operation_timings": {
+        "data_loading": 125.03,
+        "dim_filter": 0.55,
+        "build_joins": 145.99,
+        "main_scan": 153.88,
+        "output": 5.61,
+        "total": 431.1
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 351.5133333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 351.5133333333333,
+      "validation": "pass",
+      "strategy": "Root cause is a plan/implementation mismatch (Category A/B): the previous stable plan still spends most hot time in a dual large-triple-index merge path, while the regressed plan moved too much work into a cache-unfriendly global runtime hash build. This revision drives from fy-filtered sub adsh keys, probes num through num_adsh postings (single pass over relevant num rows), and performs adsh-local pre matching with cache-resident per-adsh vectors derived from pre triple ranges and stmt filtering, eliminating global pre-hash construction and reducing random global index probes.",
+      "operation_timings": {
+        "data_loading": 141.14,
+        "dim_filter": 0.66,
+        "build_joins": 3.1,
+        "main_scan": 200.46,
+        "output": 9.92,
+        "total": 355.32
+      }
+    }
+  ]
+}

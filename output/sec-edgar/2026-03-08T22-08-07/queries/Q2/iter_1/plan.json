@@ -1,0 +1,127 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "resolve_pure_code",
+    "load_postings",
+    "build_fy2022_lookup",
+    "scan_pure_rowids",
+    "semi_join_sub_first",
+    "aggregate_max_and_ties",
+    "merge_group_states",
+    "topk_from_group_winners",
+    "decode_top100"
+  ],
+  "join_order": [
+    {
+      "build": "sub(fy = 2022)",
+      "probe": "num(uom = 'pure' AND value IS NOT NULL)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 27333,
+      "notes": "Validated with sampling_join_order.cpp: semijoining against fy=2022 first was empirically best on the full pure postings slice (sub_first ~58 ms vs agg_first ~830 ms in the sampler)."
+    },
+    {
+      "build": "winner_state((adsh, tag) -> {max_value, tie_count}) over semijoin-qualified num rows",
+      "probe": "grouped winners for top-k emission",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3362,
+      "notes": "Eliminate the runtime self-join back to num by carrying tie_count during aggregation and emitting duplicate winner rows directly from grouped state."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.0346
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    },
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.3173
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN sub(fy = 2022)",
+      "selectivity": 0.1137
+    }
+  ],
+  "scan": {
+    "table": "num(uom='pure' postings slice)",
+    "rows": 1364900,
+    "columns": [
+      {
+        "name": "rowid",
+        "file": "indexes/num/num_uom_postings.rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "name",
+        "file": "sub/name.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array<uint32_t>(86136, UINT32_MAX) mapping qualifying adsh code -> sub rowid for fy=2022",
+    "fact_join": "thread_local flat_array<int32_t>(86136, -1) adsh_slot plus touched_adsh list; qualifying adsh codes index sparse local buckets directly instead of probing a global packed-key hash table",
+    "aggregation": "thread_local sparse buckets keyed by adsh code, each bucket storing a small append-only vector of GroupState{tag, max_value, tie_count}; merge only touched adsh buckets into a compact global winner array"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Scan contiguous pure-rowid morsels in parallel; each thread keeps local adsh_slot and group-state storage, then merges only its touched adsh buckets."
+  },
+  "indexes": [
+    {
+      "index": "num_uom_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_fy_postings",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "sub_adsh_dense_lookup",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "n.value DESC",
+      "s.name ASC",
+      "n.tag ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan spends most of its time in build_joins because it scans the pure slice twice and uses over-sized thread-local packed-key hash tables for a post-semijoin grouping problem that is actually tiny; the join-order sampler measured sub-first at about 58 ms versus about 830 ms for aggregating before the sub semijoin, and the same sampler found only about 155k qualifying rows, 1326 active adsh values, and 3362 final (adsh,tag) groups. Strategy category A/C: keep the empirically best sub-first semijoin order, replace the flat hash aggregate with a dense adsh-indexed sparse bucket layout that stores {max_value,tie_count} per tag, merge only touched adsh buckets, and emit the top-100 directly from grouped winners so the expensive self-join / second raw scan over num disappears entirely.",
+  "correctness_anchors": {}
+}

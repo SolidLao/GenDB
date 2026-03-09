@@ -1,0 +1,115 @@
+{
+  "query_id": "Q9",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 162.52,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 162.52,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.61,
+        "dim_filter": 5.28,
+        "build_joins": 0.41,
+        "main_scan": 29.36,
+        "output": 0.59,
+        "total": 158.85
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 222.91666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 222.91666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: the current hot path probes the cache-exceeding partsupp posting structures for every qualifying lineitem row, causing unnecessary random work after the green-part filter. Strategy category A/B: restructure the plan to filter parts first, build a compact hash table only for green partsupp rows keyed by (partkey,suppkey), keep supplier->nation and orderkey->year as dense arrays, and then run a single sequential lineitem scan with one cache-resident composite join probe before aggregation.",
+      "operation_timings": {
+        "data_loading": 0.53,
+        "dim_filter": 21.16,
+        "build_joins": 103.44,
+        "main_scan": 23.77,
+        "output": 0.7,
+        "total": 204.99
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 199.4466666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 199.4466666666667,
+      "validation": "pass",
+      "strategy": "Root cause: the hot path still performs millions of random probes into the cache-exceeding raw partsupp posting payloads, while iteration 1 regressed because it paid a large build cost to materialize the lookup from too much data. Strategy category A/B: first build the green-part bitset, then use the existing partsupp_part_postings index once to gather only the approximately 435k green partsupp pairs into a compact LLC-resident (partkey,suppkey)->supplycost lookup, keep supplier->nation and orderkey->year as dense arrays, and run a single sequential lineitem scan that probes only cache-resident structures before aggregating.",
+      "operation_timings": {
+        "data_loading": 0.4,
+        "dim_filter": 12.12,
+        "build_joins": 105.32,
+        "main_scan": 24.04,
+        "output": 1.81,
+        "total": 198.95
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 148.03666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 148.03666666666666,
+      "validation": "pass",
+      "strategy": "Root cause: the stalled plans spent too much time either walking cache-exceeding partsupp posting payloads from the lineitem hot path or prebuilding large helper arrays, especially orderkey->year, that do not fit the hardware budget. Strategy category A/B/C: keep the green-part filter, build the partsupp join state with one sequential scan into an LLC-resident direct structure keyed by green part slot, and fuse the orders join into the lineitem scan by exploiting that both tables are sorted by order key so o_year is produced by a streaming cursor rather than a 15M-row precompute.",
+      "operation_timings": {
+        "data_loading": 0.86,
+        "dim_filter": 71.93,
+        "build_joins": 27.62,
+        "main_scan": 47.35,
+        "output": 1.1,
+        "total": 148.93
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 110.82000000000001,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 110.82000000000001,
+      "validation": "pass",
+      "strategy": "Root cause: iteration 3 moved the expensive joins into cache-resident structures, but it left the 2M-row p_name substring filter effectively serial and used morsel-driven parallelism that breaks the natural lineitem-orders key order, adding repeated cursor setup and branchy green-slot probes in the hot scan. Strategy category D/C: parallelize the part filter, replace the green-slot indirection with a compact per-part offset/count lookup plus payload that stays well inside LLC, and run the fact phase as orderkey-aligned partitions so each thread streams both lineitem and orders sequentially while probing only cache-resident join state.",
+      "operation_timings": {
+        "data_loading": 0.88,
+        "dim_filter": 19.27,
+        "build_joins": 43.55,
+        "main_scan": 40.67,
+        "output": 1.57,
+        "total": 106
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 96.37666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 96.37666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: the remaining gap is now dominated by a storage-level mismatch on part.p_name, which still forces a 2M-row varlen substring scan every run, plus unnecessary build work from rescanning all 8M partsupp rows to rebuild a lookup for only 5.4% green parts. Strategy category E/B/C: build a reusable token-bitmap extension for part.p_name so the green predicate becomes one bitmap lookup, use partsupp_part_postings to gather only green (partkey,suppkey)->supplycost pairs into a compact cache-resident payload, and run the fact phase with lineitem late materialization and orderkey-aligned partitions so only qualifying rows touch wide columns and aggregation stays in a tiny direct array.",
+      "operation_timings": {
+        "data_loading": 0.84,
+        "dim_filter": 2.25,
+        "build_joins": 39.95,
+        "main_scan": 52.25,
+        "output": 1.57,
+        "total": 96.93
+      }
+    }
+  ]
+}

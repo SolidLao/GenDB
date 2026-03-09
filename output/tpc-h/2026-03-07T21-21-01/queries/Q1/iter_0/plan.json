@@ -1,0 +1,41 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "zonemap_prune_shipdate_blocks",
+    "scan_lineitem_filtered",
+    "aggregate_by_returnflag_linestatus",
+    "sort_groups"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY",
+      "selectivity": 0.985939
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "bitset(458)",
+    "fact_join": "none",
+    "aggregation": "direct_array(65536 keys, compact per-thread states)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

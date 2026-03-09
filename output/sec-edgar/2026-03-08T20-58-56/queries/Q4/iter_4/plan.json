@@ -1,0 +1,139 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub",
+    "filter_pre_stmt",
+    "probe_num_by_adsh_index",
+    "aggregate_by_tag_version",
+    "resolve_tag_tlabel",
+    "final_aggregate_having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "pre(stmt='EQ')",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 7752,
+      "notes": "Build dense adsh filter and retain only EQ triples whose adsh passes SIC predicate."
+    },
+    {
+      "build": "pre(filtered: stmt='EQ' AND adsh in filtered sub)",
+      "probe": "num rows from num_adsh_fk_hash postings for filtered adsh",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 88100,
+      "notes": "Use compact triple multiplicity map on (adsh,tag,version) and delay tag lookup until after first-stage aggregation."
+    },
+    {
+      "build": "tag(filtered: abstract=0)",
+      "probe": "aggregated distinct (tag,version) keys",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1070662,
+      "notes": "Resolve tlabel once per surviving (tag,version) aggregate key instead of per qualifying num row."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.09
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.102
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_posting_on_filtered_adsh"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh->sub_rowid) + bitset(filtered_adsh)",
+    "fact_join": "compact_hash_map((adsh,tag,version)->pre_eq_multiplicity)",
+    "aggregation": "two_phase_hash_group_by: local compact_hash_map((sic,tag,version,stmt)->{sum,count}) + local compact_hash_set((group_key,cik) inserted once per adsh-group), then final hash merge to (sic,tlabel,stmt)"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "tag_tag_version_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is residual wasted work in the hot path (Category C): main_scan still performs per-row tag lookups and repeated DISTINCT-cik insert attempts for the same adsh/group, while build_joins eagerly materializes tag mappings before knowing surviving aggregate keys. The revised plan keeps the selective sub+pre pruning and num_adsh index probing, but switches to a two-phase aggregation keyed by (sic,tag,version,stmt), records DISTINCT cik once per adsh-group, and resolves tlabel only for post-scan distinct (tag,version) keys with abstract=0 before final rollup to (sic,tlabel,stmt). This removes redundant per-row hash/set work and shifts tag join cost to work proportional to surviving groups.",
+  "correctness_anchors": {
+    "threshold_constant": [
+      4000,
+      4000,
+      100000
+    ]
+  }
+}

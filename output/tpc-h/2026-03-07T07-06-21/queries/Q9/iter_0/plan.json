@@ -1,0 +1,129 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "build_green_part_bitset",
+    "precompute_suppkey_to_nationrow",
+    "parallel_lineitem_scan",
+    "aggregate_reduce",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110000,
+      "notes": "Build bool/bitset array green_part[2000001] indexed by p_partkey. Probe with l_partkey per lineitem row — O(1), branch prediction friendly. ~5.5% selectivity yields ~3.3M surviving lineitem rows."
+    },
+    {
+      "build": "supplier(s_suppkey → s_nationkey)",
+      "probe": "lineitem(l_suppkey) [already green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Precompute suppkey_to_nationrow[100001] as int8_t (or int32_t) array: for each supplier row, store nationkey. Load supplier_by_suppkey dense index + s_nationkey at startup. O(1) per probe."
+    },
+    {
+      "build": "nation(n_nationkey → n_name row)",
+      "probe": "supplier(s_nationkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "Fold into suppkey_to_nationrow precomputation. 25-row nation table loaded entirely at startup. No per-row lookup needed during hot path — nationrow is already stored in precomputed array."
+    },
+    {
+      "build": "orders(o_orderkey → o_orderdate)",
+      "probe": "lineitem(l_orderkey) [already green-filtered]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use orders_by_orderkey dense array (240 MB, mmap). O(1): orow = orders_by_orderkey[l_orderkey]; year = extract_year(o_orderdate[orow]). 7 distinct years (1992–1998)."
+    },
+    {
+      "build": "partsupp(ps_partkey, ps_suppkey → ps_supplycost)",
+      "probe": "lineitem(l_partkey, l_suppkey) [already green-filtered]",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 8000000,
+      "notes": "Use pre-built partsupp_hash_index (open-addressing, 16.7M slots, 256 MB, load 0.477). Composite key = partkey * 200001ULL + suppkey. Fibonacci hash (FIB_CONST = 11400714819323198485ULL, LOG2_CAP = 24). mmap the file; lookup is O(1) avg. Only called for ~3.3M green-filtered rows."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.055,
+      "implementation": "strstr(p_name_ptr, \"green\") != nullptr on fixed-56-byte records",
+      "output_rows": 110000
+    }
+  ],
+  "data_structures": {
+    "green_part_filter": "flat bool array, size 2000001, indexed by p_partkey — fits in L3 cache (2 MB)",
+    "suppkey_to_nationrow": "flat int32_t array, size 100001, precomputed at startup (~400 KB, hot in cache)",
+    "nation_names": "char[25][26] loaded at startup (650 bytes, always cached)",
+    "orders_lookup": "mmap dense int32_t array orders_by_orderkey[60000001] (240 MB) + o_orderdate column (60 MB)",
+    "partsupp_lookup": "mmap partsupp_hash_index HTSlot[16777216] (256 MB) + ps_supplycost column (61 MB)",
+    "aggregation": "double profits[64][25][10] — per-thread 2D array (nation × year_offset), zero-initialized; reduced after parallel phase"
+  },
+  "startup_sequence": [
+    "mmap lineitem columns: l_partkey, l_suppkey, l_orderkey, l_extendedprice, l_discount, l_quantity",
+    "mmap orders_by_orderkey.bin (240 MB) + orders/o_orderdate.bin (57 MB)",
+    "mmap partsupp/partsupp_hash_index.bin (256 MB) + partsupp/ps_supplycost.bin (61 MB)",
+    "load part/p_partkey.bin + part/p_name.bin into memory; build green_part bool[2000001]",
+    "load supplier/supplier_by_suppkey.bin + supplier/s_nationkey.bin; build suppkey_to_nationrow[100001]",
+    "load nation/nation_by_nationkey.bin + nation/n_name.bin (trivial sizes)"
+  ],
+  "hot_path_per_lineitem_row": [
+    "if (!green_part[l_partkey[i]]) continue;",
+    "int32_t nrow = suppkey_to_nationrow[l_suppkey[i]];",
+    "int32_t orow = orders_by_orderkey[l_orderkey[i]]; int year = extract_year(o_orderdate[orow]);",
+    "double sc = lookup_partsupp(l_partkey[i], l_suppkey[i]);",
+    "double amount = l_extendedprice[i] * (1.0 - l_discount[i]*0.01) - sc * (double)l_quantity[i];",
+    "local_profits[nrow][year - 1992] += amount;"
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "parallel_phase": "lineitem scan (60M rows split into ~600 morsels across 64 threads)",
+    "thread_local_state": "double profits[25][10] per thread, zero-initialized",
+    "reduction": "single-threaded sum of per-thread profits[25][10] arrays after join phase"
+  },
+  "indexes": [
+    {
+      "index": "part green_part bool array",
+      "purpose": "O(1) filter of lineitem rows by l_partkey — replaces hash probe"
+    },
+    {
+      "index": "suppkey_to_nationrow int32_t[100001]",
+      "purpose": "O(1) lineitem l_suppkey → nation row, precomputed to eliminate two-level indirection"
+    },
+    {
+      "index": "orders/orders_by_orderkey.bin (dense_array)",
+      "purpose": "O(1) l_orderkey → orders row for o_orderdate extraction"
+    },
+    {
+      "index": "partsupp/partsupp_hash_index.bin (open_addressing_hash)",
+      "purpose": "O(1) avg (l_partkey, l_suppkey) → ps_supplycost row"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_detail": {
+    "groups": 175,
+    "structure": "double profits[25][10] indexed by [nationrow][year-1992]",
+    "finalize": "iterate 25×10, skip zero-sum groups, collect (n_name, year, sum) tuples"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "sort_implementation": "std::sort on ~175 result tuples (trivial cost)",
+    "limit": null
+  },
+  "memory_budget": {
+    "lineitem_columns": "~1200 MB (mmap, OS manages pages)",
+    "orders_index": "297 MB (mmap)",
+    "partsupp_index": "317 MB (mmap)",
+    "hot_structures": "~2.5 MB (green_part + suppkey_to_nationrow + nation data — fits in L3)"
+  },
+  "execution_target": "cpp"
+}

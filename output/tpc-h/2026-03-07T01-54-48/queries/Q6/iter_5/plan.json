@@ -1,0 +1,121 @@
+{
+  "query_id": "Q6",
+  "storage_extensions": [
+    {
+      "id": "lineitem.l_discount.int16_scaled_by_100",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count]"
+      },
+      "usage": "mmap codes.bin; use discount_code[row] for predicate 5 <= code <= 7 and compute revenue contribution as l_extendedprice[row] * (discount_code[row] * 0.01)"
+    },
+    {
+      "id": "lineitem.l_quantity.int16_scaled_by_100",
+      "action": "built_new",
+      "files": {
+        "codes": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "codes_format": "uint16_t[row_count]"
+      },
+      "usage": "mmap codes.bin; use quantity_code[row] for predicate quantity_code[row] < 2400 instead of loading l_quantity double"
+    }
+  ],
+  "pipeline": [
+    "zone_map_prune",
+    "scan_filter",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131",
+      "selectivity": 0.1667
+    },
+    {
+      "table": "lineitem",
+      "predicate": "discount_code BETWEEN 5 AND 7",
+      "selectivity": 0.2222
+    },
+    {
+      "table": "lineitem",
+      "predicate": "quantity_code < 2400",
+      "selectivity": 0.65
+    },
+    {
+      "table": "lineitem",
+      "predicate": "combined",
+      "selectivity": 0.024
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_discount_code",
+        "file": "column_versions/lineitem.l_discount.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_quantity_code",
+        "file": "column_versions/lineitem.l_quantity.int16_scaled_by_100/codes.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(600)",
+    "fact_join": "none",
+    "aggregation": "thread_local_double_sum"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_discount_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "lineitem_quantity_zonemap",
+      "purpose": "skip_blocks"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is a storage-level encoding mismatch (Category E): the hot path is a bandwidth-bound scan over two wide double predicate columns where most rows are rejected. The plan adds persistent scaled-int16 column versions for l_discount and l_quantity, keeps zone-map block pruning, and uses a fused sequential filter+aggregate loop with late l_extendedprice access and thread-local reduction; this reduces per-row scan bytes and branch-path cost while preserving exact predicates and revenue semantics.",
+  "correctness_anchors": {
+    "shipdate_lo": 8766,
+    "shipdate_hi": 9131,
+    "discount_lo": 0.05,
+    "discount_hi": 0.07,
+    "quantity_hi": 24.0,
+    "revenue_formula": "SUM(l_extendedprice * l_discount)"
+  }
+}

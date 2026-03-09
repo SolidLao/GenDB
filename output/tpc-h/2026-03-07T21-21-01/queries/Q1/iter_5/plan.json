@@ -1,0 +1,91 @@
+{
+  "query_id": "Q1",
+  "pipeline": [
+    "parallel_prefault_contiguous_partitions",
+    "scan_filter_aggregate",
+    "merge_thread_local_groups",
+    "sort_groups"
+  ],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= DATE '1998-12-01' - INTERVAL '90' DAY",
+      "selectivity": 0.985939
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {
+        "name": "l_shipdate",
+        "file": "lineitem/l_shipdate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "l_returnflag",
+        "file": "lineitem/l_returnflag.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_linestatus",
+        "file": "lineitem/l_linestatus.bin",
+        "type": "uint8_t",
+        "bytes_per_row": 1
+      },
+      {
+        "name": "l_quantity",
+        "file": "lineitem/l_quantity.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_extendedprice",
+        "file": "lineitem/l_extendedprice.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_discount",
+        "file": "lineitem/l_discount.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      },
+      {
+        "name": "l_tax",
+        "file": "lineitem/l_tax.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential contiguous row partitions; each worker prefaults and scans its own fixed range so page placement and scan bandwidth stay local, with the shipdate predicate applied inline and no zonemap classification pass"
+  },
+  "data_structures": {
+    "dim_filter": "none",
+    "fact_join": "none",
+    "aggregation": "per-thread uint8_t key_to_slot[65536] initialized to 0xFF plus compact AggState slots[8] and populated_keys[8]; merge only populated groups"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "threads": "min(32, nproc)"
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "l_returnflag ASC",
+      "l_linestatus ASC"
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "The root cause is a parallel scan bandwidth bottleneck after earlier fixes removed the oversized aggregation state: Q1 still streams about 2.28 GB of column data for 59.99M rows, and the remaining gap is dominated by page placement, thread scheduling, and memory-channel saturation rather than hash lookup or block pruning. Strategy category D: drop the non-selective zonemap path, keep the tiny cache-resident direct aggregation table, and run one static contiguous-partition scan with a fixed bandwidth-oriented thread count and parallel prefault/first-touch so each worker faults and scans the same slice, reducing remote-memory traffic and scheduler overhead while preserving the validated date arithmetic and revenue formula.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(gendb::date_str_to_epoch_days(\"1998-12-01\"), -90)",
+    "revenue_formula": "disc_price * (1.0L + static_cast<long double>(tax)"
+  }
+}

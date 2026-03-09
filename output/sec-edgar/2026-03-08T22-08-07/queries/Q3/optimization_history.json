@@ -1,0 +1,61 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 100.61666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 100.61666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.17,
+        "dim_filter": 4.52,
+        "build_joins": 11.04,
+        "main_scan": 65.29,
+        "output": 0.93,
+        "total": 100.15
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 63.95333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 63.95333333333334,
+      "validation": "pass",
+      "strategy": "Root cause: the current 65 ms main scan is dominated by a low-value postings-driven fact pass over 33.2M USD rowids and by doing outer-group and inner-group updates directly in the hot loop. That plan keeps an extra 151 MB rowid stream in flight and uses per-thread aggregate state of roughly 325 KB, which spills beyond a 256 KB L2. Strategy Category A: replace the postings-driven probe with one fused sequential scan of num(uom, adsh, value), build a dense adsh_code->filtered_filing_gid map once, aggregate each qualifying fact row first into a filing-granularity direct array, then roll up the reduced filing totals into cik and (name,cik) groups after the scan. This removes the rowid indirection, cuts hot-loop updates from four arrays to one cache-resident array, and keeps join/filter/aggregation fully branch-light and bandwidth-efficient.",
+      "operation_timings": {
+        "data_loading": 0.16,
+        "dim_filter": 3.46,
+        "build_joins": 15.5,
+        "main_scan": 31.78,
+        "output": 14.93,
+        "total": 77.15
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 41.47,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 41.47,
+      "validation": "pass",
+      "strategy": "Root cause: the hot path still does work proportional to the full 39.4M-row num table even though only the fy=2022 filing domain can join and only about 0.3173 x 0.8435 ≈ 26.8% of fact rows can survive both filters; it also pays for thread-local filing arrays and a merge pass. Strategy Category E: build a reusable dense postings version on num.adsh and restructure execution to drive the fact phase from filtered sub filings, so the scan touches only rows belonging to admissible filings, skips the num.adsh column entirely in the hot loop, and parallelizes by filing ownership with direct writes into filing_totals instead of replicated per-thread aggregates.",
+      "operation_timings": {
+        "data_loading": 0.14,
+        "dim_filter": 3.34,
+        "build_joins": 0.88,
+        "main_scan": 22.01,
+        "output": 1.2,
+        "total": 39.13
+      }
+    }
+  ]
+}

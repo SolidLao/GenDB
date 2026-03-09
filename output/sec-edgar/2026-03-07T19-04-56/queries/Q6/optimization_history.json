@@ -1,0 +1,79 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 680.6633333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 680.6633333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "dim_filter": 0.54,
+        "build_joins": 17,
+        "data_loading": 560.27,
+        "main_scan": 52.55,
+        "output": 119.29,
+        "total": 776.01
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 81.82333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 81.82333333333334,
+      "validation": "pass",
+      "strategy": "Category E + A: The data_loading phase consumed 560ms (82% of total), dominated by 1.06M varlen plabel string constructions, hashings, and unordered_map insertions during pre hash map build. Root cause is a storage-level mismatch: varlen plabel strings force expensive per-row string operations. Built dict-encoded pre.plabel (698K unique values → uint32_t codes). The revised plan: (1) mmap plabel codes.bin and read integer codes for IS range rows instead of varlen string dedup — eliminates all string operations from pre hash map build, reducing it from ~500ms to ~20ms; (2) use open-addressing hash maps for thread-local aggregation instead of std::unordered_map for better cache locality; (3) defer tag_dict loading to output phase since it's only needed for decoding 200 result rows. Group key is all-integer: (name_id:u32, tag_code:u32, plabel_code:u32).",
+      "operation_timings": {
+        "dim_filter": 0.49,
+        "build_joins": 0.02,
+        "data_loading": 18.07,
+        "output": 34.27,
+        "main_scan": 90.33,
+        "total": 115.26
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 83.70333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 83.70333333333333,
+      "validation": "pass",
+      "strategy": "Category B (algorithm change): The main_scan phase (~90ms) is bottlenecked by random probes into the 275MB pre_by_adsh_tag_ver.idx file, which is 6x larger than the 44MB LLC. Each of ~6.2M qualifying num rows triggers random reads into: (1) the 275MB index, (2) stmt_code array (9.6MB), and (3) plabel_codes array (38MB) — total ~322MB random-access working set. The fix: stop using the pre-built index entirely. Instead, build a compact open-addressing hash multimap at runtime from only the IS-filtered pre rows (~1.06M rows). Pack the 3-component key into a single uint64_t (52 bits). The resulting hash map is ~32MB and fits in LLC. During the num scan, each qualifying row does a single probe into this cache-resident structure instead of 3 random accesses into cache-exceeding arrays. Expected speedup: 2-3x on main_scan phase from eliminating L3 cache misses. Build cost: ~5-10ms for sequential scan of 1.06M pre rows (sequential I/O, trivially fast).",
+      "operation_timings": {
+        "dim_filter": 0.53,
+        "build_joins": 10.39,
+        "data_loading": 28.84,
+        "output": 29.56,
+        "main_scan": 83.07,
+        "total": 111.92
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 62.666666666666664,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 62.666666666666664,
+      "validation": "pass",
+      "strategy": "Category A+C (plan restructuring + work elimination): Iter_1's main_scan bottleneck (56ms scan-only) is caused by ~6.2M random probes into the 275MB pre_by_adsh_tag_ver.idx (6x LLC). Iter_2 built a 32MB runtime hash map from 1.06M IS pre rows (borderline LLC) but the 10ms build cost offset the scan improvement. The key missed optimization: also apply fy2023 filter during pre hash build, reducing entries from 1.06M to ~200K (1.06M × 0.188). The resulting hash map is ~8MB (5x smaller), solidly fitting in the 44MB LLC. Build cost: ~3ms for scanning 1.06M IS pre rows sequentially and inserting only ~200K qualifying entries. During num scan, every probe hits LLC instead of main memory, eliminating the cache-miss bottleneck. Use open-addressing with packed uint64_t keys (sub_fk|tag_code|version_code) and uint32_t plabel_code values. DO NOT use the pre-built index file at all.",
+      "operation_timings": {
+        "dim_filter": 0.37,
+        "build_joins": 11.17,
+        "data_loading": 21.16,
+        "main_scan": 40.07,
+        "output": 19.38,
+        "total": 80.62
+      }
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "filter_part_green",
+    "load_nation_array",
+    "load_indexes",
+    "scan_lineitem_parallel",
+    "merge_aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(p_name LIKE '%green%')",
+      "probe": "lineitem.l_partkey",
+      "type": "semi",
+      "strategy": "bloom_filter",
+      "build_cardinality": 110600,
+      "notes": "Scan p_name.bin (112MB, stride=56) with strstr('green'). Build bitset over p_partkey [0..2000000] = 250KB — fits in L2. Rejects 94.5% of lineitem rows at near-zero cost per row."
+    },
+    {
+      "build": "supplier(all via s_suppkey_hash)",
+      "probe": "lineitem.l_suppkey",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 100000,
+      "notes": "s_suppkey_hash: capacity 262144, ~2MB total. Fits entirely in L2 cache. Probe hash32(l_suppkey), linear probe, retrieve s_nationkey. Nation resolved via direct array (n_nationkey = array index)."
+    },
+    {
+      "build": "partsupp(all via ps_composite_hash)",
+      "probe": "lineitem.(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 8000000,
+      "notes": "ps_composite_hash: capacity 16777216, ~192MB. Exceeds L3 (44MB). Composite key = (l_partkey << 32) | (uint32_t)l_suppkey; probe hash64(key). Only ~3.3M lineitem rows survive part filter, so ~3.3M probes total across all threads (~52K/thread). LLC miss penalty is acceptable at this volume."
+    },
+    {
+      "build": "orders(all via o_orderkey_hash)",
+      "probe": "lineitem.l_orderkey",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 15000000,
+      "notes": "o_orderkey_hash: capacity 33554432, ~268MB. Fetch o_orderdate (int32 days-since-epoch), extract Gregorian year via JDN conversion. Same ~3.3M probes total."
+    },
+    {
+      "build": "nation(all)",
+      "probe": "supplier.s_nationkey",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "n_name.bin is 650 bytes. Load into char[25][26] at startup. n_nationkey IS the row index [0..24] — zero-cost lookup, always L1 cache."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "strstr(p_name_buf + row*56, 'green') != nullptr",
+      "selectivity": 0.0553,
+      "output_cardinality": 110600,
+      "notes": "Applied once at build phase. Drives bitset construction over p_partkey."
+    }
+  ],
+  "data_structures": {
+    "part_filter": "bitset(2000001) — 250KB bool array indexed by p_partkey; built once, shared read-only across all threads",
+    "supplier_lookup": "pre_built_index: s_suppkey_hash mmap'd (~2MB, fits L2); probe hash32 + linear open-addressing",
+    "partsupp_lookup": "pre_built_index: ps_composite_hash mmap'd (~192MB); probe hash64 on int64 composite key; int64 sentinel = -1LL",
+    "orders_lookup": "pre_built_index: o_orderkey_hash mmap'd (~268MB); probe hash32 on l_orderkey; fetch o_orderdate for year extraction",
+    "nation_lookup": "flat_array: char n_name[25][26] loaded at startup (650 bytes); indexed directly by s_nationkey",
+    "aggregation": "direct_array: double thread_agg[25][7] per thread (1400 bytes, L1 cache); year_idx = extracted_year - 1992; nation_idx = s_nationkey"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Divide lineitem 59,986,052 rows into ~600 morsels of 100K rows. Each thread claims morsels from atomic counter. Thread-local agg[25][7] avoids all synchronization during scan. Single reduction pass sums thread-local arrays after all morsels complete."
+  },
+  "indexes": [
+    {
+      "index": "s_suppkey_hash",
+      "purpose": "join_lookup: l_suppkey → supplier row index → s_nationkey"
+    },
+    {
+      "index": "ps_composite_hash",
+      "purpose": "join_lookup: (l_partkey<<32 | l_suppkey) → partsupp row index → ps_supplycost"
+    },
+    {
+      "index": "o_orderkey_hash",
+      "purpose": "join_lookup: l_orderkey → orders row index → o_orderdate"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_details": {
+    "key_space": "25 nations × 7 years (1992–1998) = 175 groups",
+    "structure": "double agg[25][7] per thread; nation_idx = s_nationkey [0..24]; year_idx = year - 1992",
+    "merge": "sum 64 thread-local arrays element-wise into final agg[25][7] after scan completes"
+  },
+  "year_extraction": {
+    "method": "JDN conversion",
+    "input": "int32_t days = o_orderdate[ord_row]",
+    "code_pattern": "jdn=days+2440588; a=jdn+32044; b2=(4*a+3)/146097; c=a-(146097*b2)/4; d2=(4*c+3)/1461; e=c-(1461*d2)/4; m=(5*e+2)/153; year=100*b2+d2+(m<10?0:1)"
+  },
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "output_rows": 175,
+    "sort_key": "strcmp on n_name[nation_idx] (26-byte fixed strings) for primary; year desc for secondary"
+  },
+  "execution_target": "cpp"
+}

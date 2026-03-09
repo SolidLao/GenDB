@@ -1,0 +1,118 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_customer_build_bitset",
+    "scan_orders_filter_build_compact_hashmap",
+    "scan_lineitem_zone_skip_flat_aggregate",
+    "sequential_flat_merge",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "customer(c_mktsegment='BUILDING')",
+      "probe": "orders(o_custkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 300000,
+      "notes": "Unchanged from iter_0: single-threaded scan of c_mktsegment + c_custkey; build uint8_t cust_ok[1500001] (1.5 MB, L3-resident). Read building_code from c_mktsegment_dict.bin at startup."
+    },
+    {
+      "build": "orders(cust_ok[o_custkey] AND o_orderdate < 9204)",
+      "probe": "lineitem(l_shipdate > 9204)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1461000,
+      "notes": "COMPACT OrderHashMap: struct OrderSlot { int32_t key; int16_t orderdate; int8_t shippriority; int8_t _pad; } = 8 bytes/slot. orderdate stored as int16_t (max qualifying value 9203 < 32767, sign-safe). shippriority stored as int8_t (TPC-H range 0-3 fits). Capacity = 4M slots (power-of-2 >= 2 * 1.46M). Memory: 4M x 8 = 32 MB. Combined with qualifying_orders bitset (7.5 MB) = 39.5 MB total hot random-access working set, fits within 44 MB LLC. Sentinel: key = -1 (empty slot). Hash: Knuth multiplicative (key * 2654435761u) & mask. Linear probing."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "c_mktsegment == building_code",
+      "selectivity": 0.20,
+      "output_rows": 300000
+    },
+    {
+      "table": "orders",
+      "predicate": "cust_ok[o_custkey] && o_orderdate < 9204",
+      "selectivity": 0.097,
+      "output_rows": 1461000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "zone_map: skip blocks where zones[b].max_date <= 9204",
+      "selectivity": 0.545,
+      "notes": "lineitem sorted ASC by l_shipdate; ~273 of 600 blocks skipped entirely; qualifying ~327 blocks processed"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate > 9204",
+      "selectivity": 0.545,
+      "output_rows": 17823100
+    },
+    {
+      "table": "lineitem",
+      "predicate": "qualifying_orders bitset[l_orderkey] — bit-packed uint64_t array, 60M bits = 7.5 MB",
+      "selectivity": 0.329,
+      "output_rows": 5870000,
+      "notes": "Rejects ~67% of l_shipdate-qualifying rows before compact hash map lookup; bitset is L3-resident"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey",      "file": "lineitem/l_orderkey.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate",      "file": "lineitem/l_shipdate.bin",      "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "int8_t",  "bytes_per_row": 1}
+    ],
+    "access_pattern": "sequential with zone-map block skipping; morsels = one zone-map block = 100K rows"
+  },
+  "data_structures": {
+    "customer_filter": "uint8_t cust_ok[1500001] — zero-initialized, 1.5 MB, L3-resident",
+    "orders_prefilter": "bit-packed uint64_t qualifying_orders[(60000001+63)/64] — 7.5 MB, L3-resident; rejects non-qualifying l_orderkey values before compact hash probe",
+    "orders_metadata": "compact_hash_map — 4M slots x 8 bytes = 32 MB; struct OrderSlot { int32_t key; int16_t orderdate; int8_t shippriority; int8_t _pad; }; fits in LLC alongside bitset (39.5 MB combined); built single-threaded from merged thread-local vectors after parallel orders scan",
+    "local_aggregation": "thread_local flat open-addressing AggHashMap — 64K slots x 20 bytes = 1.28 MB per thread; struct AggSlot { double revenue; int32_t key; int32_t orderdate; int32_t shippriority; }; sentinel key = -1; Knuth hash; linear probing; expected LF ~19% for ~12.4K unique orderkeys per thread; revenue accumulated as double (SSE2)",
+    "global_aggregation": "flat open-addressing AggHashMap — 2M slots x 20 bytes = 40 MB; same AggSlot layout; LF ~0.73 for 1.46M entries; fits in 44 MB LLC during single-threaded sequential merge phase; average probe chain ~3.7 slots but within same cache lines"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_breakdown": {
+      "phase1_customer": "single_threaded — scan c_mktsegment (1.5 MB) + c_custkey (5.7 MB); build cust_ok bitset",
+      "phase2_orders": "parallel scan — each thread scans its row range of orders (4 columns x 15M rows = 228 MB total); applies cust_ok[o_custkey] AND o_orderdate < 9204; appends qualifying OrderRow {orderkey, orderdate, shippriority} to thread-local vector; main thread merges: fills qualifying_orders bitset + compact OrderHashMap (single-threaded, 1.46M insertions into 32 MB map)",
+      "phase3_lineitem": "morsel_driven parallel — atomic block index; zone-map qualifying block list pre-built; each thread claims blocks; inner loop: l_shipdate filter -> bitset prefilter -> compact OrderHashMap probe (L3-resident, ~5 ns) -> revenue as double -> flat local AggHashMap update (1.28 MB, L3-resident); NO std::unordered_map, NO heap allocation",
+      "phase4_merge": "SINGLE-THREADED SEQUENTIAL — iterate 64 local AggHashMaps one at a time (each 1.28 MB, sequentially scanned); insert/accumulate into flat global AggHashMap (2M slots, 40 MB, L3-resident during merge); total: ~82 MB sequential reads of local maps + ~1.46M random-but-L3-resident writes to global map"
+    }
+  },
+  "indexes": [
+    {
+      "index": "l_shipdate_zone_map",
+      "purpose": "skip_blocks — skip lineitem blocks where zones[b].max_date <= 9204; eliminates ~273/600 blocks"
+    },
+    {
+      "index": "orders_by_orderkey",
+      "purpose": "not_used — 240 MB random-access dense array avoided; compact in-memory hash map is cache-friendly and sufficient"
+    },
+    {
+      "index": "customer_by_custkey",
+      "purpose": "not_used — direct customer column scan with bitset build is cheaper than index indirection"
+    }
+  ],
+  "aggregation": "flat_hash_group_by — thread-local flat AggHashMap (64K slots, 1.28 MB, struct AggSlot { double revenue; int32_t key; int32_t orderdate; int32_t shippriority; }); key = l_orderkey (uniquely determines o_orderdate and o_shippriority after join); revenue = double; single-threaded merge into flat global AggHashMap (2M slots, 40 MB)",
+  "output": {
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "strategy": "iterate global AggHashMap to collect non-empty slots into result vector; partial_sort top-10 by (revenue DESC, orderdate ASC)"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause of iter_1 regression (Category A/D mismatch): the parallel range-partitioned merge caused each of 64 threads to scan ALL 64 local AggHashMaps (256K slots x 20B = 5MB each = 320MB total) searching for keys in its range — 64 x 320MB = 20.5GB of data read for the merge step alone, explaining the +99ms regression exactly. Iter_2 corrects this with three targeted changes: (1) Category B — compact OrderHashMap from 8M x 12B = 96MB down to 4M x 8B = 32MB, so combined with the qualifying_orders bitset (7.5MB) the full 39.5MB hot random-access working set fits in the 44MB LLC, eliminating ~54% L3 miss rate on 5.9M hash probes; (2) replace thread-local std::unordered_map aggregation with flat open-addressing AggHashMaps (64K slots x 20B = 1.28MB per thread, LF~19%) to eliminate heap allocation and pointer-chasing overhead, using double instead of long double for SSE2 FP throughput; (3) single-threaded sequential merge into a flat global AggHashMap (2M slots x 20B = 40MB) that fits in LLC, so all 1.46M merge insertions hit L3 (~5ns each) rather than chasing heap nodes across DRAM.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice*(1-l_discount)",
+    "revenue_formula_int8_encoding": "l_extendedprice * (1 - l_discount/100)",
+    "date_threshold": 9204,
+    "o_orderdate_predicate": "o_orderdate < 9204",
+    "l_shipdate_predicate": "l_shipdate > 9204"
+  }
+}

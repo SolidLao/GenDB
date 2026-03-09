@@ -1,0 +1,61 @@
+{
+  "query_id": "Q3",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 349.49333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 349.49333333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "dim_filter": 0.09,
+        "build_joins": 0.04,
+        "main_scan": 331.68,
+        "output": 0.34,
+        "total": 340.5
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 86.27666666666669,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 86.27666666666669,
+      "validation": "pass",
+      "strategy": "Root cause: Category A plus D. The hot path spends nearly all time in a single-threaded scan that performs random hash aggregation for every qualifying num row even though the join target is a tiny one-row-per-adsh dimension. Change the plan to build a filtered dense adsh_id->sub_row lookup for fy=2022, scan num in parallel with zone-map pruning, and accumulate values into thread-local dense sub_row sum arrays. The dense array is about 86135 * 8 bytes per thread (~689 KB), so even at 64 threads the replicated working set stays around 44 MB and fits inside the 88 MB LLC; the final SQL groupings and AVG threshold are then computed from the much smaller filtered sub-row result set instead of from the full fact stream.",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "dim_filter": 0.6,
+        "build_joins": 0.08,
+        "main_scan": 30.14,
+        "output": 0.32,
+        "total": 85.42
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 47.32999999999999,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 47.32999999999999,
+      "validation": "pass",
+      "strategy": "Root cause: Category C. Iteration 1 still performs substantial wasted work by materializing a dense block_count x filtered_sub_rows accumulation matrix, which is about 86 MB for 395 num blocks and 27,333 qualifying sub rows, then zero-initializing and reducing that oversized structure even though only 64 workers contribute. Replace it with one cache-sized dense sum array per worker (about 27,333 x 8 bytes = 219 KB each, fitting in L2 and only about 14 MB total across 64 threads), and precompute compact dense ids for cik and (name_id,cik) so the post-scan threshold and outer grouping are direct-array rollups instead of hash aggregation. This eliminates excess page faults, shrinks the reduction working set into LLC, and keeps the entire plan as sequential fact scan plus dense-array lookups.",
+      "operation_timings": {
+        "data_loading": 0.07,
+        "dim_filter": 7.49,
+        "build_joins": 0.07,
+        "main_scan": 26.7,
+        "output": 0.48,
+        "total": 44.83
+      }
+    }
+  ]
+}

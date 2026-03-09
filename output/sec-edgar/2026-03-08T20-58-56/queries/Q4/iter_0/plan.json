@@ -1,0 +1,102 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "filter_sub_sic",
+    "join_num_via_adsh_postings",
+    "filter_num_usd_notnull",
+    "join_pre_eq_triple",
+    "join_tag_lookup",
+    "aggregate",
+    "having",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: sic BETWEEN 4000 AND 4999)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 5242,
+      "notes": "Use sub_sic_zonemap + sub scan to build adsh->(sic,cik), then fetch num rowids via num_adsh_fk_hash postings."
+    },
+    {
+      "build": "pre(filtered: stmt='EQ')",
+      "probe": "num(sub-joined, USD, value_not_null)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 1069672,
+      "notes": "Build compact hash map on (adsh,tag,version)->pre_multiplicity from pre_stmt_hash rowids and pre triple columns."
+    },
+    {
+      "build": "tag(filtered: abstract=0)",
+      "probe": "stream after pre join",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "notes": "Probe tag_tag_version_pk_hash using packed (tag<<32|version) to fetch tlabel rowid."
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN 4000 AND 4999",
+      "selectivity": 0.0609
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.887
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.949
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = 'EQ'",
+      "selectivity": 0.1294
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = 0",
+      "selectivity": 1.0
+    }
+  ],
+  "data_structures": {
+    "dim_filter": "compact_hash_map(adsh -> {sic,cik})",
+    "fact_join": "compact_hash_map(triple(adsh,tag,version) -> pre_count) with optional bloom_filter",
+    "aggregation": "compact_hash_map((sic,tlabel,stmt) -> {sum_value,count_value,distinct_cik_hash_set})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_rows": 65536
+  },
+  "indexes": [
+    {
+      "index": "sub_sic_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "pre_stmt_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "tag_tag_version_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 500
+  },
+  "execution_target": "cpp"
+}

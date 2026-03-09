@@ -1,0 +1,99 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "prefilter_sub",
+    "build_pre_eq_hashset",
+    "scan_num_usd_range",
+    "merge_aggregate",
+    "having_topk_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(sic BETWEEN 4000 AND 4999)",
+      "probe": "num(usd_range)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3500,
+      "notes": "sic_ok bitset over 86K sub rows; direct lookup via num.sub_fk"
+    },
+    {
+      "build": "pre(stmt='EQ' AND sic_ok[sub_fk])",
+      "probe": "num(after sub filter)",
+      "type": "semi",
+      "strategy": "hash_join",
+      "build_cardinality": 51000,
+      "notes": "Two-pass right-sized hash table ~51K entries, ~1.6MB fits L3. PARALLELIZE both passes with OpenMP."
+    },
+    {
+      "build": "tag(abstract=0)",
+      "probe": "num(after sub+pre filter)",
+      "type": "inner",
+      "strategy": "pre_built_index",
+      "build_cardinality": 1070000,
+      "notes": "Use tag_pk_index for O(1) lookup; check abstract[tag_row]==0 inline"
+    }
+  ],
+  "filters": [
+    {"table": "num", "predicate": "uom = 'USD'", "selectivity": 0.844, "method": "uom_offsets_range_scan"},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.85, "method": "isnan_check"},
+    {"table": "sub", "predicate": "sic BETWEEN 4000 AND 4999", "selectivity": 0.041},
+    {"table": "pre", "predicate": "stmt = 'EQ'", "selectivity": 0.129, "method": "stmt_offsets_range_scan"},
+    {"table": "tag", "predicate": "abstract = 0", "selectivity": 0.9999}
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33200000,
+    "columns": [
+      {"name": "value", "file": "num/value.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "sub_fk", "file": "num/sub_fk.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "tag_code", "file": "num/tag_code.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "version_code", "file": "num/version_code.bin", "type": "uint32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential_within_usd_range"
+  },
+  "data_structures": {
+    "sub_sic_ok": "bitset(86135) — 10.8KB, trivially fits cache",
+    "sub_sic_val": "direct_array(int16_t, 86135) — 172KB",
+    "sub_cik_val": "direct_array(int32_t, 86135) — 344KB",
+    "pre_eq_hashset": "compact_hash_map(key=(uint32_t sub_fk, uint32_t tag_code, uint32_t version_code), value=uint32_t count, pre_sized=~51K). Two-pass build PARALLELIZED with OpenMP: pass 1 uses thread-local counters with reduction, pass 2 uses parallel insert with partitioned ranges. Memory: ~51K × 2 × 16 bytes = 1.6MB, fits L3.",
+    "tag_abstract": "direct_array(int8_t, 1070662) — 1MB",
+    "tag_pk_index": "pre_built_index(mmap) — used as-is",
+    "aggregation": "thread-local compact_hash_map(key=uint64_t(sic,tag_row), value=(double sum, uint64_t count, vector<int32_t> cik_buf), INITIAL_CAPACITY=4096). TWO-PHASE MERGE: (1) merge all thread-local maps by integer key into single global integer-keyed map — fast O(N) integer hash ops, no strings. (2) Then iterate global map once to re-aggregate by (sic, tlabel) string — only touches each unique group once, not once per thread. This reduces string operations by ~64× vs previous approach."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "scan_target": "num_usd_range",
+    "morsel_size": 100000,
+    "threads": "auto(nproc)",
+    "notes": "Thread-local agg maps with 4096 initial capacity. build_joins phase also parallelized with OpenMP parallel for."
+  },
+  "indexes": [
+    {"index": "uom_offsets", "file": "num/uom_offsets.bin", "purpose": "get USD row range"},
+    {"index": "tag_pk_index", "file": "indexes/tag_pk_index.idx", "purpose": "O(1) tag lookup"},
+    {"index": "stmt_offsets", "file": "pre/stmt_offsets.bin", "purpose": "get EQ row range in pre"}
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "(int16_t sic, uint32_t tag_row) packed as uint64_t",
+    "group_key_notes": "p.stmt is constant 'EQ', excluded from key. tag_row is proxy for tlabel during scan. String re-aggregation deferred to merge phase.",
+    "accumulators": {
+      "sum_value": "double",
+      "count_value": "uint64_t",
+      "cik_buf": "std::vector<int32_t> — append CIK values during scan, sort+unique only at final output."
+    },
+    "thread_local": true,
+    "merge_strategy": "TWO-PHASE: Phase 1 — iterate all 64 thread-local maps, merge into single global unordered_map<uint64_t, AggEntry> by integer key. For CIK: move largest vector, append remaining. This is fast (integer hash only, no strings). Phase 2 — iterate the single merged integer map, read tlabel once per unique (sic, tag_row), re-aggregate into final string-keyed map. This touches each unique group exactly once instead of once per thread that observed it. Expected speedup: merge from 35ms to ~15-20ms."
+  },
+  "output": {
+    "columns": ["s.sic", "t.tlabel", "p.stmt(='EQ')", "num_companies", "total_value", "avg_value"],
+    "order_by": ["total_value DESC"],
+    "limit": 500,
+    "having": "num_companies >= 2",
+    "sort_strategy": "partial_sort"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A (plan restructuring). Root cause: merge_aggregate (35ms) dominates because it performs expensive varlen string reads and string-keyed hash map operations for EVERY occupied slot across all 64 thread-local maps. Fix: two-phase merge — first merge all thread-local maps by integer key (sic, tag_row) into a single global integer-keyed map (fast, no strings), then do string re-aggregation by tlabel in a single pass over the much smaller merged result. This reduces string operations by ~64× (once per unique group vs once per thread observation). Secondary: parallelize build_joins phase — the two-pass scan over 1.24M EQ pre rows is currently single-threaded; use OpenMP parallel for with reduction for counting pass and parallel insert for the second pass. Expected improvement: merge 35→15ms, build_joins 13→5ms, total ~90ms.",
+  "correctness_anchors": {
+    "threshold_constant": 4000
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["load_dicts", "parallel_scan_filter", "aggregate", "merge", "decode_output", "sort_topk"],
+  "join_order": [],
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt_code != null_stmt_code",
+      "selectivity": 0.97,
+      "note": "null_stmt_code is the code for empty-string '' loaded from indexes/stmt_codes.bin; if no empty-string entry exists, sentinel -99 means accept all rows"
+    }
+  ],
+  "scan": {
+    "table": "pre",
+    "columns": ["stmt_code", "rfile_code", "adsh_code", "line"],
+    "column_files": [
+      "pre/stmt_code.bin",
+      "pre/rfile_code.bin",
+      "pre/adsh_code.bin",
+      "pre/line.bin"
+    ],
+    "total_rows": 9600799,
+    "morsel_size": 100000
+  },
+  "data_structures": {
+    "aggregation": "direct_array[256][256] per thread — indexed by (uint8_t)stmt_code and (uint8_t)rfile_code; holds cnt(int64), sum_line(int64), row_count(int64)",
+    "distinct_adsh": "bitset(86135) per group per thread — 7 groups × 64 threads × ~10.6KB = ~4.7MB total; OR-merged at reduction step",
+    "dict_maps": "flat array string[256] for stmt_strings and rfile_strings built from indexes/stmt_codes.bin and indexes/rfile_codes.bin at startup"
+  },
+  "aggregation": {
+    "strategy": "array_direct",
+    "group_by": ["stmt_code (int8_t → uint8_t index)", "rfile_code (int8_t → uint8_t index)"],
+    "max_groups": 14,
+    "accumulators": [
+      {"name": "cnt", "type": "int64_t", "op": "COUNT(*)"},
+      {"name": "sum_line", "type": "int64_t", "op": "SUM(line) for AVG"},
+      {"name": "num_filings_bits", "type": "bitset<86135>", "op": "COUNT(DISTINCT adsh_code)"}
+    ],
+    "output_expressions": [
+      "cnt = per_group cnt",
+      "num_filings = bitset.count()",
+      "avg_line_num = (double)sum_line / cnt"
+    ]
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "per_thread_state": "independent direct_array[256][256] accumulators + bitset[7] for distinct adsh",
+    "reduction": "sequential merge of thread-local arrays: sum cnt/sum_line, bitwise-OR bitsets"
+  },
+  "indexes": [
+    {
+      "index": "stmt_codes",
+      "file": "indexes/stmt_codes.bin",
+      "purpose": "load null_stmt_code for filter + build code->string inverse map for output decode"
+    },
+    {
+      "index": "rfile_codes",
+      "file": "indexes/rfile_codes.bin",
+      "purpose": "build code->string inverse map for output decode"
+    }
+  ],
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "expected_rows": 14,
+    "sort_strategy": "std::sort on 14-element result vector — trivial cost",
+    "columns": ["stmt (decoded string)", "rfile (decoded string)", "cnt", "num_filings", "avg_line_num"]
+  },
+  "execution_target": "cpp"
+}

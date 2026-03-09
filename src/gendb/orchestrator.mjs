@@ -580,7 +580,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
     meta.gendbDir = args.gendbDir;
     meta.scaleFactor = args.scaleFactor;
     meta.maxIterations = args.maxIterations;
-    meta.model = args.model;
+    meta.model = args.modelOverride || args.model;
     meta.agentProvider = args.agentProvider;
     meta.optimizationTarget = args.optimizationTarget;
     meta.phase1 = {

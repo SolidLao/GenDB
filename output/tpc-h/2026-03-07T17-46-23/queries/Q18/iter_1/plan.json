@@ -1,0 +1,75 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "subquery_scan_aggregate",
+    "index_lookup_orders_customer",
+    "sort_and_limit"
+  ],
+  "join_order": [
+    {
+      "build": "lineitem(subquery_aggregated → qualifying_orderkeys)",
+      "probe": "orders(via dense index lookup)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "Subquery produces ~15K qualifying orderkeys; orders_orderkey_lookup gives O(1) access"
+    },
+    {
+      "build": "orders(qualifying rows)",
+      "probe": "customer(via dense index lookup)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "customer_custkey_lookup gives O(1) row access by custkey"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) GROUP BY l_orderkey HAVING > 300",
+      "selectivity": 0.001
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "subquery_aggregation": "sorted_sequential_accumulate (no hash table — l_orderkey sorted)",
+    "qualifying_results": "flat_array<struct{int32_t orderkey, double sum_qty, int32_t order_row_idx, int32_t cust_row_idx, double o_totalprice, int32_t o_orderdate}>",
+    "orders_lookup": "dense_lookup_array (mmap orders_orderkey_lookup.bin)",
+    "customer_lookup": "dense_lookup_array (mmap customer_custkey_lookup.bin)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_details": "Partition lineitem rows into equal-sized ranges across threads. Align morsel boundaries to orderkey group boundaries using sorted l_orderkey. Each thread scans sequentially and collects qualifying orderkeys locally. Merge results after parallel region (small — ~15K entries).",
+    "phase2_onwards": "single_thread (only ~15K rows)"
+  },
+  "indexes": [
+    {
+      "index": "orders_orderkey_lookup",
+      "file": "indexes/orders_orderkey_lookup.bin",
+      "purpose": "O(1) lookup: qualifying orderkey → orders row index"
+    },
+    {
+      "index": "customer_custkey_lookup",
+      "file": "indexes/customer_custkey_lookup.bin",
+      "purpose": "O(1) lookup: o_custkey → customer row index"
+    }
+  ],
+  "aggregation": "sorted_sequential_accumulate",
+  "output": {
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100,
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A — Plan restructuring. Root cause: data_loading phase (58ms / 117ms total) dominated by MAP_POPULATE forcing synchronous page fault of 913MB across all mmap'd files, including 228MB of orders columns only accessed for ~15K rows. Fix: (1) Remove MAP_POPULATE from ALL mmap calls — for hot runs pages are already in OS page cache, and sequential scan of lineitem naturally triggers hardware prefetch without needing upfront population. (2) Use MADV_SEQUENTIAL for lineitem files (sequential scan), MADV_RANDOM for index/lookup files (sparse random access). (3) Defer mmap of orders and customer columns until after subquery completes — they are only needed for ~15K qualifying rows. (4) Remove the separate data_loading phase entirely — just mmap lazily at point of use. This eliminates the 58ms data_loading overhead; page faults during the scan are near-free on cached pages. Expected total: ~20-30ms.",
+  "correctness_anchors": {}
+}

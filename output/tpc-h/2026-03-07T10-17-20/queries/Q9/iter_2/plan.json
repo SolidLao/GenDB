@@ -1,0 +1,123 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.o_orderkey.year_idx",
+      "action": "use_existing",
+      "files": {
+        "year_idx": "column_versions/orders.o_orderkey.year_idx/year_idx.bin",
+        "year_idx_format": "int32_t max_okey header (4 bytes) followed by uint8_t[max_okey+1]; 0xFF for unused slots"
+      },
+      "usage": "Used only during setup to build the lineitem.l_year_idx extension (already done). Not used directly in the query scan loop."
+    },
+    {
+      "id": "lineitem.l_year_idx",
+      "action": "built_new",
+      "files": {
+        "year_idx": "column_versions/lineitem.l_year_idx/year_idx.bin",
+        "year_idx_format": "uint8_t[59986052]; entry i = (year - 1992) for the order of lineitem row i (0=1992..6=1998); all entries valid"
+      },
+      "usage": "mmap year_idx.bin as uint8_t[59986052]. In the scan: l_year_arr[i] replaces okey_year_arr[l_orderkey[i]]. Sequential access (row index i) — no LLC misses, hardware prefetcher works perfectly. Eliminates l_orderkey column from scan entirely."
+    }
+  ],
+  "pipeline": [
+    "mmap_columns",
+    "prefetch_l_partkey_only",
+    "parallel_build_green_bitset",
+    "parallel_build_compact_ps_hash_with_cas",
+    "load_supplier_nation_arrays",
+    "lineitem_pass1_scan_partkey_build_selvec",
+    "sort_selection_vector",
+    "lineitem_pass2_gather_and_aggregate",
+    "merge_aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "part(p_name LIKE '%green%')",
+      "probe": "lineitem.l_partkey (pass 1)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 110600,
+      "notes": "Parallel scan of p_name.bin (112MB, stride=56) across all threads. Build shared uint8_t is_green[2000001] (2MB, L3-resident). Pass 1 of lineitem scan: read l_partkey only (240MB), collect qualifying row indices into per-thread vectors (~51K per thread)."
+    },
+    {
+      "build": "partsupp(filtered to green ps_partkey only)",
+      "probe": "lineitem.(l_partkey, l_suppkey) in pass 2",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 440000,
+      "notes": "Parallel scan of partsupp raw columns (128MB). Parallel CAS-based insertion of ~440K green entries into compact hash (capacity 1048576 = 2^20, key=int64, value=double, 16MB total — L3-resident). No single-threaded bottleneck. Use uint64_t atomic CAS to claim slots; write value after key is claimed. Probe during pass 2 only for qualifying rows."
+    },
+    {
+      "build": "supplier(direct array suppkey->nationkey)",
+      "probe": "lineitem.l_suppkey in pass 2",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "uint8_t supp_nat[100001] — 100KB, L1-resident. Single-threaded build from s_suppkey + s_nationkey columns (tiny)."
+    },
+    {
+      "build": "lineitem.l_year_idx extension",
+      "probe": "selection vector row indices in pass 2",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 59986052,
+      "notes": "mmap uint8_t[59986052]. Sequential access via sorted selection vector indices — hardware prefetcher works. No LLC misses. Replaces random 60MB okey_year_arr lookup."
+    },
+    {
+      "build": "nation(all)",
+      "probe": "supp_nat[l_suppkey]",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "char nation_names[25][26] from n_name.bin — 650 bytes, L1-resident."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "strstr(p_name_buf + row*56, 'green') != nullptr",
+      "selectivity": 0.0553,
+      "output_cardinality": 110600
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey",       "file": "lineitem/l_partkey.bin",       "type": "int32_t", "bytes_per_row": 4, "pass": "pass1_and_pass2"},
+      {"name": "l_suppkey",       "file": "lineitem/l_suppkey.bin",       "type": "int32_t", "bytes_per_row": 4, "pass": "pass2_only"},
+      {"name": "l_year_idx",      "file": "column_versions/lineitem.l_year_idx/year_idx.bin", "type": "uint8_t", "bytes_per_row": 1, "pass": "pass2_only"},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double",  "bytes_per_row": 8, "pass": "pass2_only"},
+      {"name": "l_discount",      "file": "lineitem/l_discount.bin",      "type": "double",  "bytes_per_row": 8, "pass": "pass2_only"},
+      {"name": "l_quantity",      "file": "lineitem/l_quantity.bin",      "type": "double",  "bytes_per_row": 8, "pass": "pass2_only"}
+    ],
+    "access_pattern": "two_pass",
+    "notes": "Pass 1: scan l_partkey only (240MB sequential). For each row i where is_green[l_partkey[i]], append i to thread-local selection vector. Pass 2: after merging and sorting the global selection vector (3.3M sorted indices, 13.2MB), iterate in sorted order gathering l_suppkey[idx], l_year_idx[idx], l_extprice[idx], l_discount[idx], l_quantity[idx]. Sorted order ensures ascending cache-line access within each column. l_orderkey is NOT needed — dropped entirely."
+  },
+  "data_structures": {
+    "part_filter": "uint8_t is_green[2000001] — 2MB, built in parallel from p_name scan. Shared read-only across threads.",
+    "compact_ps_hash": "Flat hash: uint64_t keys[1048576] (sentinel=0xFFFFFFFFFFFFFFFF, atomically claimed via CAS), double values[1048576]; 16MB total, L3-resident. Parallel CAS-based insertion of 440K entries across all threads. key = (uint64(ps_partkey)<<32)|uint32(ps_suppkey).",
+    "supplier_lookup": "uint8_t supp_nat[100001] — direct array, 100KB, L1-resident.",
+    "year_lookup": "uint8_t l_year_arr[59986052] — mmap of lineitem.l_year_idx extension. Sequential access during pass 2 (sorted row indices). Hardware prefetcher handles perfectly.",
+    "selection_vector": "std::vector<int32_t> global_selvec (~3.3M entries = 13.2MB). Built by merging per-thread vectors after pass 1. Sorted with std::sort before pass 2.",
+    "nation_lookup": "char nation_names[25][26] — 650 bytes, L1-resident.",
+    "aggregation": "double thread_agg[25][7] per thread (1400 bytes, L1-resident, cache-line aligned with alignas(64) padding)."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Phase 1 (p_name scan + partsupp scan): nthreads parallel for schedule(static). CAS-based parallel hash insertion. Phase 2 (pass 1 scan): morsel-driven over l_partkey (60M rows). Phase 3 (sort selvec): std::sort on merged global vector (single-threaded, 3.3M entries ~3ms). Phase 4 (pass 2 gather+agg): divide sorted selvec evenly across nthreads, each thread processes its slice sequentially (sorted indices ensure ascending cache access). Thread-local agg[25][7] merged at end."
+  },
+  "indexes": [],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Iter 1 timing (exclusive per phase): data_loading=52.6ms, dim_filter=6.3ms, build_joins=27.6ms, main_scan=41.7ms. Three root causes: (1) Category C/B — data_loading overhead from MADV_WILLNEED on 2.16GB lineitem data; only l_partkey needs prefetch since payload columns are accessed for only 5.5% of rows; (2) Category B/E — main_scan is bandwidth-limited at ~51GB/s reading 2.16GB of lineitem data for every row, while 94.5% of rows are rejected after l_partkey check; replacing single-pass with two-pass eliminates reading 1.74GB of payload columns for non-qualifying rows (effective pass 2 bandwidth ~96MB for 3.3M qualifying rows); additionally, okey_year_arr random 60MB access causes LLC misses — eliminated by new lineitem.l_year_idx column version (uint8_t[59986052], sequential access, built in 1.7s); (3) Category D — single-threaded partsupp hash insertion of 440K entries (~22ms) replaced with CAS-based parallel insertion across all 64 threads. Expected new totals: data_loading ~5ms, dim_filter ~6ms, build_joins ~4ms, pass1+sort ~6ms, pass2+agg ~8ms, total ~30ms.",
+  "correctness_anchors": {}
+}

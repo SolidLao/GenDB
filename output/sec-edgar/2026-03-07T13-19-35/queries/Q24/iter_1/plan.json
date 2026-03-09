@@ -1,0 +1,96 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "load_zone_maps_and_usd_code",
+    "identify_surviving_blocks",
+    "mmap_num_columns_no_prefetch",
+    "madvise_surviving_block_ranges",
+    "load_anti_set_sorted_vector",
+    "main_scan_single_thread",
+    "having_filter",
+    "topk_sort",
+    "decode_strings"
+  ],
+  "join_order": [
+    {
+      "build": "pre(indexes/pre_adsh_tagver_set.bin — pre-sorted uint64_t array)",
+      "probe": "num(surviving blocks only)",
+      "type": "anti",
+      "strategy": "binary_search_sorted_array",
+      "build_cardinality": 8631890,
+      "notes": "Read header uint64_t n_unique (8 bytes), then fread n_unique uint64_t keys into vector<uint64_t>. Array is already sorted ascending — use std::lower_bound / std::binary_search for O(log 8.6M) probe per row. DO NOT build unordered_set: inserting 8.6M keys into a 130MB hash table costs ~800ms even warm. Binary search on 69MB sorted array: ~67K probes x log2(8.6M) comparisons ≈ 30ms total — cheaper than hash table construction."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == usd_code",
+      "selectivity": 0.05,
+      "method": "zone_map_block_skip + row_filter",
+      "notes": "usd_code loaded from indexes/uom_codes.bin — never hardcoded. Zone map: skip block b if zm[b].min_uom > usd_code || zm[b].max_uom < usd_code."
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 20230101 AND 20231231",
+      "selectivity": 0.0034,
+      "method": "zone_map_block_skip + row_filter",
+      "notes": "Zone map: skip block b if zm[b].max_ddate < 20230101 || zm[b].min_ddate > 20231231. Combined with uom filter: ~0.17% of rows survive (~67K rows) across 1-3 blocks."
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.999,
+      "method": "row_filter",
+      "notes": "std::isnan(v) check after uom+ddate pass, before anti-join probe."
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {"name": "uom_code",  "file": "num/uom_code.bin",  "type": "int8_t",  "bytes_per_row": 1},
+      {"name": "ddate",     "file": "num/ddate.bin",     "type": "int32_t", "bytes_per_row": 4},
+      {"name": "adsh_code", "file": "num/adsh_code.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "tagver_code","file": "num/tagver_code.bin","type": "int32_t","bytes_per_row": 4},
+      {"name": "value",     "file": "num/value.bin",     "type": "double",  "bytes_per_row": 8}
+    ],
+    "access_pattern": "selective_block_scan",
+    "prefetch_strategy": "After mmapping all 5 columns with no prefetch, call madvise(MADV_WILLNEED) on the surviving block byte ranges for each column. Surviving blocks determined from zone maps BEFORE any column data is read. Byte range for block b in column with element_size E: offset = b * 100000 * E, length = min(100000, remaining_rows) * E."
+  },
+  "data_structures": {
+    "anti_set": "vector<uint64_t> sorted_array(8631890) — fread entire array, use std::lower_bound for anti-join probe. Key: ((uint64_t)(uint32_t)adsh_code << 32) | (uint32_t)tagver_code. tagver_code=-1 casts to 0xFFFFFFFF — valid non-matching key. NO unordered_set.",
+    "aggregation": "unordered_map<int32_t, pair<int32_t,double>> — compact map for ~2315 groups, ~200KB footprint fits in L2 cache. Key: tagver_code. Guard: skip tagver_code < 0 or >= TAG_COUNT.",
+    "zone_maps": "vector<ZoneMap>(395) loaded FIRST (4,744 bytes, trivial). ZoneMap layout: int8_t min_uom@0, int8_t max_uom@1, int8_t pad[2]@2, int32_t min_ddate@4, int32_t max_ddate@8. sizeof(ZoneMap)=12."
+  },
+  "parallelism": {
+    "strategy": "single_threaded_scan",
+    "threads": 1,
+    "notes": "Zone maps eliminate ~397 of 395 block candidates; only 1-3 blocks (~100K-300K rows) remain for scan, of which ~67K pass row-level filters. Single-threaded avoids: (1) 64x12MB=768MB thread-local direct array allocation+zeroing, (2) 106ms merge phase. The scan work is sub-millisecond; threading overhead dominates."
+  },
+  "indexes": [
+    {
+      "index": "pre_adsh_tagver_set",
+      "file": "indexes/pre_adsh_tagver_set.bin",
+      "purpose": "anti_join sorted array — header is uint64_t n_unique (8 bytes), followed by n_unique sorted uint64_t keys. Load into vector<uint64_t>. Use std::lower_bound for probe."
+    },
+    {
+      "index": "num_zone_maps",
+      "file": "indexes/num_zone_maps.bin",
+      "purpose": "skip_blocks — loaded FIRST before mmapping columns. Dual-condition filter. Build list of surviving block indices for targeted madvise."
+    },
+    {
+      "index": "uom_codes_dict",
+      "file": "indexes/uom_codes.bin",
+      "purpose": "dict_lookup — resolve USD string to int8_t usd_code. Layout: uint8_t N; N x {int8_t code, uint8_t slen, char[slen]}."
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "having": "cnt > 10",
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "decode": "After top-100 selection by cnt DESC, decode tag and version strings: tag/tag_offsets.bin (uint32_t[TAG_COUNT+1]) + tag/tag_data.bin (char[]); tag/version_offsets.bin (uint32_t[TAG_COUNT+1]) + tag/version_data.bin (char[]). Access pattern: tag_str = tag_data[tag_offsets[tc] .. tag_offsets[tc+1]). Both files are small — mmap and access directly."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A + C — plan restructuring + work elimination): data_loading consumed 97% of total time (2511ms) because mmap_prefetch_all eagerly read all 5 num columns (~828MB) from disk, while zone maps show only 1-3 of 395 blocks contain USD 2023 data (~0.17% combined selectivity = ~67K rows, ~4MB of column data needed). A secondary cost was building a 130MB unordered_set from 8.6M keys (~800ms), and 64 thread-local 12MB direct arrays generating a 106ms merge phase. Fix: load zone maps first (4.7KB), identify surviving block indices, mmap columns without prefetch, then madvise(MADV_WILLNEED) on only the surviving block byte ranges per column (~4MB total vs 828MB). Replace unordered_set with vector<uint64_t> + std::lower_bound — avoids 130MB hash table construction while adding only ~30ms for 67K binary searches. Switch to single-threaded scan (1-3 blocks is trivially fast) with compact unordered_map aggregation (~200KB, L2-resident). Expected: data_loading ~30-50ms, scan ~30ms, total ~60-80ms."
+}

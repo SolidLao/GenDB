@@ -1,0 +1,99 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "filter_sub_fy2022",
+    "build_adsh_to_filtered_idx",
+    "fetch_usd_posting",
+    "scan_usd_rowids",
+    "aggregate_per_filtered_subrow",
+    "rollup_name_cik_and_cik",
+    "compute_avg_threshold",
+    "having_filter",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=2022)",
+      "probe": "num(filtered: uom='USD' via posting list)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 17572,
+      "notes": "Use sub_adsh_pk_hash LUT domain to map adsh->filtered_sub_idx and aggregate by filtered index"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8434649913
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 33233384,
+    "columns": [
+      {
+        "name": "num_uom_hash.rowids(USD)",
+        "file": "num/indexes/num_uom_hash.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "num.value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "flat_array(adsh_code->filtered_sub_idx, sentinel=-1) + vector(filtered_sub_rows)",
+    "fact_join": "pre_built_index(num_uom_hash) + direct_array_lookup(sub_adsh_pk_hash_domain)",
+    "aggregation": "thread_local direct_array(filtered_sub_cardinality) then compact_hash_map rollup for (name,cik) and cik"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "prune sub blocks and materialize fy=2022 filtered rows"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "define dense adsh code domain and constant-time adsh->row lookup"
+    },
+    {
+      "index": "num_uom_hash",
+      "purpose": "get USD rowids directly and avoid scanning non-USD fact rows"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": [
+      "total_value DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause is that iter_0 still performs too much per-row hot-path work: a full 39.4M-row fact loop plus two hash-map updates for each qualifying row. Strategy Category C (work elimination) with cache-fit array aggregation: drive scan from the USD posting list so only USD rowids are touched, map adsh codes through a dense filtered-index array, accumulate into thread-local fixed arrays keyed by filtered sub rows, and defer hash aggregation to a small post-scan rollup over filtered rows; this removes one entire per-row aggregation path and replaces random hash updates with contiguous array writes while preserving exact query semantics.",
+  "correctness_anchors": {}
+}

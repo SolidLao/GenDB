@@ -1,0 +1,115 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 69.99666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 69.99666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 22.39,
+        "output": 1.2,
+        "total": 68.75
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 83.21333333333332,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 83.21333333333332,
+      "validation": "pass",
+      "strategy": "Root cause: the hot-path cost is dominated by scan execution overhead relative to useful output in a single-table query; strategy category D+C applies by replacing fine-grained dynamic morsels with partition-parallel contiguous scan ranges and a fully fused filter+aggregate loop while preserving zone-map block pruning as an inexpensive pre-pass, reducing scheduler/coordination overhead and unnecessary column touches before qualification.",
+      "operation_timings": {
+        "data_loading": 0.11,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 28.16,
+        "output": 1.03,
+        "total": 72.87
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 85.61,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 85.61,
+      "validation": "pass",
+      "strategy": "Root cause: work is highly disproportional to output (about 97.6% of rows are rejected) while the current scalar row-at-a-time path still pays heavy branch and column-touch overhead in main_scan; strategy category C applies by switching to a selection-cascade plan that first filters with cheap predicates into compact row-id vectors and only then touches later columns, with late materialization of l_extendedprice and thread-local reduction to minimize unnecessary memory traffic and hot-loop control cost.",
+      "operation_timings": {
+        "data_loading": 0.08,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 37.81,
+        "output": 0.51,
+        "total": 84.59
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 95.28000000000002,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 95.28000000000002,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level access-path mismatch: prior plans still scanned nearly all 59.9M rows while only ~2.4% survive, so main_scan remained dominant despite loop-shape tuning; strategy category E builds and uses a persistent shipdate postings index to convert the date predicate into direct row-id range lookup, then evaluates discount/quantity only on candidate rows with late l_extendedprice access and thread-local sum reduction.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 40.98,
+        "output": 0.49,
+        "total": 86.04
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": false,
+      "categories": [],
+      "timing_ms": 225.19000000000003,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 225.19000000000003,
+      "validation": "pass",
+      "strategy": "Root cause is physical-implementation mismatch (Category B): the previous postings-based plan converted date filtering into cache-exceeding random probes over large measure columns, so memory latency dominated main_scan. The revised plan keeps the shipdate postings access path but changes algorithm by sorting candidate row ids before predicate evaluation, turning discount/quantity/extendedprice access into near-sequential sparse scans; this reduces random LLC misses while preserving late materialization and thread-local reduction.",
+      "operation_timings": {
+        "data_loading": 0.03,
+        "dim_filter": 0,
+        "build_joins": 165.31,
+        "main_scan": 16.72,
+        "output": 1.46,
+        "total": 224.08
+      }
+    },
+    {
+      "iteration": 5,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 40.79333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 40.79333333333333,
+      "validation": "pass",
+      "strategy": "Root cause is a storage-level encoding mismatch (Category E): the hot path is a bandwidth-bound scan over two wide double predicate columns where most rows are rejected. The plan adds persistent scaled-int16 column versions for l_discount and l_quantity, keeps zone-map block pruning, and uses a fused sequential filter+aggregate loop with late l_extendedprice access and thread-local reduction; this reduces per-row scan bytes and branch-path cost while preserving exact predicates and revenue semantics.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0,
+        "build_joins": 0,
+        "main_scan": 16.64,
+        "output": 1.12,
+        "total": 41.19
+      }
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "query_id": "Q24",
+  "storage_extensions": [
+    {
+      "id": "pre.adsh_tag_version.by_adsh_pairs",
+      "action": "built_new",
+      "files": {
+        "offsets": "column_versions/pre.adsh_tag_version.by_adsh_pairs/offsets.bin",
+        "offsets_format": "uint64_t[86137] indexed by adsh_code",
+        "pairs": "column_versions/pre.adsh_tag_version.by_adsh_pairs/pairs.bin",
+        "pairs_format": "PairKey[row_count] where PairKey={uint32_t tag, uint32_t version} sorted by (tag,version) within each adsh slice"
+      },
+      "usage": "mmap offsets.bin and pairs.bin; for each filtered num row, use num.adsh as a direct-array lookup into the current pre adsh slice, then test (num.tag,num.version) against that adsh's sorted PairKey range instead of hashing the full triple into the partitioned-exact structure"
+    }
+  ],
+  "pipeline": [
+    "date_postings_range",
+    "uom_postings_membership",
+    "anti_probe_pre_by_adsh_pairs",
+    "late_value_non_null_and_aggregate",
+    "having_count_gt_10",
+    "topk_cnt_desc"
+  ],
+  "join_order": [
+    {
+      "build": "pre(unique (adsh,tag,version) grouped by adsh)",
+      "probe": "num(filtered: ddate range, uom=USD)",
+      "type": "anti",
+      "strategy": "direct_array",
+      "build_cardinality": 8631890,
+      "notes": "Use a dense offsets array on adsh_code plus a sorted (tag,version) slice per adsh. The filtered num stream has strong adsh locality, so repeated rows from the same filing reuse a tiny hot pre slice instead of recomputing a full-triple hash probe."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 1.0
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 9026731,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "Drive from num_ddate_postings range slices, test USD via a compact membership bitset, keep a thread-local cached pre slice for the current adsh, and materialize num.value only after the anti-join miss survives."
+  },
+  "data_structures": {
+    "dim_filter": "bitset(39401761) for num_uom_postings membership; drive from num_ddate_postings range rowids",
+    "fact_join": "pre_built_index(dense adsh offsets + sorted PairKey slices) with thread-local current_adsh slice cache and in-slice exact lookup on (tag,version)",
+    "aggregation": "compact_hash_map(thread_local, pre_sized) keyed by packed(tag,version) -> {count_rows,sum_value}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num_ddate_postings",
+      "purpose": "enumerate 2023 candidate rowids via postings range scan"
+    },
+    {
+      "index": "num_uom_postings",
+      "purpose": "apply USD membership before join work"
+    },
+    {
+      "index": "pre.adsh_tag_version.by_adsh_pairs",
+      "purpose": "reuse a small exact (tag,version) slice per adsh for anti-join membership"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC",
+      "tag ASC",
+      "version ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: after replacing the 805 MB open-addressed pre hash table, the remaining 81 ms hot phase still spends most work on anti-probing a pre layout organized by full-triple hash even though the filtered stream has strong adsh locality and almost every filtered num row matches pre, so reading num.value and redoing full-triple probe setup per row is wasted work. Strategy category E/A: build a new exact storage extension that groups pre's unique (adsh,tag,version) keys by adsh into a 673 KB dense offsets array plus a 66 MB sorted PairKey payload that fits in LLC, then probe only the current adsh's hot (tag,version) slice and late-materialize value after an anti-miss before rolling up by (tag,version).",
+  "correctness_anchors": {}
+}

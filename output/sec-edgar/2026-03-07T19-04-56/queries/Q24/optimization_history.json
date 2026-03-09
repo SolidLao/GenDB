@@ -1,0 +1,102 @@
+{
+  "query_id": "Q24",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 71.83666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 71.83666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.08,
+        "dim_filter": 0.19,
+        "build_joins": 0.01,
+        "main_scan": 37.36,
+        "sort_topk": 9.45,
+        "output": 0.37,
+        "total": 70.55
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 66.17,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 66.17,
+      "validation": "pass",
+      "strategy": "Category B+D: Two root causes identified. (1) std::unordered_map uses chained hashing with node-based allocation causing severe cache misses during both scan-time insertion and the merge phase (sort_topk=9ms). Replace with flat open-addressing hash map using power-of-2 sizing (128K slots × 24 bytes = 3MB per thread, fits in LLC). Use sentinel key UINT64_MAX for empty slots; linear probing. (2) Two-phase scan within each morsel: first pass filters ddate+value sequentially to build a compact selection vector of qualifying row indices, second pass loads sub_fk/tag_code/version_code only for qualifying rows and does index probe + aggregation. This improves branch prediction and reduces column reads for the ~73% of rows eliminated by ddate+value filters. For the anti-join probe, pack the 3-field comparison by checking a combined 64-bit value first (sub_fk<<32|tag_code) before checking version_code to reduce comparison cost. Merge phase: iterate flat map slots skipping sentinels (sequential scan, no pointer chasing). Expected improvement: ~5ms from flat hash map in scan, ~4ms from faster merge = target ~63ms.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "dim_filter": 0.11,
+        "build_joins": 0,
+        "main_scan": 37.27,
+        "sort_topk": 4.75,
+        "output": 0.39,
+        "total": 65.99
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 60.54,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 60.54,
+      "validation": "pass",
+      "strategy": "Category B+C: The iter_1 code used std::unordered_map despite the plan specifying flat hash maps, and did not implement two-phase scan. Root cause: (1) std::unordered_map causes node-based allocation and pointer-chasing during both scan-time insertion (~2ms overhead) and merge phase (sort_topk=5ms could be ~2ms with flat map). (2) Single-phase scan loads sub_fk/tag_code/version_code for ALL rows including the ~73% eliminated by ddate+value filters. Fix: (A) Implement an explicit custom FlatHashMap struct (NOT std::unordered_map) with contiguous key/value arrays, power-of-2 sizing, linear probing, sentinel-based empty detection. This eliminates allocation overhead and enables cache-friendly sequential merge. (B) Two-phase scan per block: pass 1 checks ddate+value and writes qualifying indices to a selection vector (sequential reads of ddate and value only); pass 2 loads sub_fk/tag_code/version_code only for qualifying rows, does anti-join probe, and aggregates. This reduces column reads by ~73%. (C) Software prefetching for anti-join probes: in pass 2, prefetch the bucket_offsets entry for the next qualifying row while processing the current probe, hiding memory latency for the 153MB index.",
+      "operation_timings": {
+        "data_loading": 0.08,
+        "mmap_columns": 0.04,
+        "dim_filter": 0.01,
+        "main_scan": 28.43,
+        "merge_having_topk": 7.84,
+        "output": 0.36,
+        "total": 59.81
+      }
+    },
+    {
+      "iteration": 3,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 56.00333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 56.00333333333333,
+      "validation": "pass",
+      "strategy": "Category C (work elimination): Two root causes. (1) main_scan=28ms: 9M anti-join probes into the 153MB pre index (far exceeds 44MB LLC), but ~99% of probed rows have matches and are discarded. Fix: build a Bloom filter (12MB, fits LLC) from all pre (sub_fk, tag_code, version_code) tuples. Bloom negative = definitely no match = passes anti-join, aggregate directly. Bloom positive = likely has match = skip row immediately. Only ~0.8% false positives (~720 rows) need the expensive full index probe. This eliminates ~9M random cache-miss-heavy probes, replacing them with cache-resident Bloom checks. Expected main_scan reduction: 28ms → ~12-15ms. (2) merge_having_topk=8ms: merging 32 thread-local maps requires scanning 32×131K = 4.2M slots, but only ~50K groups exist. Fix: each FlatHashMap tracks occupied slot indices in a vector<uint32_t>. On new key insertion, push the slot index. Merge iterates only occupied slots (~50K total vs 4.2M). Expected merge reduction: 8ms → ~1-2ms. Total expected: ~45-50ms.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "mmap_columns": 0.03,
+        "dim_filter": 0.01,
+        "main_scan": 29.11,
+        "merge_having_topk": 1.76,
+        "output": 1.09,
+        "total": 55.01
+      }
+    },
+    {
+      "iteration": 4,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 51.22,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 51.22,
+      "validation": "pass",
+      "strategy": "Category D (micro-architecture optimization): main_scan=29ms dominates. Root cause: 9M anti-join probes into 153MB pre index (3.5× LLC) with TWO dependent cache misses per probe — first to read bucket_offsets[bucket], second to read pre_entries[bStart..bEnd]. The iter_3 code prefetches bucket_offsets 8 rows ahead but NEVER prefetches the entries array, leaving the second (dependent) cache miss fully latency-bound at ~100ns each. Fix: implement two-stage group prefetching (amortized hash probing) with BATCH_SIZE=32. Process qualifying rows in batches of 32: Stage 1 computes all 32 hashes and issues __builtin_prefetch for bucket_offsets[bucket] for each; Stage 2 reads all 32 bucket offset pairs (bStart, bEnd) and issues __builtin_prefetch for &pre_entries[bStart] for each; Stage 3 performs the actual entry scan and match check for all 32, aggregating anti-join survivors. This hides BOTH levels of dependent memory latency by separating them into distinct loops with 32 prefetches in flight simultaneously. The tail (selCount % 32 remaining rows) is processed with the same pattern. DO NOT implement a Bloom filter — analysis shows it is ineffective for this anti-join pattern where 99% of rows match (Bloom positive requires full index probe for correctness, saving only ~1% of probes). Keep all other structures unchanged: FlatHashMap with occupied_slots, two-phase scan (pass 1 filter, pass 2 probe), zone map block skipping. Expected main_scan reduction: 29ms → 12-18ms from hiding the entries cache miss latency.",
+      "operation_timings": {
+        "data_loading": 0.07,
+        "mmap_columns": 0.03,
+        "dim_filter": 0.01,
+        "main_scan": 24.73,
+        "merge_having_topk": 1.75,
+        "output": 0.93,
+        "total": 50.62
+      }
+    }
+  ]
+}

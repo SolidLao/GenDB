@@ -1,0 +1,122 @@
+{
+  "query_id": "Q24",
+  "pipeline": [
+    "filter_num_rows",
+    "merge_anti_join",
+    "aggregate",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "pre(adsh,tag,version sorted index)",
+      "probe": "num(filtered row bitmap via sorted index walk)",
+      "type": "anti",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Use both existing sorted rowid permutations as a forward merge anti-join on (adsh,tag,version) instead of per-row binary search; advance pre only forward while scanning qualifying num rowids in key order."
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom = 'USD'",
+      "selectivity": 0.8435
+    },
+    {
+      "table": "num",
+      "predicate": "ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2716
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'USD' AND ddate BETWEEN 19358 AND 19722",
+      "selectivity": 0.2284
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 39401761,
+    "columns": [
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "ddate",
+        "file": "num/ddate.bin",
+        "type": "int32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh_tag_version_rowids",
+        "file": "num/indexes/adsh_tag_version.rowids.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "version",
+        "file": "num/version.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(39401761)",
+    "fact_join": "pre_built_index",
+    "aggregation": "compact_hash_map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "num/indexes/uom.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num/indexes/ddate.zone_map.bin",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "ordered_num_probe"
+    },
+    {
+      "index": "pre/indexes/adsh_tag_version.rowids.bin",
+      "purpose": "ordered_join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "cnt DESC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current main scan performs about 9.0M filtered-row anti-join probes, each as a random binary search into pre key columns and rowids whose working set exceeds the 88 MB LLC, so time is dominated by cache-miss latency. Strategy category B/A: first scan num.uom and num.ddate sequentially to build a 39.4M-row qualifying bitmap, then walk num/indexes/adsh_tag_version.rowids.bin and pre/indexes/adsh_tag_version.rowids.bin as a forward merge anti-join on (adsh,tag,version), checking the bitmap to skip non-qualifying num rowids and aggregating only unmatched qualifying rows; this replaces repeated random probes with one ordered pass over the existing indexes while keeping final GROUP BY on integer (tag,version) ids.",
+  "correctness_anchors": {}
+}

@@ -1,0 +1,118 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "load_pure_code",
+    "load_sub_fy_array",
+    "pass1_scan_aggregate",
+    "pass2_scan_filter_join_topk",
+    "topk_merge",
+    "string_decode_output"
+  ],
+  "two_pass_strategy": {
+    "pass1": {
+      "scan_columns": ["uom_code", "adsh_code", "tagver_code", "value"],
+      "zone_map_skip": "skip block b if zm[b].min_uom > pure_code || zm[b].max_uom < pure_code",
+      "filter": "uom_code == pure_code && tagver_code != -1",
+      "output": "compact_hash_map<uint64_t,double> keyed by ((uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)tagver_code) storing MAX(value)",
+      "expected_blocks_read": 1,
+      "expected_output_entries": 94564
+    },
+    "pass2": {
+      "scan_columns": ["uom_code", "adsh_code", "tagver_code", "value"],
+      "zone_map_skip": "same as pass1 — reuse loaded zone maps",
+      "filter": "uom_code == pure_code && tagver_code != -1 && sub_fy[adsh_code] == 2022 && value == max_val[((uint64_t)(uint32_t)adsh_code << 32 | (uint32_t)tagver_code)]",
+      "expected_input_rows": 94564,
+      "expected_post_fy_filter_rows": 18913,
+      "expected_post_maxval_filter_rows": 500,
+      "output": "thread_local min-heap of 100 rows (value DESC, name_placeholder=adsh_code, tag_placeholder=tagver_code)"
+    }
+  },
+  "join_order": [
+    {
+      "build": "num pass1 grouped MAX → hash_map",
+      "probe": "num pass2 (uom=pure, tagver!=-1)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 94564,
+      "notes": "Key = (adsh_code<<32)|tagver_code; exact double equality valid since value stored verbatim"
+    },
+    {
+      "build": "sub.fy direct array (86135 int16_t entries)",
+      "probe": "num pass2 after uom+tagver filter",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 86135,
+      "notes": "adsh_code == sub row index; O(1) lookup sub_fy[adsh_code] == 2022; apply before max_val probe to reduce hash lookups"
+    }
+  ],
+  "filters": [
+    {
+      "table": "num",
+      "predicate": "uom_code == pure_code",
+      "selectivity": 0.0024,
+      "mechanism": "zone_map skip then per-row check; applied in both passes"
+    },
+    {
+      "table": "num",
+      "predicate": "tagver_code != -1",
+      "selectivity": 0.99,
+      "mechanism": "per-row check after uom filter"
+    },
+    {
+      "table": "sub",
+      "predicate": "fy == 2022",
+      "selectivity": 0.20,
+      "mechanism": "direct_array lookup sub_fy[adsh_code]; applied in pass2 before hash probe"
+    }
+  ],
+  "data_structures": {
+    "pure_code_lookup": "load from indexes/uom_codes.bin at startup; single int8_t value",
+    "zone_maps": "load indexes/num_zone_maps.bin once; reused for both passes",
+    "sub_fy_array": "mmap or fread sub/fy.bin → int16_t[86135]; direct index by adsh_code",
+    "pass1_aggregation": "compact_hash_map<uint64_t,double> pre_sized=131072 (next power-of-2 above 94564); parallel build with thread-local maps merged via MAX semantics",
+    "pass2_topk": "thread_local std::priority_queue (min-heap, capacity=100) storing (value, adsh_code, tagver_code); merged post-scan to global top-100"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "pass1_parallelism": {
+      "granularity": "block-level morsels over the ~1 block range passing zone maps",
+      "merge": "thread_local hash maps merged sequentially: for each key keep max(value)"
+    },
+    "pass2_parallelism": {
+      "granularity": "same block-level morsels",
+      "merge": "thread_local min-heaps merged to produce global top-100"
+    },
+    "note": "With ~1 contiguous block range (~94564 rows), thread count should be capped to avoid excessive synchronization overhead on small data; runtime auto-tunes morsel size"
+  },
+  "indexes": [
+    {
+      "index": "num_zone_maps",
+      "purpose": "skip_blocks — eliminates ~394/395 blocks per pass; pure rows contiguous due to (uom_code,ddate) sort order"
+    },
+    {
+      "index": "uom_codes",
+      "purpose": "resolve 'pure' string to int8_t code at startup; never hardcode numeric value"
+    }
+  ],
+  "aggregation": "hash_group_by keyed by (adsh_code<<32 | tagver_code) computing MAX(value) in pass1",
+  "output": {
+    "order_by": ["value DESC", "name ASC", "tag ASC"],
+    "limit": 100,
+    "string_decode": {
+      "name": {
+        "offsets_file": "sub/name_offsets.bin",
+        "data_file": "sub/name_data.bin",
+        "index_by": "adsh_code",
+        "timing": "deferred — decode only for final 100 result rows"
+      },
+      "tag": {
+        "offsets_file": "tag/tag_offsets.bin",
+        "data_file": "tag/tag_data.bin",
+        "index_by": "tagver_code",
+        "timing": "deferred — decode only for final 100 result rows"
+      }
+    }
+  },
+  "execution_target": "cpp"
+}

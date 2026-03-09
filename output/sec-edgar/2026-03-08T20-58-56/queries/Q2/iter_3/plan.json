@@ -1,0 +1,108 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "filter_sub_fy",
+    "dedup_sub_adsh",
+    "probe_num_by_adsh_index",
+    "single_pass_per_adsh_aggregate_and_emit",
+    "topk"
+  ],
+  "join_order": [
+    {
+      "build": "sub[fy=2022] distinct adsh",
+      "probe": "num via num_adsh_fk_hash postings",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 17572,
+      "notes": "keep best join order and fuse m-join semantics into the posting traversal"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = 2022",
+      "selectivity": 0.204
+    },
+    {
+      "table": "num",
+      "predicate": "uom = 'pure'",
+      "selectivity": 0.001
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL",
+      "selectivity": 0.996
+    },
+    {
+      "table": "n_join_m",
+      "predicate": "n.value = m.max_value",
+      "selectivity": 0.43
+    }
+  ],
+  "scan": {
+    "table": "num",
+    "rows": 11544074,
+    "columns": [
+      {
+        "name": "adsh",
+        "file": "num/adsh.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "tag",
+        "file": "num/tag.bin",
+        "type": "uint32_t",
+        "bytes_per_row": 4
+      },
+      {
+        "name": "uom",
+        "file": "num/uom.bin",
+        "type": "uint16_t",
+        "bytes_per_row": 2
+      },
+      {
+        "name": "value",
+        "file": "num/value.bin",
+        "type": "double",
+        "bytes_per_row": 8
+      }
+    ],
+    "access_pattern": "index_driven_posting_scan"
+  },
+  "data_structures": {
+    "dim_filter": "bitset(sub_rows) + distinct_adsh_vector(filtered)",
+    "fact_join": "pre_built_index(num_adsh_fk_hash)",
+    "aggregation": "thread_local_hash_map(tag->max_and_tie_rows) per adsh"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "sub_fy_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "num_adsh_fk_hash",
+      "purpose": "join_lookup"
+    },
+    {
+      "index": "sub_adsh_pk_hash",
+      "purpose": "join_lookup"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      "value DESC",
+      "name ASC",
+      "tag ASC"
+    ],
+    "limit": 100
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: the current plan still performs two full passes over the same adsh-driven posting stream (first to build (adsh,tag)->max, second to re-probe for n.value=max), so build_joins remains dominant from repeated random fact-column touches and extra hash-map merge/probe work. Strategy category A/C: keep the validated join order (sub fy filter then num_adsh posting probes) but fuse aggregation and eq-max emission into a single per-adsh traversal using thread-local tag states that track max and tie rows, removing the global max_map build/merge and the second posting pass while preserving exact MAX equality semantics.",
+  "correctness_anchors": {}
+}
