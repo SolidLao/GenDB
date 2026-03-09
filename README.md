@@ -22,8 +22,8 @@ Each extension is [difficult](https://www.vldb.org/pvldb/vol18/p1962-kim.pdf) an
 
 **But actually there is a third option:** use LLMs to **generate per-query execution code**.
 
-- **Performance** — Instance-optimized code exploits exact data distributions, group cardinalities, join selectivities, and cache topology. No general-purpose engine can match this.
-- **Extensibility** — Integrating new techniques requires *prompting*, not re-engineering a complex codebase.
+- **Performance** — Instance-optimized code exploits exact data distributions, join selectivities, group cardinalities, and hardware characteristics. No general-purpose engine can match this.
+- **Extensibility** — Integrating new techniques requires *prompting*, not re-engineering a complex codebase. [Semantic queries](https://sembench.org), [GPU-native code](https://vldb.org/cidrdb/papers/2026/p12-yogatama.pdf) — all reachable through prompt updates.
 - **Economics** — In production, [80% of queries repeat in 50% of clusters](https://www.vldb.org/pvldb/vol17/p3694-saxena.pdf), and long-running queries almost always recur as they correspond to regular transformation or analytical tasks. Generation cost is amortized over many executions.
 
 ## Current Landscape
