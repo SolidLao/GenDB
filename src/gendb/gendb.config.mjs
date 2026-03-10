@@ -39,15 +39,15 @@ export const defaults = {
   // --- Provider-specific settings ---
   providers: {
     claude: {
-      model: "sonnet",
+      model: "opus",
       agentModels: {
-        workload_analyzer: "sonnet",
-        storage_designer: "sonnet",
-        dba: "sonnet",
-        query_planner: "sonnet",
-        code_generator: "sonnet",
-        code_inspector: "sonnet",
-        query_optimizer: "sonnet",
+        workload_analyzer: "opus",
+        storage_designer: "opus",
+        dba: "opus",
+        query_planner: "opus",
+        code_generator: "opus",
+        code_inspector: "opus",
+        query_optimizer: "opus",
       },
       // Claude effort: "low" | "medium" | "high" | "max" (max = Opus only)
       agentEffortLevels: {
@@ -62,7 +62,7 @@ export const defaults = {
       escalationModel: "opus",
       escalationEffortLevel: "high",
       singleAgent: {
-        model: "sonnet",
+        model: "opus",
         effortLevel: "medium",
       },
     },
