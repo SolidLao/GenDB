@@ -1,0 +1,85 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["scan_filter_aggregate", "finalize_output"],
+  "scan": {
+    "table": "lineitem",
+    "columns": [
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "encoding": "days_since_epoch"},
+      {"name": "l_returnflag", "file": "lineitem/l_returnflag.bin", "type": "uint8_t", "encoding": "raw_char_as_byte"},
+      {"name": "l_linestatus", "file": "lineitem/l_linestatus.bin", "type": "uint8_t", "encoding": "raw_char_as_byte"},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "encoding": "native_binary"},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "encoding": "native_binary"},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "encoding": "native_binary"},
+      {"name": "l_tax", "file": "lineitem/l_tax.bin", "type": "double", "encoding": "native_binary"}
+    ],
+    "total_rows": 59986052,
+    "block_size": 100000
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "predicate": "l_shipdate <= 10471",
+      "constant": 10471,
+      "constant_comment": "1998-09-02 as days_since_epoch",
+      "selectivity": 0.986,
+      "rows_passing": 59146126
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "layout": {"num_blocks_offset": 0, "block_size_offset": 4, "entries_offset": 8, "entry_size": 8},
+      "skip_condition": "zone_min > 10471",
+      "notes": "Minimal benefit (~8 blocks skippable), but free to check"
+    }
+  ],
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_key": "uint16_t key = ((uint16_t)l_returnflag << 8) | l_linestatus",
+    "array_size": 65536,
+    "estimated_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double",
+      "sum_base_price": "double",
+      "sum_disc_price": "double",
+      "sum_charge": "double",
+      "sum_discount": "double",
+      "count": "int64_t"
+    },
+    "per_row_expressions": {
+      "disc_price": "l_extendedprice * (1.0 - l_discount)",
+      "charge": "disc_price * (1.0 + l_tax)"
+    },
+    "derived_outputs": {
+      "avg_qty": "sum_qty / count",
+      "avg_price": "sum_base_price / count",
+      "avg_disc": "sum_discount / count"
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "per_thread_aggregation": true,
+    "merge": "iterate direct_array entries, sum accumulators across threads",
+    "notes": "Each thread owns a local 65536-entry accumulator array; merge is trivial over ~4 active groups"
+  },
+  "data_structures": {
+    "aggregation": "direct_array(65536, per_thread)",
+    "io_buffers": "mmap_all_columns"
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "columns": [
+      "l_returnflag", "l_linestatus",
+      "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge",
+      "avg_qty", "avg_price", "avg_disc", "count_order"
+    ],
+    "format_notes": "l_returnflag and l_linestatus output as char (cast uint8_t to char)"
+  },
+  "execution_target": "cpp"
+}

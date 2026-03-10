@@ -1,0 +1,95 @@
+{
+  "query_id": "Q9",
+  "storage_extensions": [
+    {
+      "id": "orders.orderkey_year.direct_lookup",
+      "action": "built_new",
+      "files": {
+        "year_offset": "column_versions/orders.orderkey_year.direct_lookup/year_offset.bin",
+        "year_offset_format": "uint32_t max_orderkey header + uint8_t[max_orderkey+1], value = year - 1992"
+      },
+      "usage": "mmap year_offset.bin; skip header (4 bytes); for qualifying lineitem row, year_off = year_data[l_orderkey] gives year_offset directly. Replaces orders_orderkey_lookup.bin (229MB) + o_orderdate.bin (57MB) + year_from_days() computation with single 57MB lookup."
+    }
+  ],
+  "pipeline": ["mmap_all_files", "parallel_prefault", "load_nation_supplier", "parallel_filter_part", "block_scan_lineitem_join_aggregate"],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 109600,
+      "probe_cardinality": 59986052,
+      "surviving_rows": 3287000,
+      "notes": "Bitset indexed by partkey-1 (0-based), partkeys contiguous 1..n_parts."
+    },
+    {
+      "build": "partsupp",
+      "probe": "lineitem(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Use partsupp_pk_index dense_range, scan ~4 entries per partkey to match suppkey."
+    },
+    {
+      "build": "orders(year_offset via storage extension)",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 60000001,
+      "notes": "Use year_offset.bin storage extension: year_data[l_orderkey] gives year_offset directly. NO orders_orderkey_lookup.bin or o_orderdate.bin needed. Eliminates one level of indirection and year_from_days computation."
+    },
+    {
+      "build": "supplier + nation",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "s_nationkey[suppkey - 1] gives nationkey directly (suppkey is 1-based contiguous)."
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0548,
+      "method": "memmem on varlen_string offsets_plus_data, PARALLEL with OpenMP schedule(static)"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey", "file": "lineitem/l_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential with block-based selection vector"
+  },
+  "data_structures": {
+    "nation_names": "std::string[25] indexed by n_nationkey",
+    "supplier_nationkey": "Direct access: s_nationkey[suppkey - 1] gives nationkey. No separate array needed.",
+    "part_filter": "bitset using uint64_t[(n_parts/64)+1], partkeys contiguous 1..n_parts",
+    "partsupp_index": "dense_range index from partsupp_pk_index.bin",
+    "year_lookup": "uint8_t* from storage extension year_offset.bin, indexed by l_orderkey, gives year - 1992",
+    "aggregation": "thread-local double[25][8] direct 2D array (nation x year_offset), year_offset = year - 1992"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "CRITICAL OPTIMIZATIONS over iter_3: (1) STORAGE EXTENSION: Replace orders_orderkey_lookup.bin (229MB) + o_orderdate.bin (57MB) with year_offset.bin (57MB). Access: const uint8_t* year_data = (const uint8_t*)(mmap_year_offset.data + 4); then year_off = year_data[l_orderkey]. This eliminates one indirection level and year_from_days computation per qualifying row. (2) BLOCK-BASED SCAN WITH PREFETCHING: Process lineitem in blocks of 4096 rows. For each block: Pass 1 — scan l_partkey, collect qualifying indices into a local uint32_t sel_vec[225]. Pass 2 — for each qualifying index in sel_vec, issue __builtin_prefetch for: (a) &ps_index[l_partkey[sel[j]]], (b) &year_data[l_orderkey[sel[j]]], (c) &l_extendedprice[sel[j]], (d) &l_discount[sel[j]], (e) &l_quantity[sel[j]]. Pass 3 — process qualifying rows with prefetched data: lookup partsupp, read year_offset, read s_nationkey, compute amount, accumulate. The prefetch distance between Pass 2 and Pass 3 (~225 iterations × ~2ns = ~450ns) ensures L2/LLC hits instead of DRAM misses on the random-access columns. (3) PARALLEL PREFAULT: Same as iter_3 but exclude orders_orderkey_lookup and o_orderdate (no longer mmapped). Reduced working set: ~2.5GB → ~2.2GB → fewer pages to prefault → faster. (4) MADVISE TUNING: MADV_RANDOM only on ps_suppkey and ps_supplycost. MADV_SEQUENTIAL on year_offset.bin (semi-sequential via l_orderkey sort). All lineitem columns keep default (sequential). (5) Keep schedule(static) for all parallel loops."
+  },
+  "indexes": [
+    {"index": "partsupp_pk_index", "file": "indexes/partsupp_pk_index.bin", "purpose": "partsupp lookup by l_partkey, scan ~4 entries for matching l_suppkey"}
+  ],
+  "aggregation": "array_direct",
+  "output": {"order_by": ["nation ASC", "o_year DESC"], "limit": null},
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B+E. prefault_pages=23ms and main_scan=27ms together account for 93% of 54ms. The main_scan is latency-limited by random cache misses: each of 3.3M qualifying rows requires ~5 dependent random accesses (ps_index, ps_suppkey, ps_supplycost, orders_lookup, o_orderdate) plus year_from_days computation. Two fixes: (E) Built a storage extension orders.orderkey_year.direct_lookup — a dense uint8_t[max_orderkey+1] array mapping orderkey directly to year_offset, eliminating orders_orderkey_lookup.bin (229MB) and o_orderdate.bin (57MB) and year_from_days(). This removes 229MB from the mmap working set and eliminates one level of pointer indirection per qualifying row. (B) Block-based scan with software prefetching — process lineitem in 4096-row blocks with a selection vector: Pass 1 filters l_partkey via bitset, Pass 2 issues prefetches for all random-access targets of qualifying rows, Pass 3 processes qualifying rows with data already in cache. The prefetch-to-use distance (~225 qualifying rows × ~2ns compute each ≈ 450ns) covers the ~100-200ns DRAM latency. Together these reduce random access latency in main_scan and shrink the prefault working set.",
+  "correctness_anchors": {
+    "revenue_formula": "l_extendedprice * (1 - l_discount)"
+  }
+}

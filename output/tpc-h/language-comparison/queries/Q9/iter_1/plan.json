@@ -1,0 +1,82 @@
+{
+  "query_id": "Q9",
+  "pipeline": ["load_nation", "load_supplier_nationkey", "parallel_filter_part", "parallel_scan_lineitem_join_aggregate"],
+  "join_order": [
+    {
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset",
+      "build_cardinality": 109600,
+      "probe_cardinality": 59986052,
+      "surviving_rows": 3287000,
+      "notes": "partkey max = n_parts (contiguous 1..2M), bitset ~250KB. MUST parallelize filter with OpenMP."
+    },
+    {
+      "build": "partsupp",
+      "probe": "lineitem(l_partkey, l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 8000000,
+      "notes": "Use partsupp_pk_index dense_range, scan ~4 entries per partkey to match suppkey"
+    },
+    {
+      "build": "orders",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Use orders_orderkey_lookup dense index → o_orderdate → extract year"
+    },
+    {
+      "build": "supplier + nation",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Pre-build nationkey_for_supplier[suppkey] = s_nationkey[suppkey-1]"
+    }
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.0548,
+      "method": "memmem on varlen_string offsets_plus_data, PARALLEL with OpenMP over row ranges"
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey", "file": "lineitem/l_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "nation_names": "std::string[25] indexed by n_nationkey",
+    "supplier_nationkey": "int32_t[max_suppkey+1] direct array",
+    "part_filter": "bitset using uint64_t[(n_parts/64)+1], partkeys are 1..n_parts (contiguous PK), NO extra scan for max_partkey needed — use n_parts directly",
+    "partsupp_index": "dense_range index from partsupp_pk_index.bin",
+    "aggregation": "thread-local double[25][8] direct 2D array (nation × year_offset), year_offset = year - 1992"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "CRITICAL: filter_part MUST use #pragma omp parallel for over part rows (previous iter was single-threaded, wasting 81ms). Use thread-local bitset words with atomic OR, or partition bitset by partkey range. For main lineitem scan, use schedule(dynamic, 100000). All lineitem columns use MADV_SEQUENTIAL (not MADV_RANDOM) — access is at sequential index i with ~5% density gaps, readahead helps."
+  },
+  "indexes": [
+    {"index": "partsupp_pk_index", "file": "indexes/partsupp_pk_index.bin", "purpose": "partsupp lookup by l_partkey, scan ~4 entries for matching l_suppkey"},
+    {"index": "orders_orderkey_lookup", "file": "indexes/orders_orderkey_lookup.bin", "purpose": "o_orderkey → row_index → o_orderdate → extract year"}
+  ],
+  "aggregation": "array_direct",
+  "output": {"order_by": ["nation ASC", "o_year DESC"], "limit": null},
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category D (parallelism). filter_part consumed 81ms (47% of 172ms total) running single-threaded over 2M varlen strings. With 64 cores available, parallelizing this with OpenMP should reduce it to ~2ms. Secondary fix (Category C): remove unnecessary max_partkey scan (partkeys are contiguous 1..n_parts), and change lineitem column madvise from MADV_RANDOM to MADV_SEQUENTIAL — columns are accessed at sequential index i (with 5.48% qualifying density), so readahead is beneficial. These changes should bring total from 172ms to ~40-45ms."
+}

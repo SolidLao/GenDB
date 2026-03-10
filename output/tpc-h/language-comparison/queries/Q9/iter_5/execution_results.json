@@ -1,0 +1,82 @@
+{
+  "compile": {
+    "status": "pass"
+  },
+  "run": {
+    "status": "pass",
+    "duration_ms": 89
+  },
+  "validation": {
+    "status": "fail",
+    "details": {
+      "match": false,
+      "queries": {
+        "Q9": {
+          "rows_expected": 175,
+          "rows_actual": 175,
+          "match": false,
+          "error": "140 row(s) differ across 2 column(s)",
+          "column_failures": {
+            "nation": {
+              "category": "exact",
+              "failure_count": 140,
+              "samples": [
+                {
+                  "expected": "CHINA",
+                  "actual": "EGYPT",
+                  "row": 28,
+                  "pattern": "string_mismatch"
+                },
+                {
+                  "expected": "CHINA",
+                  "actual": "EGYPT",
+                  "row": 29,
+                  "pattern": "string_mismatch"
+                }
+              ]
+            },
+            "sum_profit": {
+              "category": "sum_money",
+              "failure_count": 140,
+              "samples": [
+                {
+                  "expected": "272070640.6693",
+                  "actual": "275826468.5660",
+                  "abs_diff": 3755827.9,
+                  "rel_diff_pct": 1.3805,
+                  "tolerance": "$100",
+                  "row": 28,
+                  "pattern": "value_mismatch"
+                },
+                {
+                  "expected": "455987131.7972",
+                  "actual": "468914421.1737",
+                  "abs_diff": 12927289.38,
+                  "rel_diff_pct": 2.835,
+                  "tolerance": "$100",
+                  "row": 29,
+                  "pattern": "value_mismatch"
+                }
+              ]
+            }
+          },
+          "mismatch_patterns": {
+            "string_mismatch": 3,
+            "value_mismatch": 3
+          }
+        }
+      }
+    }
+  },
+  "optimization_target": "hot",
+  "timing_ms": 35.843333333333334,
+  "hot_timing_ms": 35.843333333333334,
+  "operation_timings": {
+    "prefault_pages": 4.42,
+    "load_nation": 0.01,
+    "filter_part": 6.6,
+    "main_scan": 23.51,
+    "output": 0.68,
+    "total": 35.98
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "runId": "2026-03-07T17-46-23",
+  "workload": "tpc-h",
+  "startedAt": "2026-03-07T17:46:23.085Z",
+  "status": "completed",
+  "dataDir": "/home/jl4492/GenDB/benchmarks/tpc-h/data/sf10",
+  "gendbDir": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/gendb",
+  "scaleFactor": 10,
+  "maxIterations": 5,
+  "model": "opus",
+  "agentProvider": "claude",
+  "optimizationTarget": "hot",
+  "phase1": {
+    "status": "completed",
+    "steps": {
+      "workload_analysis": {
+        "status": "completed",
+        "startedAt": "2026-03-07T17:46:23.103Z",
+        "completedAt": "2026-03-07T17:53:03.761Z"
+      },
+      "storage_design": {
+        "status": "completed",
+        "startedAt": "2026-03-07T17:53:03.763Z",
+        "completedAt": "2026-03-07T17:59:44.286Z"
+      },
+      "data_ingestion": {
+        "status": "completed",
+        "completedAt": "2026-03-07T17:59:44.286Z"
+      },
+      "index_building": {
+        "status": "completed",
+        "completedAt": "2026-03-07T17:59:44.286Z"
+      }
+    },
+    "completedAt": "2026-03-07T18:03:59.642Z"
+  },
+  "phase2": {
+    "status": "completed",
+    "queries": [
+      "Q1",
+      "Q3",
+      "Q6",
+      "Q9",
+      "Q18"
+    ],
+    "maxConcurrent": 22,
+    "pipelines": {
+      "Q1": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/queries/Q1/iter_2/q1.cpp",
+        "iterations": 2
+      },
+      "Q3": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/queries/Q3/iter_5/q3.cpp",
+        "iterations": 5
+      },
+      "Q6": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/queries/Q6/iter_1/q6.cpp",
+        "iterations": 1
+      },
+      "Q9": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/queries/Q9/iter_3/q9.cpp",
+        "iterations": 3
+      },
+      "Q18": {
+        "status": "completed",
+        "bestCppPath": "/home/jl4492/GenDB/output/tpc-h/2026-03-07T17-46-23/queries/Q18/iter_1/q18.cpp",
+        "iterations": 1
+      }
+    },
+    "completedAt": "2026-03-07T19:04:53.634Z"
+  },
+  "completedAt": "2026-03-07T19:04:56.249Z"
+}

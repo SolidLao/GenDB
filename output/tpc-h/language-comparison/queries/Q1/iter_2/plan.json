@@ -1,0 +1,87 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["mmap_columns", "scan_filter_aggregate", "finalize_output"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_returnflag", "file": "lineitem/l_returnflag.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "l_linestatus", "file": "lineitem/l_linestatus.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_tax", "file": "lineitem/l_tax.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= 10471",
+      "selectivity": 0.986
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zonemap",
+      "file": "indexes/lineitem_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "layout": {"num_blocks_offset": 0, "block_size_offset": 4, "entries_offset": 8, "entry_size": 8},
+      "skip_condition": "zone_min > 10471"
+    }
+  ],
+  "aggregation": {
+    "strategy": "compact_direct_array",
+    "group_key_encoding": "Map returnflag to index: 'A'->0, 'N'->1, 'R'->2. Map linestatus: 'F'->0, 'O'->1. Compact key = rf_idx * 2 + ls_idx. Use a 256-byte lookup table for each.",
+    "array_size": 6,
+    "estimated_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double",
+      "sum_base_price": "double",
+      "sum_disc_price": "double",
+      "sum_charge": "double",
+      "sum_discount": "double",
+      "count": "int64_t"
+    },
+    "accumulator_notes": "CRITICAL: Use double for ALL sum fields — NOT long double. The previous iteration incorrectly used long double in the Acc struct despite the plan saying double. long double forces the x87 FPU which prevents SSE/AVX vectorization and is 2-3x slower. The struct must be: struct Acc { double sum_qty; double sum_base_price; double sum_disc_price; double sum_charge; double sum_discount; int64_t count; }; — exactly 48 bytes.",
+    "per_row_expressions": {
+      "disc_price": "l_extendedprice * (1.0 - l_discount)",
+      "charge": "disc_price * (1.0 + l_tax)"
+    },
+    "derived_outputs": {
+      "avg_qty": "sum_qty / count",
+      "avg_price": "sum_base_price / count",
+      "avg_disc": "sum_discount / count"
+    }
+  },
+  "data_structures": {
+    "aggregation": "compact_direct_array(6_entries, per_thread, double_accumulators_48bytes)",
+    "per_thread_footprint": "6 entries × 48 bytes = 288 bytes (fits L1 cache)",
+    "total_footprint": "64 threads × 288 bytes = 18KB",
+    "mmap_strategy": "Do NOT use MAP_POPULATE. Use plain MAP_PRIVATE only. After mmap, call madvise(MADV_SEQUENTIAL) to enable kernel readahead. MAP_POPULATE forces synchronous page table population (99ms overhead on hot runs when pages are already in cache). Without it, pages fault lazily during the sequential scan, overlapping with computation."
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "per_thread_aggregation": true,
+    "merge": "Iterate only 6 entries per thread. Total merge work: 6 × nthreads iterations.",
+    "notes": "Each thread has a stack-allocated array of 6 Acc structs (double, not long double). The inner loop should be tight enough for auto-vectorization: load 4 doubles, compute disc_price and charge, accumulate."
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "columns": [
+      "l_returnflag", "l_linestatus",
+      "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge",
+      "avg_qty", "avg_price", "avg_disc", "count_order"
+    ],
+    "format_notes": "Reverse-map compact index back to char: rf_chars[]={'A','N','R'}, ls_chars[]={'F','O'}."
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause (Category A+C): Two issues. (1) MAP_POPULATE in mmap causes 99ms of synchronous page table population on hot runs — 69% of total time — even though pages are already in page cache. Fix: remove MAP_POPULATE, use plain MAP_PRIVATE with MADV_SEQUENTIAL to let kernel handle readahead lazily during scan. (2) The Acc struct used long double despite the plan specifying double, forcing x87 FPU and preventing SSE/AVX vectorization. Fix: enforce double accumulators (48 bytes per entry) for SSE-friendly inner loop. Expected improvement: data_loading drops from 99ms to near-zero (merged into scan), scan may increase slightly but net saving ~80-90ms.",
+  "correctness_anchors": {
+    "revenue_formula": "disc_price * (1.0 + l_tax[i])"
+  }
+}

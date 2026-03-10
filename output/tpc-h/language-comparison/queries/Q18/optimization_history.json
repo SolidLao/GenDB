@@ -1,0 +1,43 @@
+{
+  "query_id": "Q18",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 117.27333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 117.27333333333333,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 57.83,
+        "subquery_scan_aggregate": 15.25,
+        "index_lookup_orders": 0.06,
+        "index_lookup_customer": 0.03,
+        "sort_and_limit": 0.02,
+        "output": 0.95,
+        "total": 107.03
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 48.23333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 48.23333333333333,
+      "validation": "pass",
+      "strategy": "Category A — Plan restructuring. Root cause: data_loading phase (58ms / 117ms total) dominated by MAP_POPULATE forcing synchronous page fault of 913MB across all mmap'd files, including 228MB of orders columns only accessed for ~15K rows. Fix: (1) Remove MAP_POPULATE from ALL mmap calls — for hot runs pages are already in OS page cache, and sequential scan of lineitem naturally triggers hardware prefetch without needing upfront population. (2) Use MADV_SEQUENTIAL for lineitem files (sequential scan), MADV_RANDOM for index/lookup files (sparse random access). (3) Defer mmap of orders and customer columns until after subquery completes — they are only needed for ~15K qualifying rows. (4) Remove the separate data_loading phase entirely — just mmap lazily at point of use. This eliminates the 58ms data_loading overhead; page faults during the scan are near-free on cached pages. Expected total: ~20-30ms.",
+      "operation_timings": {
+        "main_scan": 21.21,
+        "build_joins": 7.23,
+        "sort_and_limit": 0.02,
+        "output": 2.58,
+        "total": 48.56
+      }
+    }
+  ]
+}

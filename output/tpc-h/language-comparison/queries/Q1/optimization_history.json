@@ -1,0 +1,56 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 468.5466666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 468.5466666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 93.27,
+        "main_scan": 32.82,
+        "merge": 33.03,
+        "output": 0.64,
+        "total": 465.71
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 144.12666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 144.12666666666667,
+      "validation": "pass",
+      "strategy": "Root cause (Category B+C): per-thread direct arrays of 65536 entries with 104-byte long-double Acc structs totaled 416MB (64 threads × 6.5MB), far exceeding 44MB LLC. Only 4-6 of 65536 slots were ever used, wasting 306ms on zero-initialization page faults (untimed gap between data_loading and main_scan). Additionally, long double uses slow x87 FPU instead of SSE. Fix: compact group key mapping (rf_idx*2 + ls_idx) reduces array from 65536 to 6 entries. Switch to double accumulators (48 bytes/entry). Per-thread footprint drops from 6.5MB to 288 bytes (fits L1). Total from 416MB to 18KB. Merge drops from 4M iterations to 384. This eliminates the 306ms initialization overhead and accelerates both scan and merge phases.",
+      "operation_timings": {
+        "data_loading": 99.48,
+        "main_scan": 40.2,
+        "output": 0.5,
+        "total": 140.28
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 36.53333333333333,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 36.53333333333333,
+      "validation": "pass",
+      "strategy": "Root cause (Category A+C): Two issues. (1) MAP_POPULATE in mmap causes 99ms of synchronous page table population on hot runs — 69% of total time — even though pages are already in page cache. Fix: remove MAP_POPULATE, use plain MAP_PRIVATE with MADV_SEQUENTIAL to let kernel handle readahead lazily during scan. (2) The Acc struct used long double despite the plan specifying double, forcing x87 FPU and preventing SSE/AVX vectorization. Fix: enforce double accumulators (48 bytes per entry) for SSE-friendly inner loop. Expected improvement: data_loading drops from 99ms to near-zero (merged into scan), scan may increase slightly but net saving ~80-90ms.",
+      "operation_timings": {
+        "data_loading": 0.11,
+        "main_scan": 35.47,
+        "output": 0.37,
+        "total": 36.08
+      }
+    }
+  ]
+}

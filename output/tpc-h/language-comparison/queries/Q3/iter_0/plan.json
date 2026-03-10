@@ -1,0 +1,85 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["build_customer_bitset", "scan_filter_orders", "probe_lineitem_aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered by BUILDING)",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 314000,
+      "notes": "custkeys are dense 1..1500000, bitset ~187KB fits in L1 cache"
+    },
+    {
+      "build": "orders(filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1530000,
+      "notes": "use lineitem_orderkey_index for contiguous range lookups into lineitem"
+    }
+  ],
+  "filters": [
+    {"table": "customer", "predicate": "c_mktsegment = 'BUILDING'", "selectivity": 0.2098, "dict_encoded": true},
+    {"table": "orders", "predicate": "o_orderdate < 9204", "selectivity": 0.486},
+    {"table": "lineitem", "predicate": "l_shipdate > 9204", "selectivity": 0.539}
+  ],
+  "data_structures": {
+    "customer_filter": "bitset(1500001)",
+    "aggregation": "compact_hash_map(pre_sized=2000000, key=int32_t(l_orderkey), value=struct{double revenue, int32_t o_orderdate, int32_t o_shippriority})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_orders": {
+      "partition_by": "row_range",
+      "morsel_size": 100000,
+      "notes": "each thread scans a chunk of orders, builds local aggregation map"
+    },
+    "merge": "merge thread-local hash maps after parallel phase"
+  },
+  "indexes": [
+    {"index": "customer_custkey_lookup", "purpose": "map custkey to row_index for mktsegment check during bitset build"},
+    {"index": "lineitem_orderkey_index", "purpose": "contiguous range lookup for lineitem rows per qualifying orderkey"}
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "name": "build_customer_bitset",
+      "description": "Load c_mktsegment_dict.bin to find BUILDING code. Scan c_mktsegment.bin, set bit in bitset for c_custkey[i] where mktsegment matches. Bitset indexed by custkey value (dense, max ~1500000).",
+      "input_rows": 1500000,
+      "output_cardinality": 314000,
+      "parallel": false
+    },
+    {
+      "step": 2,
+      "name": "scan_filter_orders_and_probe_lineitem",
+      "description": "Parallel morsel-driven scan of orders. For each order row: check o_orderdate[i] < 9204, then check customer_bitset[o_custkey[i]]. For qualifying orders (~1.53M), use lineitem_orderkey_index to get contiguous lineitem range. For each lineitem row in range: check l_shipdate[j] > 9204, if pass: accumulate l_extendedprice[j] * (1 - l_discount[j]) into thread-local hash map keyed by l_orderkey (= o_orderkey). Store o_orderdate and o_shippriority with the group.",
+      "input_rows": 15000000,
+      "qualifying_orders": 1530000,
+      "lineitem_probes": 6100000,
+      "output_groups": 1000000,
+      "parallel": true
+    },
+    {
+      "step": 3,
+      "name": "merge_and_topk",
+      "description": "Merge thread-local hash maps. Then single-pass top-10 selection using a min-heap of size 10, ordered by (revenue DESC, o_orderdate ASC).",
+      "output_rows": 10,
+      "parallel": false
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "group_by_keys": ["l_orderkey"],
+  "group_by_payload": ["o_orderdate", "o_shippriority"],
+  "aggregate_expr": "SUM(l_extendedprice * (1 - l_discount))",
+  "output": {
+    "columns": ["l_orderkey", "revenue", "o_orderdate", "o_shippriority"],
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10
+  },
+  "date_constants": {
+    "date_19950315": 9204
+  },
+  "execution_target": "cpp"
+}

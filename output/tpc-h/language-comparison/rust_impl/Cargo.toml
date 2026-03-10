@@ -1,0 +1,39 @@
+[package]
+name = "gendb_queries"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "q1"
+path = "src/q1.rs"
+
+[[bin]]
+name = "q3"
+path = "src/q3.rs"
+
+[[bin]]
+name = "q6"
+path = "src/q6.rs"
+
+[[bin]]
+name = "q9"
+path = "src/q9.rs"
+
+[[bin]]
+name = "q18"
+path = "src/q18.rs"
+
+[dependencies]
+memmap2 = "0.9"
+rayon = "1.10"
+libc = "0.2"
+memchr = "2.7"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.release.build-override]
+opt-level = 3

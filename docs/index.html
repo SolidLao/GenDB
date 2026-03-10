@@ -119,6 +119,7 @@ nav .links a:hover { color: #23272f; }
 .hero-stat .number.c-emerald { color: #059669; }
 .hero-stat .number.c-indigo { color: #6366f1; }
 .hero-stat .number.c-amber { color: #d97706; }
+.hero-stat .number.c-rose { color: #e11d48; }
 .hero-stat .label { font-size: 0.85rem; color: #8b8fa3; margin-top: 6px; }
 .hero-buttons { display: flex; gap: 14px; justify-content: center; margin-top: 44px; }
 .btn {
@@ -503,6 +504,7 @@ footer a:hover { color: #23272f; }
       <a href="#why">Why</a>
       <a href="#leaderboard">Leaderboard</a>
       <a href="#models">Models</a>
+      <a href="#languages">Languages</a>
       <a href="#roadmap">Roadmap</a>
       <a href="#team">Team</a>
       <a href="https://arxiv.org/abs/2603.02081">Paper</a>
@@ -520,6 +522,7 @@ footer a:hover { color: #23272f; }
   <a href="#why" onclick="closeMenu()">Why</a>
   <a href="#leaderboard" onclick="closeMenu()">Leaderboard</a>
   <a href="#models" onclick="closeMenu()">Models</a>
+  <a href="#languages" onclick="closeMenu()">Languages</a>
   <a href="#roadmap" onclick="closeMenu()">Roadmap</a>
   <a href="#team" onclick="closeMenu()">Team</a>
   <a href="https://arxiv.org/abs/2603.02081" onclick="closeMenu()">Paper</a>
@@ -540,7 +543,7 @@ footer a:hover { color: #23272f; }
     </div>
     <div class="hero-stats fade-in fade-in-d3">
       <div class="hero-stat">
-        <div class="number c-emerald">2.4x</div>
+        <div class="number c-emerald">3.2x</div>
         <div class="label">faster than DuckDB on TPC-H</div>
       </div>
       <div class="hero-stat">
@@ -548,8 +551,12 @@ footer a:hover { color: #23272f; }
         <div class="label">faster than DuckDB on SEC-EDGAR</div>
       </div>
       <div class="hero-stat">
-        <div class="number c-amber">280x</div>
-        <div class="label">faster than PostgreSQL</div>
+        <div class="number c-amber">462x</div>
+        <div class="label">faster than PostgreSQL on TPC-H</div>
+      </div>
+      <div class="hero-stat">
+        <div class="number c-rose">280x</div>
+        <div class="label">faster than PostgreSQL on SEC-EDGAR</div>
       </div>
     </div>
   </div>
@@ -734,6 +741,107 @@ footer a:hover { color: #23272f; }
 
 <div class="section-divider"></div>
 
+<!-- Language Comparison -->
+<section id="languages" style="background: linear-gradient(180deg, rgba(255,251,235,0.35) 0%, #fafafa 100%);">
+  <div class="container">
+    <span class="tag tag-amber reveal">Language Comparison</span>
+    <h2 class="reveal" style="margin-top: 16px;">C++ vs Optimized C++ vs Rust</h2>
+    <p class="section-sub reveal">
+      We select the best-performing C++ binary for each TPC-H query from a GenDB run, then give
+      <strong>Claude Code (Opus 4.6)</strong> 5 iterations to analyze, profile, and improve &mdash;
+      first for optimized C++, then for a full Rust rewrite.
+    </p>
+
+    <div class="reveal" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 36px;">
+      <div class="why-card" style="border-top: 3px solid #92C5DE;">
+        <h3 style="font-size: 1rem;">Original C++</h3>
+        <p style="font-size: 0.88rem; margin-bottom: 12px;">GenDB-generated code with standard compilation.</p>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.3rem; font-weight: 800; color: #92C5DE;">241 ms</div>
+        <div class="dim" style="font-size: 0.8rem;">total (5 queries)</div>
+      </div>
+      <div class="why-card" style="border-top: 3px solid #2166AC;">
+        <h3 style="font-size: 1rem;">Optimized C++</h3>
+        <p style="font-size: 0.88rem; margin-bottom: 12px;">Aggressive flags, madvise tuning, parallelized joins, thread optimization.</p>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.3rem; font-weight: 800; color: #2166AC;">185 ms</div>
+        <div class="dim" style="font-size: 0.8rem;">total &mdash; 1.30x faster</div>
+      </div>
+      <div class="why-card" style="border-top: 3px solid #B2182B;">
+        <h3 style="font-size: 1rem;">Rust</h3>
+        <p style="font-size: 0.88rem; margin-bottom: 12px;">Full rewrite with rayon, memmap2, unsafe bounds-check elimination.</p>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.3rem; font-weight: 800; color: #B2182B;">283 ms</div>
+        <div class="dim" style="font-size: 0.8rem;">total &mdash; competitive main_scan</div>
+      </div>
+    </div>
+
+    <div class="lb-table-wrap reveal" style="margin-bottom: 32px;">
+      <table class="lb">
+        <thead>
+          <tr>
+            <th>Query</th>
+            <th>Original C++</th>
+            <th>Optimized C++</th>
+            <th>Rust</th>
+            <th>Best</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="font-weight: 700; text-align: left;">Q1</td>
+            <td class="time-val">49.8 ms</td>
+            <td class="time-val" style="color: #2166AC; font-weight: 700;">39.2 ms</td>
+            <td class="time-val">71.7 ms</td>
+            <td><span class="sys-tag tag-indigo">Opt. C++</span></td>
+          </tr>
+          <tr>
+            <td style="font-weight: 700; text-align: left;">Q3</td>
+            <td class="time-val" style="color: #92C5DE; font-weight: 700;">25.0 ms</td>
+            <td class="time-val">26.0 ms</td>
+            <td class="time-val">52.5 ms</td>
+            <td><span class="sys-tag tag-indigo">Orig. C++</span></td>
+          </tr>
+          <tr>
+            <td style="font-weight: 700; text-align: left;">Q6</td>
+            <td class="time-val">31.8 ms</td>
+            <td class="time-val">35.5 ms</td>
+            <td class="time-val" style="color: #B2182B; font-weight: 700;">23.7 ms</td>
+            <td><span class="sys-tag tag-rose">Rust</span></td>
+          </tr>
+          <tr>
+            <td style="font-weight: 700; text-align: left;">Q9</td>
+            <td class="time-val">85.4 ms</td>
+            <td class="time-val" style="color: #2166AC; font-weight: 700;">64.4 ms</td>
+            <td class="time-val">101.9 ms</td>
+            <td><span class="sys-tag tag-indigo">Opt. C++</span></td>
+          </tr>
+          <tr>
+            <td style="font-weight: 700; text-align: left;">Q18</td>
+            <td class="time-val">49.2 ms</td>
+            <td class="time-val" style="color: #2166AC; font-weight: 700;">20.1 ms</td>
+            <td class="time-val">32.8 ms</td>
+            <td><span class="sys-tag tag-indigo">Opt. C++</span></td>
+          </tr>
+          <tr style="background: #f9fafb; border-top: 2px solid #e5e7eb;">
+            <td style="font-weight: 800; text-align: left;">Total</td>
+            <td class="time-val">241.2 ms</td>
+            <td class="time-val" style="color: #2166AC; font-weight: 800;">185.2 ms</td>
+            <td class="time-val">282.6 ms</td>
+            <td><span class="sys-tag tag-indigo" style="font-weight: 800;">Opt. C++ (1.30x)</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="reveal" style="font-size: 0.92rem; color: #6b7280; line-height: 1.7; max-width: 700px;">
+      <strong>Key findings:</strong> Optimized C++ achieves a 1.30x overall speedup, with Q18 showing the largest gain (2.44x) from parallelized join building.
+      Rust wins on Q6 (zone-map scan with <code style="background:#f0f1f3; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem;">get_unchecked</code>) but carries ~30ms per-query overhead from mmap page table setup, penalizing short queries.
+      The Rust <code style="background:#f0f1f3; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem;">main_scan</code> compute times are competitive with C++, suggesting the overhead is structural rather than algorithmic.
+      We plan to introduce a dedicated <strong>Code Refiner</strong> agent to the pipeline, responsible for low-level, implementation-level optimizations &mdash; to automatically achieve these gains as part of the standard GenDB workflow.
+    </p>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
 <!-- Roadmap -->
 <section id="roadmap" class="roadmap-section">
   <div class="container">
@@ -853,10 +961,12 @@ document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
 
 // ── Data ──────────────────────────────────────────────────────────────────
 const TPCH = [
-  { name: "GenDB", model: "Opus 4.6", type: "gendb-best", ms: 246.0, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "Sonnet 4.6", type: "gendb", ms: 285.3, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "GPT-5.4", type: "gendb", ms: 374.2, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "GPT-5.3 Codex", type: "gendb", ms: 522.9, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Opus 4.6, Optimized C++", type: "gendb-best", ms: 185.2, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Opus 4.6, C++", type: "gendb", ms: 246.0, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Opus 4.6, Rust", type: "gendb", ms: 282.6, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Sonnet 4.6, C++", type: "gendb", ms: 285.3, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.4, C++", type: "gendb", ms: 374.2, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.3 Codex, C++", type: "gendb", ms: 522.9, tag: "gendb", tagColor: "emerald" },
   { name: "Umbra", model: null, type: "dbms", ms: 589.6, tag: "dbms", tagColor: "indigo" },
   { name: "DuckDB", model: null, type: "dbms", ms: 594.3, tag: "dbms", tagColor: "indigo" },
   { name: "MonetDB", model: null, type: "dbms", ms: 1416.3, tag: "dbms", tagColor: "amber" },
@@ -865,10 +975,10 @@ const TPCH = [
 ];
 
 const EDGAR = [
-  { name: "GenDB", model: "Opus 4.6", type: "gendb-best", ms: 241.5, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "GPT-5.4", type: "gendb", ms: 456.8, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "GPT-5.3 Codex", type: "gendb", ms: 659.0, tag: "gendb", tagColor: "emerald" },
-  { name: "GenDB", model: "Sonnet 4.6", type: "gendb", ms: 830.4, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Opus 4.6, C++", type: "gendb-best", ms: 241.5, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.4, C++", type: "gendb", ms: 456.8, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "GPT-5.3 Codex, C++", type: "gendb", ms: 659.0, tag: "gendb", tagColor: "emerald" },
+  { name: "GenDB", model: "Sonnet 4.6, C++", type: "gendb", ms: 830.4, tag: "gendb", tagColor: "emerald" },
   { name: "Umbra", model: null, type: "dbms", ms: 1280.4, tag: "dbms", tagColor: "indigo" },
   { name: "DuckDB", model: null, type: "dbms", ms: 1639.2, tag: "dbms", tagColor: "indigo" },
   { name: "ClickHouse", model: null, type: "dbms", ms: 2046.6, tag: "dbms", tagColor: "amber" },
