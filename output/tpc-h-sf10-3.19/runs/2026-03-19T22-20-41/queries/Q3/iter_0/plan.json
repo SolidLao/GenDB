@@ -1,0 +1,155 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["build_customer_bitmap", "scan_orders_with_filter", "probe_lineitem_via_index", "aggregate", "topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered by c_mktsegment='BUILDING')",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "bitmap_filter",
+      "build_cardinality": 300000,
+      "probe_cardinality": 15000000,
+      "notes": "max custkey ~1.5M, dense bitmap feasible (187KB fits L1). Scan orders checking bitmap + o_orderdate filter."
+    },
+    {
+      "build": "orders(filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3500000,
+      "probe_cardinality": 59986052,
+      "notes": "Use lineitem_l_orderkey_grouped index for O(1) lookup per qualifying orderkey. Contiguous lineitem rows enable sequential reads."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "column": "c_mktsegment",
+      "predicate": "c_mktsegment = :c_mktsegment_eq",
+      "encoding": "dictionary",
+      "dict_file": "storage/customer/c_mktsegment_dict.bin",
+      "selectivity": 0.2,
+      "output_rows": 300000
+    },
+    {
+      "table": "orders",
+      "column": "o_orderdate",
+      "predicate": "o_orderdate < :o_orderdate_upper",
+      "encoding": "raw_int32_days_since_epoch",
+      "selectivity": 0.48,
+      "output_rows": 7200000
+    },
+    {
+      "table": "lineitem",
+      "column": "l_shipdate",
+      "predicate": "l_shipdate > :l_shipdate_lower",
+      "encoding": "raw_int32_days_since_epoch",
+      "selectivity": 0.54,
+      "output_rows": 32392000
+    }
+  ],
+  "data_structures": {
+    "customer_filter": "bitset(1500001)",
+    "orders_qualifying": {
+      "type": "flat_arrays",
+      "description": "Parallel-collected arrays of (o_orderkey, o_orderdate, o_shippriority) for qualifying orders",
+      "estimated_size": "3.5M entries × 12 bytes = ~42MB"
+    },
+    "aggregation": {
+      "type": "compact_hash_map",
+      "key": "int32_t (l_orderkey)",
+      "value": "double (revenue_sum)",
+      "pre_size": 524288,
+      "notes": "~500K groups. Per-thread local maps, merge at end."
+    },
+    "order_metadata": {
+      "type": "direct_array",
+      "description": "dense_pk_array lookup[orderkey] → (o_orderdate, o_shippriority) for final output",
+      "notes": "Store o_orderdate and o_shippriority for qualifying orders so they can be retrieved by l_orderkey during output phase"
+    }
+  },
+  "execution_steps": [
+    {
+      "step": 0,
+      "name": "build_customer_bitmap",
+      "operation": "Load c_mktsegment dictionary, find code for :c_mktsegment_eq. Scan c_mktsegment column, set bit in bitmap for each qualifying c_custkey.",
+      "input_rows": 1500000,
+      "output_rows": 300000,
+      "columns_read": ["c_mktsegment", "c_custkey"],
+      "parallel": true
+    },
+    {
+      "step": 1,
+      "name": "scan_orders_with_filter",
+      "operation": "Parallel scan orders. For each row: check o_orderdate < :o_orderdate_upper AND customer_bitmap[o_custkey]. Qualifying orders: store o_orderkey into per-thread arrays. Also populate order_metadata arrays indexed by o_orderkey for o_orderdate and o_shippriority.",
+      "input_rows": 15000000,
+      "output_rows": 3500000,
+      "columns_read": ["o_custkey", "o_orderdate", "o_orderkey", "o_shippriority"],
+      "parallel": true
+    },
+    {
+      "step": 2,
+      "name": "probe_lineitem_and_aggregate",
+      "operation": "For each qualifying o_orderkey from step 1: use lineitem_l_orderkey_grouped index to get (start, count). For each lineitem row in [start, start+count): check l_shipdate > :l_shipdate_lower. If passes, accumulate l_extendedprice * (1 - l_discount) into per-thread hash map keyed by l_orderkey.",
+      "input_orderkeys": 3500000,
+      "avg_lineitems_per_order": 4,
+      "lineitem_rows_touched": 14000000,
+      "lineitem_rows_after_shipdate_filter": 7560000,
+      "aggregation_groups": 500000,
+      "columns_read": ["l_shipdate", "l_extendedprice", "l_discount"],
+      "parallel": true
+    },
+    {
+      "step": 3,
+      "name": "merge_and_topk",
+      "operation": "Merge per-thread aggregation maps. Find top :limit entries by (revenue DESC, o_orderdate ASC) using partial_sort or priority queue. Look up o_orderdate and o_shippriority from order_metadata for output.",
+      "input_groups": 500000,
+      "output_rows": 10,
+      "parallel": false
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_l_orderkey_grouped",
+      "file": "storage/indexes/lineitem_l_orderkey_grouped.bin",
+      "purpose": "O(1) lookup of contiguous lineitem rows per orderkey, avoiding full lineitem scan"
+    },
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "purpose": "skip_blocks where max_date <= :l_shipdate_lower (not primary strategy since index_nested_loop already targets specific rows)"
+    }
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "effective_key": "l_orderkey (int32_t)",
+    "full_group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+    "note": "l_orderkey functionally determines o_orderdate and o_shippriority via the join, so hash only on l_orderkey",
+    "aggregate_expr": "SUM(l_extendedprice * (1.0 - l_discount))",
+    "per_thread_local_maps": true,
+    "merge_strategy": "iterate smaller maps, insert-or-add into largest map"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "step0_partitioning": "chunk customer rows across threads",
+    "step1_partitioning": "chunk orders rows across threads (morsel size ~65536)",
+    "step2_partitioning": "chunk qualifying orderkeys across threads",
+    "thread_local_aggregation": true,
+    "final_merge": "single-threaded merge of per-thread maps"
+  },
+  "output": {
+    "columns": ["l_orderkey", "revenue", "o_orderdate", "o_shippriority"],
+    "order_by": ["revenue DESC", "o_orderdate ASC"],
+    "limit": 10,
+    "topk_strategy": "partial_sort_or_nth_element"
+  },
+  "parameters": {
+    "c_mktsegment_eq": {"type": "string", "default": "BUILDING"},
+    "o_orderdate_upper": {"type": "int32_t_days_since_epoch", "default": 9204},
+    "l_shipdate_lower": {"type": "int32_t_days_since_epoch", "default": 9204},
+    "limit": {"type": "int", "default": 10}
+  },
+  "storage_dir": "/home/jl4492/GenDB/output/tpc-h-sf10/storage",
+  "execution_target": "cpp"
+}

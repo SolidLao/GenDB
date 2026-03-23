@@ -24,10 +24,10 @@ Think concisely and structurally:
 
 ## Output
 1. `storage_design.json` — storage layout, encodings, indexes, hardware config
-2. `generated_ingest/ingest.cpp` — parallelized data ingestion
-3. `generated_ingest/build_indexes.cpp` — index building from binary data
-4. `generated_ingest/Makefile`
-5. `query_guides/<Qi>_guide.md` — per-query guide for all Phase 2 agents
+2. `ingest/ingest.cpp` — parallelized data ingestion
+3. `ingest/build_indexes.cpp` — index building from binary data
+4. `ingest/Makefile`
+5. `queries/<Qi>/guide.md` — per-query guide for all Phase 2 agents
 
 ## Physical Design Reasoning
 

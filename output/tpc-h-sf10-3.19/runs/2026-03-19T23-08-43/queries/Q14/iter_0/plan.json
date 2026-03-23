@@ -1,0 +1,82 @@
+{
+  "query_id": "Q14",
+  "pipeline": ["build_promo_bitset", "zonemap_prefilter", "parallel_scan_aggregate"],
+  "join_order": [
+    {
+      "build": "part(is_promo bool array)",
+      "probe": "lineitem(date-filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 2000000,
+      "probe_cardinality": 720000,
+      "notes": "Precompute is_promo[partkey] bool array; O(1) lookup per qualifying lineitem row via part_p_partkey_lookup index"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 9374 AND l_shipdate < 9404",
+      "selectivity": 0.012,
+      "estimated_output": 720000
+    }
+  ],
+  "data_structures": {
+    "promo_lookup": "bool_array(2000001) indexed by partkey — precomputed from p_type dict codes starting with PROMO",
+    "zonemap": "block min/max array for l_shipdate — skip blocks where max < 9374 || min >= 9404",
+    "aggregation": "two thread-local double accumulators (promo_sum, total_sum) per thread, reduced after parallel scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Parallel scan over qualifying blocks only; each thread accumulates local promo_sum and total_sum, then atomically reduce"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "purpose": "skip_blocks",
+      "notes": "Skip blocks where max < 9374 || min >= 9404"
+    },
+    {
+      "index": "part_p_partkey_lookup",
+      "purpose": "build_promo_array",
+      "notes": "Map partkey → row_id to read p_type for each part; used only during is_promo precomputation"
+    }
+  ],
+  "aggregation": "thread_local_accumulate",
+  "output": {
+    "formula": "100.0 * promo_sum / total_sum",
+    "columns": ["promo_revenue"],
+    "limit": 1
+  },
+  "execution_target": "cpp",
+  "mmap_strategy": {
+    "lineitem_columns": "demand_paged_no_MAP_POPULATE",
+    "advice": "MADV_SEQUENTIAL + MADV_HUGEPAGE",
+    "part_columns": "demand_paged_no_MAP_POPULATE"
+  },
+  "implementation_notes": {
+    "phase1_build_promo": [
+      "Load p_type_dict.bin: read uint32_t count, then for each entry read uint16_t len + char[len]",
+      "Build set of dict codes where string starts with 'PROMO'",
+      "Allocate bool is_promo[max_partkey+1] initialized to false",
+      "For each part row: read p_partkey and p_type code, set is_promo[partkey] = (code in promo_set)"
+    ],
+    "phase2_zonemap_prefilter": [
+      "Read lineitem_l_shipdate_zonemap.bin header (num_blocks, block_size=65536)",
+      "Build qualifying_blocks vector: include block if !(max < 9374 || min >= 9404)"
+    ],
+    "phase3_parallel_scan": [
+      "Parallel for over qualifying_blocks",
+      "For each block: scan l_shipdate, for rows in [9374, 9404):",
+      "  Load l_extendedprice[i], l_discount[i], l_partkey[i]",
+      "  revenue = l_extendedprice * (1.0 - l_discount)",
+      "  total_sum += revenue",
+      "  if (is_promo[l_partkey[i]]) promo_sum += revenue",
+      "Use __restrict__ pointers for vectorization"
+    ],
+    "phase4_output": [
+      "printf(\"%.2f\\n\", 100.0 * promo_sum / total_sum)"
+    ],
+    "raii_timer": "Declare mmap resources BEFORE timer scope to exclude munmap TLB shootdown cost"
+  }
+}

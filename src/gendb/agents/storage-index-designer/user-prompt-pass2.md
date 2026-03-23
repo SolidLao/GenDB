@@ -26,8 +26,7 @@ Read: {{workload_analysis_path}}
 {{gendb_dir}}
 
 ## Output
-Write per-query guides to: {{query_guides_dir}}
-Each file: <QUERY_ID>_guide.md
+Write each query's guide to: {{query_guides_dir}}/<QUERY_ID>/guide.md
 
 ## Guide Rules
 1. For each index: read the EXACT hash function from build_indexes.cpp and copy the

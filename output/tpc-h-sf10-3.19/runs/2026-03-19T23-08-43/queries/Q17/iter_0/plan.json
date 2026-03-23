@@ -1,0 +1,119 @@
+{
+  "query_id": "Q17",
+  "pipeline": [
+    "load_dicts",
+    "filter_part",
+    "build_compact_map",
+    "pass1_scan_lineitem_avg",
+    "compute_thresholds",
+    "pass2_scan_lineitem_sum",
+    "final_output"
+  ],
+  "filters": [
+    {"table": "part", "predicate": "p_brand = :p_brand_eq", "selectivity": 0.04},
+    {"table": "part", "predicate": "p_container = :p_container_eq", "selectivity": 0.025},
+    {"table": "part", "predicate": "p_brand = :p_brand_eq AND p_container = :p_container_eq", "selectivity": 0.001, "output_cardinality": 2000}
+  ],
+  "steps": [
+    {
+      "id": "load_dicts",
+      "operation": "Load p_brand and p_container dictionaries, resolve parameter codes",
+      "files": [
+        "storage/part/p_brand_dict.bin",
+        "storage/part/p_container_dict.bin"
+      ],
+      "details": "Dict format: uint32_t count, then [uint16_t len, char[len]] per entry. Find int8_t code for brand and container parameters."
+    },
+    {
+      "id": "filter_part",
+      "operation": "Scan part columns, collect qualifying partkeys",
+      "files": [
+        "storage/part/p_brand.bin",
+        "storage/part/p_container.bin",
+        "storage/part/p_partkey.bin"
+      ],
+      "row_count": 2000000,
+      "output_cardinality": 2000,
+      "details": "Scan p_brand and p_container (both int8_t). Collect p_partkey values where both match. Store qualifying partkeys in a flat vector."
+    },
+    {
+      "id": "build_compact_map",
+      "operation": "Build compact partkey-to-index mapping",
+      "details": "Create hash map: partkey → compact_id (0..~2K). This enables compact accumulator arrays that fit in L1 cache. Also create a bitset over partkey domain (2M bits = 250KB) for fast membership testing during lineitem scans."
+    },
+    {
+      "id": "pass1_scan_lineitem_avg",
+      "operation": "Parallel scan lineitem to compute per-part AVG(l_quantity)",
+      "files": [
+        "storage/lineitem/l_partkey.bin",
+        "storage/lineitem/l_quantity.bin"
+      ],
+      "row_count": 59986052,
+      "details": "For each lineitem row, test l_partkey membership via bitset. If qualifying, look up compact_id from hash map. Accumulate thread-local sum_qty[compact_id] and count[compact_id]. Merge thread-local arrays after scan (arrays are ~2K entries = 32KB, trivial merge)."
+    },
+    {
+      "id": "compute_thresholds",
+      "operation": "Compute per-part quantity threshold",
+      "details": "For each compact_id: threshold[compact_id] = 0.2 * (sum_qty[compact_id] / count[compact_id]). Array of ~2K doubles = 16KB, fits L1."
+    },
+    {
+      "id": "pass2_scan_lineitem_sum",
+      "operation": "Parallel scan lineitem to sum qualifying l_extendedprice",
+      "files": [
+        "storage/lineitem/l_partkey.bin",
+        "storage/lineitem/l_quantity.bin",
+        "storage/lineitem/l_extendedprice.bin"
+      ],
+      "row_count": 59986052,
+      "details": "For each lineitem row, test l_partkey membership via bitset. If qualifying, look up compact_id, check l_quantity < threshold[compact_id]. If passes, add l_extendedprice to thread-local accumulator. Final reduction across threads."
+    },
+    {
+      "id": "final_output",
+      "operation": "Compute avg_yearly = total_extendedprice / 7.0",
+      "output_columns": ["avg_yearly"]
+    }
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered: ~2K rows)",
+      "probe": "lineitem(pass1: 60M rows)",
+      "type": "semi",
+      "strategy": "bitset_membership + compact_hash_map",
+      "build_cardinality": 2000,
+      "probe_cardinality": 59986052,
+      "notes": "Bitset over 2M partkey domain (250KB) for fast membership test; compact hash map for index lookup. Two-pass: pass1 aggregates qty, pass2 filters and sums price."
+    }
+  ],
+  "data_structures": {
+    "qualifying_partkeys": "flat_vector<int32_t>(~2K entries)",
+    "partkey_membership": "bitset(2000000) — 250KB for fast membership test during lineitem scan",
+    "partkey_to_compact": "compact_hash_map<int32_t, uint16_t>(pre_sized ~2K) — partkey to compact index",
+    "pass1_sum_qty": "thread_local double[~2K] — per-compact-id quantity sum",
+    "pass1_count": "thread_local uint32_t[~2K] — per-compact-id row count",
+    "thresholds": "double[~2K] — 0.2 * avg_qty per compact_id, 16KB fits L1",
+    "pass2_accumulator": "thread_local double — running sum of l_extendedprice"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "pass1": "Parallel scan l_partkey + l_quantity with thread-local compact arrays (~32KB each). Merge via simple array addition.",
+    "pass2": "Parallel scan l_partkey + l_quantity + l_extendedprice with thread-local scalar accumulator. Final scalar reduction."
+  },
+  "mmap_strategy": {
+    "advice": "demand_paged",
+    "flags": "MAP_PRIVATE (no MAP_POPULATE)",
+    "madvise": ["MADV_SEQUENTIAL", "MADV_HUGEPAGE"],
+    "notes": "Declare mmap resources before RAII timer scope to exclude munmap TLB shootdown cost"
+  },
+  "compiler_hints": {
+    "restrict_pointers": true,
+    "vectorization": "Use __restrict__ on column pointers to enable auto-vectorization of scan loops"
+  },
+  "output": {
+    "columns": ["avg_yearly"],
+    "computation": "SUM(l_extendedprice) / 7.0",
+    "format": "single_row"
+  },
+  "execution_target": "cpp"
+}

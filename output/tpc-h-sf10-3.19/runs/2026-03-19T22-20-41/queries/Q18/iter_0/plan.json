@@ -1,0 +1,118 @@
+{
+  "query_id": "Q18",
+  "pipeline": [
+    "subquery_grouped_sum",
+    "orders_lookup",
+    "customer_lookup",
+    "build_results",
+    "topk_sort",
+    "decode_varlen"
+  ],
+  "steps": [
+    {
+      "id": "subquery_grouped_sum",
+      "description": "Find orderkeys with SUM(l_quantity) > 300 using grouped index",
+      "index": "lineitem_l_orderkey_grouped",
+      "column": "l_quantity",
+      "operation": "iterate_groups_sum_filter",
+      "having_predicate": "SUM(l_quantity) > 300",
+      "input_groups": 15000000,
+      "output_cardinality": 15000,
+      "output": "qualifying_orderkeys with precomputed sum_qty"
+    },
+    {
+      "id": "orders_lookup",
+      "description": "For each qualifying orderkey, direct-array lookup into orders",
+      "index": "orders_o_orderkey_lookup",
+      "columns_to_read": ["o_custkey", "o_orderdate", "o_totalprice"],
+      "input_cardinality": 15000,
+      "output_cardinality": 15000
+    },
+    {
+      "id": "customer_lookup",
+      "description": "Direct array lookup: row_id = c_custkey - 1 (dense 1-based PKs)",
+      "strategy": "direct_array",
+      "columns_to_read": ["c_custkey"],
+      "input_cardinality": 15000,
+      "output_cardinality": 15000,
+      "notes": "c_name decoded only for final 100 rows; c_custkey already known from o_custkey"
+    },
+    {
+      "id": "topk_sort",
+      "description": "Sort ~15K result tuples and take top 100",
+      "input_cardinality": 15000,
+      "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+      "limit": 100,
+      "strategy": "partial_sort",
+      "notes": "std::partial_sort or nth_element+sort for top 100 from ~15K rows"
+    },
+    {
+      "id": "decode_varlen",
+      "description": "Decode c_name only for final 100 result rows",
+      "column": "c_name",
+      "files": ["c_name_offsets.bin", "c_name_data.bin"],
+      "input_cardinality": 100
+    }
+  ],
+  "join_order": [
+    {
+      "build": "lineitem(subquery → qualifying_orderkeys)",
+      "probe": "orders(via direct_array index)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "Use orders_o_orderkey_lookup for O(1) lookup per qualifying orderkey"
+    },
+    {
+      "build": "orders(filtered ~15K rows)",
+      "probe": "customer(via direct_array)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000,
+      "notes": "c_custkey is dense 1-based, row_id = c_custkey - 1"
+    }
+  ],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "SUM(l_quantity) > 300 per orderkey",
+      "selectivity": 0.001,
+      "notes": "HAVING filter on grouped aggregation"
+    }
+  ],
+  "data_structures": {
+    "subquery_result": "flat_array<struct{int32_t orderkey, double sum_qty}>(~15K entries)",
+    "grouped_index": "memory_mapped lineitem_l_orderkey_grouped.bin",
+    "orders_lookup_index": "memory_mapped orders_o_orderkey_lookup.bin",
+    "result_tuples": "flat_array<struct{c_custkey, o_orderkey, o_orderdate, o_totalprice, sum_qty}>(~15K)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_step": "subquery_grouped_sum",
+    "partition": "partition orderkey range across threads, each thread collects local qualifying set, then merge",
+    "notes": "Subquery iterates ~15M groups over ~60M l_quantity values — parallelize this. Remaining steps operate on ~15K rows, single-threaded is fine."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_orderkey_grouped",
+      "file": "storage/indexes/lineitem_l_orderkey_grouped.bin",
+      "purpose": "grouped_aggregation",
+      "layout": "header: uint64_t num_entries; body: interleaved uint32_t[num_entries*2] as [start, count] pairs"
+    },
+    {
+      "index": "orders_o_orderkey_lookup",
+      "file": "storage/indexes/orders_o_orderkey_lookup.bin",
+      "purpose": "join_lookup",
+      "layout": "header: uint64_t num_entries; body: int32_t[num_entries] where arr[orderkey] = row_id, -1 if missing"
+    }
+  ],
+  "aggregation": "precomputed_in_subquery",
+  "aggregation_notes": "SUM(l_quantity) is computed during the subquery grouped scan. The GROUP BY in the outer query has ~15K groups keyed by o_orderkey (which uniquely determines all other group-by columns). Since sum_qty is already computed per orderkey in the subquery, no further aggregation hash table is needed.",
+  "output": {
+    "columns": ["c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice", "sum_qty"],
+    "order_by": ["o_totalprice DESC", "o_orderdate ASC"],
+    "limit": 100
+  },
+  "execution_target": "cpp"
+}

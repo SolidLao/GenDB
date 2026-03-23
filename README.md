@@ -14,6 +14,16 @@
 
 > **Note:** This project is under active development. The stable version used for the [arxiv paper](https://arxiv.org/abs/2603.02081) is available in the [`arxiv-03-02-2026`](https://github.com/SolidLao/GenDB/tree/arxiv-03-02-2026) branch.
 
+## News
+
+- **2026-03-23** — **SQL Template-Native Generation & Component Reuse.** GenDB now extracts parameterized SQL templates from queries and generates code at the template level. Queries sharing the same template structure (e.g., different date ranges or filter predicates) reuse the same generated code — no re-generation needed. Storage, indexes, and optimized query binaries are versioned and persisted across runs, with hardware fingerprinting to trigger automatic rebenchmarking when hardware changes. This enables incremental workload onboarding: run 5 queries today, add 17 more tomorrow, and GenDB only generates code for the new ones.
+- **2026-03-23** — **Self-Evolving Memory System (experimental).** GenDB can now learn from past runs via a 6-layer Hierarchical Abstraction Graph and auto-generated optimization skills. This feature is still under active development and testing, and is disabled by default. Enable with `--memory-dir <path>`. See `src/gendb/memory/README.md`.
+- **2026-03-09** — **Language comparison.** Compared GenDB's C++ output with Optimized C++ and Rust rewrites by Claude Code. See [results](docs/language-comparison.md).
+- **2026-03-08** — **Multi-model support.** Added Opus 4.6, GPT-5.4, GPT-5.3-Codex as backbone models with [comparison results](docs/model-comparison.md).
+- **2026-03-08** — **[Website](https://solidlao.github.io/GenDB/)** launched.
+- **2026-03-07** — **OpenAI Codex agent provider** added (`--agent-provider codex`).
+- **2026-03-02** — **[Paper](https://arxiv.org/abs/2603.02081)** released on arXiv.
+
 ## Why Generate?
 
 Consider PostgreSQL. Since its origins as an OLTP database, the community has built extensions for nearly every emerging use case: PostGIS for geospatial, TimescaleDB for time-series, pgvector for embeddings, Citus for distributed analytics, pg_duckdb for OLAP, AGE for graph queries, and [hundreds more](https://pigsty.io/blog/pg/pg-eat-db-world/). In parallel, entirely new systems were purpose-built for each domain: DuckDB, ClickHouse, and Umbra for OLAP; Milvus and Pinecone for vector search; InfluxDB for time-series; Neo4j for graph; Snowflake and BigQuery for cloud analytics.
@@ -38,18 +48,21 @@ GenDB supports multiple LLM agent providers — currently **Claude** (via `@anth
 
 - **Semantic queries** — Generate code for multimodal data (images, audio, text) with AI-powered operators, moving beyond SQL's relational model
 - **GPU-native generation** — Generate CUDA/GPU code targeting libcudf and cost-efficient GPU analytics, not just CPU
-- **Self-evolving system** — Learn from past runs, accumulate optimization experience, improve generation quality over time
-- **Reusable generation** — Share operators across queries, generate for query templates, reduce per-query generation cost
+- **Self-evolving system** — Learn from past runs, accumulate optimization experience, improve generation quality over time (experimental support available via `--memory-dir`)
 
 ## Results
 
 We evaluate on two benchmarks: **TPC-H**, a widely-used OLAP benchmark whose queries and optimization strategies are well-represented in LLM training data, and **SEC-EDGAR**, a new benchmark we constructed from real-world SEC financial filings. SEC-EDGAR serves as an unseen workload — its schemas and query patterns have rarely appeared in training corpora — to test whether GenDB generalizes beyond memorized optimizations.
 
 **Main experiment runs:**
-- **TPC-H:** `output/tpc-h/2026-02-26T06-27-28`
-- **SEC-EDGAR:** `output/sec-edgar/2026-02-26T07-58-24`
+- **TPC-H:** `output/deprecated/tpc-h/2026-02-26T06-27-28`
+- **SEC-EDGAR:** `output/deprecated/sec-edgar/2026-02-26T07-58-24`
 
-> **Note:** The `gendb/` data storage folders within each run directory are excluded from this repository due to their large size (12GB for TPC-H, 3.3GB for SEC-EDGAR). As a result, the output runs cannot be directly executed from a fresh clone. To reproduce or re-run, download the storage folders from [Google Drive](https://drive.google.com/drive/folders/14FICOHv5MnEf_qedsvyGfj64ay8mMTnv?usp=sharing) and place them in the corresponding run directories (e.g., `output/tpc-h/2026-02-26T06-27-28/gendb/`).
+**Latest runs (SQL template-native generation):**
+- **TPC-H:** `output/tpc-h-sf10-3.19`
+- **SEC-EDGAR:** `output/sec-edgar-sf3-3.19`
+
+> **Note:** The `storage/` (and legacy `gendb/`) data folders within each run directory are excluded from this repository due to their large size (12GB for TPC-H, 3.3GB for SEC-EDGAR). As a result, the output runs cannot be directly executed from a fresh clone. To reproduce or re-run, download the storage folders from [Google Drive](https://drive.google.com/drive/folders/14FICOHv5MnEf_qedsvyGfj64ay8mMTnv?usp=sharing) and place them in the corresponding run directories (e.g., `output/tpc-h-sf10-3.19/storage/`).
 
 **All engines are configured to use comparable hardware resources, and parallelism is fully enabled to ensure each system can fully demonstrate its performance. To ensure fair comparison, result or intermediate result caching, or pre-computed derived columns, are not allowed in GenDB.** GenDB outperforms all baselines on every query in both benchmarks.
 
@@ -68,52 +81,7 @@ We evaluate on two benchmarks: **TPC-H**, a widely-used OLAP benchmark whose que
 #### SEC-EDGAR (3 Years, 5GB)
 ![SEC-EDGAR Benchmark Results](benchmarks/figures/sec-edgar/benchmark_results_combined.png)
 
-#### Ablation: Multi-Agent vs Single-Agent
-
-| | Multi-Agent | Single (Guided) | Single (High-Level) |
-|---|---|---|---|
-| **TPC-H** | **236 ms** | 456 ms (1.9x slower) | 281 ms (1.2x slower) |
-| **SEC-EDGAR** | **320 ms** | 752 ms (2.3x slower) | 1,325 ms (4.1x slower) |
-
-The gap widens on unseen workloads (SEC-EDGAR), where structured multi-agent decomposition generalizes better. Multi-agent also costs less ($14.15 vs $17.54 on TPC-H).
-
-<img src="benchmarks/figures/gendb_compare_versions/gendb_version_summary.png" width="500">
-
-#### Model Comparison
-
-GenDB supports multiple LLM backbone models. Different models offer different trade-offs between generated code quality, generation time, and cost.
-
-| | Opus 4.6 | Sonnet 4.6 | GPT-5.4 | GPT-5.3-Codex |
-|---|---|---|---|---|
-| **TPC-H** | **246 ms** | 285 ms | 374 ms | 523 ms |
-| **SEC-EDGAR** | **242 ms** | 830 ms | 457 ms | 659 ms |
-| **TPC-H Cost** | $27.98 | $62.46 | $12.61 | $10.79 |
-| **SEC-EDGAR Cost** | $41.85 | $55.44 | $32.08 | $21.19 |
-| **TPC-H Gen. Time** | 79 min | 182 min | 56 min | 69 min |
-| **SEC-EDGAR Gen. Time** | 87 min | 244 min | 70 min | 69 min |
-
-**Opus 4.6** achieves the best execution performance on both benchmarks. **GPT-5.3-Codex** offers the lowest generation cost. **GPT-5.4** provides a good balance between code quality and cost.
-
-> **Note:** The original paper used Sonnet 4.6 for experiments. However, Sonnet 4.6 has recently become unstable — frequently overthinking or encountering internal errors, causing agents to hang until timeout. We recommend using **Opus 4.6** or **GPT-5.4** for now.
-
-<img src="benchmarks/figures/model_comparison/model_comparison_summary.png" width="500">
-
-#### Language Comparison: C++ vs Optimized C++ vs Rust
-
-We compare three implementations of GenDB's generated query code on TPC-H (SF10): the **original C++** generated by GenDB, **optimized C++** refined by Claude Code (Opus 4.6), and a full **Rust** rewrite also by Claude Code (Opus 4.6). The process: select the best-performing C++ binary for each query from the GenDB run, then give Claude Code 5 iterations to analyze, profile, and improve each implementation — first for optimized C++ (aggressive compiler flags, madvise tuning, parallelized joins, thread count optimization), then for Rust (rayon parallelism, unsafe bounds-check elimination, memmap2 zero-copy I/O).
-
-| | Original C++ | Optimized C++ | Rust |
-|---|---|---|---|
-| **Q1** | 49.8 ms | **39.2 ms** | 71.7 ms |
-| **Q3** | **25.0 ms** | 26.0 ms | 52.5 ms |
-| **Q6** | 31.8 ms | 35.5 ms | **23.7 ms** |
-| **Q9** | 85.4 ms | **64.4 ms** | 101.9 ms |
-| **Q18** | 49.2 ms | **20.1 ms** | 32.8 ms |
-| **Total** | 241.2 ms | **185.2 ms** (1.30x) | 282.6 ms |
-
-Optimized C++ achieves a **1.30x** speedup over the original, with Q18 showing the largest gain (2.44x) from parallelized join building. Rust wins on Q6 (zone-map scan with `get_unchecked`) but carries ~30ms per-query overhead from mmap page table setup, penalizing short queries. The Rust `main_scan` compute times are competitive with C++, suggesting the overhead is structural rather than algorithmic. We plan to introduce a dedicated **Code Refiner** agent to the pipeline, responsible for low-level, implementation-level optimizations — compiler flag tuning, memory access patterns, SIMD utilization, cross-language code generation — to automatically achieve these gains as part of the standard GenDB workflow.
-
-<img src="benchmarks/figures/language_comparison/language_comparison_perquery.png" width="500">
+**More results:** [Ablation: Multi-Agent vs Single-Agent](docs/ablation.md) &nbsp;|&nbsp; [Model Comparison](docs/model-comparison.md) &nbsp;|&nbsp; [Language Comparison: C++ vs Optimized C++ vs Rust](docs/language-comparison.md)
 
 ## How It Works
 
@@ -208,7 +176,7 @@ node src/gendb/single.mjs --benchmark tpc-h --sf 10 --agent-provider codex --mod
 bash scripts/ablation.sh
 
 # Benchmark GenDB against baseline systems (DuckDB, Umbra, ClickHouse, etc.)
-python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --gendb-run output/tpc-h/<run-dir>
+python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --gendb-run output/tpc-h-sf10
 ```
 
 ## Project Structure
@@ -231,8 +199,10 @@ src/gendb/
     query-optimizer/        #   Iterative optimization
     code-inspector/         #   Code review (skills mode)
     dba/                    #   DBA analysis (skills mode)
+    memory-manager/         #   Post-run learning (memory mode)
     single-agent/           #   Single-agent prompts
-  tools/                    # Result comparison utilities
+  memory/                   # Self-evolving memory system (experimental)
+  tools/                    # Result comparison, template extraction
   utils/                    # C++ utility headers (mmap, hashing, timing, dates)
 
 benchmarks/
@@ -245,10 +215,14 @@ benchmarks/
 scripts/
   setup.sh                  # Environment setup (prerequisites, dependencies, data)
   ablation.sh               # Execute GenDB in all version configurations
+  memory_eval.sh            # Memory system evaluation (4 experiments)
 
-.claude/skills/             # Domain skills (12 skills: join optimization, parallelism, etc.)
+.claude/skills/             # Auto-generated optimization skills (memory mode)
 assets/                     # Project figures
-output/                     # GenDB run outputs (per benchmark, per timestamp)
+output/                     # GenDB run outputs (per benchmark, versioned)
+  tpc-h-sf10-3.19/          #   Latest TPC-H run (template-native)
+  sec-edgar-sf3-3.19/       #   Latest SEC-EDGAR run (template-native)
+  deprecated/               #   Pre-template runs (paper experiments)
 ```
 
 ## Citation

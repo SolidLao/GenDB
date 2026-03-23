@@ -116,6 +116,13 @@ Reduce the amount of data or operations that reach expensive phases. Examples:
 - Check for sequential bottlenecks: single-threaded merge after parallel scan
 - Check thread utilization: is work evenly distributed?
 
+**Category F — Derivation** (template can't meet performance for specific params):
+When optimizing a parameterized template that can't meet the performance target for specific
+parameter values (e.g., a narrow date range is fast but a wide range is slow), recommend
+creating a `derived/<instance_name>/` specialization. First exhaust Categories A-E on the
+template. Only derive if the template hits a fundamental performance wall for specific params
+that can't be fixed generically.
+
 **Category E — Storage extension** (from Scope Check → storage-level constraint):
 The root cause is a column encoding mismatch that cannot be fixed by plan changes alone.
 You can extend the storage by building a new column version — a derived representation

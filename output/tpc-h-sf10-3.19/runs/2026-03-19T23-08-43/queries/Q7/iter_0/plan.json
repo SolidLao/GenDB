@@ -1,0 +1,150 @@
+{
+  "query_id": "Q7",
+  "pipeline": [
+    "load_nation_filter",
+    "build_supplier_nation_array",
+    "build_customer_nation_array",
+    "build_orders_custkey_array",
+    "scan_lineitem_with_zonemap",
+    "index_lookup_supplier_nation",
+    "index_lookup_order_customer_nation",
+    "aggregate_4_buckets",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered: FRANCE/GERMANY → 2 nationkeys)",
+      "probe": "supplier(s_nationkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2,
+      "probe_cardinality": 100000,
+      "output_cardinality": 8000,
+      "notes": "Build supp_nation_flag[suppkey] = 0(none)/1(FRANCE)/2(GERMANY) direct array from s_nationkey column. suppkey is dense, use supplier_s_suppkey_lookup for mapping."
+    },
+    {
+      "build": "nation(filtered: FRANCE/GERMANY → 2 nationkeys)",
+      "probe": "customer(c_nationkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2,
+      "probe_cardinality": 1500000,
+      "output_cardinality": 120000,
+      "notes": "Build cust_nation_flag[custkey] = 0(none)/1(FRANCE)/2(GERMANY) direct array from c_nationkey column. custkey is dense, use customer_c_custkey_lookup."
+    },
+    {
+      "build": "orders(o_custkey indexed)",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "notes": "Precompute orders_custkey[orderkey] = o_custkey via orders_o_orderkey_lookup for O(1) access during lineitem scan."
+    },
+    {
+      "build": "supplier_nation + customer_nation precomputed",
+      "probe": "lineitem(date-filtered, ~17.4M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 0,
+      "probe_cardinality": 17400000,
+      "output_cardinality": 560000,
+      "notes": "Single-pass lineitem scan. For each row: (1) check supp_nation_flag[l_suppkey]!=0 (~8% pass), (2) lookup orders_custkey[l_orderkey]→custkey→cust_nation_flag[custkey]!=0 (~8% of remainder), (3) validate pair. Early exit on supplier nation saves ~92% of order/customer lookups."
+    }
+  ],
+  "filters": [
+    {
+      "table": "nation",
+      "predicate": "n_name IN ('FRANCE', 'GERMANY')",
+      "selectivity": 0.08,
+      "result_rows": 2
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate BETWEEN 9131 AND 9861",
+      "selectivity": 0.29,
+      "result_rows": 17400000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "supp_nation_flag[l_suppkey] != 0 (supplier is FRANCE or GERMANY)",
+      "selectivity": 0.08,
+      "result_rows": 1392000,
+      "notes": "Applied BEFORE order/customer lookup to avoid expensive index probes"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "valid nation pair: (FRANCE,GERMANY) or (GERMANY,FRANCE)",
+      "selectivity": 0.04,
+      "result_rows": 560000
+    }
+  ],
+  "data_structures": {
+    "supp_nation_flag": "direct_array(uint8_t[max_suppkey+1], 0=none/1=FRANCE/2=GERMANY)",
+    "cust_nation_flag": "direct_array(uint8_t[max_custkey+1], 0=none/1=FRANCE/2=GERMANY)",
+    "orders_custkey": "direct_array(int32_t[max_orderkey+1], preloaded o_custkey by orderkey)",
+    "aggregation": "direct_array(double[4], indexed by (supp_nation_idx*2 + cust_nation_idx - complement) per year bucket)",
+    "thread_local_agg": "direct_array(double[4], per-thread to avoid contention, merge at end)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "notes": "Parallel scan of lineitem blocks. Thread-local aggregation arrays (4 doubles each), single merge at end. Precomputed arrays are read-only shared."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "purpose": "skip_blocks",
+      "notes": "Skip lineitem blocks where max < 9131 or min > 9861"
+    },
+    {
+      "index": "supplier_s_suppkey_lookup",
+      "purpose": "build_supp_nation_array",
+      "notes": "Map suppkey→row_id to load s_nationkey during precomputation"
+    },
+    {
+      "index": "orders_o_orderkey_lookup",
+      "purpose": "build_orders_custkey_array",
+      "notes": "Map orderkey→row_id to load o_custkey during precomputation"
+    },
+    {
+      "index": "customer_c_custkey_lookup",
+      "purpose": "build_cust_nation_array",
+      "notes": "Map custkey→row_id to load c_nationkey during precomputation"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_details": {
+    "groups": 4,
+    "layout": "double[2][2][2] indexed by [supp_nation_idx][cust_nation_idx][year_idx] where year_idx = shipdate >= 9496",
+    "merge": "sum thread-local arrays after parallel scan"
+  },
+  "scan_optimizations": {
+    "mmap_strategy": "demand_paged",
+    "mmap_flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "madvise": "MADV_SEQUENTIAL for lineitem columns during scan",
+    "filter_order_in_scan": [
+      "1. l_shipdate range check (zonemap pre-filter + per-row check)",
+      "2. supp_nation_flag[l_suppkey] != 0 (direct array, ~8% pass)",
+      "3. orders_custkey[l_orderkey] → cust_nation_flag[custkey] != 0 (~8% pass)",
+      "4. validate nation pair is (FRANCE,GERMANY) or (GERMANY,FRANCE)",
+      "5. compute volume and year, accumulate"
+    ]
+  },
+  "year_extraction": {
+    "method": "threshold_compare",
+    "threshold": 9496,
+    "notes": "Since date range is [9131,9861] spanning only 1995-1996: year_idx = (l_shipdate >= 9496) ? 1 : 0. 9496 = days_since_epoch for 1996-01-01."
+  },
+  "output": {
+    "order_by": ["supp_nation ASC", "cust_nation ASC", "l_year ASC"],
+    "limit": null,
+    "rows": 4,
+    "format": "supp_nation|cust_nation|l_year|revenue"
+  },
+  "resource_scoping": {
+    "mmap_before_timer": true,
+    "notes": "Declare all mmap resources before RAII timer scope to exclude munmap TLB shootdown cost from timing"
+  },
+  "execution_target": "cpp"
+}

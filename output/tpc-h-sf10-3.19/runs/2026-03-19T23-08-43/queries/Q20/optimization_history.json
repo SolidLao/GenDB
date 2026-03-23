@@ -1,0 +1,51 @@
+{
+  "query_id": "Q20",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 220.02666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 220.02666666666667,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "filter_nation": 0.01,
+        "filter_supplier": 0.55,
+        "filter_part": 21.76,
+        "merge_maps": 58.6,
+        "scan_lineitem": 183.81,
+        "scan_partsupp": 11.47,
+        "materialize": 1.23,
+        "sort": 0.11,
+        "output": 0.32,
+        "total": 219.71
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 31.55666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 31.55666666666667,
+      "validation": "pass",
+      "strategy": "Root cause: Category B+C. Thread-local hash maps were 100x oversized — 256K slots × 16B × 64 threads = 256MB, far exceeding 44MB LLC. Only ~106K lineitem rows qualify (partkey 1.1% × shipdate 16%), yet each thread allocated 4MB maps, causing 256MB init writes + 59ms merge scanning 16M slots. Fix: replace thread-local hash maps with thread-local vectors that collect qualifying (partkey, suppkey, qty) tuples — 26KB per thread vs 4MB. After parallel scan, build a single global hash map from ~106K collected tuples (~1.7MB, fits L2) in one pass — eliminates merge entirely. Also parallelize filter_part (22ms) across 64 cores. Expected: lineitem scan drops to ~15-20ms (bandwidth-limited on ~1.2GB with 64 cores), aggregate <1ms, filter_part <2ms, total ~20ms.",
+      "operation_timings": {
+        "filter_nation": 0.01,
+        "filter_supplier": 0.3,
+        "filter_part": 3.43,
+        "scan_lineitem_collect": 11.6,
+        "aggregate_collected": 1.62,
+        "scan_partsupp": 10.51,
+        "materialize": 1.06,
+        "sort": 0.1,
+        "output": 1.16,
+        "total": 32.47
+      }
+    }
+  ]
+}

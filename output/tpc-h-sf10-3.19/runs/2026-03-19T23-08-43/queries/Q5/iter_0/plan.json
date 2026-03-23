@@ -1,0 +1,166 @@
+{
+  "query_id": "Q5",
+  "pipeline": [
+    "load_dimension_filters",
+    "build_supplier_nationkey_array",
+    "scan_orders_with_zonemap",
+    "lookup_customer_filter_asia",
+    "probe_lineitem_grouped",
+    "lookup_supplier_check_locality",
+    "aggregate_revenue",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "region(filtered r_name='ASIA')",
+      "probe": "nation",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1,
+      "probe_cardinality": 25,
+      "result_cardinality": 5,
+      "notes": "Scan region for ASIA regionkey, filter nation by n_regionkey match. Build asia_nationkeys bitset."
+    },
+    {
+      "build": "customer(asia nations via c_nationkey)",
+      "probe": "orders(date-filtered)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 300000,
+      "probe_cardinality": 2250000,
+      "result_cardinality": 450000,
+      "notes": "Use customer_c_custkey_lookup index: for each qualifying order's o_custkey, lookup c_nationkey, check asia_nationkeys bitset. Keep c_nationkey for locality check."
+    },
+    {
+      "build": "orders(asia-customer-filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 450000,
+      "probe_cardinality": 1800000,
+      "result_cardinality": 1800000,
+      "notes": "Use lineitem_l_orderkey_grouped index to fetch lineitem rows for each qualifying orderkey."
+    },
+    {
+      "build": "supplier(nationkey array)",
+      "probe": "lineitem(from qualifying orders)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "probe_cardinality": 1800000,
+      "result_cardinality": 360000,
+      "notes": "Use supplier_s_suppkey_lookup to get s_nationkey. Check c_nationkey == s_nationkey (locality constraint). ~20% pass."
+    }
+  ],
+  "filters": [
+    {
+      "table": "region",
+      "predicate": "r_name = :r_name_eq",
+      "selectivity": 0.2,
+      "result_rows": 1
+    },
+    {
+      "table": "nation",
+      "predicate": "n_regionkey = asia_regionkey",
+      "selectivity": 0.2,
+      "result_rows": 5
+    },
+    {
+      "table": "orders",
+      "predicate": "o_orderdate >= :o_orderdate_lower AND o_orderdate < :o_orderdate_upper",
+      "selectivity": 0.15,
+      "result_rows": 2250000
+    },
+    {
+      "table": "customer",
+      "predicate": "c_nationkey IN asia_nationkeys",
+      "selectivity": 0.2,
+      "result_rows": 300000,
+      "notes": "Applied during order probe via custkey lookup"
+    },
+    {
+      "table": "lineitem+supplier",
+      "predicate": "c_nationkey == s_nationkey (locality)",
+      "selectivity": 0.2,
+      "result_rows": 360000
+    }
+  ],
+  "data_structures": {
+    "asia_nationkeys": "bitset(25)",
+    "nationkey_to_nation_idx": "direct_array(25, uint8_t)",
+    "nation_names": "flat_array(5, string)",
+    "supplier_nationkey": "direct_array(max_suppkey+1, int8_t)",
+    "customer_nationkey_lookup": "mmap(customer_c_custkey_lookup index)",
+    "lineitem_orderkey_grouped": "mmap(lineitem_l_orderkey_grouped index)",
+    "qualifying_orders": "compact_array(~450000 entries: {orderkey, c_nationkey})",
+    "aggregation": "direct_array(5, double)"
+  },
+  "parallelism": {
+    "strategy": "two_pass_parallel_scatter",
+    "phase1_scan_orders": {
+      "method": "morsel_driven",
+      "threads": "auto(nproc)",
+      "morsel_size": 65536,
+      "notes": "Parallel scan of orders with zonemap block skipping. Each thread collects local qualifying orders."
+    },
+    "phase2_probe_lineitem": {
+      "method": "morsel_driven",
+      "threads": "auto(nproc)",
+      "notes": "Partition qualifying orders across threads. Each thread probes lineitem_l_orderkey_grouped index, accumulates into thread-local revenue[5] array, then merge."
+    },
+    "final_merge": "sum thread-local revenue arrays (5 entries, trivial)"
+  },
+  "indexes": [
+    {
+      "index": "orders_o_orderdate_zonemap",
+      "file": "storage/indexes/orders_o_orderdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "notes": "Skip order blocks where max < o_orderdate_lower || min >= o_orderdate_upper"
+    },
+    {
+      "index": "customer_c_custkey_lookup",
+      "file": "storage/indexes/customer_c_custkey_lookup.bin",
+      "purpose": "join_lookup",
+      "notes": "Direct array: arr[custkey] → row_id → load c_nationkey[row_id]"
+    },
+    {
+      "index": "supplier_s_suppkey_lookup",
+      "file": "storage/indexes/supplier_s_suppkey_lookup.bin",
+      "purpose": "join_lookup",
+      "notes": "Direct array: arr[suppkey] → row_id → load s_nationkey[row_id]"
+    },
+    {
+      "index": "lineitem_l_orderkey_grouped",
+      "file": "storage/indexes/lineitem_l_orderkey_grouped.bin",
+      "purpose": "join_lookup",
+      "notes": "For each orderkey: [start, count] → range of lineitem rows"
+    }
+  ],
+  "aggregation": "array_direct",
+  "aggregation_details": {
+    "type": "direct_array",
+    "size": 5,
+    "key": "nation_idx (0-4, mapped from nationkey)",
+    "value": "double (revenue sum)",
+    "thread_local": true,
+    "merge": "element-wise sum"
+  },
+  "output": {
+    "columns": ["n_name", "revenue"],
+    "order_by": ["revenue DESC"],
+    "limit": null,
+    "num_rows": 5
+  },
+  "execution_notes": {
+    "mmap_strategy": "demand_paged",
+    "mmap_flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "madvise": {
+      "orders_columns": "MADV_SEQUENTIAL",
+      "lineitem_columns": "MADV_RANDOM",
+      "index_files": "MADV_RANDOM"
+    },
+    "raii_timer": "Declare mmap resources before timer scope to exclude munmap TLB shootdown",
+    "sorted_probe": "Sort qualifying_orders by orderkey before lineitem probe for sequential access via MADV_SEQUENTIAL on lineitem_l_orderkey_grouped index"
+  },
+  "execution_target": "cpp"
+}

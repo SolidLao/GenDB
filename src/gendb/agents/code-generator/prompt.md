@@ -49,7 +49,7 @@ ordering guarantees. Performance optimizations must never sacrifice correctness.
 
 ## Workflow
 1. Read the execution plan (plan.json) — this is your authoritative strategy
-2. Implement the plan faithfully in C++ following the file structure in the gendb-code-patterns skill
+2. Implement the plan faithfully in C++
 4. Write the .cpp file using the Write tool
 5. Compile → Run → Validate (up to 2 fix attempts if validation fails)
 6. If validation fails: analyze root cause, fix, retry
@@ -59,10 +59,40 @@ You MUST produce a .cpp file using the Write tool. Do NOT output only analysis o
 If unsure about details, still write the .cpp file — the validation loop will catch errors.
 
 ## Output Contract
-- Follow the file structure template from the gendb-code-patterns skill
-- Use GENDB_PHASE timing for all phases (total, data_loading, dim_filter, build_joins, main_scan, output)
-- CSV output: comma-delimited with header row, 2 decimal places for monetary, YYYY-MM-DD for dates
+- CSV output: comma-delimited with header row
 - The plan is authoritative — implement it faithfully. It was produced by the Query Optimizer using profiling data
+
+## Utility Headers
+A utils directory is provided via `-I<utils_path>` in the compile flags. It contains
+headers you can `#include` directly.
+
+### MANDATORY: `timing_utils.h`
+You MUST `#include "timing_utils.h"` and use `GENDB_PHASE("name")` for timing. Do NOT
+define your own timing macros — the provided header is the only accepted source.
+
+`GENDB_PHASE("name")` is an RAII scoped timer. It prints `[TIMING] name: X.XX ms` to
+stdout when the scope exits. The orchestrator parses this output to extract timing data.
+
+Required phases: `total`, `data_loading`, `main_scan`, `output`. Add others as appropriate
+(e.g., `dim_filter`, `build_joins`, `aggregation`).
+
+Example:
+```cpp
+#include "timing_utils.h"
+
+void run_q1(const std::string& gendb_dir, const std::string& results_dir) {
+    GENDB_PHASE("total");
+    { GENDB_PHASE("data_loading"); /* mmap columns */ }
+    { GENDB_PHASE("main_scan"); /* scan + aggregate */ }
+    { GENDB_PHASE("output"); /* write CSV */ }
+}
+```
+
+### Other utils (optional)
+The utils directory also contains `date_utils.h`, `cli_params.h`, `hash_utils.h`,
+`mmap_utils.h`. Read them if relevant to your query and use what helps, but do not
+rely on them blindly — they may not be the most effective approach for every query.
+Write your own implementations when the utils don't fit.
 
 ## Storage Extensions (Column Versions)
 The plan.json may include a `storage_extensions` field listing derived column representations
@@ -78,3 +108,18 @@ When `storage_extensions` is present:
 
 ## Standalone Code Requirement
 Generated code must be standalone and executable with only two inputs: `gendb_dir` (argv[1]) and `results_dir` (argv[2]). All runtime dependencies — data files, metadata, encoding dictionaries, and column versions — must exist within `gendb_dir`. Never read files from the output directory, query guides, or any path outside `gendb_dir` and system utilities.
+
+## Parameterized Code Generation
+When the query uses named parameters (provided via `params.json`), generate code that accepts
+parameter values from the command line instead of hardcoding literals.
+
+- Include `cli_params.h` from the utils path: `#include "cli_params.h"`
+- At the top of `main()`, call `gendb::init_date_tables()` first, then parse all parameters
+  from CLI args using the `parse_*_arg()` helpers (e.g., `parse_int_arg()`, `parse_date_arg()`,
+  `parse_string_arg()`, `parse_float_arg()`)
+- Use the parsed variables (not hardcoded literals) in all predicate evaluations, filter
+  conditions, HAVING thresholds, LIMIT values, and any other query constants
+- Binary signature: `./q1 <gendb_dir> <results_dir> [--param value ...]`
+- Default values are compiled in from `params.json`, so the binary works correctly with no
+  extra arguments
+- Each `parse_*_arg()` call specifies the parameter name, argc/argv, and the default value

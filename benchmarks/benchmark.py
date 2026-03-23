@@ -8,7 +8,7 @@ Usage:
     python3 benchmarks/benchmark.py --benchmark all --sf <N> --years <N> [options]
 
 Common options:
-    --gendb-run <path>    Path to GenDB run directory
+    --gendb-run <path>    Path to GenDB workload dir or run directory
     --mode <hot|cold>     Benchmark mode (default: hot)
     --setup               Force database setup/reload
     --output <path>       Output plot path
@@ -60,7 +60,7 @@ def main():
 
     # Common options
     parser.add_argument("--gendb-run", type=Path, default=None,
-                        help="Path to GenDB run directory")
+                        help="Path to GenDB workload dir (output/<benchmark>-sf<N>) or run directory")
     parser.add_argument("--mode", type=str, default="hot", choices=["hot", "cold"],
                         help="Benchmark mode (default: hot)")
     parser.add_argument("--setup", action="store_true",

@@ -1,0 +1,121 @@
+{
+  "query_id": "Q3",
+  "pipeline": [
+    "load_dictionaries",
+    "prefilter_sub",
+    "build_sub_info_array",
+    "parallel_scan_num_dual_aggregate",
+    "merge_thread_local_maps",
+    "compute_having_threshold",
+    "filter_and_topk",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022, ~16900 rows)",
+      "probe": "num(filtered uom='USD' AND value IS NOT NULL, ~33.3M rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 16900,
+      "probe_cardinality": 33300000,
+      "result_cardinality": 6500000,
+      "notes": "Build dense sub_info array indexed by adsh_code; O(1) lookup per num row combines join check + attribute fetch"
+    }
+  ],
+  "filters": [
+    {"table": "sub", "predicate": "fy = :fy_eq", "selectivity": 0.196, "rows_out": 16900},
+    {"table": "num", "predicate": "uom = :uom_eq", "selectivity": 0.844, "rows_out": 33300000},
+    {"table": "num", "predicate": "value IS NOT NULL", "selectivity": 0.999, "rows_out": 33300000},
+    {"combined": "after join", "selectivity": 0.165, "rows_out": 6500000}
+  ],
+  "data_structures": {
+    "sub_info_array": {
+      "type": "direct_array",
+      "description": "Array indexed by adsh_code, stores {uint32_t name_code, int32_t cik} for qualifying sub rows, sentinel (UINT32_MAX) for non-qualifying",
+      "index_range": "max adsh_code from dict_shared_adsh (~86K)",
+      "entry_size_bytes": 8,
+      "total_size_estimate": "~700KB",
+      "fits_in": "L2_cache"
+    },
+    "main_agg_map": {
+      "type": "compact_hash_map",
+      "key": "{uint32_t name_code, int32_t cik}",
+      "value": "double sum_value",
+      "estimated_groups": 15000,
+      "per_thread": true,
+      "per_thread_size_estimate": "~360KB",
+      "notes": "Thread-local maps; 64 threads * 360KB = 23MB < 44MB LLC"
+    },
+    "cik_agg_map": {
+      "type": "compact_hash_map",
+      "key": "int32_t cik",
+      "value": "double sum_value",
+      "estimated_groups": 15000,
+      "per_thread": true,
+      "per_thread_size_estimate": "~240KB",
+      "notes": "For HAVING subquery; computed in same pass as main aggregation"
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "parallel_phase": "num scan + dual aggregation",
+    "merge_phase": "serial merge of thread-local maps (small — ~15K entries per map)",
+    "notes": "64 threads * (360KB + 240KB) = ~38MB per-thread maps fit in 44MB LLC"
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_lookup",
+      "file": "indexes/sub_adsh_lookup.idx",
+      "purpose": "Map adsh_code -> sub_row_id during sub_info_array construction",
+      "usage": "NOT used during num scan; sub_info_array replaces it for O(1) combined filter+lookup"
+    }
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "dual_map_single_pass": true,
+    "map1": {
+      "purpose": "main query GROUP BY (name_code, cik) -> SUM(value)",
+      "groups": 15000
+    },
+    "map2": {
+      "purpose": "HAVING subquery GROUP BY cik -> SUM(value)",
+      "groups": 15000
+    },
+    "having_computation": "After merge: iterate cik_agg_map, compute sum_of_sums / count -> avg_threshold",
+    "having_filter": "Keep main_agg_map entries where sum_value > avg_threshold"
+  },
+  "output": {
+    "order_by": ["total_value DESC NULLS LAST"],
+    "limit": 100,
+    "sort_strategy": "partial_sort (std::partial_sort or nth_element + sort)",
+    "decode": "Resolve name_code -> string via dictionaries/name.dict for output"
+  },
+  "column_access": {
+    "sub_prefilter": {
+      "columns": ["sub/fy.bin", "sub/adsh.bin", "sub/name.bin", "sub/cik.bin"],
+      "mmap_advice": "MADV_SEQUENTIAL",
+      "notes": "Single sequential pass over 86K rows"
+    },
+    "num_scan": {
+      "columns": ["num/uom.bin", "num/value_null.bin", "num/adsh.bin", "num/value.bin"],
+      "mmap_advice": "MADV_SEQUENTIAL per morsel",
+      "scan_order": "Check uom first (uint16_t, cheapest), then value_null (uint8_t), then adsh lookup in sub_info_array, then read value (double) only for qualifying rows",
+      "notes": "demand-paged mmap without MAP_POPULATE; exclude munmap from timing via RAII scoping"
+    }
+  },
+  "optimization_notes": {
+    "single_pass": "Main query and HAVING subquery share identical base scan — accumulate both maps simultaneously",
+    "filter_ordering": "uom check (uint16_t compare) → value_null check (uint8_t) → sub_info_array lookup (combined join + fy filter) → read value (double) — ordered by cost, each step eliminates rows",
+    "memory_layout": "sub_info_array + all thread-local maps fit comfortably in LLC"
+  },
+  "execution_target": "cpp",
+  "parameters": [
+    {"name": "limit", "type": "int", "default": 100},
+    {"name": "uom_eq", "type": "string", "default": "USD"},
+    {"name": "fy_eq", "type": "int", "default": 2022},
+    {"name": "uom_eq_2", "type": "string", "default": "USD"},
+    {"name": "fy_eq_2", "type": "int", "default": 2022}
+  ]
+}

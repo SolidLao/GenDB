@@ -1,0 +1,92 @@
+{
+  "query_id": "Q15",
+  "pipeline": ["zonemap_filter", "parallel_scan_aggregate", "find_max", "lookup_supplier"],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 9497 AND l_shipdate < 9588",
+      "selectivity": 0.037,
+      "estimated_rows": 2220000
+    }
+  ],
+  "join_order": [
+    {
+      "build": "revenue_array(aggregated, ~100K entries)",
+      "probe": "supplier(via pk_lookup, 1-2 rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "probe_cardinality": 1,
+      "notes": "suppkey is dense 0-100K; use direct array for aggregation and join. After finding max revenue, lookup matching suppkey(s) via supplier pk index."
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array(double, max_suppkey+1, ~800KB)",
+    "thread_local_aggregation": "direct_array(double, max_suppkey+1, per_thread ~800KB)",
+    "supplier_lookup": "pre_built_index(supplier_s_suppkey_lookup)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "condition": "skip where max < 9497 || min >= 9588"
+    },
+    {
+      "index": "supplier_s_suppkey_lookup",
+      "file": "storage/indexes/supplier_s_suppkey_lookup.bin",
+      "purpose": "join_lookup",
+      "condition": "lookup row_id for matching suppkey(s) to retrieve s_name, s_address, s_phone"
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_phase": {
+      "description": "Parallel block-level scan of lineitem with thread-local revenue arrays",
+      "schedule": "static",
+      "morsel_size": 65536,
+      "thread_local_arrays": true,
+      "merge": "element-wise sum of thread-local arrays into global array"
+    }
+  },
+  "aggregation": "array_direct",
+  "execution_phases": [
+    {
+      "phase": 1,
+      "name": "zonemap_filter",
+      "description": "Load lineitem_l_shipdate_zonemap. Build list of qualifying block indices where block overlaps [9497, 9588)."
+    },
+    {
+      "phase": 2,
+      "name": "parallel_scan_aggregate",
+      "description": "Each thread has thread-local double revenue[max_suppkey+1] zeroed. For qualifying blocks: scan l_shipdate, for rows in [9497, 9588): revenue[l_suppkey[i]] += l_extendedprice[i] * (1.0 - l_discount[i]). After scan, merge thread-local arrays via element-wise addition.",
+      "columns_scanned": ["l_shipdate", "l_suppkey", "l_extendedprice", "l_discount"],
+      "mmap_advice": "MADV_SEQUENTIAL + MADV_HUGEPAGE, no MAP_POPULATE"
+    },
+    {
+      "phase": 3,
+      "name": "find_max",
+      "description": "Single pass over revenue[0..max_suppkey] to find max_revenue. Then collect all suppkeys where fabs(revenue[sk] - max_revenue) < 1e-6."
+    },
+    {
+      "phase": 4,
+      "name": "lookup_supplier",
+      "description": "For each matching suppkey, use supplier_s_suppkey_lookup to get row_id. Read s_name, s_address, s_phone from supplier varlen columns at that row_id."
+    }
+  ],
+  "output": {
+    "columns": ["s_suppkey", "s_name", "s_address", "s_phone", "total_revenue"],
+    "order_by": ["s_suppkey ASC"],
+    "limit": null,
+    "expected_rows": 1
+  },
+  "mmap_strategy": {
+    "technique": "demand_paged_mmap",
+    "flags": "MAP_PRIVATE",
+    "advice": ["MADV_SEQUENTIAL", "MADV_HUGEPAGE"],
+    "anti_pattern": "no MAP_POPULATE",
+    "resource_scoping": "declare mmap before RAII timer to exclude munmap TLB shootdown"
+  },
+  "execution_target": "cpp"
+}

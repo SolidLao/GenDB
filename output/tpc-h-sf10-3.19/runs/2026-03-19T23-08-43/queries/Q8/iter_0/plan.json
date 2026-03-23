@@ -1,0 +1,131 @@
+{
+  "query_id": "Q8",
+  "pipeline": [
+    "load_dimensions",
+    "build_part_bitset",
+    "build_america_customer_bitset",
+    "find_brazil_nationkey",
+    "parallel_lineitem_scan_with_index_probes",
+    "aggregate_market_share"
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered by p_type='ECONOMY ANODIZED STEEL')",
+      "probe": "lineitem(l_partkey)",
+      "type": "semi",
+      "strategy": "bitset_filter",
+      "build_cardinality": 1400,
+      "notes": "Bitset over partkey domain (max ~2M). Most selective filter applied first on lineitem scan."
+    },
+    {
+      "build": "orders(filtered by o_orderdate BETWEEN 9131 AND 9861)",
+      "probe": "lineitem(l_orderkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 4500000,
+      "notes": "Use orders_o_orderkey_lookup dense_pk_array for O(1) lookup. Check date inline after part filter passes."
+    },
+    {
+      "build": "customer(filtered to AMERICA region nations)",
+      "probe": "orders(o_custkey)",
+      "type": "semi",
+      "strategy": "bitset_filter",
+      "build_cardinality": 300000,
+      "notes": "Bitset over custkey domain (max ~1.5M). Check after order date passes."
+    },
+    {
+      "build": "supplier",
+      "probe": "lineitem(l_suppkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "Use supplier_s_suppkey_lookup for O(1) nationkey retrieval. Needed for BRAZIL check in CASE expression."
+    }
+  ],
+  "filters": [
+    {"table": "part", "predicate": "p_type = 'ECONOMY ANODIZED STEEL'", "selectivity": 0.0007, "method": "dictionary_code_lookup"},
+    {"table": "orders", "predicate": "o_orderdate BETWEEN 9131 AND 9861", "selectivity": 0.30, "method": "inline_range_check_via_index"},
+    {"table": "region", "predicate": "r_name = 'AMERICA'", "selectivity": 0.20, "method": "scan_5_rows"},
+    {"table": "customer", "predicate": "c_nationkey IN (AMERICA nation keys)", "selectivity": 0.20, "method": "nationkey_set_check"}
+  ],
+  "data_structures": {
+    "part_qualifying_bitset": "bitset(2000001) — set bits for partkeys matching p_type filter",
+    "america_customer_bitset": "bitset(1500001) — set bits for custkeys in AMERICA region",
+    "america_nationkeys": "flat_array(~5 int32) — nation keys belonging to AMERICA region",
+    "brazil_nationkey": "int32 — single value for BRAZIL nation",
+    "orders_orderkey_index": "mmap dense_pk_array — orders_o_orderkey_lookup.bin for O(1) orderkey→row_id",
+    "customer_custkey_index": "mmap dense_pk_array — customer_c_custkey_lookup.bin for O(1) custkey→row_id",
+    "supplier_suppkey_index": "mmap dense_pk_array — supplier_s_suppkey_lookup.bin for O(1) suppkey→row_id",
+    "o_orderdate_col": "mmap int32 array — orders/o_orderdate.bin",
+    "o_custkey_col": "mmap int32 array — orders/o_custkey.bin",
+    "c_nationkey_col": "mmap int32 array — customer/c_nationkey.bin",
+    "s_nationkey_col": "mmap int32 array — supplier/s_nationkey.bin",
+    "aggregation": "direct_array(2) — index by (year - 1995): brazil_volume[2], total_volume[2]"
+  },
+  "dimension_setup": [
+    {
+      "step": "load_region",
+      "action": "Scan 5 region rows, find r_regionkey where r_name='AMERICA'"
+    },
+    {
+      "step": "load_nation",
+      "action": "Scan 25 nation rows. Collect n_nationkey where n_regionkey=AMERICA_regionkey into america_nationkeys set. Find n_nationkey where n_name='BRAZIL' → brazil_nationkey."
+    },
+    {
+      "step": "build_america_customer_bitset",
+      "action": "Scan c_nationkey column (1.5M rows). For each customer, if c_nationkey in america_nationkeys, set bit in america_customer_bitset at c_custkey."
+    },
+    {
+      "step": "build_part_bitset",
+      "action": "Load p_type dict, find dictionary code for 'ECONOMY ANODIZED STEEL'. Scan p_type column (2M rows). For matching rows, set bit in part_qualifying_bitset at p_partkey value (read from p_partkey column)."
+    }
+  ],
+  "main_scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns_needed": ["l_partkey", "l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"],
+    "mmap_advice": "MADV_SEQUENTIAL on l_partkey; demand-paged on others (accessed sparsely after part filter)",
+    "filter_chain_per_row": [
+      "1. Check part_qualifying_bitset[l_partkey] → ~0.07% pass (~42K rows)",
+      "2. Lookup order_row = orders_orderkey_index[l_orderkey]. Check o_orderdate[order_row] in [9131,9861] → ~30% of 42K → ~12.6K rows",
+      "3. Get o_custkey[order_row]. Check america_customer_bitset[o_custkey] → ~20% of 12.6K → ~2.5K rows",
+      "4. Lookup supp_row = supplier_suppkey_index[l_suppkey]. Get s_nationkey[supp_row]. Check if == brazil_nationkey.",
+      "5. Compute volume = l_extendedprice[i] * (1.0 - l_discount[i]). Year = derive from o_orderdate[order_row] (year_idx = 0 or 1). Accumulate total_volume[year_idx] += volume. If brazil: brazil_volume[year_idx] += volume."
+    ]
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "partitioning": "lineitem rows divided into morsels; each thread has local brazil_volume[2] and total_volume[2]; merge at end",
+    "notes": "Part bitset and customer bitset are read-only shared across threads. Index arrays are mmap read-only shared."
+  },
+  "indexes": [
+    {"index": "orders_o_orderkey_lookup", "file": "storage/indexes/orders_o_orderkey_lookup.bin", "purpose": "O(1) orderkey→row_id for date and custkey lookup"},
+    {"index": "customer_c_custkey_lookup", "file": "storage/indexes/customer_c_custkey_lookup.bin", "purpose": "O(1) custkey→row_id for nationkey lookup"},
+    {"index": "supplier_s_suppkey_lookup", "file": "storage/indexes/supplier_s_suppkey_lookup.bin", "purpose": "O(1) suppkey→row_id for nationkey lookup"}
+  ],
+  "aggregation": {
+    "strategy": "array_direct",
+    "groups": 2,
+    "group_key": "year - 1995 (0 or 1)",
+    "accumulators": ["total_volume (double)", "brazil_volume (double)"],
+    "final_computation": "mkt_share = brazil_volume / total_volume per year",
+    "thread_local": true
+  },
+  "year_extraction": {
+    "method": "precompute epoch boundaries for 1995 and 1996 — if o_orderdate < 9496 (1996-01-01) then year_idx=0 else year_idx=1",
+    "epoch_1996_01_01": 9496
+  },
+  "mmap_strategy": {
+    "pre_timer": ["all index files", "dimension columns (region, nation, part, customer, supplier)"],
+    "demand_paged": ["lineitem columns — MADV_SEQUENTIAL on l_partkey, no MAP_POPULATE on others"],
+    "notes": "Declare mmap resources before RAII timer scope to exclude munmap TLB shootdown cost"
+  },
+  "output": {
+    "order_by": ["o_year ASC"],
+    "limit": null,
+    "columns": ["o_year (int)", "mkt_share (double, division result)"]
+  },
+  "execution_target": "cpp"
+}

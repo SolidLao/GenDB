@@ -1,0 +1,92 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["mmap_columns", "parallel_scan_aggregate", "merge_output"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 65536,
+    "num_blocks": 916,
+    "columns": [
+      {"name": "l_shipdate", "type": "int32_t", "file": "storage/lineitem/l_shipdate.bin", "bytes_per_row": 4},
+      {"name": "l_returnflag", "type": "int8_t", "file": "storage/lineitem/l_returnflag.bin", "bytes_per_row": 1},
+      {"name": "l_linestatus", "type": "int8_t", "file": "storage/lineitem/l_linestatus.bin", "bytes_per_row": 1},
+      {"name": "l_quantity", "type": "double", "file": "storage/lineitem/l_quantity.bin", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "type": "double", "file": "storage/lineitem/l_extendedprice.bin", "bytes_per_row": 8},
+      {"name": "l_discount", "type": "double", "file": "storage/lineitem/l_discount.bin", "bytes_per_row": 8},
+      {"name": "l_tax", "type": "double", "file": "storage/lineitem/l_tax.bin", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "mmap_flags": "MAP_PRIVATE only — no MAP_POPULATE",
+    "madvise": "MADV_SEQUENTIAL + MADV_HUGEPAGE on all column mmaps"
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= threshold",
+      "default_threshold": 10471,
+      "selectivity": 0.988,
+      "rows_passing": 59274000
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "type": "zone_map",
+      "layout": {
+        "header": {"num_blocks": "uint64_t", "block_size": "uint32_t"},
+        "body": "int32_t[num_blocks * 2] (min, max pairs)"
+      },
+      "purpose": "skip_blocks",
+      "block_classification": {
+        "all_pass": "max_date <= threshold → aggregate entire block without per-row date check",
+        "all_skip": "min_date > threshold → skip block entirely",
+        "partial": "scan rows individually with per-row predicate"
+      }
+    }
+  ],
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_by": ["l_returnflag", "l_linestatus"],
+    "key_encoding": {
+      "method": "lookup_table_256",
+      "description": "Use a 256-entry uint8_t lookup table for each of returnflag and linestatus. returnflag: A→0, N→1, R→2. linestatus: F→0, O→1. Combined key = rf_idx * 2 + ls_idx. Max index = 5, allocate 6 slots."
+    },
+    "num_groups": 6,
+    "actual_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double — plain += accumulation",
+      "sum_base_price": "double — plain += accumulation",
+      "sum_disc_price": "double — plain += accumulation. Compute as extendedprice * (1.0 - discount)",
+      "sum_charge": "double — plain += accumulation. Compute as extendedprice * (1.0 - discount) * (1.0 + tax)",
+      "sum_discount": "double — plain += accumulation",
+      "count": "int64_t — plain ++ increment"
+    },
+    "struct_layout": "CRITICAL: The Accum struct MUST contain EXACTLY these 6 fields: double sum_qty, double sum_base_price, double sum_disc_price, double sum_charge, double sum_discount, int64_t count. Total = 48 bytes. Do NOT add any Kahan compensation fields. Do NOT define any KAHAN_ADD macro. Do NOT use compensated summation anywhere. Use simple += for ALL accumulations.",
+    "avg_computation": "deferred to finalize: avg = sum / count"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_unit": "block",
+    "schedule": "static — work is nearly perfectly balanced at 98.8% selectivity. Static scheduling eliminates dynamic scheduling overhead (atomic counter contention across 64 threads).",
+    "local_aggregation": true,
+    "merge": "sum thread-local accumulator arrays (6 slots each) into global result",
+    "thread_local_layout": "Allocate per-thread accumulators as array of cache-line-aligned ThreadSlot structs. Each ThreadSlot contains Accum[6]. Use alignas(64) on ThreadSlot to prevent false sharing. Zero-initialize with memset before scan."
+  },
+  "data_structures": {
+    "aggregation": "fixed_array(6 slots per thread, indexed by compact key)",
+    "thread_local_accumulators": "std::vector<ThreadSlot> where ThreadSlot is alignas(64) with Accum[6]. Each Accum is 48 bytes (5 doubles + 1 int64_t, NO compensation fields)."
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "trivial — iterate compact keys 0..5 in order, output non-empty groups"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A+C. Root cause: iter_1 code still used Kahan summation (KAHAN_ADD macro, compensation fields in Accum struct) despite the plan directing removal — adding 8 extra FP ops/row and bloating the struct from 48 to 64 bytes. Also used schedule(dynamic,4) causing atomic contention across 64 threads for only 916 blocks. Fixes: (1) REMOVE all Kahan summation — use plain += for all accumulators, struct drops to 48 bytes (5 doubles + 1 int64_t), (2) switch to static scheduling since 98.8% selectivity means near-perfect load balance, (3) compile with -O3 -march=native -funroll-loops for best autovectorization of the inner accumulation loop. Target: sub-31ms by eliminating ~470M wasted FP ops and reducing scheduling overhead.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(param_date, -90)"
+  }
+}

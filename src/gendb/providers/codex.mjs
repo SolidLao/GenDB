@@ -16,7 +16,7 @@ import { Codex } from "@openai/codex-sdk";
 import { defaults, getProviderConfig } from "../gendb.config.mjs";
 import { formatDuration } from "../shared.mjs";
 
-export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName, useSkills, domainSkillsPrompt, verbose = false }) {
+export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName, useSkills, domainSkillsPrompt, effortLevel: effortOverride, verbose = false }) {
   // Build the effective system prompt (same logic as Claude provider)
   const effectivePrompt = (useSkills !== false && domainSkillsPrompt)
     ? systemPrompt + "\n\n" + domainSkillsPrompt
@@ -24,7 +24,7 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
 
   const timeout = timeoutMs || defaults.agentTimeoutMs;
   const providerCfg = getProviderConfig("codex");
-  const codexEffort = (configName && providerCfg.agentEffortLevels[configName]) || "medium";
+  const codexEffort = effortOverride || (configName && providerCfg.agentEffortLevels[configName]) || "medium";
   const effectiveModel = model || providerCfg.model;
 
   console.log(`\n[${"=".repeat(60)}]`);
@@ -119,11 +119,11 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
 
   if (agentError) {
     console.error(`\n[Orchestrator] Agent "${name}" failed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)}): ${agentError}`);
-    return { result: resultText, durationMs, tokens, costUsd, error: agentError };
+    return { result: resultText, durationMs, tokens, costUsd, error: agentError, skillsUsed: {} };
   }
 
   console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
-  return { result: resultText, durationMs, tokens, costUsd };
+  return { result: resultText, durationMs, tokens, costUsd, skillsUsed: {} };
 }
 
 /**

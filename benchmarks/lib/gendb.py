@@ -1,4 +1,10 @@
-"""GenDB iteration history & benchmarking — shared across workloads."""
+"""GenDB iteration history & benchmarking — shared across workloads.
+
+Supports two output structures:
+  - Legacy (v36-): output/<benchmark>/<timestamp>/ with run.json, queries/Q1/iter_*/
+  - Workload (v37+): output/<benchmark>-sf<N>/ with workload.json, queries/Q1/best->vN/,
+    runs/<timestamp>/run.json, runs/<timestamp>/queries/Q1/iter_*/
+"""
 
 import json
 import os
@@ -6,8 +12,44 @@ import re
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 from .utils import GREEN, RED, BOLD, RESET, drop_os_caches
+
+
+def is_workload_dir(path):
+    """Check if a path is a v37+ persistent workload directory."""
+    return (path / "workload.json").exists()
+
+
+def resolve_gendb_paths(gendb_path):
+    """Resolve a user-provided GenDB path to (workload_dir, run_dir).
+
+    Accepts:
+      - A workload dir (has workload.json) -> uses runs/latest/ as run_dir
+      - A legacy run dir (has run.json at top level)
+      - A run dir inside a workload dir (runs/<timestamp>/)
+
+    Returns (workload_dir_or_None, run_dir_or_None).
+    """
+    gendb_path = Path(gendb_path).resolve()
+
+    if is_workload_dir(gendb_path):
+        # Workload dir — find latest run
+        latest = gendb_path / "runs" / "latest"
+        run_dir = latest.resolve() if latest.exists() else None
+        return gendb_path, run_dir
+
+    # Check if it's a run dir (has run.json)
+    if (gendb_path / "run.json").exists():
+        # Could be inside a workload dir (workload_dir/runs/<timestamp>/)
+        # or a legacy standalone run dir
+        parent = gendb_path.parent
+        if parent.name == "runs" and is_workload_dir(parent.parent):
+            return parent.parent, gendb_path
+        return None, gendb_path
+
+    return None, None
 
 
 def read_gendb_iteration_history(run_dir):
@@ -167,11 +209,37 @@ def parse_timing_output(stdout):
     return timings
 
 
-def find_best_binaries(run_dir):
-    """Find the best per-query binary from run.json's bestCppPath.
+def find_best_binaries(run_dir, workload_dir=None):
+    """Find the best per-query binary.
+
+    Supports two modes:
+    1. Workload dir (v37+): queries/Q1/best/ symlink -> vN/ with binary inside
+    2. Legacy run dir: run.json bestCppPath -> iter_N/ with binary inside
+
     Returns {"Q1": Path("/path/to/q1"), ...}
     """
-    from pathlib import Path
+    binaries = {}
+
+    # v37+ workload dir: use queries/Q1/best/ symlinks
+    if workload_dir and is_workload_dir(workload_dir):
+        queries_dir = workload_dir / "queries"
+        if queries_dir.exists():
+            for qdir in sorted(queries_dir.iterdir()):
+                if not qdir.is_dir() or not qdir.name.startswith("Q"):
+                    continue
+                qid = qdir.name
+                best_link = qdir / "best"
+                if best_link.exists():
+                    best_dir = best_link.resolve()
+                    binary = best_dir / qid.lower()
+                    if binary.exists() and os.access(str(binary), os.X_OK):
+                        binaries[qid] = binary
+        if binaries:
+            return binaries
+
+    # Legacy: read bestCppPath from run.json
+    if run_dir is None:
+        return {}
     run_json_path = run_dir / "run.json"
     if not run_json_path.exists():
         return {}
@@ -180,33 +248,53 @@ def find_best_binaries(run_dir):
         run_data = json.load(f)
 
     pipelines = run_data.get("phase2", {}).get("pipelines", {})
-    binaries = {}
     for qid, info in pipelines.items():
         cpp_path = info.get("bestCppPath")
         if cpp_path:
-            iter_dir = Path(cpp_path).parent
-            binary = iter_dir / qid.lower()
+            bin_dir = Path(cpp_path).parent
+            binary = bin_dir / qid.lower()
             if binary.exists() and os.access(str(binary), os.X_OK):
                 binaries[qid] = binary
 
     return binaries
 
 
-def gendb_benchmark_best(run_dir, gendb_dir, mode):
+def _read_param_cli_args(workload_dir, qid):
+    """Read params.json for a query and return CLI args list."""
+    if workload_dir is None:
+        return []
+    params_path = workload_dir / "queries" / qid / "params.json"
+    if not params_path.exists():
+        return []
+    with open(params_path) as f:
+        params_data = json.load(f)
+    args = []
+    for p in params_data.get("parameters", []):
+        args.append(f"--{p['name']}")
+        args.append(str(p["default"]))
+    return args
+
+
+def gendb_benchmark_best(run_dir, gendb_dir, mode, workload_dir=None):
     """Execute the best per-query GenDB binaries and return timing results.
     Returns {"Q1": [times], "Q3": [times], ...}
     """
-    best_binaries = find_best_binaries(run_dir)
+    best_binaries = find_best_binaries(run_dir, workload_dir)
     if not best_binaries:
-        print("  No best binaries found in run.json")
+        print("  No best binaries found")
         return {}
 
     total_runs = 4 if mode == "hot" else 1
     results = {}
     with tempfile.TemporaryDirectory() as tmpdir:
-        for qid in sorted(best_binaries):
+        for qid in sorted(best_binaries, key=lambda q: int(q[1:])):
             binary = best_binaries[qid]
             print(f"  Running {qid} ({binary.parent.name}/{binary.name})...", end="", flush=True)
+
+            # Build command: binary <gendb_dir> <results_dir> [--param value ...]
+            cmd = [str(binary), str(gendb_dir), tmpdir]
+            param_args = _read_param_cli_args(workload_dir, qid)
+            cmd.extend(param_args)
 
             if mode == "cold":
                 drop_os_caches()
@@ -214,7 +302,7 @@ def gendb_benchmark_best(run_dir, gendb_dir, mode):
             ok = True
             for _ in range(total_runs):
                 proc = subprocess.run(
-                    [str(binary), str(gendb_dir), tmpdir],
+                    cmd,
                     capture_output=True, text=True, timeout=600,
                 )
                 if proc.returncode != 0:

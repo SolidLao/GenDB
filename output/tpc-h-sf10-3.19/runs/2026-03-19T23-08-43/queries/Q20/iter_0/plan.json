@@ -1,0 +1,180 @@
+{
+  "query_id": "Q20",
+  "pipeline": [
+    "filter_nation",
+    "filter_supplier_by_nation",
+    "filter_part_by_name",
+    "scan_lineitem_aggregate",
+    "scan_partsupp_check_threshold",
+    "collect_qualifying_suppliers",
+    "materialize_output",
+    "sort_output"
+  ],
+  "steps": [
+    {
+      "id": "filter_nation",
+      "operation": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = :n_name_eq",
+      "output": "canada_nationkey (single int32)",
+      "cardinality_in": 25,
+      "cardinality_out": 1
+    },
+    {
+      "id": "filter_supplier_by_nation",
+      "operation": "scan_filter",
+      "table": "supplier",
+      "columns": ["s_suppkey", "s_nationkey"],
+      "predicate": "s_nationkey = canada_nationkey",
+      "output": "canada_suppkey_bitset",
+      "cardinality_in": 100000,
+      "cardinality_out": 4000,
+      "notes": "Bitset sized to max suppkey (~100K). Also store suppkey list for later materialization."
+    },
+    {
+      "id": "filter_part_by_name",
+      "operation": "scan_filter",
+      "table": "part",
+      "columns": ["p_partkey", "p_name"],
+      "predicate": "p_name LIKE :p_name_pattern",
+      "output": "forest_partkey_bitset",
+      "cardinality_in": 2000000,
+      "cardinality_out": 22000,
+      "notes": "Bitset sized to max partkey (~2M). Check prefix match via memcmp."
+    },
+    {
+      "id": "scan_lineitem_aggregate",
+      "operation": "parallel_scan_aggregate",
+      "table": "lineitem",
+      "columns": ["l_partkey", "l_suppkey", "l_shipdate", "l_quantity"],
+      "predicates": [
+        "l_shipdate >= 8766 AND l_shipdate < 9131",
+        "l_partkey IN forest_partkey_bitset"
+      ],
+      "output": "qty_map: hash_map<(partkey, suppkey), double>",
+      "cardinality_in": 59986052,
+      "cardinality_out_map_entries": 88000,
+      "notes": "Use zonemap to skip blocks outside shipdate range. Check partkey bitset first (cheaper), then shipdate. Thread-local hash maps merged after parallel scan."
+    },
+    {
+      "id": "scan_partsupp_check_threshold",
+      "operation": "indexed_scan_filter",
+      "table": "partsupp",
+      "index": "partsupp_ps_partkey_grouped",
+      "columns": ["ps_partkey", "ps_suppkey", "ps_availqty"],
+      "predicates": [
+        "ps_partkey IN forest_partkey_bitset (via grouped index)",
+        "ps_suppkey IN canada_suppkey_bitset",
+        "ps_availqty > 0.5 * qty_map[(ps_partkey, ps_suppkey)]"
+      ],
+      "output": "qualifying_suppkey_bitset",
+      "cardinality_in": 88000,
+      "cardinality_out": 200,
+      "notes": "Iterate qualifying partkeys via grouped index. For each partsupp row: check suppkey in CANADA bitset first (fast reject), then lookup qty_map, compare threshold. Mark qualifying suppkeys in bitset."
+    },
+    {
+      "id": "materialize_output",
+      "operation": "lookup_materialize",
+      "table": "supplier",
+      "index": "supplier_s_suppkey_lookup",
+      "columns": ["s_name", "s_address"],
+      "input": "qualifying_suppkey_bitset",
+      "cardinality": 200,
+      "notes": "Use dense_pk_array index for O(1) row lookup per qualifying suppkey."
+    },
+    {
+      "id": "sort_output",
+      "operation": "sort",
+      "order_by": ["s_name ASC NULLS FIRST"],
+      "cardinality": 200
+    }
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered → 1 row)",
+      "probe": "supplier",
+      "type": "semi",
+      "strategy": "direct_scalar_compare",
+      "build_cardinality": 1,
+      "notes": "Single nationkey value; direct equality check during supplier scan"
+    },
+    {
+      "build": "part(filtered → 22K forest parts)",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "build_cardinality": 22000,
+      "notes": "Bitset on partkey for O(1) probe during lineitem scan"
+    },
+    {
+      "build": "qty_map from lineitem aggregation",
+      "probe": "partsupp(indexed on qualifying partkeys)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 88000,
+      "notes": "Hash map keyed on (partkey, suppkey) built during lineitem scan, probed during partsupp scan"
+    },
+    {
+      "build": "supplier(filtered CANADA → 4K)",
+      "probe": "partsupp",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "build_cardinality": 4000,
+      "notes": "Bitset on suppkey for fast CANADA check during partsupp scan"
+    }
+  ],
+  "filters": [
+    {"table": "nation", "predicate": "n_name = :n_name_eq", "selectivity": 0.04},
+    {"table": "supplier", "predicate": "s_nationkey = canada_nationkey", "selectivity": 0.04},
+    {"table": "part", "predicate": "p_name LIKE :p_name_pattern", "selectivity": 0.011},
+    {"table": "lineitem", "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131", "selectivity": 0.16},
+    {"table": "lineitem", "predicate": "l_partkey IN forest_partkey_bitset", "selectivity": 0.011},
+    {"table": "partsupp", "predicate": "ps_suppkey IN canada_suppkey_bitset", "selectivity": 0.04},
+    {"table": "partsupp", "predicate": "ps_availqty > 0.5 * SUM(l_quantity)", "selectivity": 0.05}
+  ],
+  "data_structures": {
+    "canada_suppkey_bitset": "bitset(100001)",
+    "forest_partkey_bitset": "bitset(2000001)",
+    "qty_map": "compact_hash_map<pair<int32,int32>, double>(pre_sized ~128K slots)",
+    "qualifying_suppkey_bitset": "bitset(100001)",
+    "thread_local_qty_maps": "per-thread compact_hash_map, merged post-scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_phases": [
+      {
+        "phase": "scan_lineitem_aggregate",
+        "approach": "parallel block scan with thread-local hash maps",
+        "morsel_size": 65536,
+        "notes": "Largest table; primary bottleneck. Each thread accumulates into local qty_map, merge at end."
+      },
+      {
+        "phase": "filter_part_by_name",
+        "approach": "parallel scan",
+        "notes": "2M rows, parallelizable but fast even single-threaded"
+      }
+    ],
+    "serial_phases": ["filter_nation", "filter_supplier_by_nation", "scan_partsupp_check_threshold", "materialize_output", "sort_output"]
+  },
+  "indexes": [
+    {"index": "lineitem_l_shipdate_zonemap", "purpose": "skip_blocks outside [8766, 9131) during lineitem scan"},
+    {"index": "partsupp_ps_partkey_grouped", "purpose": "direct lookup of partsupp rows for qualifying partkeys only"},
+    {"index": "supplier_s_suppkey_lookup", "purpose": "O(1) row lookup for final materialization of s_name, s_address"}
+  ],
+  "mmap_strategy": {
+    "approach": "demand_paged",
+    "flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "advice": {
+      "lineitem_columns": "MADV_SEQUENTIAL for l_partkey, l_shipdate, l_suppkey, l_quantity",
+      "partsupp_columns": "MADV_RANDOM (indexed access via grouped index)"
+    },
+    "scoping": "declare mmap resources before RAII timer to exclude munmap TLB shootdown"
+  },
+  "output": {
+    "order_by": ["s_name ASC NULLS FIRST"],
+    "limit": null,
+    "columns": ["s_name", "s_address"]
+  },
+  "execution_target": "cpp"
+}

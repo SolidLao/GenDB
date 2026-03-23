@@ -1,0 +1,73 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["build_customer_bitmap", "scan_orders_collect_compact", "sort_qualifying_orderkeys", "probe_lineitem_aggregate_fused", "topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered by c_mktsegment='BUILDING')",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "bitmap_filter",
+      "build_cardinality": 300000,
+      "probe_cardinality": 15000000,
+      "notes": "Bitmap on custkey (187KB, fits L1). Filter orders by bitmap + o_orderdate."
+    },
+    {
+      "build": "orders(filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3500000,
+      "probe_cardinality": 59986052,
+      "notes": "Use lineitem_l_orderkey_grouped index. Sort qualifying orderkeys first for sequential lineitem access."
+    }
+  ],
+  "filters": [
+    {"table": "customer", "predicate": "c_mktsegment = :c_mktsegment_eq", "selectivity": 0.2},
+    {"table": "orders", "predicate": "o_orderdate < :o_orderdate_upper", "selectivity": 0.48},
+    {"table": "lineitem", "predicate": "l_shipdate > :l_shipdate_lower", "selectivity": 0.54}
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {"name": "o_custkey", "file": "orders/o_custkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderdate", "file": "orders/o_orderdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderkey", "file": "orders/o_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_shippriority", "file": "orders/o_shippriority.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "customer_filter": "bitset(1500001) — 187KB, fits L1 cache",
+    "qualifying_orders": {
+      "type": "compact_struct_array",
+      "fields": ["int32_t orderkey", "int32_t orderdate", "int32_t shippriority"],
+      "estimated_entries": 3500000,
+      "estimated_size_mb": 42,
+      "notes": "CRITICAL: Use compact arrays sized to number of qualifying orders (~3.5M), NOT max_orderkey (~60M). Per-thread collection then merge. This replaces the old approach of 4 separate arrays each sized to max_orderkey (~60M entries totaling ~1GB)."
+    },
+    "aggregation": {
+      "type": "inline_per_order",
+      "notes": "For each qualifying order, compute revenue sum inline during lineitem probe. Store result directly in the compact qualifying_orders array (add a double revenue field). No separate aggregation map needed since each qualifying orderkey is unique."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "orders_scan": "static partitioning of orders rows, per-thread compact arrays, then merge",
+    "lineitem_probe": "dynamic scheduling over sorted qualifying orderkeys (chunk size ~4096). Each order's lineitems are contiguous, so threads process non-overlapping orderkey ranges. Revenue accumulated directly into the compact result array — no atomics needed since each orderkey appears exactly once.",
+    "notes": "Sort qualifying orderkeys before lineitem probe to ensure sequential access pattern across lineitem columns (sorted by l_orderkey). This maximizes prefetch and cache line utilization."
+  },
+  "indexes": [
+    {"index": "lineitem_l_orderkey_grouped", "purpose": "O(1) lookup of contiguous lineitem rows per qualifying orderkey"}
+  ],
+  "aggregation": "inline_per_order",
+  "output": {"order_by": ["revenue DESC", "o_orderdate ASC"], "limit": 10},
+  "execution_target": "cpp",
+  "optimization_notes": "Category C — Work Elimination. Root cause: the iter_0 code allocated 4 arrays indexed by max_orderkey (~60M), totaling ~1GB of zero-initialized memory, but only ~3.5M entries were used. This allocation+initialization dominated runtime (593ms total vs ~55ms in measured phases). Fix: replace all max_orderkey-sized arrays with compact arrays sized to the number of qualifying orders (~3.5M). Store (orderkey, orderdate, shippriority, revenue) in a single compact struct array. Sort qualifying orderkeys before lineitem probe for sequential access. Fuse aggregation into the probe loop — since each orderkey is unique among qualifying orders, accumulate revenue directly into the compact array slot. This reduces memory from ~1GB to ~56MB and eliminates the initialization bottleneck.",
+  "correctness_anchors": {
+    "o_orderdate_upper": 9204,
+    "l_shipdate_lower": 9204,
+    "revenue_formula": "SUM(l_extendedprice * (1.0 - l_discount))"
+  }
+}

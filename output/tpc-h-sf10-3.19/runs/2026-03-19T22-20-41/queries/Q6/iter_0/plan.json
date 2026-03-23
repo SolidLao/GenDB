@@ -1,0 +1,75 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["zonemap_filter", "scan_filter", "aggregate"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 65536,
+    "num_blocks": 916,
+    "columns": [
+      {"name": "l_shipdate", "file": "storage/lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount", "file": "storage/lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "storage/lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "storage/lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8}
+    ]
+  },
+  "filters": [
+    {"table": "lineitem", "column": "l_shipdate", "predicate": "l_shipdate >= :l_shipdate_lower AND l_shipdate < :l_shipdate_upper", "type": "int32_t", "selectivity": 0.15, "eval_order": 1},
+    {"table": "lineitem", "column": "l_discount", "predicate": "l_discount >= :l_discount_lower AND l_discount <= :l_discount_upper", "type": "double", "selectivity": 0.27, "eval_order": 2},
+    {"table": "lineitem", "column": "l_quantity", "predicate": "l_quantity < :l_quantity_upper", "type": "double", "selectivity": 0.46, "eval_order": 3}
+  ],
+  "filter_order_rationale": "shipdate first (lowest selectivity 0.15, cheapest int32 comparison); discount second (0.27); quantity last (0.46)",
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "type": "zone_map",
+      "column": "l_shipdate",
+      "purpose": "skip_blocks",
+      "layout": {
+        "header": "uint64_t num_blocks, uint32_t block_size",
+        "body": "int32_t[num_blocks * 2] — (min_date, max_date) per block"
+      },
+      "skip_condition": "zonemap[b*2] >= :l_shipdate_upper || zonemap[b*2+1] < :l_shipdate_lower",
+      "estimated_skip_rate": 0.85
+    }
+  ],
+  "aggregation": {
+    "type": "scalar_sum",
+    "expression": "l_extendedprice[i] * l_discount[i]",
+    "output_column": "revenue",
+    "output_type": "double",
+    "no_group_by": true,
+    "per_thread_accumulators": true
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "unit": "block",
+    "threads": "auto(nproc)",
+    "merge": "sum per-thread accumulators into final result"
+  },
+  "vectorization": {
+    "enabled": true,
+    "notes": "All columns are contiguous int32/double arrays — use SIMD for filter evaluation and multiply-accumulate. Process blocks of 65536 rows at a time. Consider AVX2/AVX-512 for parallel predicate evaluation on l_shipdate (int32 range check) and fused multiply-add for revenue accumulation."
+  },
+  "io_strategy": {
+    "method": "mmap",
+    "total_bytes": 1679613456,
+    "notes": "4 columns × ~60M rows. mmap all files; OS page cache handles prefetch. With zonemap skipping ~85% of blocks, effective read is ~252MB."
+  },
+  "parameters": [
+    {"name": "l_shipdate_lower", "type": "date_as_int32", "default_value": 8766, "default_date": "1994-01-01"},
+    {"name": "l_shipdate_upper", "type": "date_as_int32", "default_value": 9131, "default_date": "1995-01-01"},
+    {"name": "l_discount_lower", "type": "double", "default_value": 0.05},
+    {"name": "l_discount_upper", "type": "double", "default_value": 0.07},
+    {"name": "l_quantity_upper", "type": "double", "default_value": 24.0}
+  ],
+  "output": {
+    "columns": ["revenue"],
+    "rows": 1,
+    "format": "single scalar value"
+  },
+  "data_structures": {},
+  "join_order": [],
+  "execution_target": "cpp"
+}

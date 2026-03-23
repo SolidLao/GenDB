@@ -28,6 +28,11 @@ export function getGendbDir(benchmark, scaleFactor) {
   return resolve(BENCHMARKS_DIR, benchmark, "gendb", `sf${scaleFactor}.gendb`);
 }
 
+/** Resolve the persistent workload directory: output/<benchmark>-sf<N>/. */
+export function getWorkloadDir(benchmark, scaleFactor) {
+  return resolve(OUTPUT_DIR, `${benchmark}-sf${scaleFactor}`);
+}
+
 /** Resolve the schema path for a given benchmark. */
 export function getSchemaPath(benchmark) {
   return resolve(BENCHMARKS_DIR, benchmark, "schema.sql");

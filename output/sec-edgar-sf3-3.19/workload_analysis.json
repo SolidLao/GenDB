@@ -1,0 +1,107 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d=1MiB, L1i=1MiB, L2=32MiB, L3=44MiB",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd": "avx512"
+  },
+  "tables": {
+    "sub": {
+      "role": "dimension",
+      "exact_row_count": 86135,
+      "hot_columns": ["adsh", "fy", "sic", "name", "cik"],
+      "column_stats": {
+        "adsh": { "approx_distinct": 86135 },
+        "fy": { "min": "2020", "max": "2023", "approx_distinct": 4 },
+        "sic": { "min": "100", "max": "9999", "approx_distinct": 458 },
+        "cik": { "approx_distinct": 86000 }
+      }
+    },
+    "num": {
+      "role": "fact",
+      "exact_row_count": 39401761,
+      "hot_columns": ["adsh", "tag", "version", "uom", "value", "ddate"],
+      "column_stats": {
+        "uom": { "approx_distinct": 30, "top_values": ["USD=33.2M", "shares=3.1M", "pure=1.4M"] },
+        "ddate": { "min": "20151231", "max": "20231231", "approx_distinct": 500 },
+        "tag": { "approx_distinct": 20000 }
+      }
+    },
+    "tag": {
+      "role": "dimension",
+      "exact_row_count": 1070662,
+      "hot_columns": ["tag", "version", "tlabel", "abstract"],
+      "column_stats": {
+        "abstract": { "min": "0", "max": "0", "approx_distinct": 1 },
+        "custom": { "approx_distinct": 2 }
+      }
+    },
+    "pre": {
+      "role": "fact",
+      "exact_row_count": 9600799,
+      "hot_columns": ["adsh", "tag", "version", "stmt", "rfile", "line", "plabel"],
+      "column_stats": {
+        "stmt": { "approx_distinct": 8, "top_values": ["BS=3.1M", "CF=2.9M", "IS=1.8M", "EQ=1.2M", "CI=253K"] },
+        "rfile": { "approx_distinct": 1, "top_values": ["H=9.6M"] }
+      }
+    }
+  },
+  "joins": [
+    {
+      "left": "num.adsh", "right": "sub.adsh", "type": "FK-PK",
+      "selectivity": "high",
+      "left_unique": false, "right_unique": true, "right_max_duplicates": 1,
+      "queries": ["Q2", "Q3", "Q4", "Q6", "Q24"]
+    },
+    {
+      "left": "num.tag,num.version", "right": "tag.tag,tag.version", "type": "FK-PK",
+      "selectivity": "high",
+      "left_unique": false, "right_unique": true, "right_max_duplicates": 1,
+      "queries": ["Q4"]
+    },
+    {
+      "left": "num.adsh,num.tag,num.version", "right": "pre.adsh,pre.tag,pre.version", "type": "M-N",
+      "selectivity": "high",
+      "left_unique": false, "right_unique": false, "right_max_duplicates": 20,
+      "queries": ["Q4", "Q6", "Q24"]
+    },
+    {
+      "left": "num.adsh,num.tag", "right": "m.adsh,m.tag", "type": "FK-PK",
+      "selectivity": "high",
+      "left_unique": false, "right_unique": true, "right_max_duplicates": 1,
+      "queries": ["Q2"]
+    }
+  ],
+  "filters": [
+    { "table": "pre", "column": "stmt", "operator": "IS NOT NULL", "selectivity": 0.9999, "query": "Q1" },
+    { "table": "num", "column": "uom", "operator": "=", "value": "pure", "selectivity": 0.035, "query": "Q2" },
+    { "table": "sub", "column": "fy", "operator": "=", "value": "2022", "selectivity": 0.196, "query": "Q2" },
+    { "table": "num", "column": "value", "operator": "IS NOT NULL", "selectivity": 1.0, "query": "Q2" },
+    { "table": "num", "column": "uom", "operator": "=", "value": "USD", "selectivity": 0.844, "query": "Q3" },
+    { "table": "sub", "column": "fy", "operator": "=", "value": "2023", "selectivity": 0.188, "query": "Q6" },
+    { "table": "pre", "column": "stmt", "operator": "=", "value": "EQ", "selectivity": 0.129, "query": "Q4" },
+    { "table": "pre", "column": "stmt", "operator": "=", "value": "IS", "selectivity": 0.184, "query": "Q6" },
+    { "table": "sub", "column": "sic", "operator": "BETWEEN", "value": "4000-4999", "selectivity": 0.041, "query": "Q4" },
+    { "table": "tag", "column": "abstract", "operator": "=", "value": "0", "selectivity": 1.0, "query": "Q4" },
+    { "table": "num", "column": "ddate", "operator": "BETWEEN", "value": "20230101-20231231", "selectivity": 0.272, "query": "Q24" },
+    { "table": "pre", "column": "adsh", "operator": "IS NULL", "value": "anti-join", "selectivity": 0.5, "query": "Q24" }
+  ],
+  "aggregations": [
+    { "group_by": ["stmt", "rfile"], "functions": ["COUNT(*)", "COUNT(DISTINCT adsh)", "AVG(line)"], "query": "Q1", "estimated_groups": "16" },
+    { "group_by": ["adsh", "tag"], "functions": ["MAX(value)"], "query": "Q2", "estimated_groups": "1000000" },
+    { "group_by": ["s.name", "s.cik"], "functions": ["SUM(n.value)"], "query": "Q3", "estimated_groups": "15000" },
+    { "group_by": ["s2.cik"], "functions": ["SUM(n2.value)"], "query": "Q3", "estimated_groups": "15000" },
+    { "group_by": ["s.sic", "t.tlabel", "p.stmt"], "functions": ["COUNT(DISTINCT s.cik)", "SUM(n.value)", "AVG(n.value)"], "query": "Q4", "estimated_groups": "5000" },
+    { "group_by": ["s.name", "p.stmt", "n.tag", "p.plabel"], "functions": ["SUM(n.value)", "COUNT(*)"], "query": "Q6", "estimated_groups": "500000" },
+    { "group_by": ["n.tag", "n.version"], "functions": ["COUNT(*)", "SUM(n.value)"], "query": "Q24", "estimated_groups": "20000" }
+  ],
+  "ordering": [
+    { "columns": ["cnt DESC"], "limit": null, "query": "Q1" },
+    { "columns": ["n.value DESC", "s.name", "n.tag"], "limit": 100, "query": "Q2" },
+    { "columns": ["total_value DESC"], "limit": 100, "query": "Q3" },
+    { "columns": ["total_value DESC"], "limit": 500, "query": "Q4" },
+    { "columns": ["total_value DESC"], "limit": 200, "query": "Q6" },
+    { "columns": ["cnt DESC"], "limit": 100, "query": "Q24" }
+  ]
+}

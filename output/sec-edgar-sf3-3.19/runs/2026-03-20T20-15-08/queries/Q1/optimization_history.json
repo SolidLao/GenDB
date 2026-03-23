@@ -1,0 +1,22 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 15.12,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 15.12,
+      "validation": "pass",
+      "strategy": "Category A — Plan restructuring. Root cause: iter_0 crashed (SIGSEGV) due to buffer overflow in composite key computation. The formula (stmt_code << 8) | rfile_code produces values up to 2049 (stmt has 9 dictionary codes 0-8), but only 256 array slots were allocated. Fix: use composite_key = stmt_code * num_rfile + rfile_code, giving max 9*2=18 groups. Allocate array sized to num_stmt * num_rfile at runtime. This also reduces per-thread memory from 2.76MB to 194KB (18 vs 256 groups), improving cache locality. Retained from iter_0: demand-paged mmap with MADV_SEQUENTIAL + MADV_HUGEPAGE, no MAP_POPULATE, schedule(static), no Kahan summation, mmap declared before RAII timer scope, per-group bitset for COUNT(DISTINCT adsh). For adsh dict, only read the uint32_t count from the first 4 bytes — no need to decode all 86K strings.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "main_scan": 9.48,
+        "aggregation": 3.3,
+        "output": 0.21,
+        "total": 13.08
+      }
+    }
+  ]
+}

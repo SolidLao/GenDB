@@ -1,0 +1,61 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["load_dicts", "mmap_columns", "parallel_scan_filter_aggregate", "merge_thread_local", "sort_output"],
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns": [
+      {"name": "stmt", "file": "pre/stmt.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "rfile", "file": "pre/rfile.bin", "type": "uint8_t", "bytes_per_row": 1},
+      {"name": "adsh", "file": "pre/adsh.bin", "type": "uint32_t", "bytes_per_row": 4},
+      {"name": "line", "file": "pre/line.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential"
+  },
+  "filters": [
+    {
+      "table": "pre",
+      "predicate": "stmt != null_code (code 6 = empty string)",
+      "selectivity": 0.9999
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array(num_stmt * num_rfile)",
+    "composite_key": "stmt_code * num_rfile + rfile_code",
+    "composite_key_max": "9 * 2 = 18 groups max (stmt dict has 9 entries, rfile dict has 2 entries)",
+    "composite_key_note": "CRITICAL: Do NOT use bit-shift (stmt << 8 | rfile) — stmt codes go up to 8, producing keys up to 2049 which overflows a 256-slot array. Use multiplication: stmt_code * num_rfile + rfile_code. Load num_rfile from rfile dictionary count at runtime.",
+    "agg_struct_fields": ["uint64_t count", "int64_t line_sum", "uint64_t line_count"],
+    "distinct_adsh": "bitset per group: (max_adsh_code + 63) / 64 uint64_t words. max_adsh_code = adsh dict count = 86135, so 1346 words = 10768 bytes per group. With 18 groups per thread: 18 * (24 + 10768) = ~194KB per thread",
+    "agg_struct_alignment": "alignas(64)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "schedule": "static",
+    "thread_local_state": "each thread has its own flat array of (num_stmt * num_rfile) agg structs with bitsets, allocated via calloc inside parallel region",
+    "thread_local_memory_per_thread_bytes": 194000,
+    "total_note": "64 threads * 194KB = ~12MB total — fits comfortably in LLC"
+  },
+  "dictionaries": [
+    {"name": "stmt", "path": "dictionaries/stmt.dict", "purpose": "identify null sentinel code (code for empty string) and decode output, also get num_stmt = dict.count"},
+    {"name": "rfile", "path": "dictionaries/rfile.dict", "purpose": "decode output, also get num_rfile = dict.count"},
+    {"name": "adsh", "path": "dictionaries/adsh.dict", "purpose": "get max_adsh = dict.count for bitset sizing (only read the count, no need to decode strings)"}
+  ],
+  "aggregation": "array_direct",
+  "join_order": [],
+  "indexes": [],
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "columns": ["stmt (decoded string)", "rfile (decoded string)", "cnt", "num_filings", "avg_line_num"],
+    "estimated_output_rows": 14
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A — Plan restructuring. Root cause: iter_0 crashed (SIGSEGV) due to buffer overflow in composite key computation. The formula (stmt_code << 8) | rfile_code produces values up to 2049 (stmt has 9 dictionary codes 0-8), but only 256 array slots were allocated. Fix: use composite_key = stmt_code * num_rfile + rfile_code, giving max 9*2=18 groups. Allocate array sized to num_stmt * num_rfile at runtime. This also reduces per-thread memory from 2.76MB to 194KB (18 vs 256 groups), improving cache locality. Retained from iter_0: demand-paged mmap with MADV_SEQUENTIAL + MADV_HUGEPAGE, no MAP_POPULATE, schedule(static), no Kahan summation, mmap declared before RAII timer scope, per-group bitset for COUNT(DISTINCT adsh). For adsh dict, only read the uint32_t count from the first 4 bytes — no need to decode all 86K strings.",
+  "correctness_anchors": {
+    "stmt_null_code": 6,
+    "adsh_dict_count": 86135,
+    "stmt_dict_count": 9,
+    "rfile_dict_count": 2
+  }
+}

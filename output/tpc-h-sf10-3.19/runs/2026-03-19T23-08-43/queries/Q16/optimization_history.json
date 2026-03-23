@@ -1,0 +1,46 @@
+{
+  "query_id": "Q16",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 123.78000000000002,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 123.78000000000002,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.08,
+        "supplier_exclusion": 22.57,
+        "dict_setup": 0.04,
+        "filter_parts": 35.87,
+        "index_probe": 21.4,
+        "aggregation": 37.45,
+        "output": 13.54,
+        "total": 133.76
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 14.26,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 14.26,
+      "validation": "pass",
+      "strategy": "Category A+B: Plan restructuring and algorithm change. Four root causes identified: (1) supplier_exclusion was single-threaded — now parallelized with OpenMP. (2) filter_parts used unordered_map for group_id assignment — replaced with direct array mapping using composite key brand_code*n_types*8+type_code*8+size_idx, keyspace ~30K entries (~60KB, fits L1). The size_to_idx array fuses size filtering with index computation. (3) index_probe had per-row hash map lookups for group_id — eliminated since group_id is now precomputed and stored in qualifying_parts struct (only 6 bytes: partkey + group_id). (4) aggregation sorted 1.2M pairs with comparison sort — fused with index probe using thread-local per-group suppkey vectors. COUNT(DISTINCT) computed by sorting each group's small vector (~67 elements avg) and counting unique, which is orders of magnitude cheaper than sorting all 1.2M pairs. Qualifying_parts struct shrunk from 12 bytes to 6 bytes (partkey + group_id only) improving cache efficiency. mmap resources declared before timer scope per RAII pattern. Demand-paged mmap without MAP_POPULATE. MADV_SEQUENTIAL for index since parts sorted by partkey.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "build_excluded_suppliers": 2.28,
+        "filter_parts": 0.97,
+        "aggregation": 0.64,
+        "main_scan": 7.83,
+        "output": 5.43,
+        "total": 17.45
+      }
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "load_dictionaries",
+    "filter_sub_fy",
+    "build_adsh_bitset",
+    "pass1_scan_num_build_max_map",
+    "pass2_scan_num_match_max",
+    "topk_sort",
+    "decode_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered fy=2022)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 16900,
+      "notes": "Use sub_adsh_lookup index for O(1) sub row lookup; pre-build adsh bitset from qualifying sub rows"
+    },
+    {
+      "build": "max_value_map(from pass1)",
+      "probe": "num(pass2)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 75000,
+      "notes": "Hash map keyed by (adsh_code, tag_code) -> max double value; only adsh codes with fy=2022 included"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = :fy_eq",
+      "selectivity": 0.196,
+      "estimated_rows": 16900
+    },
+    {
+      "table": "num",
+      "predicate": "uom = :uom_eq AND value IS NOT NULL",
+      "selectivity": 0.035,
+      "estimated_rows": 1380000
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN qualifying_adsh_set",
+      "selectivity": 0.196,
+      "estimated_rows": 270000,
+      "notes": "Applied during both passes to restrict to adsh codes with fy=2022"
+    }
+  ],
+  "optimization_pushdown": {
+    "description": "Push sub.fy filter into both num passes: only compute max and match for adsh codes where sub.fy=2022. Reduces hash map from ~1M groups to ~75K groups and cuts pass2 matching work proportionally.",
+    "correctness": "The subquery max is per (adsh,tag). Since output requires s.fy=2022, we only need max values for qualifying adsh codes. The max over a restricted adsh set equals the global max restricted to that adsh, so results are identical."
+  },
+  "data_structures": {
+    "sub_fy_qualifying_adsh": "bitset(max_adsh_code) — ~86K bits = ~11KB, indexed by adsh_code",
+    "max_value_map": "compact_hash_map<uint64_t, double>(pre_sized=100000) — key = (adsh_code << 32 | tag_code), value = max double",
+    "pass2_results": "per_thread_vector<result_tuple> — (value, adsh_code, tag_code, name_code)"
+  },
+  "execution_phases": {
+    "phase0_setup": {
+      "description": "Load dictionaries and build qualifying adsh bitset",
+      "steps": [
+        "Load uom.dict, find code for :uom_eq parameter",
+        "Load tag.dict and name.dict for final output decode",
+        "Load sub_adsh_lookup.idx",
+        "Mmap sub/fy.bin and sub/adsh.bin",
+        "Scan sub: for each row where fy == :fy_eq, set bit in adsh_bitset using sub.adsh[row]",
+        "Also build array: qualifying_sub_name[adsh_code] = sub.name[row] for output"
+      ]
+    },
+    "phase1_build_max_map": {
+      "description": "Parallel scan of num to build (adsh,tag)->max(value) map for qualifying adsh codes",
+      "columns": ["num/uom.bin", "num/value_null.bin", "num/value.bin", "num/adsh.bin", "num/tag.bin"],
+      "filter_chain": "uom == uom_code AND value_null == 0 AND adsh_bitset[adsh_code]",
+      "action": "Insert/update max_value in hash map keyed by composite key (adsh_code, tag_code)",
+      "parallelism": "per_thread_hash_maps then merge via max"
+    },
+    "phase2_match_and_collect": {
+      "description": "Parallel scan of num to find rows matching max value, collect results",
+      "columns": ["num/uom.bin", "num/value_null.bin", "num/value.bin", "num/adsh.bin", "num/tag.bin"],
+      "filter_chain": "uom == uom_code AND value_null == 0 AND adsh_bitset[adsh_code] AND value == max_map[key]",
+      "action": "Collect (value, name_code, tag_code) into per-thread result vector",
+      "parallelism": "per_thread_vectors, merge after"
+    },
+    "phase3_topk_sort": {
+      "description": "Partial sort for top-100 results",
+      "action": "std::partial_sort on merged results, compare by (value DESC, name_string ASC, tag_string ASC)",
+      "string_compare": "Decode name_code and tag_code via dictionaries for comparison, or use dictionary-order if lexicographically consistent"
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 16,
+    "morsel_size": 100000,
+    "notes": "16 threads: each thread-local hash map ~75K entries × 16B ≈ 1.2MB, total ~19MB fits in 44MB L3. Both passes use same morsel partitioning."
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_lookup",
+      "purpose": "O(1) lookup of sub row_id by adsh_code during phase0 (building name lookup array)"
+    }
+  ],
+  "mmap_strategy": {
+    "method": "demand_paged_mmap",
+    "flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "advice": "MADV_SEQUENTIAL for full-column scans in pass1 and pass2",
+    "raii_scope": "Declare mmap resources before timer scope to exclude munmap TLB shootdown cost"
+  },
+  "aggregation": "hash_group_by",
+  "output": {
+    "columns": ["s.name (string)", "n.tag (string)", "n.value (double)"],
+    "order_by": ["n.value DESC", "s.name ASC", "n.tag ASC"],
+    "limit": 100,
+    "decode": "Use name.dict and tag.dict to convert codes to strings for output and string-order comparison"
+  },
+  "parameters": {
+    "uom_eq": {"type": "string", "usage": "dictionary lookup to find uom code"},
+    "uom_eq_2": {"type": "string", "usage": "same as uom_eq, used in subquery — identical filter"},
+    "fy_eq": {"type": "int", "usage": "direct int16_t comparison on sub.fy"},
+    "limit": {"type": "int", "usage": "partial_sort limit"}
+  },
+  "execution_target": "cpp"
+}

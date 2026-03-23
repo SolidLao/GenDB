@@ -11,7 +11,8 @@ import psycopg2
 from .config import WorkloadConfig
 from .gendb import (
     read_gendb_iteration_history, print_iteration_table,
-    gendb_benchmark_best,
+    gendb_benchmark_best, find_best_binaries,
+    is_workload_dir, resolve_gendb_paths,
 )
 from .indexes import (
     parse_gendb_indexes, create_indexes_pg, create_indexes_duckdb,
@@ -41,16 +42,35 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
     benchmark_root = config.benchmark_root
     queries = config.queries
 
-    # Auto-detect GenDB run directory
-    if args.gendb_run is None:
-        latest_link = project_root / "output" / config.name / "latest"
-        if latest_link.exists() and latest_link.is_dir():
-            args.gendb_run = latest_link.resolve()
+    # Resolve GenDB paths: support workload dir (v37+), run dir, or auto-detect
+    workload_dir = None
+    run_dir = None
 
-    # Auto-detect GenDB storage directory from run.json
+    if args.gendb_run is not None:
+        workload_dir, run_dir = resolve_gendb_paths(args.gendb_run)
+    else:
+        # Auto-detect: try v37+ workload dir first, then legacy
+        sf_val = config.scale_value
+        workload_path = project_root / "output" / f"{config.name}-sf{sf_val}"
+        if is_workload_dir(workload_path):
+            workload_dir, run_dir = resolve_gendb_paths(workload_path)
+        else:
+            latest_link = project_root / "output" / config.name / "latest"
+            if latest_link.exists() and latest_link.is_dir():
+                run_dir = latest_link.resolve()
+
+    # Set args.gendb_run for downstream compatibility
+    args.gendb_run = run_dir
+
+    # Auto-detect GenDB storage directory
     gendb_dir = None
-    if args.gendb_run:
-        run_json_path = args.gendb_run / "run.json"
+    if workload_dir:
+        # v37+: storage is in workload dir
+        sd = workload_dir / "storage"
+        if sd.exists():
+            gendb_dir = sd
+    if gendb_dir is None and run_dir:
+        run_json_path = run_dir / "run.json"
         if run_json_path.exists():
             with open(run_json_path) as f:
                 run_data = json.load(f)
@@ -65,9 +85,11 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
     print(f"Benchmark mode: {args.mode} ({'4 runs, avg last 3' if args.mode == 'hot' else '1 cold run per query'})")
     print(f"Query timeout:  {args.timeout}s")
     print(f"Queries:        {len(queries)} ({', '.join(sorted(queries.keys(), key=lambda q: int(q[1:])))})")
-    if args.gendb_run:
-        print(f"GenDB run:      {args.gendb_run}")
-        print(f"GenDB storage:  {gendb_dir}")
+    if workload_dir:
+        print(f"GenDB workload: {workload_dir}")
+    if run_dir:
+        print(f"GenDB run:      {run_dir}")
+    print(f"GenDB storage:  {gendb_dir}")
     print()
 
     all_results = {}
@@ -104,12 +126,18 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
             }
         print()
 
+    # --- Determine GenDB query IDs from best binaries (covers all runs) ---
+    if not args.plot_only and workload_dir:
+        best_binaries = find_best_binaries(run_dir, workload_dir)
+        if best_binaries:
+            gendb_query_ids = sorted(best_binaries.keys(), key=lambda q: int(q[1:]))
+
     # --- GenDB: iteration history ---
-    if not args.plot_only and args.gendb_run and args.gendb_run.exists():
+    has_gendb = run_dir and run_dir.exists()
+    if not args.plot_only and has_gendb:
         print("=== GenDB Iteration History ===")
-        gendb_history = read_gendb_iteration_history(args.gendb_run)
+        gendb_history = read_gendb_iteration_history(run_dir)
         if gendb_history["query_ids"]:
-            gendb_query_ids = gendb_history["query_ids"]
             print()
             print_iteration_table(gendb_history)
             print()
@@ -128,21 +156,38 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
 
         # --- GenDB: benchmark best binaries ---
         print(f"\n=== GenDB Benchmark (best per-query, {args.mode} mode) ===")
-        best_results = gendb_benchmark_best(args.gendb_run, gendb_dir, args.mode)
+        best_results = gendb_benchmark_best(run_dir, gendb_dir, args.mode,
+                                            workload_dir=workload_dir)
+        if best_results:
+            all_results["GenDB"] = best_results
+    elif not args.plot_only and workload_dir:
+        # Workload dir exists but no run dir — can still benchmark best binaries
+        print("=== GenDB Iteration History ===")
+        print("  No run directory found, skipping iteration history.")
+        print(f"\n=== GenDB Benchmark (best per-query, {args.mode} mode) ===")
+        best_results = gendb_benchmark_best(None, gendb_dir, args.mode,
+                                            workload_dir=workload_dir)
         if best_results:
             all_results["GenDB"] = best_results
     elif not args.plot_only:
         print("=== GenDB: SKIPPED (run directory not found) ===")
 
-    # Parse indexes for cleanup
+    # Parse indexes for cleanup — check workload dir first, then run dir
     _cleanup_indexes = []
-    if args.gendb_run:
-        sd_path = args.gendb_run / "storage_design.json"
-        if sd_path and sd_path.exists():
-            if config.parse_indexes_fn:
-                _cleanup_indexes = config.parse_indexes_fn(sd_path)
-            else:
-                _cleanup_indexes = parse_gendb_indexes(sd_path, config.pk_columns)
+    sd_path = None
+    if workload_dir:
+        _sd = workload_dir / "storage_design.json"
+        if _sd.exists():
+            sd_path = _sd
+    if sd_path is None and run_dir:
+        _sd = run_dir / "storage_design.json"
+        if _sd.exists():
+            sd_path = _sd
+    if sd_path:
+        if config.parse_indexes_fn:
+            _cleanup_indexes = config.parse_indexes_fn(sd_path)
+        else:
+            _cleanup_indexes = parse_gendb_indexes(sd_path, config.pk_columns)
 
     # Drop any previously created indexes to ensure clean baseline runs
     if not args.plot_only and not args.gendb_only and _cleanup_indexes:
@@ -297,9 +342,6 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
     # --- With-indexes benchmark ---
     indexed_results = {}
     if not args.plot_only and args.with_indexes and not args.gendb_only:
-        sd_path = None
-        if args.gendb_run:
-            sd_path = args.gendb_run / "storage_design.json"
         if sd_path and sd_path.exists():
             print(f"\n{'=' * 60}")
             print("WITH-INDEXES BENCHMARK")
@@ -424,6 +466,66 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
                     indexed_results[system][qid] = qdata["all_ms"]
             print(f"Loaded indexed results from: {idx_json_path}")
 
+    # --- Merge with existing results (append/update mode) ---
+    if not args.plot_only:
+        metrics_dir = benchmark_root / "results" / f"sf{config.scale_value}" / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        # Merge benchmark results: load existing, update with new, preserve others
+        json_path = metrics_dir / "benchmark_results.json"
+        json_data = {}
+        if json_path.exists():
+            with open(json_path) as f:
+                json_data = json.load(f)
+        for system, results in all_results.items():
+            json_data[system] = {
+                q: {
+                    "all_ms": times,
+                    "average_ms": sum(times) / len(times) if times else 0,
+                    "min_ms": min(times) if times else 0,
+                    "max_ms": max(times) if times else 0,
+                }
+                for q, times in results.items()
+            }
+        with open(json_path, "w") as f:
+            json.dump(json_data, f, indent=2)
+        print(f"Results saved to: {json_path}")
+
+        # Load previously saved systems into all_results for summary/plotting
+        for system, system_data in json_data.items():
+            if system not in all_results:
+                all_results[system] = {
+                    qid: qdata["all_ms"]
+                    for qid, qdata in system_data.items()
+                }
+
+        # Merge indexed results
+        idx_json_path = metrics_dir / "benchmark_indexed_results.json"
+        idx_json_data = {}
+        if idx_json_path.exists():
+            with open(idx_json_path) as f:
+                idx_json_data = json.load(f)
+        if indexed_results:
+            for system, results in indexed_results.items():
+                idx_json_data[system] = {
+                    q: {
+                        "all_ms": times,
+                        "average_ms": sum(times) / len(times) if times else 0,
+                        "min_ms": min(times) if times else 0,
+                        "max_ms": max(times) if times else 0,
+                    }
+                    for q, times in results.items()
+                }
+            with open(idx_json_path, "w") as f:
+                json.dump(idx_json_data, f, indent=2)
+            print(f"Indexed results saved to: {idx_json_path}")
+        for system, system_data in idx_json_data.items():
+            if system not in indexed_results:
+                indexed_results[system] = {
+                    qid: qdata["all_ms"]
+                    for qid, qdata in system_data.items()
+                }
+
     # --- Results summary ---
     print("\n" + "=" * 60)
     mode_label = "hot avg of 3" if args.mode == "hot" else "cold single run"
@@ -473,43 +575,6 @@ def run_benchmark(config: WorkloadConfig, args, skip_plot=False):
             row += f"{total:<18.2f}"
     print(row)
     print()
-
-    # --- Save JSON results ---
-    if not args.plot_only:
-        metrics_dir = benchmark_root / "results" / f"sf{config.scale_value}" / "metrics"
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-        json_path = metrics_dir / "benchmark_results.json"
-        json_data = {}
-        for system, results in all_results.items():
-            json_data[system] = {
-                q: {
-                    "all_ms": times,
-                    "average_ms": sum(times) / len(times) if times else 0,
-                    "min_ms": min(times) if times else 0,
-                    "max_ms": max(times) if times else 0,
-                }
-                for q, times in results.items()
-            }
-        with open(json_path, "w") as f:
-            json.dump(json_data, f, indent=2)
-        print(f"Results saved to: {json_path}")
-
-        if indexed_results:
-            idx_json_path = metrics_dir / "benchmark_indexed_results.json"
-            idx_json_data = {}
-            for system, results in indexed_results.items():
-                idx_json_data[system] = {
-                    q: {
-                        "all_ms": times,
-                        "average_ms": sum(times) / len(times) if times else 0,
-                        "min_ms": min(times) if times else 0,
-                        "max_ms": max(times) if times else 0,
-                    }
-                    for q, times in results.items()
-                }
-            with open(idx_json_path, "w") as f:
-                json.dump(idx_json_data, f, indent=2)
-            print(f"Indexed results saved to: {idx_json_path}")
 
     # --- Plots ---
     min_systems = 1 if args.plot_only else 2

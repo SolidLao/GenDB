@@ -1,0 +1,118 @@
+{
+  "query_id": "Q7",
+  "pipeline": [
+    "load_nation_filter",
+    "build_supplier_nation_flag",
+    "build_customer_nation_flag",
+    "parallel_scan_lineitem_with_direct_lookups",
+    "merge_and_output"
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered: FRANCE/GERMANY -> 2 nationkeys)",
+      "probe": "supplier(s_nationkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2,
+      "notes": "Build supp_nation_flag[suppkey] = 0/1/2 from s_nationkey. Array is ~100KB, fits in L2 cache."
+    },
+    {
+      "build": "nation(filtered: FRANCE/GERMANY -> 2 nationkeys)",
+      "probe": "customer(c_nationkey)",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 2,
+      "notes": "Build cust_nation_flag[custkey] = 0/1/2 from c_nationkey. Array is ~1.5MB, fits in LLC."
+    },
+    {
+      "build": "supplier_nation_flag + orders_lookup + cust_nation_flag (precomputed, read-only)",
+      "probe": "lineitem(date-filtered via zonemap, ~17.4M rows)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 0,
+      "probe_cardinality": 17400000,
+      "output_cardinality": 560000,
+      "notes": "CRITICAL CHANGE: Do NOT pre-build orders_custkey array. During scan, use direct two-step lookup: ord_lookup[l_orderkey] -> o_rid, then o_custkey[o_rid] -> custkey, then cust_nation_flag[custkey]. Since lineitem is sorted by l_orderkey, ord_lookup and o_custkey accesses are sequential. This eliminates 240MB vector allocation + 540MB memory traffic from data_loading."
+    }
+  ],
+  "filters": [
+    {
+      "table": "nation",
+      "predicate": "n_name IN ('FRANCE', 'GERMANY')",
+      "selectivity": 0.08,
+      "result_rows": 2
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate BETWEEN 9131 AND 9861",
+      "selectivity": 0.29,
+      "result_rows": 17400000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "supp_nation_flag[l_suppkey] != 0",
+      "selectivity": 0.08,
+      "result_rows": 1392000
+    },
+    {
+      "table": "lineitem",
+      "predicate": "valid nation pair (FRANCE,GERMANY) or (GERMANY,FRANCE)",
+      "selectivity": 0.04,
+      "result_rows": 560000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_orderkey", "file": "lineitem/l_orderkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "supp_nation_flag": "direct_array(uint8_t[max_suppkey+1], ~100KB, 0=none/1=FRANCE/2=GERMANY). Build by scanning s_nationkey directly since supplier is sorted by s_suppkey.",
+    "cust_nation_flag": "direct_array(uint8_t[max_custkey+1], ~1.5MB, 0=none/1=FRANCE/2=GERMANY). Build from c_nationkey using customer_c_custkey_lookup.",
+    "orders_custkey": "DO NOT BUILD. Use direct two-step lookup during scan: ord_lookup[l_orderkey] -> row_id, o_custkey[row_id] -> custkey. Both access patterns are sequential since lineitem is sorted by l_orderkey.",
+    "aggregation": "direct_array(double[2][2], indexed by [pair_id][year_idx], thread-local with final merge)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "purpose": "skip_blocks"
+    },
+    {
+      "index": "orders_o_orderkey_lookup",
+      "purpose": "join_lookup",
+      "notes": "Used DURING scan for direct orderkey -> row_id lookup. MADV_SEQUENTIAL since probe keys (l_orderkey) are sorted. Do NOT pre-build orders_custkey from this."
+    },
+    {
+      "index": "customer_c_custkey_lookup",
+      "purpose": "build_cust_nation_flag",
+      "notes": "Used during pre-build of cust_nation_flag array only."
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["supp_nation ASC", "cust_nation ASC", "l_year ASC"],
+    "limit": null,
+    "rows": 4,
+    "format": "supp_nation|cust_nation|l_year|revenue"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B — algorithm change to eliminate cache-exceeding data structure. Root cause: orders_custkey pre-build (240MB vector, 5.5x LLC) dominated runtime at ~200ms (134ms allocation/init page faults + 71ms data_loading fill). Fix: eliminate orders_custkey entirely; during lineitem scan, use direct two-step lookup ord_lookup[l_orderkey] -> row_id -> o_custkey[row_id]. Since lineitem is sorted by l_orderkey, both ord_lookup and o_custkey accesses are sequential — apply MADV_SEQUENTIAL. With zonemap filtering (29% selectivity), only ~87MB additional bandwidth during parallel scan vs 540MB serial in data_loading. Kept supp_nation_flag (~100KB, L2-resident) and cust_nation_flag (~1.5MB, LLC-resident) as they are small and provide O(1) filtering. All mmap resources declared before RAII timer scope to exclude TLB shootdown. Expected: ~25-35ms total.",
+  "correctness_anchors": {
+    "l_shipdate_lower_epoch": 9131,
+    "l_shipdate_upper_epoch": 9861,
+    "year_threshold_1996": 9496,
+    "nation_pair_1": "FRANCE,GERMANY",
+    "nation_pair_2": "GERMANY,FRANCE"
+  }
+}

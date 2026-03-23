@@ -1,0 +1,159 @@
+{
+  "query_id": "Q21",
+  "pipeline": [
+    "filter_nation_supplier",
+    "scan_lineitem_candidates",
+    "check_order_status",
+    "check_exists_not_exists",
+    "aggregate",
+    "topk"
+  ],
+  "steps": [
+    {
+      "id": "filter_nation_supplier",
+      "description": "Load nation, find SAUDI ARABIA nationkey, scan supplier to build SA suppkey bitset",
+      "inputs": ["nation.n_nationkey", "nation.n_name", "supplier.s_suppkey", "supplier.s_nationkey"],
+      "output": "sa_suppkey_bitset",
+      "estimated_output_rows": 4000
+    },
+    {
+      "id": "scan_lineitem_candidates",
+      "description": "Parallel scan lineitem: filter l_suppkey IN sa_suppkey_bitset AND l_receiptdate > l_commitdate. Collect compact array of (l_orderkey, l_suppkey) pairs.",
+      "inputs": ["lineitem.l_suppkey", "lineitem.l_orderkey", "lineitem.l_receiptdate", "lineitem.l_commitdate", "sa_suppkey_bitset"],
+      "output": "candidate_pairs",
+      "estimated_input_rows": 59986052,
+      "selectivity_sa_supplier": 0.04,
+      "selectivity_late": 0.625,
+      "combined_selectivity": 0.025,
+      "estimated_output_rows": 1500000
+    },
+    {
+      "id": "check_order_status",
+      "description": "For each candidate pair, use orders_o_orderkey_lookup to get order row_id, check o_orderstatus == 'F'. Filter in-place or compact.",
+      "inputs": ["candidate_pairs", "orders.o_orderstatus", "orders_o_orderkey_lookup"],
+      "output": "f_order_candidates",
+      "selectivity": 0.49,
+      "estimated_output_rows": 735000
+    },
+    {
+      "id": "check_exists_not_exists",
+      "description": "For each surviving candidate (l_orderkey, l_suppkey), use lineitem_l_orderkey_grouped to get all lineitems for the order. Single pass per order: check EXISTS (any lineitem with different suppkey) and NOT EXISTS (no lineitem with different suppkey that is also late).",
+      "inputs": ["f_order_candidates", "lineitem_l_orderkey_grouped", "lineitem.l_suppkey", "lineitem.l_receiptdate", "lineitem.l_commitdate"],
+      "output": "qualified_suppkeys",
+      "estimated_output_rows": 460000,
+      "notes": "For each order's lineitems: set exists=false, not_exists_violated=false. For each lineitem with different suppkey: exists=true. If also late: not_exists_violated=true, break early. Pass if exists && !not_exists_violated."
+    },
+    {
+      "id": "aggregate",
+      "description": "Count by suppkey using direct array indexed by suppkey (max 100K). Then map suppkey to s_name for output.",
+      "inputs": ["qualified_suppkeys", "supplier.s_name"],
+      "output": "grouped_counts",
+      "estimated_groups": 4000
+    },
+    {
+      "id": "topk",
+      "description": "Partial sort / top-100 by (numwait DESC, s_name ASC)",
+      "inputs": ["grouped_counts"],
+      "output": "final_result",
+      "limit": 100
+    }
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered by n_name='SAUDI ARABIA')",
+      "probe": "supplier",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 1,
+      "notes": "Single nationkey → bitset of ~4000 supplier suppkeys"
+    },
+    {
+      "build": "sa_suppkey_bitset",
+      "probe": "lineitem(l1)",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 4000,
+      "notes": "Bitset indexed by suppkey for O(1) lookup during lineitem scan"
+    },
+    {
+      "build": "candidate l1 rows",
+      "probe": "orders",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1500000,
+      "notes": "Use orders_o_orderkey_lookup dense_pk_array for O(1) order status check"
+    },
+    {
+      "build": "f_order_candidates",
+      "probe": "lineitem(l2/l3)",
+      "type": "semi_anti_combined",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 735000,
+      "notes": "Use lineitem_l_orderkey_grouped to get all lineitems per order. Combined EXISTS + NOT EXISTS check in single pass."
+    }
+  ],
+  "filters": [
+    {"table": "nation", "predicate": "n_name = :n_name_eq", "selectivity": 0.04, "output_rows": 1},
+    {"table": "supplier", "predicate": "s_nationkey = sa_nationkey", "selectivity": 0.04, "output_rows": 4000},
+    {"table": "lineitem(l1)", "predicate": "l_suppkey IN sa_bitset AND l_receiptdate > l_commitdate", "selectivity": 0.025, "output_rows": 1500000},
+    {"table": "orders", "predicate": "o_orderstatus = :o_orderstatus_eq", "selectivity": 0.49, "output_rows": 735000}
+  ],
+  "data_structures": {
+    "sa_suppkey_bitset": "bitset(100001) — indexed by suppkey, marks SA suppliers",
+    "candidate_pairs": "compact_array<struct{int32_t orderkey, int32_t suppkey}> — two-pass parallel scatter, sized to actual qualifying count",
+    "count_by_suppkey": "direct_array<int32_t>(100001) — indexed by suppkey, aggregation counts. Suppkey domain is small (100K) so full-keyspace is acceptable here",
+    "lineitem_grouped_index": "pre_built_index — sorted_grouped on l_orderkey"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_phases": [
+      {
+        "phase": "scan_lineitem_candidates",
+        "strategy": "two_pass_parallel_scatter",
+        "description": "Pass 1: each thread counts qualifying rows in its morsel. Prefix sum. Pass 2: scatter (orderkey, suppkey) pairs at computed offsets."
+      },
+      {
+        "phase": "check_order_status_and_exists",
+        "strategy": "partition_parallel",
+        "description": "Partition candidate_pairs across threads. Each thread checks order status and EXISTS/NOT EXISTS independently. Aggregate into shared count_by_suppkey array using atomic increments."
+      }
+    ],
+    "morsel_size": 65536
+  },
+  "indexes": [
+    {"index": "orders_o_orderkey_lookup", "file": "storage/indexes/orders_o_orderkey_lookup.bin", "purpose": "O(1) order row_id lookup for status check"},
+    {"index": "lineitem_l_orderkey_grouped", "file": "storage/indexes/lineitem_l_orderkey_grouped.bin", "purpose": "Get all lineitems per order for EXISTS/NOT EXISTS checks"},
+    {"index": "supplier_s_suppkey_lookup", "file": "storage/indexes/supplier_s_suppkey_lookup.bin", "purpose": "Lookup s_name for output"}
+  ],
+  "aggregation": {
+    "strategy": "array_direct",
+    "key": "l_suppkey",
+    "key_domain": 100000,
+    "value": "count",
+    "notes": "Suppkey domain is bounded (0..99999), direct array is optimal. Atomic increments for thread safety."
+  },
+  "output": {
+    "order_by": ["numwait DESC", "s_name ASC"],
+    "limit": 100,
+    "materialization": "late — resolve s_name from suppkey only for groups with nonzero count, then top-100 via partial_sort"
+  },
+  "mmap_advice": {
+    "lineitem_columns": "MADV_SEQUENTIAL + MADV_HUGEPAGE — sequential scan of l_suppkey, l_orderkey, l_receiptdate, l_commitdate",
+    "orders_o_orderstatus": "MADV_RANDOM — random access via index lookup",
+    "no_map_populate": true,
+    "raii_scoping": "Declare MMap objects at outer scope before RAII timer to exclude munmap TLB shootdown cost"
+  },
+  "optimization_notes": {
+    "compact_arrays": "Use two-pass parallel scatter for candidate_pairs — never use full-keyspace arrays for intermediate results",
+    "combined_exists_check": "EXISTS and NOT EXISTS share the same lineitem_l_orderkey_grouped lookup — do both checks in single pass per order with early termination",
+    "early_termination": "In NOT EXISTS check: if any other-supplier lineitem is late, break immediately (anti-join violated)",
+    "demand_paged_mmap": "No MAP_POPULATE — demand-page all column files"
+  },
+  "execution_target": "cpp",
+  "parameters": [
+    {"name": "n_name_eq", "type": "string", "default": "SAUDI ARABIA"},
+    {"name": "o_orderstatus_eq", "type": "char", "default": "F", "cpp_value": 70},
+    {"name": "limit", "type": "int", "default": 100}
+  ]
+}

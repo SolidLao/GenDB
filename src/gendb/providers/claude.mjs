@@ -4,10 +4,17 @@
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 import { defaults, getProviderConfig } from "../gendb.config.mjs";
 import { formatDuration, estimateCost } from "../shared.mjs";
 
-export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName, useSkills, domainSkillsPrompt, verbose = false }) {
+// Repo root: skills live at <repoRoot>/.claude/skills/
+// The SDK discovers skills relative to cwd, so we must point cwd to the repo root.
+const __filename = fileURLToPath(import.meta.url);
+const REPO_ROOT = resolve(dirname(__filename), "../../..");
+
+export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, model, cwd, timeoutMs, configName, useSkills, domainSkillsPrompt, effortLevel: effortOverride, verbose = false }) {
   // Filter Skill from allowedTools if skills disabled
   const effectiveTools = useSkills === false
     ? allowedTools.filter(t => t !== "Skill")
@@ -20,7 +27,7 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
 
   const timeout = timeoutMs || defaults.agentTimeoutMs;
   const providerCfg = getProviderConfig("claude");
-  const effortLevel = configName && providerCfg.agentEffortLevels[configName];
+  const effortLevel = effortOverride || (configName && providerCfg.agentEffortLevels[configName]);
 
   console.log(`\n[${"=".repeat(60)}]`);
   console.log(`[Orchestrator] Spawning agent: ${name} (provider: claude, timeout: ${formatDuration(timeout)}${effortLevel ? `, effort: ${effortLevel}` : ''})`);
@@ -39,6 +46,7 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
   let tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 };
   let costUsd = 0;
   let agentError = null;
+  const skillsUsed = {};
 
   try {
     const agentQuery = query({
@@ -47,7 +55,8 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
         systemPrompt: effectivePrompt,
         allowedTools: effectiveTools,
         model: model || undefined,
-        cwd: cwd || process.cwd(),
+        cwd: REPO_ROOT,  // Must point to repo root for .claude/skills/ discovery
+        settingSources: ['user', 'project'],  // Enable skill discovery from filesystem
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         abortController,
@@ -57,9 +66,13 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
     });
 
     for await (const message of agentQuery) {
-      if (verbose) {
-        if (message.type === "assistant") {
-          for (const block of message.message.content) {
+      // Always track skill usage (not just verbose)
+      if (message.type === "assistant") {
+        for (const block of message.message.content) {
+          if (block.type === "tool_use" && block.name === "Skill" && block.input?.skill) {
+            skillsUsed[block.input.skill] = (skillsUsed[block.input.skill] || 0) + 1;
+          }
+          if (verbose) {
             if (block.type === "text" && block.text) {
               console.log(`[${name}] ${block.text.slice(0, 200)}`);
             }
@@ -104,9 +117,9 @@ export async function runAgent(name, { systemPrompt, userPrompt, allowedTools, m
 
   if (agentError) {
     console.error(`\n[Orchestrator] Agent "${name}" failed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)}): ${agentError}`);
-    return { result: resultText, durationMs, tokens, costUsd, error: agentError };
+    return { result: resultText, durationMs, tokens, costUsd, error: agentError, skillsUsed };
   }
 
   console.log(`\n[Orchestrator] Agent "${name}" completed (${formatDuration(durationMs)}, ${tokens.input + tokens.output} tokens, $${costUsd.toFixed(2)})`);
-  return { result: resultText, durationMs, tokens, costUsd };
+  return { result: resultText, durationMs, tokens, costUsd, skillsUsed };
 }

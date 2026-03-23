@@ -1,0 +1,87 @@
+{
+  "query_id": "Q3",
+  "pipeline": ["build_customer_bitmap", "two_pass_orders_scan", "probe_lineitem_aggregate_fused", "topk"],
+  "join_order": [
+    {
+      "build": "customer(filtered by c_mktsegment='BUILDING')",
+      "probe": "orders",
+      "type": "semi",
+      "strategy": "bitmap_filter",
+      "build_cardinality": 300000,
+      "probe_cardinality": 15000000,
+      "notes": "Bitmap on custkey (187KB, fits L2)."
+    },
+    {
+      "build": "orders(filtered)",
+      "probe": "lineitem",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3500000,
+      "probe_cardinality": 59986052,
+      "notes": "Use lineitem_l_orderkey_grouped index. Qualifying orderkeys are in sorted order (from static partitioned scan of orders sorted by o_orderkey), so lineitem access is sequential."
+    }
+  ],
+  "filters": [
+    {"table": "customer", "predicate": "c_mktsegment = :c_mktsegment_eq", "selectivity": 0.2},
+    {"table": "orders", "predicate": "o_orderdate < :o_orderdate_upper", "selectivity": 0.48},
+    {"table": "lineitem", "predicate": "l_shipdate > :l_shipdate_lower", "selectivity": 0.54}
+  ],
+  "scan": {
+    "table": "orders",
+    "rows": 15000000,
+    "columns": [
+      {"name": "o_custkey", "file": "orders/o_custkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderdate", "file": "orders/o_orderdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "o_orderkey", "file": "orders/o_orderkey.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential",
+    "notes": "Late materialize o_shippriority — only load for final top-10 results. Saves scanning 60MB during orders scan."
+  },
+  "data_structures": {
+    "customer_filter": "bitset(1500001) — 187KB, fits L2 cache",
+    "qualifying_orders": {
+      "type": "compact_struct_array",
+      "fields": ["int32_t orderkey", "int32_t orderdate", "double revenue"],
+      "estimated_entries": 3500000,
+      "estimated_size_mb": 56,
+      "notes": "CRITICAL: Use two-pass approach to avoid merge phase. Pass 1: count qualifying rows per thread (static partitioning). Compute prefix sums for offsets. Pass 2: write directly into pre-allocated shared array at computed offsets. Orders are sorted by o_orderkey and static partitioning preserves sort order, so the result array is sorted by orderkey. Allocate with malloc (lazy zero-fill via mmap for large allocations) to avoid upfront zero-initialization cost. Late materialize o_shippriority — NOT included in this struct."
+    },
+    "aggregation": {
+      "type": "inline_per_order",
+      "notes": "Revenue accumulated directly into the compact array during lineitem probe. No separate aggregation map needed."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "orders_scan": "Two-pass with static partitioning. Pass 1: each thread counts qualifying rows in its partition. Pass 2: each thread writes qualifying rows to shared array at precomputed offsets. NO per-thread vectors, NO merge/copy phase.",
+    "lineitem_probe": "Static scheduling over qualifying orders (NOT dynamic). Since qualifying orderkeys are sorted and lineitem is sorted by l_orderkey, static scheduling gives each thread a contiguous range of orderkeys, resulting in sequential access to lineitem files within each thread. This works with MADV_SEQUENTIAL for OS prefetching.",
+    "notes": "CRITICAL: Use schedule(static) for lineitem probe to maintain sequential access pattern across lineitem files. Dynamic scheduling would cause random access."
+  },
+  "indexes": [
+    {"index": "lineitem_l_orderkey_grouped", "purpose": "O(1) lookup of contiguous lineitem rows per qualifying orderkey"}
+  ],
+  "aggregation": "inline_per_order",
+  "output": {"order_by": ["revenue DESC", "o_orderdate ASC"], "limit": 10},
+  "execution_target": "cpp",
+  "optimization_notes": "Category B+C — Algorithm change + Work elimination. Three root causes: (1) MAP_POPULATE pre-faults page tables for ~706MB (including the 458MB lineitem index where only 6% of entries are accessed), costing 33ms — fix: disable MAP_POPULATE for all files, use demand-paging. (2) Lineitem data columns use MADV_RANDOM which disables OS prefetching, yet access is sequential (sorted qualifying orderkeys) — this causes ~200K unnecessary soft page faults, explaining the 36ms unaccounted time in iter_1. Fix: use MADV_SEQUENTIAL for lineitem data columns, MADV_SEQUENTIAL for orders columns, MADV_RANDOM only for the lineitem index. (3) The merge_sort phase copies 84MB from per-thread vectors to a single array (22ms). Fix: two-pass approach — count qualifying rows per thread in pass 1, compute prefix sums, write directly to pre-allocated shared array in pass 2. Additional: late materialize o_shippriority (skip scanning 60MB, only load for top-10 results). Use schedule(static) for lineitem probe to maintain sequential access. Expected savings: data_loading 33ms→~2ms, unaccounted 36ms→~5ms, merge 22ms→0ms, scan 18ms→~14ms.",
+  "correctness_anchors": {
+    "o_orderdate_upper": 9204,
+    "l_shipdate_lower": 9204,
+    "revenue_formula": "SUM(l_extendedprice * (1.0 - l_discount))"
+  },
+  "mmap_strategy": {
+    "customer_columns": {"populate": false, "advice": "MADV_SEQUENTIAL"},
+    "orders_columns": {"populate": false, "advice": "MADV_SEQUENTIAL"},
+    "lineitem_data_columns": {"populate": false, "advice": "MADV_SEQUENTIAL", "notes": "Access is sequential after sorting qualifying orderkeys. MADV_SEQUENTIAL enables OS readahead, eliminating ~200K soft page faults that caused 36ms overhead in iter_1. Do NOT use MADV_RANDOM."},
+    "lineitem_l_orderkey_grouped_index": {"populate": false, "advice": "MADV_RANDOM", "notes": "Only 6% of entries accessed. No MAP_POPULATE to avoid faulting 458MB of pages."},
+    "notes": "CRITICAL: Do NOT use MAP_POPULATE for any file. On hot runs, pages are in OS page cache. MAP_POPULATE still costs ~33ms to walk page tables and create PTEs for 706MB. Demand-paging with appropriate MADV_* hints is faster."
+  },
+  "late_materialization": {
+    "o_shippriority": {
+      "file": "orders/o_shippriority.bin",
+      "when": "After top-10 selection. Only 10 lookups needed instead of scanning all 15M rows.",
+      "how": "Store row_id (the orders scan loop index) in the qualifying orders struct. After finding top-10, use row_id to look up o_shippriority[row_id]."
+    }
+  }
+}

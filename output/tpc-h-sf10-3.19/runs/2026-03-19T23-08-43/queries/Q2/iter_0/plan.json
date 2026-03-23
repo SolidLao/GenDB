@@ -1,0 +1,145 @@
+{
+  "query_id": "Q2",
+  "pipeline": [
+    "filter_region_nation",
+    "build_europe_supplier_bitset",
+    "filter_part",
+    "index_lookup_partsupp_min_cost",
+    "second_pass_match_supplier",
+    "materialize_output",
+    "sort_topk"
+  ],
+  "filters": [
+    {"table": "region", "predicate": "r_name = :r_name_eq", "selectivity": 0.2, "output_rows": 1},
+    {"table": "nation", "predicate": "n_regionkey = europe_regionkey", "selectivity": 0.2, "output_rows": 5},
+    {"table": "supplier", "predicate": "s_nationkey IN europe_nations", "selectivity": 0.2, "output_rows": 20000},
+    {"table": "part", "predicate": "p_size = :p_size_eq AND p_type LIKE :p_type_pattern", "selectivity": 0.004, "output_rows": 8000}
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "description": "Filter region to find EUROPE regionkey, then collect nation_keys where n_regionkey matches",
+      "build": "region(filtered) → nation(filtered)",
+      "probe": "supplier",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 5,
+      "notes": "nation_keys fit in tiny bitset/array; scan supplier checking s_nationkey membership"
+    },
+    {
+      "step": 2,
+      "description": "For each qualifying part, use grouped index into partsupp, filter to EUROPE suppliers via supplier lookup index",
+      "build": "europe_supplier_bitset",
+      "probe": "partsupp(via grouped index per qualifying part)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 20000,
+      "probe_cardinality": 32000,
+      "notes": "~8K parts × 4 partsupp rows each = ~32K probes; use supplier_s_suppkey_lookup for O(1) nationkey check"
+    }
+  ],
+  "steps": [
+    {
+      "id": "filter_region_nation",
+      "operation": "Scan region (5 rows), find r_regionkey where r_name = :r_name_eq. Scan nation (25 rows), collect n_nationkey where n_regionkey matches. Build europe_nation_bitset.",
+      "output": "europe_nation_set (5 nation keys)"
+    },
+    {
+      "id": "build_europe_supplier_bitset",
+      "operation": "Load supplier_s_suppkey_lookup index. Scan s_nationkey (100K rows), for each supplier check if s_nationkey is in europe_nation_set. Build bitset indexed by suppkey.",
+      "output": "europe_supplier_bitset sized to max_suppkey (~100K), ~20K bits set"
+    },
+    {
+      "id": "filter_part",
+      "operation": "Load p_type dict, find all dict codes where string ends with pattern suffix (e.g. 'BRASS'). Parallel scan part table: check p_size == :p_size_eq AND p_type code in matching_codes set. Collect qualifying partkeys into compact array using two-pass parallel scatter.",
+      "output": "qualifying_partkeys[] (~8K entries), qualifying_part_rowids[] (~8K entries)"
+    },
+    {
+      "id": "index_lookup_partsupp_min_cost",
+      "operation": "Load partsupp_ps_partkey_grouped index. For each qualifying partkey, lookup (start, count) in grouped index. For each partsupp row in [start, start+count), load ps_suppkey, check europe_supplier_bitset. If EUROPE supplier, load ps_supplycost and track MIN. Store min_cost per qualifying part, and the suppkey that achieved it.",
+      "parallel_over": "qualifying_partkeys (morsel-driven)",
+      "output": "per_part_min_cost[8K], per_part_best_suppkey[8K]"
+    },
+    {
+      "id": "second_pass_match_supplier",
+      "operation": "For each qualifying part where a valid min_cost was found, the best_suppkey is already known from step above (track both min cost and corresponding suppkey in single pass). Use supplier_s_suppkey_lookup to get supplier row_id. Collect (partkey, part_rowid, supp_rowid, nationkey) tuples.",
+      "output": "result_tuples[] (~8K entries)"
+    },
+    {
+      "id": "materialize_output",
+      "operation": "For each result tuple, load output columns: s_acctbal, s_name (varlen), n_name (varlen from nation), p_partkey, p_mfgr (dict decode), s_address (varlen), s_phone (varlen), s_comment (varlen). Late materialization: only load varlen strings for final results.",
+      "output": "materialized result rows (~8K)"
+    },
+    {
+      "id": "sort_topk",
+      "operation": "Partial sort / top-K selection: ORDER BY s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC, LIMIT :limit. Use std::partial_sort with limit=100 on ~8K rows.",
+      "output": "top 100 rows"
+    }
+  ],
+  "data_structures": {
+    "europe_nation_set": "bitset(25) or flat_array(5)",
+    "europe_supplier_bitset": "bitset(max_suppkey+1, ~100001 bits)",
+    "p_type_matching_codes": "bitset(150) from dictionary",
+    "qualifying_partkeys": "compact_array(~8000, int32_t)",
+    "qualifying_part_rowids": "compact_array(~8000, int32_t)",
+    "per_part_min_cost": "compact_array(~8000, double)",
+    "per_part_best_suppkey": "compact_array(~8000, int32_t)",
+    "result_tuples": "compact_array(~8000, struct{partkey, part_rowid, supp_rowid, nationkey, min_cost})"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_phases": [
+      {
+        "phase": "filter_part",
+        "method": "two_pass_parallel_scatter",
+        "notes": "Phase 1: parallel count per thread. Phase 2: prefix-sum + parallel scatter into compact array. Avoids serial merge."
+      },
+      {
+        "phase": "index_lookup_partsupp_min_cost",
+        "method": "morsel_driven",
+        "morsel_size": 256,
+        "notes": "Partition qualifying_partkeys into morsels. Each thread processes its morsels independently — no shared state needed since each part is independent."
+      }
+    ]
+  },
+  "indexes": [
+    {
+      "index": "partsupp_ps_partkey_grouped",
+      "file": "storage/indexes/partsupp_ps_partkey_grouped.bin",
+      "purpose": "O(1) lookup of partsupp rows for each qualifying partkey; yields (start, count) pair, exactly 4 rows per part",
+      "layout": "uint64_t num_entries, then uint32_t[num_entries*2] interleaved [start, count]"
+    },
+    {
+      "index": "supplier_s_suppkey_lookup",
+      "file": "storage/indexes/supplier_s_suppkey_lookup.bin",
+      "purpose": "O(1) lookup supplier row_id by suppkey for nationkey check and output materialization",
+      "layout": "uint64_t num_entries, then int32_t[num_entries] where arr[suppkey] = row_id"
+    }
+  ],
+  "mmap_strategy": {
+    "method": "demand_paged",
+    "flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "advice": {
+      "part_columns": "MADV_SEQUENTIAL for p_size, p_type scan",
+      "partsupp_columns": "MADV_RANDOM for indexed access via grouped index",
+      "supplier_columns": "MADV_SEQUENTIAL for initial nationkey scan, MADV_RANDOM for later lookups"
+    },
+    "raii_scoping": "Declare all mmap resources BEFORE RAII timer scope to exclude munmap TLB shootdown cost from timing"
+  },
+  "aggregation": "per_part_min_tracking",
+  "output": {
+    "order_by": ["s_acctbal DESC", "n_name ASC", "s_name ASC", "p_partkey ASC"],
+    "limit": 100,
+    "method": "std::partial_sort on ~8K result tuples"
+  },
+  "key_optimizations": [
+    "Single-pass min-cost tracking: track both min_cost AND best_suppkey simultaneously to avoid second pass over partsupp",
+    "Bitset for EUROPE supplier membership: O(1) check per ps_suppkey, cache-friendly",
+    "Compact qualifying arrays sized to ~8K rows, not 2M part keyspace",
+    "Late materialization: load varlen strings (s_name, s_address, s_phone, s_comment, n_name) only for final 100 rows after top-K selection",
+    "Two-pass parallel scatter for part filtering to avoid serial bottleneck",
+    "partial_sort for top-100 on 8K rows instead of full sort"
+  ],
+  "execution_target": "cpp"
+}

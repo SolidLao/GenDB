@@ -479,12 +479,49 @@ def compare_tpch_value(exp_val, act_val, category):
     return False, {"expected": exp_s, "actual": act_s}
 
 
+def _compare_rows_tpch(exp_rows, act_rows, headers, categories, column_failures, row_offset=0):
+    """Compare rows positionally using TPC-H tolerance rules. Returns number of mismatched rows."""
+    row_mismatches = 0
+    for i, (exp_row, act_row) in enumerate(zip(exp_rows, act_rows)):
+        max_cols = max(len(exp_row), len(act_row), len(headers))
+        row_has_mismatch = False
+
+        for col_idx in range(max_cols):
+            exp_val = exp_row[col_idx] if col_idx < len(exp_row) else ""
+            act_val = act_row[col_idx] if col_idx < len(act_row) else ""
+            cat = categories[col_idx] if col_idx < len(categories) else "exact"
+            col_name = headers[col_idx] if col_idx < len(headers) else f"col_{col_idx}"
+
+            match, detail = compare_tpch_value(exp_val, act_val, cat)
+            if not match:
+                row_has_mismatch = True
+                if col_name not in column_failures:
+                    column_failures[col_name] = {
+                        "category": cat,
+                        "failure_count": 0,
+                        "samples": [],
+                    }
+                column_failures[col_name]["failure_count"] += 1
+                if len(column_failures[col_name]["samples"]) < 3:
+                    if detail:
+                        detail["row"] = row_offset + i
+                    column_failures[col_name]["samples"].append(detail or {"row": row_offset + i})
+
+        if row_has_mismatch:
+            row_mismatches += 1
+    return row_mismatches
+
+
 def compare_query_tpch(expected_path, actual_path):
     """Compare two CSV files using TPC-H tolerance rules.
 
     Compares rows positionally (no sorting) to validate ORDER BY correctness.
     TPC-H queries specify ORDER BY; the ground truth is in the correct order,
     and the generated code must produce matching order.
+
+    Tie-aware: when consecutive rows share the same ORDER BY value, their
+    relative order is undefined per SQL spec, so they are compared as sets
+    rather than positionally.
     """
     if not os.path.exists(expected_path):
         return {"match": False, "error": "expected file not found", "rows_expected": 0, "rows_actual": 0}
@@ -511,42 +548,50 @@ def compare_query_tpch(expected_path, actual_path):
     headers = exp_headers if exp_headers else act_headers
     categories = [classify_tpch_column(h) for h in headers]
 
+    # Detect ORDER BY column for tie-aware comparison
+    order_col = _detect_order_column(headers, categories, exp_rows)
+
     # Compare rows
     column_failures = {}  # col_name -> list of failure details
     row_mismatches = 0
 
-    for i, (exp_row, act_row) in enumerate(zip(exp_rows, act_rows)):
-        max_cols = max(len(exp_row), len(act_row), len(headers))
-        row_has_mismatch = False
+    if order_col is None:
+        # No ORDER BY column detected — strict positional comparison
+        row_mismatches = _compare_rows_tpch(exp_rows, act_rows, headers, categories, column_failures)
+    else:
+        # Tie-aware comparison: group by ORDER BY value, compare tied groups as sets
+        exp_groups = _group_by_order_value(exp_rows, order_col)
+        act_groups = _group_by_order_value(act_rows, order_col)
 
-        for col_idx in range(max_cols):
-            exp_val = exp_row[col_idx] if col_idx < len(exp_row) else ""
-            act_val = act_row[col_idx] if col_idx < len(act_row) else ""
-            cat = categories[col_idx] if col_idx < len(categories) else "exact"
-            col_name = headers[col_idx] if col_idx < len(headers) else f"col_{col_idx}"
-
-            match, detail = compare_tpch_value(exp_val, act_val, cat)
-            if not match:
-                row_has_mismatch = True
-                if col_name not in column_failures:
-                    column_failures[col_name] = {
-                        "category": cat,
-                        "failure_count": 0,
-                        "samples": [],
-                    }
-                column_failures[col_name]["failure_count"] += 1
-                if len(column_failures[col_name]["samples"]) < 3:
-                    if detail:
-                        detail["row"] = i
-                    column_failures[col_name]["samples"].append(detail or {"row": i})
-
-        if row_has_mismatch:
-            row_mismatches += 1
+        if len(exp_groups) != len(act_groups):
+            # Different group structure — fall back to strict positional
+            row_mismatches = _compare_rows_tpch(exp_rows, act_rows, headers, categories, column_failures)
+        else:
+            row_offset = 0
+            for (exp_val, exp_group), (act_val, act_group) in zip(exp_groups, act_groups):
+                if exp_val != act_val or len(exp_group) != len(act_group):
+                    # Group mismatch — compare positionally
+                    row_mismatches += _compare_rows_tpch(
+                        exp_group, act_group, headers, categories, column_failures, row_offset)
+                elif len(exp_group) == 1:
+                    # Single-row group — positional comparison
+                    row_mismatches += _compare_rows_tpch(
+                        exp_group, act_group, headers, categories, column_failures, row_offset)
+                else:
+                    # Multi-row tie group — sort both sides by all columns, then compare
+                    sorted_exp = sorted(exp_group)
+                    sorted_act = sorted(act_group)
+                    row_mismatches += _compare_rows_tpch(
+                        sorted_exp, sorted_act, headers, categories, column_failures, row_offset)
+                row_offset += len(exp_group)
 
     if column_failures:
         result["match"] = False
         result["error"] = f"{row_mismatches} row(s) differ across {len(column_failures)} column(s)"
         result["column_failures"] = column_failures
+        if order_col is not None:
+            result["tie_aware"] = True
+            result["order_column"] = headers[order_col] if order_col < len(headers) else f"col_{order_col}"
         # Auto-classify mismatch patterns across all column failures
         pattern_counts = {}
         for col_name, cf in column_failures.items():
@@ -561,6 +606,9 @@ def compare_query_tpch(expected_path, actual_path):
             result["mismatch_patterns"] = pattern_counts
     else:
         result["match"] = True
+        if order_col is not None:
+            result["tie_aware"] = True
+            result["order_column"] = headers[order_col] if order_col < len(headers) else f"col_{order_col}"
 
     return result
 

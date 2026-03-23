@@ -1,0 +1,43 @@
+{
+  "query_id": "Q15",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 55.01333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 55.01333333333334,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 0.06,
+        "zonemap_filter": 0,
+        "merge": 1.15,
+        "main_scan": 51.32,
+        "find_max": 0.27,
+        "output": 0.33,
+        "total": 52.4
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 38.63666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 38.63666666666666,
+      "validation": "pass",
+      "strategy": "Category B+C: Root cause is 64 thread-local revenue arrays (64 × 800KB = 50MB) exceeding L3 cache (44MB), all zero-initialized sequentially in the main thread via std::vector before the parallel region — causing 50MB of serial page faults and cache thrashing. Fix: (1) Cap threads to min(nproc, qualifying_blocks, 16) — with ~34 qualifying blocks, 16 threads × 800KB = 12.8MB fits comfortably in L3. (2) Allocate thread-local arrays via calloc INSIDE the parallel region for NUMA first-touch locality, eliminating serial initialization bottleneck. (3) Use calloc instead of std::vector to avoid zero-init constructor overhead (OS provides zero pages via copy-on-write). These changes reduce memory pressure by 4× and parallelize initialization cost across threads.",
+      "operation_timings": {
+        "data_loading": 0.14,
+        "main_scan": 35.01,
+        "find_max": 0.29,
+        "output": 0.35,
+        "total": 35.91
+      }
+    }
+  ]
+}

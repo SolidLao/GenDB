@@ -9,6 +9,6 @@ export const config = {
   configKey: "code_generator",
   promptPath: resolve(__dirname, "prompt.md"),
   allowedTools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Skill"],
-  domainSkillsPrompt: "## Domain Skills\nDomain skills (gendb-code-patterns, hash tables, data loading, indexing, parallelism, etc.) are available and will be loaded automatically when relevant. The experience skill contains critical correctness rules — always check it.",
+  domainSkillsPrompt: "## Domain Skills\nOptimization skills from prior runs are available. Each skill contains proven C++ patterns, performance evidence, and anti-patterns. To load a skill, call `Skill(name=\"<skill-name>\")`.\n\nReview the skill descriptions in your context. Before writing code, load any skill whose description matches the query's characteristics (join types, aggregation pattern, data access pattern, column types) and hardware profile (cache hierarchy, core count, memory bandwidth). Only load skills that are relevant to the specific query, data, and hardware.",
   model: "sonnet",
 };

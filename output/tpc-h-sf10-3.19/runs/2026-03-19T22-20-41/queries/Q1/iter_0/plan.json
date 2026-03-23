@@ -1,0 +1,87 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["zonemap_filter", "scan_aggregate", "finalize_sort"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 65536,
+    "num_blocks": 916,
+    "columns": [
+      {"name": "l_shipdate", "type": "int32_t", "file": "storage/lineitem/l_shipdate.bin"},
+      {"name": "l_returnflag", "type": "int8_t", "file": "storage/lineitem/l_returnflag.bin"},
+      {"name": "l_linestatus", "type": "int8_t", "file": "storage/lineitem/l_linestatus.bin"},
+      {"name": "l_quantity", "type": "double", "file": "storage/lineitem/l_quantity.bin"},
+      {"name": "l_extendedprice", "type": "double", "file": "storage/lineitem/l_extendedprice.bin"},
+      {"name": "l_discount", "type": "double", "file": "storage/lineitem/l_discount.bin"},
+      {"name": "l_tax", "type": "double", "file": "storage/lineitem/l_tax.bin"}
+    ]
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= :l_shipdate_upper",
+      "default_threshold": 10471,
+      "selectivity": 0.988,
+      "rows_passing": 59274000
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "type": "zone_map",
+      "layout": {
+        "header": {"num_blocks": "uint64_t", "block_size": "uint32_t"},
+        "body": "int32_t[num_blocks * 2] (min, max pairs)"
+      },
+      "purpose": "skip_blocks",
+      "block_classification": {
+        "all_pass": "max_date <= threshold → aggregate entire block without per-row date check",
+        "all_skip": "min_date > threshold → skip block entirely",
+        "partial": "scan rows individually with per-row predicate"
+      }
+    }
+  ],
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_by": ["l_returnflag", "l_linestatus"],
+    "key_encoding": {
+      "method": "lookup_table_256",
+      "description": "Use a 256-entry lookup table mapping ASCII char to compact index. returnflag: A→0, N→1, R→2. linestatus: F→0, O→1. Combined key = returnflag_idx * 2 + linestatus_idx. Max index = 5, allocate array of 6 slots."
+    },
+    "num_groups": 6,
+    "actual_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double",
+      "sum_base_price": "double",
+      "sum_disc_price": "double (extendedprice * (1 - discount))",
+      "sum_charge": "double (extendedprice * (1 - discount) * (1 + tax))",
+      "sum_discount": "double",
+      "count": "int64_t"
+    },
+    "avg_computation": "deferred to finalize: avg_qty = sum_qty/count, avg_price = sum_base_price/count, avg_disc = sum_discount/count"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_unit": "block",
+    "local_aggregation": true,
+    "merge": "sum thread-local accumulator arrays (6 slots each) into global result",
+    "notes": "Each thread maintains a local array[6] of accumulator structs. No synchronization during scan. Single merge at end."
+  },
+  "data_structures": {
+    "aggregation": "fixed_array(6 slots, indexed by compact key)",
+    "thread_local_accumulators": "array[6] per thread, cache-line aligned to avoid false sharing"
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "trivial — iterate compact keys 0..5 in order, output non-empty groups"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": {
+    "io_strategy": "mmap all 7 column files; OS prefetch handles sequential scan",
+    "vectorized_scan": "process blocks of 65536 rows; for all-pass blocks skip per-row date check",
+    "computation": "compute (1 - discount) once per row, reuse for both sum_disc_price and sum_charge"
+  }
+}

@@ -11,6 +11,23 @@
 {{query_guide}}
 {{/if}}
 
+{{#if memory_pre_injection}}
+{{memory_pre_injection}}
+{{/if}}
+
+{{#if memory_catalog}}
+{{memory_catalog}}
+{{/if}}
+
+{{#if template_sql}}
+## Parameterized Template SQL
+The query uses named parameters. Plan for the template pattern, not specific values.
+```sql
+{{template_sql}}
+```
+Parameters: {{params_json}}
+{{/if}}
+
 ## Query to Plan
 ```sql
 {{query_sql}}
@@ -21,6 +38,13 @@ Binary columnar data: {{gendb_dir}}
 
 {{#if benchmark_context}}
 {{benchmark_context}}
+{{/if}}
+
+{{#if memory_note}}
+## Memory System Note
+Prior optimization experience is provided above from GenDB's memory system.
+Try the suggested approaches first. If they do not lead to good performance,
+identify bottlenecks yourself and propose new implementations.
 {{/if}}
 
 ## Output

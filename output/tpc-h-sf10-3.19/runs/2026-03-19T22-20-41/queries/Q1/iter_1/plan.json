@@ -1,0 +1,92 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["mmap_no_populate", "parallel_scan_aggregate", "merge_output"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 65536,
+    "num_blocks": 916,
+    "columns": [
+      {"name": "l_shipdate", "type": "int32_t", "file": "storage/lineitem/l_shipdate.bin", "bytes_per_row": 4},
+      {"name": "l_returnflag", "type": "int8_t", "file": "storage/lineitem/l_returnflag.bin", "bytes_per_row": 1},
+      {"name": "l_linestatus", "type": "int8_t", "file": "storage/lineitem/l_linestatus.bin", "bytes_per_row": 1},
+      {"name": "l_quantity", "type": "double", "file": "storage/lineitem/l_quantity.bin", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "type": "double", "file": "storage/lineitem/l_extendedprice.bin", "bytes_per_row": 8},
+      {"name": "l_discount", "type": "double", "file": "storage/lineitem/l_discount.bin", "bytes_per_row": 8},
+      {"name": "l_tax", "type": "double", "file": "storage/lineitem/l_tax.bin", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential",
+    "mmap_flags": "MAP_PRIVATE only — do NOT use MAP_POPULATE. MAP_POPULATE forces synchronous page table walk for all 2.28GB even on hot runs, adding 84ms of overhead. Without it, pages fault on demand during the scan, overlapping with computation.",
+    "madvise": "MADV_SEQUENTIAL on all columns for OS prefetch. Additionally call madvise(MADV_HUGEPAGE) on each mapping to use transparent huge pages, reducing TLB misses across the 2.28GB working set."
+  },
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate <= threshold",
+      "default_threshold": 10471,
+      "selectivity": 0.988,
+      "rows_passing": 59274000
+    }
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "type": "zone_map",
+      "layout": {
+        "header": {"num_blocks": "uint64_t", "block_size": "uint32_t"},
+        "body": "int32_t[num_blocks * 2] (min, max pairs)"
+      },
+      "purpose": "skip_blocks",
+      "block_classification": {
+        "all_pass": "max_date <= threshold → aggregate entire block without per-row date check",
+        "all_skip": "min_date > threshold → skip block entirely",
+        "partial": "scan rows individually with per-row predicate"
+      }
+    }
+  ],
+  "aggregation": {
+    "strategy": "direct_array",
+    "group_by": ["l_returnflag", "l_linestatus"],
+    "key_encoding": {
+      "method": "lookup_table_256",
+      "description": "Use a 256-entry uint8_t lookup table for each of returnflag and linestatus. returnflag: A→0, N→1, R→2. linestatus: F→0, O→1. Combined key = rf_idx * 2 + ls_idx. Max index = 5, allocate 6 slots."
+    },
+    "num_groups": 6,
+    "actual_groups": 4,
+    "accumulators_per_group": {
+      "sum_qty": "double — simple addition, no Kahan",
+      "sum_base_price": "double — simple addition, no Kahan",
+      "sum_disc_price": "double — simple addition, no Kahan. Compute as extendedprice * (1 - discount)",
+      "sum_charge": "double — simple addition, no Kahan. Compute as extendedprice * (1 - discount) * (1 + tax)",
+      "sum_discount": "double — simple addition",
+      "count": "int64_t"
+    },
+    "struct_size_note": "6 doubles + 1 int64_t = 56 bytes per group. No Kahan compensation fields — reduces struct from 64 to 56 bytes, improving cache utilization.",
+    "avg_computation": "deferred to finalize: avg = sum / count"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_unit": "block",
+    "schedule": "dynamic with chunk_size=4 blocks",
+    "local_aggregation": true,
+    "merge": "sum thread-local accumulator arrays (6 slots each) into global result — trivial, only iterate over actual thread count",
+    "thread_local_layout": "Allocate per-thread accumulators as a flat array with 64-byte alignment and padding between thread slots to avoid false sharing. Use at most nproc slots, not a fixed 256."
+  },
+  "data_structures": {
+    "aggregation": "fixed_array(6 slots per thread, indexed by compact key)",
+    "thread_local_accumulators": "Dynamically sized array[nproc][6] with cache-line padding between thread slots. Each Accum struct is 56 bytes (no Kahan fields)."
+  },
+  "output": {
+    "order_by": ["l_returnflag ASC", "l_linestatus ASC"],
+    "limit": null,
+    "sort_strategy": "trivial — iterate compact keys 0..5 in order, output non-empty groups"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A+C optimization. Root cause: data_loading phase consumed 84ms (69% of 121ms total) due to MAP_POPULATE forcing synchronous page table setup for 2.28GB of column data, even on hot runs when pages are already in page cache. Fix 1: Remove MAP_POPULATE from all mmap calls — pages will fault on demand during the scan phase, overlapping I/O with computation. Fix 2: Add MADV_HUGEPAGE to reduce TLB misses across the 2.28GB working set (with 4KB pages, 2.28GB needs ~580K TLB entries; with 2MB huge pages, only ~1140). Fix 3: Remove Kahan summation — eliminates 4 extra FP ops per row (~236M total ops), reduces accumulator struct from 64 to 56 bytes. These changes should eliminate the data_loading bottleneck and reduce scan time, targeting sub-35ms total.",
+  "correctness_anchors": {
+    "date_literal": "1998-12-01",
+    "date_arithmetic": "add_days(param_date, -90)"
+  }
+}

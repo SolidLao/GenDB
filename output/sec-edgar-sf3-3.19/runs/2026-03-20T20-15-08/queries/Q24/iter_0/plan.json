@@ -1,0 +1,99 @@
+{
+  "query_id": "Q24",
+  "pipeline": ["load_dictionaries", "resolve_params", "mmap_columns", "load_index", "parallel_scan_filter_antijoin_aggregate", "merge_aggregations", "having_filter", "topk_sort", "decode_output"],
+  "join_order": [
+    {
+      "build": "pre(pre_join index, pre-built)",
+      "probe": "num(filtered by uom, ddate, value_null)",
+      "type": "anti",
+      "strategy": "pre_built_hash_index_probe",
+      "build_cardinality": 9600799,
+      "probe_cardinality_pre_filter": 39401761,
+      "probe_cardinality_post_filter": 9100000,
+      "anti_join_output_estimate": 4500000,
+      "notes": "Use pre_join.idx for existence-only probe; no rowids needed for anti-join"
+    }
+  ],
+  "filters": [
+    {"table": "num", "column": "uom", "predicate": "uom == :uom_eq (dict lookup)", "selectivity": 0.844, "encoding": "uint16_t dict code comparison"},
+    {"table": "num", "column": "ddate", "predicate": "ddate BETWEEN :ddate_lower AND :ddate_upper", "selectivity": 0.272, "encoding": "raw int32_t range check"},
+    {"table": "num", "column": "value_null", "predicate": "value_null == 0", "selectivity": 1.0, "encoding": "uint8_t equality"},
+    {"combined_selectivity": 0.23, "rows_after_filter": 9100000}
+  ],
+  "data_structures": {
+    "anti_join_index": "pre_built_hash_multimap(pre_join.idx, mmap read-only, existence probe only via hash_u32x3)",
+    "aggregation": "per_thread_hash_map<uint64_t, AggState> where key = (tag_code << 32 | version_code), AggState = {int64_t count, double sum}",
+    "aggregation_sizing": "~20000 groups per thread, fits in L1/L2 cache",
+    "having_output": "compact_vector<GroupResult>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "notes": "Each thread: scan morsel → apply 3 filters → probe anti-join index → aggregate into thread-local hash map. Merge thread-local maps after all morsels consumed."
+  },
+  "indexes": [
+    {
+      "index": "pre_join",
+      "file": "indexes/pre_join.idx",
+      "purpose": "anti_join_existence_check",
+      "probe_method": "hash_u32x3(adsh, tag, version) → linear probe → if no occupied slot with matching key_hash before empty slot, row qualifies",
+      "skip_rowids": true
+    }
+  ],
+  "columns_to_load": {
+    "num": [
+      {"column": "uom", "file": "num/uom.bin", "dtype": "uint16_t", "purpose": "filter"},
+      {"column": "ddate", "file": "num/ddate.bin", "dtype": "int32_t", "purpose": "filter"},
+      {"column": "value_null", "file": "num/value_null.bin", "dtype": "uint8_t", "purpose": "filter"},
+      {"column": "adsh", "file": "num/adsh.bin", "dtype": "uint32_t", "purpose": "anti_join_key"},
+      {"column": "tag", "file": "num/tag.bin", "dtype": "uint32_t", "purpose": "anti_join_key + group_by"},
+      {"column": "version", "file": "num/version.bin", "dtype": "uint32_t", "purpose": "anti_join_key + group_by"},
+      {"column": "value", "file": "num/value.bin", "dtype": "double", "purpose": "SUM aggregation"}
+    ]
+  },
+  "dictionaries": [
+    {"name": "uom", "file": "dictionaries/uom.dict", "purpose": "resolve :uom_eq param to dict code"},
+    {"name": "tag", "file": "dictionaries/tag.dict", "purpose": "decode tag codes for output"},
+    {"name": "version", "file": "dictionaries/version.dict", "purpose": "decode version codes for output"}
+  ],
+  "mmap_strategy": {
+    "method": "demand_paged",
+    "flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "advice": "MADV_SEQUENTIAL + MADV_HUGEPAGE on all num columns",
+    "raii_scoping": "declare MMap objects at outer scope before RAII timer to exclude munmap TLB shootdown cost"
+  },
+  "scan_loop": {
+    "description": "Fused scan: apply all 3 filters first (cheapest first: uom uint16 eq, value_null uint8 eq, ddate int32 range), then probe anti-join index, then aggregate survivors",
+    "filter_order": [
+      "uom == usd_code (uint16_t, most selective per byte)",
+      "value_null == 0 (uint8_t, trivial)",
+      "ddate BETWEEN lower AND upper (int32_t, range)"
+    ],
+    "anti_join_probe": "hash_u32x3(adsh, tag, version) → linear probe pre_join hash table → qualify if NOT found",
+    "aggregate_inline": "thread_local map[key] += {1, value}"
+  },
+  "aggregation": {
+    "strategy": "per_thread_hash_maps_then_merge",
+    "group_key": "(uint64_t)((uint64_t)tag_code << 32 | version_code)",
+    "group_state": "{int64_t count, double sum}",
+    "estimated_groups": 20000,
+    "merge": "single-threaded merge of thread-local maps (small: ~20K entries each)"
+  },
+  "having": {
+    "predicate": "count > 10"
+  },
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": 100,
+    "sort_strategy": "partial_sort (nth_element + sort on top-100)",
+    "decode": "lookup tag and version strings from dictionaries"
+  },
+  "execution_target": "cpp",
+  "parameters": [
+    {"name": "limit", "type": "int", "default": 100},
+    {"name": "uom_eq", "type": "string", "default": "USD"},
+    {"name": "ddate_lower", "type": "int", "default": 20230101},
+    {"name": "ddate_upper", "type": "int", "default": 20231231}
+  ]
+}

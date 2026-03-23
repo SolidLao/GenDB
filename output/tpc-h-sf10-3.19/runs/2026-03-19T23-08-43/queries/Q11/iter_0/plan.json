@@ -1,0 +1,158 @@
+{
+  "query_id": "Q11",
+  "pipeline": [
+    "filter_nation",
+    "filter_supplier",
+    "scan_partsupp_aggregate",
+    "having_filter",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered by n_name='GERMANY')",
+      "probe": "supplier",
+      "type": "semi",
+      "strategy": "direct_array",
+      "build_cardinality": 1,
+      "notes": "Extract single nationkey, scan supplier with equality check on s_nationkey"
+    },
+    {
+      "build": "supplier(filtered, ~4000 rows)",
+      "probe": "partsupp(8M rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 4000,
+      "notes": "Bool array indexed by suppkey (100K entries) for O(1) lookup during partsupp scan"
+    }
+  ],
+  "filters": [
+    {
+      "table": "nation",
+      "predicate": "n_name = :n_name_eq",
+      "selectivity": 0.04,
+      "result_rows": 1
+    },
+    {
+      "table": "supplier",
+      "predicate": "s_nationkey = germany_nationkey",
+      "selectivity": 0.04,
+      "result_rows": 4000
+    }
+  ],
+  "data_structures": {
+    "supplier_filter": "bool_array(100001) indexed by suppkey — O(1) lookup, 100KB fits in L1/L2",
+    "aggregation": "direct_array<double>(2000001) indexed by ps_partkey — 16MB fits in L3 cache, zero hash overhead",
+    "grand_total": "thread-local double accumulators, summed after parallel scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan": "parallel partsupp scan with morsel size 65536",
+    "aggregation_merge": "thread-local direct_arrays merged via simple addition post-scan",
+    "serial_phases": ["filter_nation", "filter_supplier", "having_filter", "sort_output"]
+  },
+  "scan_strategy": {
+    "partsupp_columns": [
+      {
+        "column": "ps_suppkey",
+        "file": "storage/partsupp/ps_suppkey.bin",
+        "access": "mmap",
+        "madvise": "MADV_SEQUENTIAL"
+      },
+      {
+        "column": "ps_partkey",
+        "file": "storage/partsupp/ps_partkey.bin",
+        "access": "mmap",
+        "madvise": "MADV_SEQUENTIAL"
+      },
+      {
+        "column": "ps_supplycost",
+        "file": "storage/partsupp/ps_supplycost.bin",
+        "access": "mmap",
+        "madvise": "MADV_SEQUENTIAL"
+      },
+      {
+        "column": "ps_availqty",
+        "file": "storage/partsupp/ps_availqty.bin",
+        "access": "mmap",
+        "madvise": "MADV_SEQUENTIAL"
+      }
+    ],
+    "supplier_columns": [
+      {
+        "column": "s_suppkey",
+        "file": "storage/supplier/s_suppkey.bin",
+        "access": "mmap"
+      },
+      {
+        "column": "s_nationkey",
+        "file": "storage/supplier/s_nationkey.bin",
+        "access": "mmap"
+      }
+    ],
+    "nation_columns": [
+      {
+        "column": "n_nationkey",
+        "file": "storage/nation/n_nationkey.bin",
+        "access": "read"
+      },
+      {
+        "column": "n_name",
+        "files": ["storage/nation/n_name_offsets.bin", "storage/nation/n_name_data.bin"],
+        "access": "read"
+      }
+    ]
+  },
+  "execution_steps": [
+    {
+      "step": 1,
+      "name": "filter_nation",
+      "description": "Load 25-row nation table, find nationkey where n_name = :n_name_eq",
+      "output": "int32_t germany_nationkey"
+    },
+    {
+      "step": 2,
+      "name": "build_supplier_filter",
+      "description": "Scan 100K supplier rows, set supplier_filter[s_suppkey] = true where s_nationkey == germany_nationkey",
+      "output": "bool_array[100001] supplier_filter"
+    },
+    {
+      "step": 3,
+      "name": "scan_partsupp_aggregate",
+      "description": "Parallel morsel-driven scan of 8M partsupp rows. For each row: if supplier_filter[ps_suppkey], compute val = ps_supplycost * (double)ps_availqty, accumulate into thread-local agg_array[ps_partkey] += val and thread-local grand_total += val",
+      "output": "merged direct_array<double>[2000001] agg, double grand_total"
+    },
+    {
+      "step": 4,
+      "name": "having_filter",
+      "description": "Compute threshold = grand_total * 0.0001. Scan agg_array, collect (ps_partkey, value) pairs where value > threshold into result vector (~300K entries, most pass)",
+      "output": "vector<pair<int32_t, double>> results"
+    },
+    {
+      "step": 5,
+      "name": "sort_output",
+      "description": "Sort results by value DESC. Output all rows.",
+      "output": "sorted results"
+    }
+  ],
+  "indexes": [],
+  "aggregation": "array_direct",
+  "subquery_optimization": "single_pass — grand_total accumulated during same partsupp scan as per-partkey aggregation, avoiding redundant second scan",
+  "output": {
+    "columns": ["ps_partkey", "value"],
+    "order_by": ["value DESC"],
+    "limit": null
+  },
+  "memory_estimate": {
+    "supplier_filter": "100 KB",
+    "per_thread_agg_array": "16 MB × nthreads",
+    "grand_total": "8 bytes × nthreads",
+    "result_vector": "~4 MB"
+  },
+  "mmap_strategy": {
+    "declare_before_timer": true,
+    "use_MAP_POPULATE": false,
+    "notes": "Demand-paged mmap per L3_demand_paged_mmap skill; declare mmap resources before RAII timer per L3_raii_timer_resource_scoping"
+  },
+  "execution_target": "cpp"
+}

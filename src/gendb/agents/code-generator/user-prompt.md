@@ -35,10 +35,33 @@ Authoritative reference for column types, encodings, index layouts, table stats.
 {{benchmark_context}}
 {{/if}}
 
+{{#if memory_pre_injection}}
+{{memory_pre_injection}}
+{{/if}}
+
+{{#if memory_catalog}}
+{{memory_catalog}}
+{{/if}}
+
 ## Query to Implement
 ```sql
 {{query_sql}}
 ```
+
+{{#if template_sql}}
+## Parameterized Template SQL
+This query uses named parameters. Generate code that parses these from CLI args.
+```sql
+{{template_sql}}
+```
+
+### Parameter Definitions
+```json
+{{params_json}}
+```
+
+CLI params header: `{{cli_params_header_path}}`
+{{/if}}
 
 ## GenDB Storage Directory
 Binary columnar data: {{gendb_dir}}
@@ -59,8 +82,15 @@ Binary columnar data: {{gendb_dir}}
 
 ## Validation Loop
 Compile: g++ -O3 -march=native -std=c++17 -Wall -lpthread -fopenmp -DGENDB_PROFILE -I{{utils_path}} -o {{binary_name}} {{cpp_name}}
-Run: timeout {{timeout_sec}}s ./{{binary_name}} {{gendb_dir}} {{results_dir}}
+Run: timeout {{timeout_sec}}s ./{{binary_name}} {{gendb_dir}} {{results_dir}} {{param_cli_args}}
 {{#if has_ground_truth}}
 Validate: python3 {{compare_tool}} {{ground_truth_dir}} {{results_dir}}
 If validation fails: analyze root cause, fix, retry (up to 2 fix attempts)
+{{/if}}
+
+{{#if memory_note}}
+## Memory System Note
+Prior optimization experience is provided above from GenDB's memory system.
+Try the suggested approaches first. If they do not lead to good performance,
+identify bottlenecks yourself and propose new implementations.
 {{/if}}

@@ -17,7 +17,7 @@ Read the workload analysis from: {{workload_analysis_path}}
 ## GenDB Storage Directory (output)
 Write binary columnar data to: {{gendb_dir}}
 
-## Output Directory for Generated Code
+## Output Directory for Ingest Code
 Write ingest.cpp, build_indexes.cpp, and Makefile to: {{generated_ingest_dir}}
 
 IMPORTANT: You MUST:

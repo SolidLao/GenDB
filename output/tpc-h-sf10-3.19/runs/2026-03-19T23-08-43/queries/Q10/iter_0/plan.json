@@ -1,0 +1,122 @@
+{
+  "query_id": "Q10",
+  "pipeline": [
+    "load_nation",
+    "scan_orders_with_zonemap",
+    "probe_lineitem_index",
+    "filter_returnflag_aggregate",
+    "topk_revenue",
+    "late_materialize_customer"
+  ],
+  "join_order": [
+    {
+      "build": "orders(date_filtered)",
+      "probe": "lineitem(via_grouped_index)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 570000,
+      "notes": "Use lineitem_l_orderkey_grouped index; probe keys sorted by o_orderkey so access is sequential"
+    },
+    {
+      "build": "nation(all)",
+      "probe": "customer(c_nationkey)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 25,
+      "notes": "25-entry direct array nationkey→n_name, resolved during late materialization"
+    },
+    {
+      "build": "aggregation_result(c_custkey)",
+      "probe": "customer(via_dense_pk_lookup)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 20,
+      "notes": "Only top-20 customers need lookup via customer_c_custkey_lookup index"
+    }
+  ],
+  "filters": [
+    {
+      "table": "orders",
+      "predicate": "o_orderdate >= 8674 AND o_orderdate < 8766",
+      "selectivity": 0.038,
+      "method": "zonemap_prescan_then_parallel_scan"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_returnflag == 82",
+      "selectivity": 0.24,
+      "method": "inline_filter_during_index_probe"
+    }
+  ],
+  "data_structures": {
+    "nation_lookup": "direct_array(25, nationkey→n_name_string)",
+    "qualifying_orders": "compact_struct_array({orderkey:int32, custkey:int32}, ~570K, malloc)",
+    "lineitem_index": "sorted_grouped_index(preloaded)",
+    "aggregation": "compact_hash_map(c_custkey:int32 → revenue:double, pre_sized=600000)",
+    "topk": "priority_queue(min_heap, size=20, key=revenue)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phases": {
+      "orders_scan": "parallel_scan_with_zonemap_block_skip",
+      "orders_collect": "two_pass_parallel_scatter",
+      "lineitem_probe": "parallel_partition_by_orderkey_range",
+      "aggregation_merge": "per_thread_local_maps_then_merge"
+    }
+  },
+  "indexes": [
+    {
+      "index": "orders_o_orderdate_zonemap",
+      "file": "storage/indexes/orders_o_orderdate_zonemap.bin",
+      "purpose": "skip_blocks_outside_date_range",
+      "block_size": 65536
+    },
+    {
+      "index": "lineitem_l_orderkey_grouped",
+      "file": "storage/indexes/lineitem_l_orderkey_grouped.bin",
+      "purpose": "lookup_lineitem_rows_per_orderkey"
+    },
+    {
+      "index": "customer_c_custkey_lookup",
+      "file": "storage/indexes/customer_c_custkey_lookup.bin",
+      "purpose": "late_materialize_customer_fields_for_top20"
+    }
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["revenue DESC"],
+    "limit": 20,
+    "columns": ["c_custkey", "c_name", "revenue", "c_acctbal", "n_name", "c_address", "c_phone", "c_comment"]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": {
+    "mmap_strategy": "demand_paged_no_MAP_POPULATE",
+    "madvise_lineitem_columns": "MADV_SEQUENTIAL",
+    "madvise_lineitem_index": "MADV_SEQUENTIAL",
+    "timer_scoping": "raii_declare_mmap_before_timer",
+    "array_strategy": "compact_qualifying_arrays_not_full_keyspace",
+    "scatter_strategy": "two_pass_count_prefix_sum_scatter",
+    "late_materialization": "resolve_c_name_c_acctbal_c_address_c_phone_c_comment_n_name_only_for_top20"
+  },
+  "detailed_execution": {
+    "phase1_load_nation": {
+      "description": "Load 25-row nation table, build nationkey→n_name direct array"
+    },
+    "phase2_scan_orders": {
+      "description": "Read zonemap, identify qualifying blocks where date range [8674,8766) overlaps. Parallel scan qualifying blocks, filter o_orderdate. Two-pass parallel scatter: count qualifying per thread, prefix sum, scatter (o_orderkey, o_custkey) pairs into compact array.",
+      "output_cardinality": 570000,
+      "output_sorted_by": "o_orderkey"
+    },
+    "phase3_probe_lineitem": {
+      "description": "Partition qualifying orders across threads by range. For each orderkey, lookup lineitem_l_orderkey_grouped index to get (start, count). Read l_returnflag at those positions, filter == 82. For matches, read l_extendedprice and l_discount, compute extendedprice*(1-discount). Accumulate into per-thread hash map keyed by c_custkey (from qualifying orders array).",
+      "madvise": "MADV_SEQUENTIAL on l_returnflag, l_extendedprice, l_discount columns since orderkeys are sorted"
+    },
+    "phase4_merge_aggregate": {
+      "description": "Merge per-thread hash maps into single map. Use partial_sort or priority queue to find top-20 by revenue DESC."
+    },
+    "phase5_materialize": {
+      "description": "For top-20 custkeys only: use customer_c_custkey_lookup to get row_id, read c_name, c_acctbal, c_address, c_phone, c_comment, c_nationkey. Lookup n_name from nation direct array."
+    }
+  }
+}

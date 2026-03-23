@@ -1,0 +1,89 @@
+{
+  "query_id": "Q19",
+  "pipeline": ["load_dicts", "build_branch_array", "parallel_scan_lineitem", "reduce_sum"],
+  "join_order": [
+    {
+      "build": "part(precomputed_branch_array)",
+      "probe": "lineitem(filtered_shipinstruct_shipmode)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 2000000,
+      "probe_cardinality": 59986052,
+      "notes": "branch[partkey] direct-array lookup; partkey is dense int32 0..2M, use array not hash"
+    }
+  ],
+  "filters": [
+    {"table": "lineitem", "predicate": "l_shipinstruct = 'DELIVER IN PERSON'", "selectivity": 0.25, "column": "l_shipinstruct", "encoding": "dict_int8"},
+    {"table": "lineitem", "predicate": "l_shipmode IN ('AIR', 'AIR REG')", "selectivity": 0.13, "column": "l_shipmode", "encoding": "dict_int8"},
+    {"table": "part", "predicate": "p_brand = 'Brand#12'|'Brand#23'|'Brand#34'", "selectivity": 0.12, "column": "p_brand", "encoding": "dict_int8"},
+    {"table": "part", "predicate": "p_container IN (SM*|MED*|LG*)", "selectivity": 0.30, "column": "p_container", "encoding": "dict_int8"},
+    {"table": "part", "predicate": "p_size BETWEEN 1 AND 5|10|15", "selectivity": "0.10|0.20|0.30", "column": "p_size", "encoding": "raw_int32"}
+  ],
+  "data_structures": {
+    "branch_array": {
+      "type": "direct_array",
+      "layout": "uint8_t[max_partkey+1]",
+      "description": "branch[partkey] = 0 (no match), 1 (Brand#12/SM), 2 (Brand#23/MED), 3 (Brand#34/LG). Built from single scan of part table.",
+      "size_bytes": 2000001
+    },
+    "quantity_ranges": {
+      "type": "static_array",
+      "layout": "struct{double lo; double hi;}[4]",
+      "description": "quantity_ranges[branch] = {lo, hi}. Branch 0 unused. Branch 1: [1,11], Branch 2: [10,20], Branch 3: [20,30]."
+    },
+    "thread_accumulators": {
+      "type": "thread_local_double",
+      "description": "Per-thread partial SUM, final reduce after parallel scan"
+    }
+  },
+  "build_branch_array": {
+    "description": "Single-pass scan of part table to populate branch[] array",
+    "steps": [
+      "Load p_brand_dict, p_container_dict; resolve dict codes for Brand#12, Brand#23, Brand#34 and all 12 container values",
+      "Scan p_partkey, p_brand, p_container, p_size in parallel (small table, use all threads)",
+      "For each part row: check brand+container+size against all 3 branches, write branch[partkey] = matching branch (1/2/3) or 0"
+    ],
+    "branch_definitions": [
+      {"branch": 1, "brand": "Brand#12", "containers": ["SM CASE", "SM BOX", "SM PACK", "SM PKG"], "size_range": [1, 5]},
+      {"branch": 2, "brand": "Brand#23", "containers": ["MED BAG", "MED BOX", "MED PKG", "MED PACK"], "size_range": [1, 10]},
+      {"branch": 3, "brand": "Brand#34", "containers": ["LG CASE", "LG BOX", "LG PACK", "LG PKG"], "size_range": [1, 15]}
+    ]
+  },
+  "scan_lineitem": {
+    "description": "Parallel scan of lineitem with early filter on shipinstruct+shipmode, then branch lookup",
+    "columns_needed": ["l_shipinstruct", "l_shipmode", "l_partkey", "l_quantity", "l_extendedprice", "l_discount"],
+    "filter_order": [
+      "1. l_shipinstruct == deliver_in_person_code (int8 compare, 25% pass)",
+      "2. l_shipmode == air_code || l_shipmode == airreg_code (int8 compare, 13% pass)",
+      "3. branch[l_partkey] != 0 (array lookup, ~few% pass)",
+      "4. quantity_ranges[branch].lo <= l_quantity <= quantity_ranges[branch].hi",
+      "5. accumulate l_extendedprice * (1 - l_discount)"
+    ]
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "scan_target": "lineitem",
+    "notes": "Part table build is fast (2M rows), can be single-threaded or lightly parallel. Lineitem scan is the bottleneck — fully parallel with per-thread accumulators."
+  },
+  "mmap_strategy": {
+    "method": "demand_paged",
+    "flags": "MAP_PRIVATE, no MAP_POPULATE",
+    "advice": ["MADV_SEQUENTIAL", "MADV_HUGEPAGE"],
+    "notes": "Demand-paged mmap for all column files. MADV_SEQUENTIAL for lineitem columns (full scan). Declare mmap resources before RAII timer to exclude munmap TLB shootdown."
+  },
+  "indexes": [
+    {
+      "index": "part_p_partkey_lookup",
+      "purpose": "NOT USED — sequential part scan + direct branch_array is faster than random index lookups"
+    }
+  ],
+  "aggregation": "thread_local_sum_reduce",
+  "output": {"type": "single_value", "column": "revenue", "format": "double"},
+  "vectorization_hints": {
+    "restrict_pointers": true,
+    "notes": "Use __restrict__ on all column pointers for auto-vectorization. The shipinstruct+shipmode check is two int8 compares — highly vectorizable."
+  },
+  "execution_target": "cpp"
+}

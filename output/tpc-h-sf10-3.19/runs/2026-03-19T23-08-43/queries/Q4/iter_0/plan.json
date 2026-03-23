@@ -1,0 +1,154 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "zonemap_filter_orders",
+    "scan_filter_orderdate",
+    "compact_qualifying_orders",
+    "sort_by_orderkey",
+    "exists_probe_lineitem",
+    "aggregate_priority",
+    "output"
+  ],
+  "steps": [
+    {
+      "id": "zonemap_filter_orders",
+      "operation": "zonemap_block_skip",
+      "table": "orders",
+      "index": "orders_o_orderdate_zonemap",
+      "predicate": "o_orderdate >= 8582 && o_orderdate < 8674",
+      "output": "qualifying_block_ranges",
+      "notes": "Skip blocks whose [min,max] doesn't overlap [8582, 8674)"
+    },
+    {
+      "id": "scan_filter_orderdate",
+      "operation": "parallel_block_scan",
+      "table": "orders",
+      "input": "qualifying_block_ranges",
+      "columns": ["o_orderdate", "o_orderkey", "o_orderpriority"],
+      "predicate": "o_orderdate >= 8582 && o_orderdate < 8674",
+      "selectivity": 0.038,
+      "output_cardinality": 570000,
+      "technique": "two_pass_parallel_scatter",
+      "notes": "Two-pass: count qualifying per block, prefix-sum, scatter into compact arrays. Collect (row_id, o_orderkey, o_orderpriority_code) tuples."
+    },
+    {
+      "id": "sort_by_orderkey",
+      "operation": "parallel_sort",
+      "input": "qualifying_orders",
+      "sort_key": "o_orderkey",
+      "cardinality": 570000,
+      "notes": "Sort qualifying orders by orderkey for sequential lineitem access via grouped index. Enables MADV_SEQUENTIAL on lineitem columns."
+    },
+    {
+      "id": "exists_probe_lineitem",
+      "operation": "semi_join_index_probe",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "index": "lineitem_l_orderkey_grouped",
+      "probe_table": "orders(filtered)",
+      "lookup_table": "lineitem",
+      "probe_cardinality": 570000,
+      "columns_accessed": ["l_commitdate", "l_receiptdate"],
+      "predicate": "l_commitdate[row] < l_receiptdate[row]",
+      "exists_early_exit": true,
+      "estimated_pass_rate": 0.95,
+      "output_cardinality": 541500,
+      "notes": "For each qualifying order, use grouped index to get (start, count) for its lineitems. Scan lineitem rows checking commitdate < receiptdate. Short-circuit on first match. Most orders have 1-7 lineitems and ~62.5% satisfy condition per item, so EXISTS succeeds quickly. Probe in sorted orderkey order for sequential I/O."
+    },
+    {
+      "id": "aggregate_priority",
+      "operation": "aggregate",
+      "strategy": "thread_local_direct_array",
+      "group_by": "o_orderpriority",
+      "num_groups": 5,
+      "aggregates": [{"function": "COUNT", "alias": "order_count"}],
+      "notes": "5 priority codes → direct array[5] per thread, merge at end. No hash table needed. Use alignas(64) thread-local arrays to avoid false sharing."
+    },
+    {
+      "id": "output",
+      "operation": "dict_decode_and_sort",
+      "dict_file": "storage/orders/o_orderpriority_dict.bin",
+      "order_by": ["o_orderpriority ASC"],
+      "notes": "Load dictionary at runtime to map code→string. Sort 5 entries by string value. Never hardcode dict codes."
+    }
+  ],
+  "join_order": [
+    {
+      "build": "orders(date_filtered)",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 570000,
+      "notes": "Use lineitem_l_orderkey_grouped index for direct lookup. No hash table needed — grouped index gives O(1) access to lineitem rows per orderkey."
+    }
+  ],
+  "filters": [
+    {
+      "table": "orders",
+      "predicate": "o_orderdate >= 8582 && o_orderdate < 8674",
+      "selectivity": 0.038,
+      "zonemap": "orders_o_orderdate_zonemap"
+    },
+    {
+      "table": "lineitem",
+      "predicate": "l_commitdate < l_receiptdate",
+      "selectivity": 0.625,
+      "context": "EXISTS subquery condition"
+    }
+  ],
+  "data_structures": {
+    "qualifying_orders": "compact_arrays(o_orderkey[570K], o_orderpriority_code[570K]) — sized to qualifying rows, not full table",
+    "grouped_index": "pre_built_index(lineitem_l_orderkey_grouped) — mmap read-only",
+    "aggregation": "direct_array[5] per thread — alignas(64) to avoid false sharing"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "zonemap_scan": "parallel over qualifying blocks, schedule(static)",
+    "exists_probe": "parallel over qualifying orders, schedule(static) — uniform work per order due to sorted access",
+    "aggregation_merge": "sequential merge of thread-local arrays (5 entries each, trivial)"
+  },
+  "indexes": [
+    {
+      "index": "orders_o_orderdate_zonemap",
+      "file": "storage/indexes/orders_o_orderdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "layout": "header(uint64_t num_blocks, uint32_t block_size=65536) + body(int32_t[num_blocks*2] as [min,max] pairs)"
+    },
+    {
+      "index": "lineitem_l_orderkey_grouped",
+      "file": "storage/indexes/lineitem_l_orderkey_grouped.bin",
+      "purpose": "semi_join_lookup",
+      "layout": "header(uint64_t num_entries) + body(uint32_t[num_entries*2] as [start,count] pairs)"
+    }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_orderpriority ASC"],
+    "limit": null,
+    "columns": ["o_orderpriority", "order_count"]
+  },
+  "mmap_strategy": {
+    "technique": "demand_paged_mmap",
+    "flags": "MAP_PRIVATE",
+    "advice_columns": "MADV_SEQUENTIAL | MADV_HUGEPAGE",
+    "advice_index_probe": "MADV_SEQUENTIAL",
+    "notes": "No MAP_POPULATE — demand-paged for hot runs. Declare mmap resources before RAII timer to exclude munmap TLB shootdown."
+  },
+  "column_files": {
+    "orders": [
+      "storage/orders/o_orderdate.bin",
+      "storage/orders/o_orderkey.bin",
+      "storage/orders/o_orderpriority.bin"
+    ],
+    "lineitem": [
+      "storage/lineitem/l_orderkey.bin",
+      "storage/lineitem/l_commitdate.bin",
+      "storage/lineitem/l_receiptdate.bin"
+    ],
+    "dictionaries": [
+      "storage/orders/o_orderpriority_dict.bin"
+    ]
+  },
+  "execution_target": "cpp"
+}

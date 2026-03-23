@@ -60,10 +60,33 @@ Read the current plan for reference: {{plan_path}}
 ## Current Implementation (read for analysis)
 Read the current code to understand what was implemented: {{cpp_path}}
 
+{{#if memory_pre_injection}}
+{{memory_pre_injection}}
+{{/if}}
+
+{{#if memory_catalog}}
+{{memory_catalog}}
+{{/if}}
+
+{{#if template_sql}}
+## Parameterized Template SQL
+```sql
+{{template_sql}}
+```
+Parameters: {{params_json}}
+{{/if}}
+
 ## Original SQL
 ```sql
 {{query_sql}}
 ```
+
+{{#if memory_note}}
+## Memory System Note
+Prior optimization experience is provided above from GenDB's memory system.
+Try the suggested approaches first. If they do not lead to good performance,
+identify bottlenecks yourself and propose new implementations.
+{{/if}}
 
 ## Output
 Write your revised execution plan to: {{revised_plan_path}}

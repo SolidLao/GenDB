@@ -1,0 +1,107 @@
+{
+  "query_id": "Q15",
+  "pipeline": ["zonemap_filter", "parallel_scan_aggregate", "find_max", "lookup_supplier"],
+  "filters": [
+    {
+      "table": "lineitem",
+      "predicate": "l_shipdate >= 9497 AND l_shipdate < 9588",
+      "selectivity": 0.037,
+      "estimated_rows": 2220000
+    }
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_extendedprice", "file": "lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_discount", "file": "lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential_blocks"
+  },
+  "join_order": [
+    {
+      "build": "revenue_array(aggregated, ~100K entries)",
+      "probe": "supplier(via pk_lookup, 1-2 rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 100000,
+      "notes": "suppkey is dense 0-100K; use direct array for aggregation. After finding max revenue, lookup matching suppkey(s) via supplier pk index."
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array(double, max_suppkey+1, ~800KB)",
+    "thread_local_aggregation": "direct_array(double, max_suppkey+1, per_thread ~800KB, allocated via calloc inside parallel region for NUMA first-touch)",
+    "supplier_lookup": "pre_built_index(supplier_s_suppkey_lookup)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "purpose": "skip_blocks",
+      "condition": "skip where max < 9497 || min >= 9588"
+    },
+    {
+      "index": "supplier_s_suppkey_lookup",
+      "file": "storage/indexes/supplier_s_suppkey_lookup.bin",
+      "purpose": "join_lookup",
+      "condition": "lookup row_id for matching suppkey(s) to retrieve s_name, s_address, s_phone"
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "min(nproc, num_qualifying_blocks, 16)",
+    "notes": "Cap threads to min(nproc, qualifying_blocks, 16). With ~34 qualifying blocks and 800KB per thread-local array, 16 threads = 12.8MB which fits comfortably in 44MB L3. Allocate thread-local arrays INSIDE the parallel region using calloc (not std::vector) for NUMA-aware first-touch and to avoid constructor overhead. Each thread calloc's its own revenue array on first use, and free's after merge.",
+    "scan_phase": {
+      "schedule": "static",
+      "morsel_size": 65536,
+      "thread_local_arrays": true,
+      "allocation": "calloc inside parallel region (NUMA first-touch)",
+      "merge": "parallel element-wise sum of thread-local arrays into global array"
+    }
+  },
+  "aggregation": "array_direct",
+  "execution_phases": [
+    {
+      "phase": 1,
+      "name": "zonemap_filter",
+      "description": "Load lineitem_l_shipdate_zonemap. Build list of qualifying block indices where block overlaps [9497, 9588). Then set nthreads = min(omp_get_max_threads(), num_qualifying_blocks, 16)."
+    },
+    {
+      "phase": 2,
+      "name": "parallel_scan_aggregate",
+      "description": "Use omp_set_num_threads(nthreads). Inside #pragma omp parallel: each thread allocates its own revenue array via calloc(rev_size, sizeof(double)) — this ensures NUMA first-touch locality and avoids std::vector constructor overhead. Then #pragma omp for schedule(static) over qualifying blocks: for each block, scan l_shipdate in [shipdate_lo, shipdate_hi), accumulate revenue[l_suppkey[i]] += l_extendedprice[i] * (1.0 - l_discount[i]). After the parallel for, merge: allocate global revenue array via calloc, then #pragma omp for schedule(static) over rev_size to sum all thread-local arrays element-wise. Each thread frees its local array after merge.",
+      "columns_scanned": ["l_shipdate", "l_suppkey", "l_extendedprice", "l_discount"],
+      "mmap_advice": "MADV_SEQUENTIAL + MADV_HUGEPAGE on all four column files, no MAP_POPULATE"
+    },
+    {
+      "phase": 3,
+      "name": "find_max",
+      "description": "Single pass over revenue[0..rev_size-1] to find max_revenue. Then collect all suppkeys where fabs(revenue[sk] - max_revenue) < 1e-6 and revenue[sk] > 0."
+    },
+    {
+      "phase": 4,
+      "name": "lookup_supplier",
+      "description": "For each matching suppkey, use supplier_s_suppkey_lookup to get row_id. Read s_name, s_address, s_phone from supplier varlen columns at that row_id. Output sorted by s_suppkey."
+    }
+  ],
+  "output": {
+    "columns": ["s_suppkey", "s_name", "s_address", "s_phone", "total_revenue"],
+    "order_by": ["s_suppkey ASC"],
+    "limit": null,
+    "expected_rows": 1
+  },
+  "mmap_strategy": {
+    "technique": "demand_paged_mmap",
+    "flags": "MAP_PRIVATE",
+    "advice": ["MADV_SEQUENTIAL", "MADV_HUGEPAGE"],
+    "anti_pattern": "no MAP_POPULATE",
+    "resource_scoping": "declare mmap resources (MmapFile structs) BEFORE the RAII timer scope so that munmap TLB shootdown cost is excluded from timing"
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category B+C: Root cause is 64 thread-local revenue arrays (64 × 800KB = 50MB) exceeding L3 cache (44MB), all zero-initialized sequentially in the main thread via std::vector before the parallel region — causing 50MB of serial page faults and cache thrashing. Fix: (1) Cap threads to min(nproc, qualifying_blocks, 16) — with ~34 qualifying blocks, 16 threads × 800KB = 12.8MB fits comfortably in L3. (2) Allocate thread-local arrays via calloc INSIDE the parallel region for NUMA first-touch locality, eliminating serial initialization bottleneck. (3) Use calloc instead of std::vector to avoid zero-init constructor overhead (OS provides zero pages via copy-on-write). These changes reduce memory pressure by 4× and parallelize initialization cost across threads.",
+  "correctness_anchors": {
+    "date_arithmetic": "add_months(shipdate_hi, 3)"
+  }
+}

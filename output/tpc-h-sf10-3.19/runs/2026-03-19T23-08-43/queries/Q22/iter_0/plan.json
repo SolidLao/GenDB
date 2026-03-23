@@ -1,0 +1,161 @@
+{
+  "query_id": "Q22",
+  "pipeline": ["build_has_orders_bitset", "compute_avg_acctbal", "filter_aggregate", "sort_output"],
+  "phases": [
+    {
+      "id": "build_has_orders_bitset",
+      "description": "Scan o_custkey to build bitset of customers who have orders",
+      "input": "orders.o_custkey (15,000,000 rows)",
+      "output": "has_orders_bitset",
+      "parallel": true
+    },
+    {
+      "id": "compute_avg_acctbal",
+      "description": "Scan customer to compute AVG(c_acctbal) where acctbal > 0 AND country code in target set",
+      "input": "customer (1,500,000 rows)",
+      "output": "avg_acctbal (scalar double)",
+      "parallel": true
+    },
+    {
+      "id": "filter_aggregate",
+      "description": "Scan customer: apply country code filter + acctbal > avg + anti-join bitset, aggregate by cntrycode",
+      "input": "customer (1,500,000 rows) + has_orders_bitset + avg_acctbal",
+      "output": "7 group aggregates (count, sum)",
+      "parallel": true
+    },
+    {
+      "id": "sort_output",
+      "description": "Output 7 rows sorted by cntrycode ASC",
+      "parallel": false
+    }
+  ],
+  "join_order": [
+    {
+      "build": "orders(o_custkey → bitset)",
+      "probe": "customer",
+      "type": "anti",
+      "strategy": "bitset_anti_join",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 1500000,
+      "notes": "Bitset indexed by custkey; ~188KB fits in L3. Set bit for each o_custkey, then check NOT set during customer scan."
+    }
+  ],
+  "filters": [
+    {
+      "table": "customer",
+      "predicate": "SUBSTRING(c_phone, 1, 2) IN ('13','17','18','23','29','30','31')",
+      "selectivity": 0.28,
+      "method": "Extract first 2 bytes from varlen c_phone, convert to int: (c1-'0')*10+(c2-'0'), lookup in 32-element bool array indexed by country code value"
+    },
+    {
+      "table": "customer",
+      "predicate": "c_acctbal > avg_acctbal",
+      "selectivity": 0.35,
+      "method": "Compare after avg is computed in phase 2"
+    },
+    {
+      "table": "customer",
+      "predicate": "NOT EXISTS (orders WHERE o_custkey = c_custkey)",
+      "selectivity": 0.33,
+      "method": "Check has_orders_bitset[c_custkey] == 0"
+    }
+  ],
+  "data_structures": {
+    "has_orders_bitset": {
+      "type": "bitset",
+      "size_bits": 1500001,
+      "size_bytes": 187501,
+      "indexed_by": "c_custkey (int32_t, 0-based)",
+      "notes": "Parallel build with thread-local bitsets OR'd together, or atomic bit-set. Fits in L3 cache."
+    },
+    "country_code_lookup": {
+      "type": "direct_bool_array",
+      "size": 40,
+      "indexed_by": "country_code_int (0-39 covers all 2-digit codes)",
+      "target_codes_as_int": [13, 17, 18, 23, 29, 30, 31],
+      "notes": "bool[40] with true at indices 13,17,18,23,29,30,31"
+    },
+    "avg_accumulators": {
+      "type": "thread_local_sum_count",
+      "fields": ["double sum", "int64_t count"],
+      "notes": "Per-thread sum/count, merge after parallel scan, compute avg = total_sum / total_count"
+    },
+    "aggregation": {
+      "type": "direct_array",
+      "size": 7,
+      "indexed_by": "cntrycode mapped to 0-6 via small lookup",
+      "fields": ["int64_t count", "double sum_acctbal"],
+      "notes": "Thread-local arrays of 7 buckets, merge after parallel scan. Map codes {13,17,18,23,29,30,31} → {0,1,2,3,4,5,6}."
+    }
+  },
+  "column_access": {
+    "phase1_orders": {
+      "o_custkey": {
+        "file": "storage/orders/o_custkey.bin",
+        "type": "int32_t",
+        "rows": 15000000,
+        "access": "sequential_scan",
+        "mmap_advice": "MADV_SEQUENTIAL"
+      }
+    },
+    "phase2_customer_avg": {
+      "c_phone_offsets": {
+        "file": "storage/customer/c_phone_offsets.bin",
+        "type": "uint32_t",
+        "rows": 1500001,
+        "access": "sequential_scan"
+      },
+      "c_phone_data": {
+        "file": "storage/customer/c_phone_data.bin",
+        "type": "char",
+        "access": "random_2byte_reads",
+        "notes": "Only read first 2 bytes per customer using offset"
+      },
+      "c_acctbal": {
+        "file": "storage/customer/c_acctbal.bin",
+        "type": "double",
+        "rows": 1500000,
+        "access": "sequential_scan"
+      }
+    },
+    "phase3_customer_main": {
+      "same_as": "phase2_customer_avg",
+      "additional": {
+        "c_custkey": {
+          "file": "storage/customer/c_custkey.bin",
+          "type": "int32_t",
+          "rows": 1500000,
+          "access": "sequential_scan",
+          "notes": "Needed for bitset anti-join lookup"
+        }
+      }
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase1_morsel_size": 131072,
+    "phase2_morsel_size": 65536,
+    "phase3_morsel_size": 65536,
+    "merge": "Thread-local aggregates merged serially after parallel phases"
+  },
+  "mmap_strategy": {
+    "method": "demand_paged_mmap",
+    "flags": "MAP_PRIVATE",
+    "populate": false,
+    "notes": "Declare mmap resources before RAII timer scope to exclude munmap TLB shootdown cost"
+  },
+  "aggregation": "array_direct",
+  "output": {
+    "columns": ["cntrycode (char[2] or string)", "numcust (int64_t)", "totacctbal (double)"],
+    "order_by": ["cntrycode ASC"],
+    "limit": null,
+    "num_rows": 7
+  },
+  "optimization_notes": {
+    "phase_overlap": "Phase 1 (orders bitset) and Phase 2 (avg computation) are independent and can run concurrently",
+    "combined_filter_selectivity": "0.28 * 0.35 * 0.33 ≈ 0.032 → ~48K qualifying customers",
+    "filter_order": "Apply country_code check first (cheapest, 28% pass), then acctbal > avg (35% pass), then bitset anti-join (33% pass)"
+  },
+  "execution_target": "cpp"
+}

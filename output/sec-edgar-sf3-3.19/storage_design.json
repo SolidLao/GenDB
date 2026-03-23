@@ -1,0 +1,78 @@
+{
+  "persistent_storage": { "format": "binary_columnar", "base_dir_name": "storage" },
+  "tables": {
+    "sub": {
+      "columns": [
+        { "name": "adsh",  "cpp_type": "uint32_t", "semantic_type": "pk_code",    "encoding": "dict_shared_adsh" },
+        { "name": "cik",   "cpp_type": "int32_t",  "semantic_type": "identifier", "encoding": "raw" },
+        { "name": "name",  "cpp_type": "uint32_t", "semantic_type": "string_code","encoding": "dict_name" },
+        { "name": "sic",   "cpp_type": "int16_t",  "semantic_type": "category",   "encoding": "raw" },
+        { "name": "fy",    "cpp_type": "int16_t",  "semantic_type": "year",       "encoding": "raw" }
+      ],
+      "file_format": { "filename": "sub.csv", "delimiter": ",", "column_order": ["adsh","cik","name","sic","countryba","stprba","cityba","countryinc","form","period","fy","fp","filed","accepted","prevrpt","nciks","afs","wksi","fye","instance"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "86135",
+      "indexes": [
+        { "name": "sub_adsh_lookup", "type": "dense_array", "columns": ["adsh"], "description": "adsh_code -> sub_row_id, dense array indexed by dict code" }
+      ]
+    },
+    "num": {
+      "columns": [
+        { "name": "adsh",    "cpp_type": "uint32_t", "semantic_type": "fk_code",  "encoding": "dict_shared_adsh" },
+        { "name": "tag",     "cpp_type": "uint32_t", "semantic_type": "fk_code",  "encoding": "dict_shared_tag" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "fk_code",  "encoding": "dict_shared_version" },
+        { "name": "ddate",   "cpp_type": "int32_t",  "semantic_type": "date_int", "encoding": "raw" },
+        { "name": "uom",     "cpp_type": "uint16_t", "semantic_type": "category", "encoding": "dict_uom" },
+        { "name": "value",   "cpp_type": "double",   "semantic_type": "measure",  "encoding": "raw" },
+        { "name": "value_null", "cpp_type": "uint8_t", "semantic_type": "null_bitmap", "encoding": "raw" }
+      ],
+      "file_format": { "filename": "num.csv", "delimiter": ",", "column_order": ["adsh","tag","version","ddate","qtrs","uom","coreg","value","footnote"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "39401761",
+      "indexes": []
+    },
+    "tag": {
+      "columns": [
+        { "name": "tag",      "cpp_type": "uint32_t", "semantic_type": "pk_code",    "encoding": "dict_shared_tag" },
+        { "name": "version",  "cpp_type": "uint32_t", "semantic_type": "pk_code",    "encoding": "dict_shared_version" },
+        { "name": "abstract", "cpp_type": "int8_t",   "semantic_type": "flag",       "encoding": "raw" },
+        { "name": "tlabel",   "cpp_type": "uint32_t", "semantic_type": "string_code","encoding": "dict_tlabel" }
+      ],
+      "file_format": { "filename": "tag.csv", "delimiter": ",", "column_order": ["tag","version","custom","abstract","datatype","iord","crdr","tlabel","doc"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "1070662",
+      "indexes": [
+        { "name": "tag_pk", "type": "hash", "columns": ["tag", "version"], "description": "hash(tag_code, version_code) -> tag_row_id" }
+      ]
+    },
+    "pre": {
+      "columns": [
+        { "name": "adsh",    "cpp_type": "uint32_t", "semantic_type": "fk_code",    "encoding": "dict_shared_adsh" },
+        { "name": "tag",     "cpp_type": "uint32_t", "semantic_type": "fk_code",    "encoding": "dict_shared_tag" },
+        { "name": "version", "cpp_type": "uint32_t", "semantic_type": "fk_code",    "encoding": "dict_shared_version" },
+        { "name": "stmt",    "cpp_type": "uint8_t",  "semantic_type": "category",   "encoding": "dict_stmt" },
+        { "name": "rfile",   "cpp_type": "uint8_t",  "semantic_type": "category",   "encoding": "dict_rfile" },
+        { "name": "line",    "cpp_type": "int32_t",  "semantic_type": "ordinal",    "encoding": "raw" },
+        { "name": "plabel",  "cpp_type": "uint32_t", "semantic_type": "string_code","encoding": "dict_plabel" }
+      ],
+      "file_format": { "filename": "pre.csv", "delimiter": ",", "column_order": ["adsh","report","line","stmt","inpth","rfile","tag","version","plabel","negating"] },
+      "sort_order": [], "block_size": 100000, "estimated_rows": "9600799",
+      "indexes": [
+        { "name": "pre_join", "type": "hash_multimap", "columns": ["adsh", "tag", "version"], "description": "hash(adsh_code, tag_code, version_code) -> list of pre_row_ids, sorted by key for grouping" }
+      ]
+    }
+  },
+  "shared_dictionaries": {
+    "adsh":    { "scope": ["sub", "num", "pre"], "value_type": "string", "code_type": "uint32_t", "estimated_cardinality": 86135 },
+    "tag":     { "scope": ["num", "tag", "pre"], "value_type": "string", "code_type": "uint32_t", "estimated_cardinality": 1000000 },
+    "version": { "scope": ["num", "tag", "pre"], "value_type": "string", "code_type": "uint32_t", "estimated_cardinality": 100000 }
+  },
+  "local_dictionaries": {
+    "uom":    { "table": "num", "code_type": "uint16_t", "estimated_cardinality": 30 },
+    "name":   { "table": "sub", "code_type": "uint32_t", "estimated_cardinality": 86000 },
+    "stmt":   { "table": "pre", "code_type": "uint8_t",  "estimated_cardinality": 8 },
+    "rfile":  { "table": "pre", "code_type": "uint8_t",  "estimated_cardinality": 2 },
+    "tlabel": { "table": "tag", "code_type": "uint32_t", "estimated_cardinality": 500000 },
+    "plabel": { "table": "pre", "code_type": "uint32_t", "estimated_cardinality": 2000000 }
+  },
+  "type_mappings": { "INTEGER": "int32_t", "DECIMAL": "double", "DATE": "int32_t", "VARCHAR": "uint32_t (dict)" },
+  "date_encoding": "raw_yyyymmdd_integer",
+  "hardware_config": { "cpu_cores": "64", "l3_cache_mb": "44", "disk_type": "hdd", "total_memory_gb": "376", "simd": "avx512" }
+}

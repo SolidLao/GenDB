@@ -1,0 +1,110 @@
+{
+  "query_id": "Q13",
+  "pipeline": ["parallel_scan_orders_with_filter", "merge_per_thread_counts", "build_histogram", "sort_output"],
+  "scan": {
+    "table": "orders",
+    "columns": ["o_custkey", "o_comment"],
+    "rows": 15000000,
+    "strategy": "parallel_morsel_scan",
+    "filter": {
+      "column": "o_comment",
+      "predicate": "NOT LIKE '%special%requests%'",
+      "method": "memmem_two_phase",
+      "selectivity": 0.989,
+      "notes": "Find 'special' via memmem, then find 'requests' in remainder. Exclude matches."
+    },
+    "action": "increment per-thread c_count array at o_custkey position for passing rows"
+  },
+  "join_order": [
+    {
+      "build": "none",
+      "probe": "orders",
+      "type": "left_outer_simulated",
+      "strategy": "direct_array",
+      "build_cardinality": 1500000,
+      "probe_cardinality": 15000000,
+      "notes": "LEFT JOIN simulated via direct count array: c_count[custkey]++. All customers start at 0 (LEFT JOIN semantics). No explicit join needed — scan orders and accumulate counts by o_custkey."
+    }
+  ],
+  "filters": [
+    {
+      "table": "orders",
+      "predicate": "o_comment NOT LIKE '%special%requests%'",
+      "selectivity": 0.989,
+      "method": "memmem_two_phase"
+    }
+  ],
+  "data_structures": {
+    "per_thread_c_count": "direct_array(int32_t[1500001], per_thread, zero_initialized)",
+    "histogram": "direct_array(int32_t[max_c_count+1])",
+    "notes": "Per-thread local arrays (6MB each × 64 = 384MB) avoid atomic contention. Merge after scan. max_c_count ≈ 40 so histogram is tiny."
+  },
+  "aggregation": [
+    {
+      "phase": "inner",
+      "operation": "COUNT(o_orderkey) per c_custkey",
+      "strategy": "direct_array_per_thread_then_merge",
+      "details": {
+        "per_thread_arrays": 64,
+        "array_size": 1500001,
+        "element_type": "int32_t",
+        "total_memory_mb": 384,
+        "merge": "parallel_reduction_of_per_thread_arrays"
+      }
+    },
+    {
+      "phase": "outer",
+      "operation": "COUNT(*) GROUP BY c_count",
+      "strategy": "array_direct",
+      "details": {
+        "distinct_groups": "~40",
+        "method": "scan merged c_count array, custdist[c_count]++ for all 1,500,000 customer keys"
+      }
+    }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "phases": {
+      "scan_orders": "parallel — partition 15M rows into morsels, each thread has local c_count array",
+      "merge_counts": "parallel — divide 1.5M custkey range across threads, sum per-thread arrays",
+      "build_histogram": "single_thread — only ~1.5M entries into ~40 buckets, trivially fast",
+      "sort_output": "single_thread — ~40 entries"
+    }
+  },
+  "mmap_strategy": {
+    "o_custkey": {
+      "file": "storage/orders/o_custkey.bin",
+      "flags": "demand_paged",
+      "advice": "MADV_SEQUENTIAL | MADV_HUGEPAGE"
+    },
+    "o_comment_offsets": {
+      "file": "storage/orders/o_comment_offsets.bin",
+      "flags": "demand_paged",
+      "advice": "MADV_SEQUENTIAL | MADV_HUGEPAGE"
+    },
+    "o_comment_data": {
+      "file": "storage/orders/o_comment_data.bin",
+      "flags": "demand_paged",
+      "advice": "MADV_SEQUENTIAL | MADV_HUGEPAGE"
+    },
+    "raii_scoping": "declare MMap objects at outer scope before RAII timer to exclude munmap TLB shootdown cost"
+  },
+  "indexes": [],
+  "output": {
+    "columns": ["c_count", "custdist"],
+    "order_by": ["custdist DESC", "c_count DESC"],
+    "limit": null,
+    "expected_rows": "~40"
+  },
+  "critical_notes": [
+    "Do NOT use MAP_POPULATE — demand-paged mmap with MADV_SEQUENTIAL for sequential scan",
+    "Per-thread local c_count arrays to avoid atomic contention on hot custkey slots",
+    "Customer keys range 1..1500000 contiguously — direct array is optimal (only 6MB each)",
+    "LEFT JOIN semantics: customers with no qualifying orders have c_count=0, must be counted in histogram",
+    "String matching: two-phase memmem — find 'special' (7 bytes), then 'requests' (8 bytes) in remainder",
+    "RAII timer scoping: munmap outside timing scope to avoid TLB shootdown cost"
+  ],
+  "execution_target": "cpp"
+}

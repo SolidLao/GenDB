@@ -1,0 +1,112 @@
+{
+  "query_id": "Q20",
+  "pipeline": [
+    "filter_nation",
+    "filter_supplier_by_nation",
+    "filter_part_by_name",
+    "scan_lineitem_collect",
+    "aggregate_collected",
+    "scan_partsupp_check_threshold",
+    "materialize_output",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "nation(filtered → 1 row)",
+      "probe": "supplier",
+      "type": "semi",
+      "strategy": "direct_scalar_compare",
+      "build_cardinality": 1,
+      "notes": "Single nationkey value; direct equality check"
+    },
+    {
+      "build": "part(filtered → 22K forest parts)",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "build_cardinality": 22000,
+      "notes": "Bitset on partkey for O(1) probe during lineitem scan"
+    },
+    {
+      "build": "qty_map from collected lineitem tuples",
+      "probe": "partsupp(indexed on qualifying partkeys)",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 88000,
+      "notes": "Hash map built from ~106K collected tuples in single pass, then probed during partsupp scan"
+    },
+    {
+      "build": "supplier(filtered CANADA → 4K)",
+      "probe": "partsupp",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "build_cardinality": 4000
+    }
+  ],
+  "filters": [
+    {"table": "nation", "predicate": "n_name = :n_name_eq", "selectivity": 0.04},
+    {"table": "supplier", "predicate": "s_nationkey = canada_nationkey", "selectivity": 0.04},
+    {"table": "part", "predicate": "p_name LIKE :p_name_pattern", "selectivity": 0.011},
+    {"table": "lineitem", "predicate": "l_partkey IN forest_partkey_bitset", "selectivity": 0.011},
+    {"table": "lineitem", "predicate": "l_shipdate >= 8766 AND l_shipdate < 9131", "selectivity": 0.16},
+    {"table": "partsupp", "predicate": "ps_suppkey IN canada_suppkey_bitset", "selectivity": 0.04},
+    {"table": "partsupp", "predicate": "ps_availqty > 0.5 * SUM(l_quantity)", "selectivity": 0.05}
+  ],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "columns": [
+      {"name": "l_partkey", "file": "lineitem/l_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_shipdate", "file": "lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_suppkey", "file": "lineitem/l_suppkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_quantity", "file": "lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "canada_suppkey_bitset": "bitset(100001) — uint64_t words",
+    "forest_partkey_bitset": "bitset(2000001) — uint64_t words",
+    "thread_local_tuples": "per-thread vector<{int32_t partkey, int32_t suppkey, double qty}> — collect qualifying rows only, no hash map during scan",
+    "global_qty_map": "compact_hash_map<(int32_t pk, int32_t sk), double> pre-sized to 256K slots (4MB, fits in LLC). Built ONCE from concatenated tuples in single thread — no merge needed",
+    "qualifying_suppkey_bitset": "bitset(100001)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_phases": [
+      {
+        "phase": "filter_part_by_name",
+        "approach": "parallel scan with OMP for over rows, thread-local vectors of qualifying partkeys, merge into bitset after",
+        "notes": "Parallelize 2M string comparisons to reduce from 22ms"
+      },
+      {
+        "phase": "scan_lineitem_collect",
+        "approach": "parallel block scan with zonemap skip. Check l_partkey against forest bitset FIRST (1.1% selectivity — rejects 98.9%). Only for qualifying partkeys, check shipdate. For rows passing both filters (~106K total), append (partkey, suppkey, quantity) tuple to thread-local vector. NO hash map during scan.",
+        "morsel_size": 65536,
+        "notes": "Thread-local vectors are cheap: ~1.6K tuples × 16B = 26KB per thread. Total collection: 106K × 16B = 1.7MB. Eliminates 256MB hash map allocation+init+merge."
+      },
+      {
+        "phase": "aggregate_collected",
+        "approach": "Single-threaded pass over concatenated tuples (~106K entries, ~1.7MB, fits L2). Insert into global_qty_map (4MB, fits LLC). No merge step needed.",
+        "notes": "This replaces the 59ms merge_maps phase. 106K hash insertions into a cache-resident map takes <1ms."
+      }
+    ],
+    "serial_phases": ["filter_nation", "filter_supplier_by_nation", "scan_partsupp_check_threshold", "materialize_output", "sort_output"]
+  },
+  "indexes": [
+    {"index": "lineitem_l_shipdate_zonemap", "purpose": "skip_blocks outside [8766, 9131) during lineitem scan"},
+    {"index": "partsupp_ps_partkey_grouped", "purpose": "direct lookup of partsupp rows for qualifying partkeys only"},
+    {"index": "supplier_s_suppkey_lookup", "purpose": "O(1) row lookup for final materialization of s_name, s_address"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": ["s_name ASC NULLS FIRST"],
+    "limit": null,
+    "columns": ["s_name", "s_address"]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Root cause: Category B+C. Thread-local hash maps were 100x oversized — 256K slots × 16B × 64 threads = 256MB, far exceeding 44MB LLC. Only ~106K lineitem rows qualify (partkey 1.1% × shipdate 16%), yet each thread allocated 4MB maps, causing 256MB init writes + 59ms merge scanning 16M slots. Fix: replace thread-local hash maps with thread-local vectors that collect qualifying (partkey, suppkey, qty) tuples — 26KB per thread vs 4MB. After parallel scan, build a single global hash map from ~106K collected tuples (~1.7MB, fits L2) in one pass — eliminates merge entirely. Also parallelize filter_part (22ms) across 64 cores. Expected: lineitem scan drops to ~15-20ms (bandwidth-limited on ~1.2GB with 64 cores), aggregate <1ms, filter_part <2ms, total ~20ms.",
+  "correctness_anchors": {
+    "date_arithmetic": "add_years(l_shipdate_upper_base, 1)"
+  }
+}

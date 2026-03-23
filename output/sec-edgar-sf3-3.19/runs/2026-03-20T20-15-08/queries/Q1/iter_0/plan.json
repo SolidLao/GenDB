@@ -1,0 +1,97 @@
+{
+  "query_id": "Q1",
+  "pipeline": ["load_dicts", "mmap_columns", "parallel_scan_filter_aggregate", "merge_thread_local", "sort_output"],
+  "scan": {
+    "table": "pre",
+    "rows": 9600799,
+    "columns": ["stmt", "rfile", "adsh", "line"],
+    "mmap_strategy": "demand_paged",
+    "mmap_flags": ["MADV_SEQUENTIAL", "MADV_HUGEPAGE"],
+    "mmap_no_populate": true,
+    "declare_mmap_before_timer": true
+  },
+  "filters": [
+    {
+      "table": "pre",
+      "column": "stmt",
+      "predicate": "stmt != null_code",
+      "null_sentinel": "dictionary code for empty string (code 0)",
+      "selectivity": 0.9999,
+      "notes": "Load stmt dict, find code for empty string '', filter rows where stmt == that code"
+    }
+  ],
+  "group_by": {
+    "keys": ["stmt", "rfile"],
+    "key_types": ["uint8_t", "uint8_t"],
+    "composite_key": "(stmt_code << 8) | rfile_code",
+    "composite_key_type": "uint16_t",
+    "max_groups": 256,
+    "estimated_groups": 16,
+    "strategy": "direct_array",
+    "notes": "Flat array of 256 aggregation structs indexed by composite key — no hash table"
+  },
+  "aggregations": [
+    {
+      "output": "cnt",
+      "function": "COUNT(*)",
+      "accumulator_type": "uint64_t"
+    },
+    {
+      "output": "num_filings",
+      "function": "COUNT(DISTINCT adsh)",
+      "distinct_tracking": "bitset",
+      "bitset_size_bits": 86000,
+      "bitset_size_bytes_per_group": 10750,
+      "notes": "One bitset per group per thread. 256 groups × 10.75KB = ~2.75MB per thread"
+    },
+    {
+      "output": "avg_line_num",
+      "function": "AVG(line)",
+      "accumulator_sum_type": "int64_t",
+      "accumulator_count_type": "uint64_t",
+      "compute": "sum / count at finalization",
+      "no_kahan_summation": true
+    }
+  ],
+  "data_structures": {
+    "aggregation": "direct_array(256)",
+    "agg_struct_fields": ["uint64_t count", "int64_t line_sum", "uint64_t line_count", "bitset adsh_seen"],
+    "distinct_adsh": "bitset(86000 bits per group)",
+    "agg_struct_alignment": "alignas(64)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 64,
+    "morsel_size": 100000,
+    "schedule": "static",
+    "thread_local_state": "each thread has its own array of 256 agg structs with bitsets",
+    "thread_local_memory_per_thread_bytes": 2816000,
+    "total_thread_local_bytes": 180224000,
+    "merge": "single-threaded merge of 64 thread-local arrays into global result",
+    "merge_notes": "For each of 256 slots: sum counts, sum line_sums, OR bitsets then popcount for distinct"
+  },
+  "dictionaries": [
+    {"name": "stmt", "path": "dictionaries/stmt.dict", "purpose": "identify null sentinel code and decode output"},
+    {"name": "rfile", "path": "dictionaries/rfile.dict", "purpose": "decode output"}
+  ],
+  "output": {
+    "order_by": ["cnt DESC"],
+    "limit": null,
+    "columns": ["stmt (decoded string)", "rfile (decoded string)", "cnt", "num_filings", "avg_line_num"],
+    "estimated_output_rows": 16
+  },
+  "join_order": [],
+  "indexes": [],
+  "execution_target": "cpp",
+  "optimization_notes": {
+    "from_memory": [
+      "demand-paged mmap without MAP_POPULATE",
+      "MADV_SEQUENTIAL + MADV_HUGEPAGE",
+      "no Kahan summation on non-precision-critical accumulators",
+      "schedule(static) for uniform workload",
+      "alignas(64) thread-local accumulators",
+      "declare mmap before RAII timer to exclude munmap TLB shootdown"
+    ],
+    "key_technique": "L3_composite_key_direct_mapping — flat array indexed by composite key eliminates all hashing overhead"
+  }
+}

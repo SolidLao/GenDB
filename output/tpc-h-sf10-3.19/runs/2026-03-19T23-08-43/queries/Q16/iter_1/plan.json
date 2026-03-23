@@ -1,0 +1,87 @@
+{
+  "query_id": "Q16",
+  "pipeline": [
+    "build_excluded_suppliers",
+    "filter_parts_with_group_id",
+    "fused_index_probe_aggregate",
+    "sort_output"
+  ],
+  "join_order": [
+    {
+      "build": "supplier(filtered → excluded_suppkeys_bitset)",
+      "probe": "partsupp(ps_suppkey)",
+      "type": "anti",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 20,
+      "notes": "Tiny exclusion set; bitset over 100K suppkey domain is only 12.5KB, fits in L1 cache"
+    },
+    {
+      "build": "part(filtered → 300K qualifying parts with group_id)",
+      "probe": "partsupp(via grouped index)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300000,
+      "notes": "Parts sorted by p_partkey gives sequential index access"
+    }
+  ],
+  "filters": [
+    {"table": "supplier", "predicate": "s_comment LIKE '%Customer%Complaints%'", "selectivity": 0.0002},
+    {"table": "part", "predicate": "p_size IN (49, 14, 23, 45, 19, 3, 36, 9)", "selectivity": 0.16},
+    {"table": "part", "predicate": "p_brand <> 'Brand#45'", "selectivity": 0.96},
+    {"table": "part", "predicate": "p_type NOT LIKE 'MEDIUM POLISHED%'", "selectivity": 0.98}
+  ],
+  "scan": {
+    "table": "part",
+    "rows": 2000000,
+    "columns": [
+      {"name": "p_partkey", "file": "storage/part/p_partkey.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "p_brand", "file": "storage/part/p_brand.bin", "type": "int8_t", "bytes_per_row": 1},
+      {"name": "p_type", "file": "storage/part/p_type.bin", "type": "int16_t", "bytes_per_row": 2},
+      {"name": "p_size", "file": "storage/part/p_size.bin", "type": "int32_t", "bytes_per_row": 4}
+    ],
+    "access_pattern": "sequential"
+  },
+  "data_structures": {
+    "excluded_suppkeys": "bitset(100001) — 12.5KB, fits L1",
+    "size_lookup": "bool_array(51) for O(1) p_size check",
+    "excluded_brand_code": "single int8_t value",
+    "excluded_type_codes": "bitset over dict codes (~150 codes)",
+    "group_id_direct_map": "uint16_t[25 * 150 * 8] = 30K entries, direct-indexed by brand_code * (n_types * 8) + type_code * 8 + size_idx. Maps composite key to compact group_id. ~60KB fits L1. Eliminates all hash map lookups.",
+    "size_to_idx": "int8_t[51] mapping p_size values {49,14,23,45,19,3,36,9} to indices 0-7, -1 for non-qualifying. Fuses size filter with size_idx computation.",
+    "qualifying_parts": "compact_array<struct{int32_t partkey, uint16_t group_id}>(~300K) — only 6 bytes per entry, no brand/type/size needed since group_id encodes them",
+    "thread_local_group_suppkeys": "per-thread vector<vector<int32_t>> indexed by group_id. Each inner vector collects suppkeys for that group from this thread's morsels. Most groups empty per thread. Total suppkeys across all threads ~1.2M.",
+    "group_infos": "array<struct{int8_t brand_code, int16_t type_code, int32_t size}> indexed by compact group_id, ~18K entries"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_1_supplier": "parallel morsel scan over 100K supplier rows with thread-local excluded lists, merge via bitset OR",
+    "phase_2_filter": "parallel two-pass scatter over 2M part rows. Group map uses direct array — no hash map, no contention. Single-threaded group_id assignment replaced by direct computation.",
+    "phase_3_fused": "parallel morsel over qualifying_parts. Each thread has thread-local vector<vector<int32_t>>[n_groups] collecting suppkeys. No global contention. After parallel phase: for each group, merge thread vectors, sort small array, count unique.",
+    "phase_4_output": "single-thread sort of ~18K result groups (trivial)"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_ps_partkey_grouped",
+      "file": "storage/indexes/partsupp_ps_partkey_grouped.bin",
+      "purpose": "index_nested_loop_join",
+      "access_pattern": "sequential (parts sorted by partkey)"
+    }
+  ],
+  "aggregation": {
+    "strategy": "fused_partition_distinct_count",
+    "group_count": 18000,
+    "distinct_column": "ps_suppkey",
+    "notes": "Fused with index probe: during probe, suppkeys are collected into thread-local per-group vectors. After probe: for each group, concatenate thread vectors into one small array (~67 elements avg), sort, count unique. Eliminates 1.2M pair materialization and parallel comparison sort. Per-group sort of ~67 elements is ~400 comparisons, 18K groups total is trivial."
+  },
+  "output": {
+    "order_by": ["supplier_cnt DESC", "p_brand ASC", "p_type ASC", "p_size ASC"],
+    "limit": null,
+    "columns": ["p_brand (decoded)", "p_type (decoded)", "p_size", "supplier_cnt"]
+  },
+  "execution_target": "cpp",
+  "optimization_notes": "Category A+B: Plan restructuring and algorithm change. Four root causes identified: (1) supplier_exclusion was single-threaded — now parallelized with OpenMP. (2) filter_parts used unordered_map for group_id assignment — replaced with direct array mapping using composite key brand_code*n_types*8+type_code*8+size_idx, keyspace ~30K entries (~60KB, fits L1). The size_to_idx array fuses size filtering with index computation. (3) index_probe had per-row hash map lookups for group_id — eliminated since group_id is now precomputed and stored in qualifying_parts struct (only 6 bytes: partkey + group_id). (4) aggregation sorted 1.2M pairs with comparison sort — fused with index probe using thread-local per-group suppkey vectors. COUNT(DISTINCT) computed by sorting each group's small vector (~67 elements avg) and counting unique, which is orders of magnitude cheaper than sorting all 1.2M pairs. Qualifying_parts struct shrunk from 12 bytes to 6 bytes (partkey + group_id only) improving cache efficiency. mmap resources declared before timer scope per RAII pattern. Demand-paged mmap without MAP_POPULATE. MADV_SEQUENTIAL for index since parts sorted by partkey.",
+  "correctness_anchors": {
+    "threshold_constant": 100000
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "query_id": "Q12",
+  "pipeline": ["load_dicts", "zonemap_prefilter", "parallel_scan_filter", "index_lookup_aggregate", "output"],
+  "join_order": [
+    {
+      "build": "none",
+      "probe": "lineitem(filtered)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 780000,
+      "notes": "Use orders_o_orderkey_lookup dense_pk_array for O(1) lookup per qualifying lineitem row. No hash table needed."
+    }
+  ],
+  "filters": [
+    {"table": "lineitem", "predicate": "l_shipmode IN ('MAIL', 'SHIP')", "selectivity": 0.28, "order": 1},
+    {"table": "lineitem", "predicate": "l_receiptdate >= 8766 AND l_receiptdate < 9131", "selectivity": 0.15, "order": 2},
+    {"table": "lineitem", "predicate": "l_commitdate < l_receiptdate", "selectivity": 0.625, "order": 3},
+    {"table": "lineitem", "predicate": "l_shipdate < l_commitdate", "selectivity": 0.48, "order": 4}
+  ],
+  "filter_application": {
+    "strategy": "zonemap_then_block_scan",
+    "zonemap_phase": {
+      "index": "lineitem_l_receiptdate_zonemap",
+      "condition": "skip blocks where max < 8766 || min >= 9131",
+      "estimated_blocks_surviving": "~15% of 916 blocks ≈ 137 blocks"
+    },
+    "scan_phase": {
+      "description": "For each surviving block, apply filters in selectivity order within the block",
+      "filter_order": ["l_shipmode IN (mail_code, ship_code)", "l_receiptdate range check", "l_commitdate < l_receiptdate", "l_shipdate < l_commitdate"],
+      "short_circuit": true
+    }
+  },
+  "data_structures": {
+    "shipmode_dict": "load l_shipmode_dict.bin, resolve codes for MAIL and SHIP",
+    "orderpriority_dict": "load o_orderpriority_dict.bin, resolve codes for 1-URGENT and 2-HIGH",
+    "orderkey_lookup": "mmap orders_o_orderkey_lookup.bin — dense_pk_array, arr[orderkey] = row_id",
+    "orderpriority_column": "mmap o_orderpriority.bin — int8_t[15000000]",
+    "aggregation": "direct_array — int64_t counters[2][2] per thread (shipmode_idx × high/low), thread-local, sum at end"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_unit": "block (65536 rows)",
+    "description": "Each thread claims surviving zonemap blocks. Per qualifying row: lookup o_orderpriority via direct_array index, increment thread-local counter. Final reduction sums all thread-local counters."
+  },
+  "indexes": [
+    {"index": "lineitem_l_receiptdate_zonemap", "file": "storage/indexes/lineitem_l_receiptdate_zonemap.bin", "purpose": "skip_blocks"},
+    {"index": "orders_o_orderkey_lookup", "file": "storage/indexes/orders_o_orderkey_lookup.bin", "purpose": "join_lookup"}
+  ],
+  "mmap_advice": {
+    "lineitem_columns": "MADV_SEQUENTIAL + MADV_HUGEPAGE, no MAP_POPULATE (demand-paged)",
+    "orders_o_orderkey_lookup": "MADV_SEQUENTIAL (probe keys are sorted by l_orderkey)",
+    "orders_o_orderpriority": "MADV_SEQUENTIAL (accessed via sorted row_ids from sorted orderkeys)"
+  },
+  "aggregation": "array_direct",
+  "aggregation_detail": {
+    "type": "thread_local_direct_array",
+    "groups": 2,
+    "counters_per_group": 2,
+    "layout": "int64_t counters[2][2] — [shipmode_idx][0=high_line_count, 1=low_line_count]",
+    "shipmode_idx_mapping": "map MAIL code and SHIP code to 0 and 1 based on alphabetical order for correct output sorting",
+    "reduction": "sum across all thread-local arrays after parallel phase"
+  },
+  "output": {
+    "order_by": ["l_shipmode ASC"],
+    "limit": null,
+    "columns": ["l_shipmode (decoded from dict)", "high_line_count", "low_line_count"],
+    "rows": 2
+  },
+  "resource_scoping": {
+    "strategy": "raii_timer_scoping",
+    "description": "Declare all MMap objects at outer scope before RAII timer. Destructors (munmap) fire after timing ends to exclude TLB shootdown cost."
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,116 @@
+{
+  "run_id": "2026-03-19T23-08-43",
+  "benchmark": "tpc-h",
+  "scale_factor": 10,
+  "classifications": {
+    "NOVEL_SUCCESS": 13,
+    "SIGNIFICANT_IMPROVEMENT": 4,
+    "FAMILIAR": 0
+  },
+  "classification_details": {
+    "NOVEL_SUCCESS": ["Q2", "Q4", "Q5", "Q8", "Q10", "Q11", "Q12", "Q13", "Q14", "Q17", "Q19", "Q21", "Q22"],
+    "SIGNIFICANT_IMPROVEMENT": ["Q7", "Q15", "Q16", "Q20"]
+  },
+  "nodes_created": 40,
+  "nodes_created_breakdown": {
+    "L0": 17,
+    "L1": 17,
+    "L3": 2,
+    "L4": 2
+  },
+  "nodes_updated": 0,
+  "edges_created": 31,
+  "skills_created": [
+    {
+      "name": "chained-sequential-lookup",
+      "category": "operators",
+      "layer": 3,
+      "origin_query": "Q7",
+      "improvement_pct": 86.5,
+      "description": "Eliminate pre-built denormalized arrays exceeding LLC by using chained index lookups"
+    },
+    {
+      "name": "composite-key-direct-mapping",
+      "category": "operators",
+      "layer": 3,
+      "origin_query": "Q16",
+      "improvement_pct": 88.5,
+      "description": "Replace hash map group-ID assignment with flat array indexed by composite key"
+    },
+    {
+      "name": "collect-then-aggregate",
+      "category": "strategies",
+      "layer": 4,
+      "origin_query": "Q20",
+      "improvement_pct": 85.7,
+      "description": "For low-selectivity scans, use thread-local vectors + single global hash map"
+    },
+    {
+      "name": "thread-local-llc-budgeting",
+      "category": "strategies",
+      "layer": 4,
+      "origin_query": "Q15",
+      "improvement_pct": 29.8,
+      "description": "Cap thread count so thread-local arrays fit in LLC; calloc inside parallel for NUMA"
+    }
+  ],
+  "skills_updated": [],
+  "breakthroughs_found": 4,
+  "breakthroughs": [
+    {
+      "query": "Q7",
+      "before_ms": 225.0,
+      "after_ms": 30.3,
+      "improvement_pct": 86.5,
+      "technique": "Eliminated 240MB orders_custkey pre-build exceeding LLC. Replaced with chained sequential lookups through index + raw column.",
+      "skill_created": "operators/chained-sequential-lookup"
+    },
+    {
+      "query": "Q16",
+      "before_ms": 123.78,
+      "after_ms": 14.26,
+      "improvement_pct": 88.5,
+      "technique": "Replaced unordered_map group assignment with composite key direct array mapping (~60KB L1-resident). Per-group small-sort for COUNT(DISTINCT) instead of global sort.",
+      "skill_created": "operators/composite-key-direct-mapping"
+    },
+    {
+      "query": "Q20",
+      "before_ms": 220.03,
+      "after_ms": 31.56,
+      "improvement_pct": 85.7,
+      "technique": "Replaced 256MB thread-local hash maps with thread-local collect vectors + single 4MB global hash map.",
+      "skill_created": "strategies/collect-then-aggregate"
+    },
+    {
+      "query": "Q15",
+      "before_ms": 55.01,
+      "after_ms": 38.64,
+      "improvement_pct": 29.8,
+      "technique": "Capped threads from 64 to 16 so thread-local arrays (12.8MB) fit in 44MB LLC. calloc inside parallel for NUMA first-touch.",
+      "skill_created": "strategies/thread-local-llc-budgeting"
+    }
+  ],
+  "regressions_recorded": 0,
+  "total_queries_processed": 17,
+  "first_iteration_successes": 13,
+  "multi_iteration_discoveries": 4,
+  "timing_summary": {
+    "Q2": 7.85,
+    "Q4": 25.91,
+    "Q5": 48.18,
+    "Q7": 30.32,
+    "Q8": 43.46,
+    "Q10": 48.12,
+    "Q11": 37.15,
+    "Q12": 25.39,
+    "Q13": 92.24,
+    "Q14": 39.83,
+    "Q15": 38.64,
+    "Q16": 14.26,
+    "Q17": 43.57,
+    "Q19": 28.57,
+    "Q20": 31.56,
+    "Q21": 43.19,
+    "Q22": 13.91
+  }
+}

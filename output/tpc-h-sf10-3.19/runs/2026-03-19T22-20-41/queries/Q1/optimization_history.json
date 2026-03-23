@@ -1,0 +1,58 @@
+{
+  "query_id": "Q1",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 121.25666666666666,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 121.25666666666666,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 83.71,
+        "main_scan": 36.17,
+        "aggregation": 0.01,
+        "output": 0.53,
+        "total": 120.46
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 75.87666666666667,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 75.87666666666667,
+      "validation": "pass",
+      "strategy": "Category A+C optimization. Root cause: data_loading phase consumed 84ms (69% of 121ms total) due to MAP_POPULATE forcing synchronous page table setup for 2.28GB of column data, even on hot runs when pages are already in page cache. Fix 1: Remove MAP_POPULATE from all mmap calls — pages will fault on demand during the scan phase, overlapping I/O with computation. Fix 2: Add MADV_HUGEPAGE to reduce TLB misses across the 2.28GB working set (with 4KB pages, 2.28GB needs ~580K TLB entries; with 2MB huge pages, only ~1140). Fix 3: Remove Kahan summation — eliminates 4 extra FP ops per row (~236M total ops), reduces accumulator struct from 64 to 56 bytes. These changes should eliminate the data_loading bottleneck and reduce scan time, targeting sub-35ms total.",
+      "operation_timings": {
+        "data_loading": 0.05,
+        "main_scan": 36.84,
+        "aggregation": 0.01,
+        "output": 0.3,
+        "total": 74.81
+      }
+    },
+    {
+      "iteration": 2,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 41.846666666666664,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 41.846666666666664,
+      "validation": "pass",
+      "strategy": "Category A+C. Root cause: iter_1 code still used Kahan summation (KAHAN_ADD macro, compensation fields in Accum struct) despite the plan directing removal — adding 8 extra FP ops/row and bloating the struct from 48 to 64 bytes. Also used schedule(dynamic,4) causing atomic contention across 64 threads for only 916 blocks. Fixes: (1) REMOVE all Kahan summation — use plain += for all accumulators, struct drops to 48 bytes (5 doubles + 1 int64_t), (2) switch to static scheduling since 98.8% selectivity means near-perfect load balance, (3) compile with -O3 -march=native -funroll-loops for best autovectorization of the inner accumulation loop. Target: sub-31ms by eliminating ~470M wasted FP ops and reducing scheduling overhead.",
+      "operation_timings": {
+        "data_loading": 0.04,
+        "main_scan": 40.52,
+        "aggregation": 0.01,
+        "output": 1.18,
+        "total": 41.8
+      }
+    }
+  ]
+}

@@ -1,0 +1,191 @@
+{
+  "query_id": "Q9",
+  "pipeline": [
+    "load_nation",
+    "load_supplier_nationkey",
+    "filter_parts",
+    "parallel_scan_lineitem_with_lookups",
+    "merge_aggregate",
+    "sort_output"
+  ],
+  "filters": [
+    {
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.048,
+      "output_cardinality": 96000,
+      "method": "strstr_or_memmem_scan"
+    }
+  ],
+  "join_order": [
+    {
+      "step": 1,
+      "build": "part(filtered by p_name LIKE '%green%')",
+      "probe": "lineitem",
+      "type": "semi",
+      "strategy": "bitset_lookup",
+      "join_key": "p_partkey = l_partkey",
+      "build_cardinality": 96000,
+      "probe_cardinality": 59986052,
+      "output_cardinality": 2880000,
+      "notes": "Bitset of 2M bits (250KB) indexed by p_partkey. Fits entirely in L2 cache. First filter applied during lineitem scan."
+    },
+    {
+      "step": 2,
+      "build": "supplier(s_nationkey array)",
+      "probe": "lineitem(surviving rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "join_key": "s_suppkey = l_suppkey",
+      "build_cardinality": 100000,
+      "probe_cardinality": 2880000,
+      "notes": "Dense array of s_nationkey indexed by s_suppkey (400KB). Direct O(1) lookup."
+    },
+    {
+      "step": 3,
+      "build": "partsupp(pre-built hash index)",
+      "probe": "lineitem(surviving rows)",
+      "type": "inner",
+      "strategy": "pre_built_hash_index",
+      "join_key": "ps_partkey = l_partkey AND ps_suppkey = l_suppkey",
+      "build_cardinality": 8000000,
+      "probe_cardinality": 2880000,
+      "notes": "Use partsupp_pk_hash index for O(1) lookup of ps_supplycost by (l_partkey, l_suppkey)."
+    },
+    {
+      "step": 4,
+      "build": "orders(pre-built dense lookup)",
+      "probe": "lineitem(surviving rows)",
+      "type": "inner",
+      "strategy": "direct_array",
+      "join_key": "o_orderkey = l_orderkey",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 2880000,
+      "notes": "Use orders_o_orderkey_lookup index for O(1) lookup of order row_id, then read o_orderdate."
+    },
+    {
+      "step": 5,
+      "build": "nation(array by nationkey)",
+      "probe": "supplier nationkey result",
+      "type": "inner",
+      "strategy": "direct_array",
+      "join_key": "n_nationkey = s_nationkey",
+      "build_cardinality": 25,
+      "notes": "Preloaded n_name[25] array. Chained through supplier: n_name[s_nationkey[l_suppkey]]."
+    }
+  ],
+  "data_structures": {
+    "nation_names": "string_array(25) indexed by n_nationkey",
+    "supplier_nationkey": "int32_array(100001) indexed by s_suppkey — s_nationkey[suppkey]",
+    "part_filter_bitset": "bitset(2000001) — 250KB, set bit for qualifying p_partkeys",
+    "partsupp_hash_index": "mmap partsupp_pk_hash.bin — pre-built hash table with capacity 2^24, entry 16 bytes",
+    "orders_lookup": "mmap orders_o_orderkey_lookup.bin — dense array orderkey→row_id",
+    "orders_orderdate": "mmap o_orderdate.bin — read date by row_id from orders_lookup",
+    "ps_supplycost": "mmap ps_supplycost.bin — read supplycost by row_id from partsupp hash lookup",
+    "aggregation": "direct_2d_array[25][max_years] per thread — 25 nations × ~7 years, sum_profit"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_pk_hash",
+      "file": "storage/indexes/partsupp_pk_hash.bin",
+      "purpose": "join_lookup for (l_partkey, l_suppkey) → ps row_id → ps_supplycost",
+      "hash_function": "((uint64_t)(uint32_t)partkey * 2654435761ULL) ^ ((uint64_t)(uint32_t)suppkey * 40499ULL)",
+      "capacity": 16777216,
+      "entry_size": 16,
+      "probing": "linear"
+    },
+    {
+      "index": "orders_o_orderkey_lookup",
+      "file": "storage/indexes/orders_o_orderkey_lookup.bin",
+      "purpose": "join_lookup for l_orderkey → orders row_id → o_orderdate"
+    }
+  ],
+  "execution_phases": {
+    "phase1_load_dimensions": {
+      "description": "Load nation and supplier dimension data",
+      "operations": [
+        "Load n_name into string array[25] indexed by n_nationkey",
+        "Load s_nationkey into int32 array[100001] indexed by s_suppkey (1-based)"
+      ]
+    },
+    "phase2_filter_parts": {
+      "description": "Scan p_name varlen, build bitset of qualifying partkeys",
+      "scan": {
+        "files": ["p_name_offsets.bin", "p_name_data.bin", "p_partkey.bin"],
+        "rows": 2000000,
+        "filter": "strstr(p_name, 'green') != nullptr",
+        "output": "set bit in bitset for each qualifying p_partkey"
+      },
+      "parallelism": "parallel_scan with morsel_size=65536"
+    },
+    "phase3_scan_lineitem": {
+      "description": "Parallel morsel-driven scan of lineitem with all lookups inline",
+      "scan_columns": [
+        "l_partkey.bin",
+        "l_suppkey.bin",
+        "l_orderkey.bin",
+        "l_extendedprice.bin",
+        "l_discount.bin",
+        "l_quantity.bin"
+      ],
+      "per_row_logic": [
+        "1. Check part_bitset[l_partkey] → skip if not set",
+        "2. Look up s_nationkey_arr[l_suppkey] → nation_idx",
+        "3. Look up partsupp_pk_hash(l_partkey, l_suppkey) → ps_row_id → ps_supplycost[ps_row_id]",
+        "4. Look up orders_lookup[l_orderkey] → o_row_id → o_orderdate[o_row_id] → extract year",
+        "5. Compute amount = l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity",
+        "6. Thread-local aggregate: agg[nation_idx][year_idx] += amount"
+      ]
+    },
+    "phase4_merge_and_output": {
+      "description": "Merge thread-local aggregation arrays, format and sort output",
+      "merge": "Sum all thread-local agg arrays element-wise",
+      "sort": "By nation name ASC, o_year DESC",
+      "output_rows": "~175"
+    }
+  },
+  "aggregation": {
+    "strategy": "array_direct",
+    "group_key": "(nation_idx, year_idx)",
+    "group_count_estimate": 175,
+    "layout": "2D array [25][max_year - min_year + 1] — year range ~1992-1998",
+    "year_extraction": "days_since_epoch to year via arithmetic (e.g., modified Hinnant algorithm or lookup table)",
+    "per_thread": true,
+    "merge": "element_wise_sum"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "main_parallel_loop": "lineitem scan (phase3)",
+    "part_filter_scan": "parallel with morsel_size=65536",
+    "thread_local_aggregation": true,
+    "final_merge": "single_thread (only 175 entries)"
+  },
+  "output": {
+    "columns": ["nation (string)", "o_year (int)", "sum_profit (double)"],
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null,
+    "row_estimate": 175
+  },
+  "memory_estimates": {
+    "part_bitset": "250 KB",
+    "supplier_nationkey_array": "400 KB",
+    "nation_names": "<1 KB",
+    "partsupp_hash_index_mmap": "256 MB",
+    "orders_lookup_mmap": "~240 MB",
+    "orders_orderdate_mmap": "60 MB",
+    "ps_supplycost_mmap": "64 MB",
+    "lineitem_columns_mmap": "~2.1 GB",
+    "thread_local_agg_arrays": "negligible"
+  },
+  "execution_target": "cpp",
+  "parameters": [
+    {
+      "name": "p_name_pattern",
+      "type": "string",
+      "default": "%green%",
+      "usage": "Extract substring between % delimiters, use strstr for contains match"
+    }
+  ]
+}

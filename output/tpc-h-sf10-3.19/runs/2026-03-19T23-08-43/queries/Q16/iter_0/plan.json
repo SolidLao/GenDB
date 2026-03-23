@@ -1,0 +1,199 @@
+{
+  "query_id": "Q16",
+  "pipeline": [
+    "build_excluded_suppliers",
+    "filter_parts",
+    "index_probe_partsupp",
+    "count_distinct_aggregate",
+    "sort_output"
+  ],
+  "phases": {
+    "phase_1_supplier_exclusion": {
+      "description": "Scan supplier s_comment, find suppkeys matching '%Customer%Complaints%', build exclusion bitset",
+      "scan": {
+        "table": "supplier",
+        "columns": ["s_suppkey", "s_comment"],
+        "files": {
+          "s_suppkey": "storage/supplier/s_suppkey.bin",
+          "s_comment_offsets": "storage/supplier/s_comment_offsets.bin",
+          "s_comment_data": "storage/supplier/s_comment_data.bin"
+        },
+        "rows": 100000,
+        "mmap_advice": "MADV_SEQUENTIAL"
+      },
+      "predicate": "s_comment LIKE '%Customer%Complaints%'",
+      "output": "excluded_suppkeys_bitset",
+      "output_cardinality": "~5-20 suppliers",
+      "data_structure": "bitset(100001)",
+      "parallelism": "single_thread"
+    },
+    "phase_2_filter_parts": {
+      "description": "Scan part columns, apply 3 filters, collect qualifying partkeys with group keys",
+      "scan": {
+        "table": "part",
+        "columns": ["p_partkey", "p_brand", "p_type", "p_size"],
+        "files": {
+          "p_partkey": "storage/part/p_partkey.bin",
+          "p_brand": "storage/part/p_brand.bin",
+          "p_brand_dict": "storage/part/p_brand_dict.bin",
+          "p_type": "storage/part/p_type.bin",
+          "p_type_dict": "storage/part/p_type_dict.bin",
+          "p_size": "storage/part/p_size.bin"
+        },
+        "rows": 2000000,
+        "mmap_advice": "MADV_SEQUENTIAL"
+      },
+      "filters_applied_in_order": [
+        {
+          "column": "p_size",
+          "predicate": "p_size IN (49, 14, 23, 45, 19, 3, 36, 9)",
+          "encoding": "raw int32_t",
+          "strategy": "lookup_array_of_50_bools",
+          "selectivity": 0.16,
+          "notes": "Most selective filter first. Use bool array[50] for O(1) lookup since max value is 49"
+        },
+        {
+          "column": "p_brand",
+          "predicate": "p_brand <> 'Brand#45'",
+          "encoding": "dict int8_t",
+          "strategy": "dict_code_neq_single_value",
+          "selectivity": 0.96
+        },
+        {
+          "column": "p_type",
+          "predicate": "p_type NOT LIKE 'MEDIUM POLISHED%'",
+          "encoding": "dict int16_t",
+          "strategy": "dict_excluded_codes_bitset",
+          "selectivity": 0.98,
+          "notes": "Pre-scan dict to find codes starting with 'MEDIUM POLISHED', build small bitset of excluded codes"
+        }
+      ],
+      "combined_selectivity": 0.15,
+      "output_cardinality": 300000,
+      "output": "qualifying_parts_array",
+      "output_schema": {
+        "partkey": "int32_t",
+        "brand_code": "int8_t",
+        "type_code": "int16_t",
+        "size": "int32_t"
+      },
+      "parallelism": "morsel_driven",
+      "morsel_size": 65536,
+      "compact_strategy": "two_pass_parallel_scatter"
+    },
+    "phase_3_index_probe_and_collect": {
+      "description": "For each qualifying part, probe grouped index to get ps_suppkey values, filter excluded suppliers, emit (group_id, suppkey) pairs",
+      "index": {
+        "name": "partsupp_ps_partkey_grouped",
+        "file": "storage/indexes/partsupp_ps_partkey_grouped.bin",
+        "layout": "header(uint64_t num_entries) + body(uint32_t[num_entries*2] interleaved [start, count])"
+      },
+      "probe_column_file": "storage/partsupp/ps_suppkey.bin",
+      "probe_rows": 8000000,
+      "group_id_encoding": "composite_hash_of(brand_code, type_code, size)",
+      "group_id_strategy": "map brand_code/type_code/size to a group_id via hash_map built during part scan",
+      "expected_partsupp_rows_per_part": 4,
+      "total_index_probes": 300000,
+      "total_partsupp_rows_accessed": 1200000,
+      "suppkey_exclusion": "check excluded_suppkeys_bitset",
+      "output": "pairs_array of (group_id, ps_suppkey)",
+      "output_cardinality": "~1,190,000",
+      "mmap_advice_ps_suppkey": "MADV_RANDOM",
+      "mmap_advice_index": "MADV_RANDOM",
+      "notes": "Parts are sorted by p_partkey, so index probes are sequential. Use MADV_SEQUENTIAL for index file. ps_suppkey random access per index offset.",
+      "mmap_advice_index_corrected": "MADV_SEQUENTIAL",
+      "parallelism": "morsel_driven_over_qualifying_parts",
+      "morsel_size": 4096
+    },
+    "phase_4_count_distinct": {
+      "description": "Count distinct ps_suppkey per group",
+      "strategy": "sort_and_count",
+      "steps": [
+        "Sort pairs_array by (group_id, ps_suppkey)",
+        "Linear scan: count distinct suppkeys per group_id run"
+      ],
+      "input_cardinality": 1190000,
+      "output_cardinality": 18000,
+      "sort_parallelism": "parallel_sort",
+      "alternative_strategy": "per_thread_hash_map_of_hash_sets_then_merge"
+    },
+    "phase_5_output": {
+      "description": "Sort groups by (supplier_cnt DESC, p_brand ASC, p_type ASC, p_size ASC) and output with decoded strings",
+      "sort_keys": [
+        {"column": "supplier_cnt", "direction": "DESC"},
+        {"column": "p_brand", "direction": "ASC"},
+        {"column": "p_type", "direction": "ASC"},
+        {"column": "p_size", "direction": "ASC"}
+      ],
+      "string_decoding": "decode brand_code and type_code via dictionaries for output",
+      "output_cardinality": 18000
+    }
+  },
+  "join_order": [
+    {
+      "build": "supplier(filtered → excluded_suppkeys_bitset)",
+      "probe": "partsupp(ps_suppkey)",
+      "type": "anti",
+      "strategy": "bitset_lookup",
+      "build_cardinality": 20,
+      "notes": "Tiny exclusion set; bitset over 100K suppkey domain is only 12.5KB, fits in L1 cache"
+    },
+    {
+      "build": "part(filtered → 300K qualifying parts)",
+      "probe": "partsupp(via grouped index)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 300000,
+      "notes": "Use partsupp_ps_partkey_grouped index. Parts sorted by p_partkey gives sequential index access."
+    }
+  ],
+  "filters": [
+    {"table": "supplier", "predicate": "s_comment LIKE '%Customer%Complaints%'", "selectivity": 0.0002},
+    {"table": "part", "predicate": "p_size IN (49, 14, 23, 45, 19, 3, 36, 9)", "selectivity": 0.16},
+    {"table": "part", "predicate": "p_brand <> 'Brand#45'", "selectivity": 0.96},
+    {"table": "part", "predicate": "p_type NOT LIKE 'MEDIUM POLISHED%'", "selectivity": 0.98}
+  ],
+  "data_structures": {
+    "excluded_suppkeys": "bitset(100001)",
+    "size_lookup": "bool_array(50)",
+    "excluded_brand_code": "single int8_t value",
+    "excluded_type_codes": "bitset over dict codes (~150 codes)",
+    "qualifying_parts": "compact_array<struct{int32_t partkey, int8_t brand, int16_t type, int32_t size}>(~300K)",
+    "group_map": "compact_hash_map<tuple(brand,type,size) → group_id>(~18K entries)",
+    "pairs": "compact_array<struct{uint16_t group_id, int32_t suppkey}>(~1.2M)",
+    "result_groups": "array<struct{uint16_t group_id, uint32_t supplier_cnt}>(~18K)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "phase_1": "single_thread (100K rows, trivial)",
+    "phase_2": "parallel morsel scan over 2M part rows",
+    "phase_3": "parallel over qualifying parts array, thread-local pair collection",
+    "phase_4": "parallel sort of pairs, single-thread count scan",
+    "phase_5": "single_thread sort of 18K groups (trivial)"
+  },
+  "indexes": [
+    {
+      "index": "partsupp_ps_partkey_grouped",
+      "file": "storage/indexes/partsupp_ps_partkey_grouped.bin",
+      "purpose": "index_nested_loop_join",
+      "access_pattern": "sequential (parts sorted by partkey)"
+    }
+  ],
+  "aggregation": {
+    "strategy": "sort_based_distinct_count",
+    "group_count": 18000,
+    "distinct_column": "ps_suppkey",
+    "notes": "Collect (group_id, suppkey) pairs → parallel sort → linear distinct count per group"
+  },
+  "output": {
+    "order_by": ["supplier_cnt DESC", "p_brand ASC", "p_type ASC", "p_size ASC"],
+    "limit": null,
+    "columns": ["p_brand (decoded)", "p_type (decoded)", "p_size", "supplier_cnt"]
+  },
+  "mmap_strategy": {
+    "approach": "demand_paged_mmap_no_MAP_POPULATE",
+    "raii_timer_scoping": "declare mmap resources BEFORE timer scope to exclude munmap TLB shootdown cost"
+  },
+  "execution_target": "cpp"
+}

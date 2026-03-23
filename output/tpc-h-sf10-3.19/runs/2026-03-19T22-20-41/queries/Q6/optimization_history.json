@@ -1,0 +1,40 @@
+{
+  "query_id": "Q6",
+  "iterations": [
+    {
+      "iteration": 0,
+      "improved": true,
+      "categories": [
+        "initial"
+      ],
+      "timing_ms": 80.36,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 80.36,
+      "validation": "pass",
+      "strategy": "initial implementation",
+      "operation_timings": {
+        "data_loading": 58.04,
+        "main_scan": 19.93,
+        "output": 0.2,
+        "total": 78.19
+      }
+    },
+    {
+      "iteration": 1,
+      "improved": true,
+      "categories": [],
+      "timing_ms": 26.003333333333334,
+      "cold_timing_ms": null,
+      "hot_timing_ms": 26.003333333333334,
+      "validation": "pass",
+      "strategy": "Category B/C: data_loading was 58ms (72% of total) because MAP_POPULATE forced all 1.68GB to be faulted in, but zonemap skips 85% of blocks so only ~252MB is needed. Fix: (1) Remove MAP_POPULATE from all mmap calls — use plain mmap so pages are demand-faulted only when accessed. (2) After zonemap filtering, use madvise(MADV_WILLNEED) only on qualifying block byte ranges for all 4 columns to trigger async readahead for just the needed pages. (3) Use madvise(MADV_DONTNEED) or simply skip madvise on non-qualifying ranges. (4) Pre-compute the list of qualifying blocks from the zonemap in a single-threaded pass first, then distribute only qualifying blocks to threads via OpenMP parallel for. (5) In the scan loop, apply filters in order: shipdate (int32 range, selectivity 0.15) → discount (double range, 0.27) → quantity (double threshold, 0.46). (6) Use thread-local double accumulators with final reduction. This should reduce data_loading to near-zero (mmap setup only) and concentrate I/O cost into the scan phase where it overlaps with computation on qualifying blocks only.",
+      "operation_timings": {
+        "data_loading": 0.09,
+        "zonemap_filter": 0.01,
+        "main_scan": 25.58,
+        "output": 0.51,
+        "total": 26.23
+      }
+    }
+  ]
+}

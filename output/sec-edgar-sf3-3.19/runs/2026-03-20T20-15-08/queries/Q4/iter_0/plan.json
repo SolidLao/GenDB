@@ -1,0 +1,195 @@
+{
+  "query_id": "Q4",
+  "pipeline": [
+    "prefilter_sub",
+    "parallel_scan_num_with_chained_lookups",
+    "merge_aggregation",
+    "having_filter",
+    "topk_sort",
+    "materialize_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered by sic BETWEEN :sic_lower AND :sic_upper)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 3530,
+      "notes": "Pre-filter sub, build adsh_code→(sic,cik) lookup array indexed by adsh_code for O(1) access during num scan"
+    },
+    {
+      "build": "tag(pre-built index)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 1070662,
+      "notes": "Use pre-built tag_pk hash index; check abstract==:abstract_eq, read tlabel_code"
+    },
+    {
+      "build": "pre(pre-built index)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Use pre-built pre_join hash multimap index; for each matching pre row check stmt==:stmt_eq"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "sic BETWEEN :sic_lower AND :sic_upper",
+      "selectivity": 0.041,
+      "phase": "prefilter",
+      "result_rows": 3530
+    },
+    {
+      "table": "num",
+      "predicate": "uom = :uom_eq",
+      "selectivity": 0.844,
+      "phase": "scan",
+      "encoding": "dict_lookup_uom"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL (value_null == 0)",
+      "selectivity": 0.99,
+      "phase": "scan",
+      "encoding": "null_bitmap_check"
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN valid_sub_adsh_set",
+      "selectivity": 0.041,
+      "phase": "scan",
+      "notes": "Checked via bitset on adsh_code; most selective filter on num rows"
+    },
+    {
+      "table": "tag",
+      "predicate": "abstract = :abstract_eq",
+      "selectivity": 1.0,
+      "phase": "lookup",
+      "notes": "Checked after tag_pk index lookup"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = :stmt_eq",
+      "selectivity": 0.129,
+      "phase": "lookup",
+      "notes": "Checked on each pre row returned by pre_join index"
+    }
+  ],
+  "scan_order_within_num": [
+    "1. Check adsh_code in valid_sub_bitset (most selective ~4.1%, eliminates 96% of rows early)",
+    "2. Check uom == usd_code (84.4%)",
+    "3. Check value_null == 0 (99%)",
+    "4. Lookup tag_pk index → check abstract, read tlabel_code",
+    "5. Lookup pre_join index → for each pre_row check stmt, accumulate",
+    "6. Read value, accumulate into group aggregation"
+  ],
+  "prefilter_sub": {
+    "description": "Scan sub.sic, find rows where sic BETWEEN :sic_lower AND :sic_upper, build two structures",
+    "outputs": {
+      "valid_adsh_bitset": "bitset indexed by adsh_code for fast membership test during num scan",
+      "sub_info_array": "flat array indexed by adsh_code → struct{int16_t sic, int32_t cik} for qualifying subs only (use sub_adsh_lookup index to map adsh_code→sub_row)"
+    },
+    "approach": "Iterate all 86,135 sub rows, check sic range, for qualifying rows: use row_id to read adsh_code from sub/adsh.bin, set bit in bitset, store sic+cik in info array"
+  },
+  "data_structures": {
+    "valid_sub_bitset": "bitset(max_adsh_code + 1) — for O(1) membership check; max_adsh_code ≤ 250,000 → ~31KB",
+    "sub_info_array": "flat_array[max_adsh_code + 1] of {sic: int16_t, cik: int32_t} — direct indexed; ~1.5MB",
+    "tag_pk_index": "pre-built hash index (loaded from indexes/tag_pk.idx)",
+    "pre_join_index": "pre-built hash multimap (loaded from indexes/pre_join.idx + pre_join_rowids.idx)",
+    "sub_adsh_lookup_index": "pre-built dense array (loaded from indexes/sub_adsh_lookup.idx)",
+    "aggregation": "compact_hash_map keyed by (sic:int16_t, tlabel_code:uint32_t, stmt_code:uint8_t) → {sum_value:double, count:uint64_t, cik_set:small_hash_set<int32_t>}",
+    "thread_local_agg": "per-thread compact_hash_map (same schema), merged after parallel scan"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "scan_table": "num",
+    "thread_local_aggregation": true,
+    "merge_strategy": "sequential_merge_thread_local_maps",
+    "notes": "Each thread scans a morsel of num rows, performs all chained lookups and accumulates into thread-local agg map. Final sequential merge combines all maps."
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_lookup",
+      "file": "indexes/sub_adsh_lookup.idx",
+      "purpose": "map adsh_code to sub row_id during prefilter phase"
+    },
+    {
+      "index": "tag_pk",
+      "file": "indexes/tag_pk.idx",
+      "purpose": "lookup tag row by (tag_code, version_code) for abstract filter and tlabel retrieval"
+    },
+    {
+      "index": "pre_join",
+      "file": "indexes/pre_join.idx",
+      "purpose": "lookup pre rows by (adsh_code, tag_code, version_code) for stmt filter"
+    },
+    {
+      "index": "pre_join_rowids",
+      "file": "indexes/pre_join_rowids.idx",
+      "purpose": "row ID array for pre_join multimap results"
+    }
+  ],
+  "columns_to_mmap": [
+    {"file": "num/adsh.bin", "type": "uint32_t", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "num/tag.bin", "type": "uint32_t", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "num/version.bin", "type": "uint32_t", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "num/uom.bin", "type": "uint16_t", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "num/value.bin", "type": "double", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "num/value_null.bin", "type": "uint8_t", "rows": 39401761, "access": "sequential", "madvise": "MADV_SEQUENTIAL"},
+    {"file": "sub/adsh.bin", "type": "uint32_t", "rows": 86135, "access": "sequential"},
+    {"file": "sub/sic.bin", "type": "int16_t", "rows": 86135, "access": "sequential"},
+    {"file": "sub/cik.bin", "type": "int32_t", "rows": 86135, "access": "sequential"},
+    {"file": "tag/abstract.bin", "type": "int8_t", "rows": 1070662, "access": "random"},
+    {"file": "tag/tlabel.bin", "type": "uint32_t", "rows": 1070662, "access": "random"},
+    {"file": "pre/stmt.bin", "type": "uint8_t", "rows": 9600799, "access": "random"}
+  ],
+  "mmap_strategy": "demand_paged",
+  "mmap_notes": "Use mmap without MAP_POPULATE; declare mmap resources before RAII timer scope to exclude munmap TLB shootdown cost from timing",
+  "dictionaries_to_load": [
+    {"file": "dictionaries/uom.dict", "lookup": "string_to_code", "key": "USD"},
+    {"file": "dictionaries/stmt.dict", "lookup": "string_to_code", "key": "EQ"},
+    {"file": "dictionaries/tlabel.dict", "lookup": "code_to_string", "purpose": "decode tlabel_code for output"}
+  ],
+  "aggregation": {
+    "strategy": "hash_group_by",
+    "group_key": "(sic: int16_t, tlabel_code: uint32_t, stmt_code: uint8_t)",
+    "group_key_notes": "stmt is constant after filter but still included for correctness with parameterized queries",
+    "aggregates": {
+      "sum_value": "SUM(n.value) as double",
+      "count_value": "COUNT(n.value) as uint64_t — for computing AVG = sum_value / count_value",
+      "distinct_cik": "small unordered_set<int32_t> per group for COUNT(DISTINCT s.cik)"
+    },
+    "estimated_groups": 5000,
+    "having": "distinct_cik.size() >= 2"
+  },
+  "output": {
+    "order_by": ["total_value DESC NULLS LAST"],
+    "limit": 500,
+    "sort_strategy": "partial_sort",
+    "columns": [
+      {"name": "sic", "source": "group_key.sic", "type": "int16_t"},
+      {"name": "tlabel", "source": "tlabel.dict[group_key.tlabel_code]", "type": "string"},
+      {"name": "stmt", "source": "stmt.dict[group_key.stmt_code]", "type": "string"},
+      {"name": "num_companies", "source": "distinct_cik.size()", "type": "int64_t"},
+      {"name": "total_value", "source": "sum_value", "type": "double"},
+      {"name": "avg_value", "source": "sum_value / count_value", "type": "double"}
+    ]
+  },
+  "execution_target": "cpp",
+  "estimated_cardinality_flow": {
+    "num_total": 39401761,
+    "num_after_adsh_bitset": 1615000,
+    "num_after_uom_filter": 1363000,
+    "num_after_null_filter": 1350000,
+    "after_tag_lookup": 1350000,
+    "after_pre_lookup_and_stmt_filter": 350000,
+    "aggregation_groups": 5000,
+    "after_having": 3000,
+    "output_rows": 500
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "query_id": "Q6",
+  "pipeline": [
+    "load_dictionaries",
+    "filter_sub",
+    "build_sub_bitset",
+    "parallel_scan_num_join_pre_aggregate",
+    "merge_aggregation",
+    "topk_output"
+  ],
+  "join_order": [
+    {
+      "build": "sub(filtered: fy=:fy_eq)",
+      "probe": "num",
+      "type": "inner",
+      "strategy": "direct_array",
+      "build_cardinality": 16200,
+      "notes": "sub_adsh_lookup dense array index; build bitset of qualifying adsh codes + compact array of (adsh_code → name_code)"
+    },
+    {
+      "build": "pre_join index (pre-built)",
+      "probe": "num(filtered)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 9600799,
+      "notes": "Use pre_join hash multimap index; probe with (adsh, tag, version), post-filter stmt=:stmt_eq on matched pre rows"
+    }
+  ],
+  "filters": [
+    {
+      "table": "sub",
+      "predicate": "fy = :fy_eq",
+      "selectivity": 0.188,
+      "phase": "pre-filter"
+    },
+    {
+      "table": "num",
+      "predicate": "uom = :uom_eq",
+      "selectivity": 0.844,
+      "phase": "scan"
+    },
+    {
+      "table": "num",
+      "predicate": "value IS NOT NULL (value_null == 0)",
+      "selectivity": 0.95,
+      "phase": "scan"
+    },
+    {
+      "table": "num",
+      "predicate": "adsh IN valid_sub_adsh_set",
+      "selectivity": 0.188,
+      "phase": "scan"
+    },
+    {
+      "table": "pre",
+      "predicate": "stmt = :stmt_eq",
+      "selectivity": 0.184,
+      "phase": "post-join"
+    }
+  ],
+  "data_structures": {
+    "sub_valid_adsh": "bitset(max_adsh_code) — small (~86K bits = ~11KB)",
+    "sub_name_lookup": "compact_array(qualifying_sub_count) — struct { uint32_t adsh_code; uint32_t name_code; } sorted by adsh_code, OR reuse sub_adsh_lookup dense array for name_code lookup",
+    "sub_name_by_adsh": "dense_array[max_adsh_code] → name_code (uint32_t); only ~86K entries, ~344KB, fits in cache",
+    "pre_join_index": "pre-built hash_multimap (mmap from indexes/pre_join.idx + pre_join_rowids.idx)",
+    "aggregation": "compact_hash_map<uint128_t, AggValue> per thread — key = pack(name_code:32, tag_code:32, plabel_code:32, unused:32), value = {double sum, uint64_t count}",
+    "topk": "partial_sort on merged aggregation results"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 100000,
+    "phase_details": {
+      "filter_sub": "single_thread — only 86K rows",
+      "scan_num_join_aggregate": "parallel — morsel-driven over num rows, each thread has thread-local hash map for aggregation",
+      "merge": "serial merge of thread-local hash maps into global map"
+    }
+  },
+  "indexes": [
+    {
+      "index": "sub_adsh_lookup",
+      "purpose": "O(1) lookup: adsh_code → sub_row_id, then read name_code from sub.name[row_id]"
+    },
+    {
+      "index": "pre_join + pre_join_rowids",
+      "purpose": "hash multimap probe: (adsh, tag, version) → list of pre row_ids for post-filter on stmt"
+    }
+  ],
+  "aggregation": {
+    "strategy": "thread_local_hash_maps_then_merge",
+    "key_encoding": "pack 3 uint32_t (name_code, tag_code, plabel_code) into 96-bit composite key; stmt_code is constant after filter so exclude from key",
+    "estimated_groups": 500000,
+    "value_type": "struct { double sum; uint64_t count; }"
+  },
+  "output": {
+    "order_by": ["total_value DESC NULLS LAST"],
+    "limit": 200,
+    "strategy": "partial_sort or nth_element + sort top-200",
+    "materialization": "decode name_code, tag_code, plabel_code via dictionaries only for final 200 rows (late materialization)"
+  },
+  "memory_advice": {
+    "num_columns": "MADV_SEQUENTIAL + MADV_HUGEPAGE, demand-paged (no MAP_POPULATE)",
+    "sub_columns": "MADV_SEQUENTIAL, small enough to read fully",
+    "pre_columns": "MADV_RANDOM — accessed via index lookups with non-sequential row_ids",
+    "pre_join_index": "MADV_RANDOM — hash probing",
+    "pre_join_rowids": "MADV_RANDOM — offset-based access"
+  },
+  "applied_skills": [
+    "L3_demand_paged_mmap — no MAP_POPULATE on any mmap",
+    "L3_raii_timer_resource_scoping — declare MMap objects at outer scope, munmap after timing",
+    "L3_compact_qualifying_arrays — sub filter uses compact bitset not full array",
+    "L2_star_join_compact_pipeline — overall pipeline structure"
+  ],
+  "execution_notes": {
+    "scan_loop": "For each num morsel: load uom[], value_null[], adsh[], tag[], version[], value[]. Filter uom==usd_code && value_null==0 && bitset[adsh_code]. For qualifying rows: lookup sub_name_by_adsh[adsh_code] → name_code. Probe pre_join index with hash_u32x3(adsh, tag, version). For each pre match: check pre.stmt[pre_row]==is_code → read plabel_code → aggregate into thread-local map.",
+    "key_note": "stmt_code is constant ('IS') for all output rows — include as literal in output, exclude from aggregation key to reduce key width",
+    "llc_budget": "Thread-local hash maps: ~500K groups × 24 bytes = ~12MB each. With 64 threads = 768MB > LLC. Consider capping threads to ~3-4 for aggregation phase, OR use collect-then-aggregate pattern.",
+    "thread_cap_recommendation": "Cap to ~16 threads for the scan+aggregate phase. Each thread's hash map ~12MB, 16 × 12MB = 192MB fits in memory but not LLC. Alternative: use two-pass — pass 1 parallel scan to collect qualifying (name_code, tag_code, plabel_code, value) tuples into compact array via two-pass scatter, pass 2 single-pass aggregation."
+  },
+  "execution_target": "cpp"
+}

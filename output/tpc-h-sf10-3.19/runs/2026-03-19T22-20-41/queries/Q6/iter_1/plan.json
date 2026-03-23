@@ -1,0 +1,62 @@
+{
+  "query_id": "Q6",
+  "pipeline": ["mmap_columns", "zonemap_filter", "parallel_scan_filter_aggregate"],
+  "scan": {
+    "table": "lineitem",
+    "rows": 59986052,
+    "block_size": 65536,
+    "num_blocks": 916,
+    "columns": [
+      {"name": "l_shipdate", "file": "storage/lineitem/l_shipdate.bin", "type": "int32_t", "bytes_per_row": 4},
+      {"name": "l_discount", "file": "storage/lineitem/l_discount.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_quantity", "file": "storage/lineitem/l_quantity.bin", "type": "double", "bytes_per_row": 8},
+      {"name": "l_extendedprice", "file": "storage/lineitem/l_extendedprice.bin", "type": "double", "bytes_per_row": 8}
+    ],
+    "access_pattern": "sequential_filtered"
+  },
+  "filters": [
+    {"table": "lineitem", "column": "l_shipdate", "predicate": "l_shipdate >= :l_shipdate_lower AND l_shipdate < :l_shipdate_upper", "type": "int32_t", "selectivity": 0.15, "eval_order": 1},
+    {"table": "lineitem", "column": "l_discount", "predicate": "l_discount >= :l_discount_lower AND l_discount <= :l_discount_upper", "type": "double", "selectivity": 0.27, "eval_order": 2},
+    {"table": "lineitem", "column": "l_quantity", "predicate": "l_quantity < :l_quantity_upper", "type": "double", "selectivity": 0.46, "eval_order": 3}
+  ],
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "file": "storage/indexes/lineitem_l_shipdate_zonemap.bin",
+      "type": "zone_map",
+      "column": "l_shipdate",
+      "purpose": "skip_blocks",
+      "layout": {
+        "header": "uint64_t num_blocks, uint32_t block_size",
+        "body": "int32_t[num_blocks * 2] — (min_date, max_date) per block"
+      },
+      "skip_condition": "zonemap[b*2] >= :l_shipdate_upper || zonemap[b*2+1] < :l_shipdate_lower",
+      "estimated_skip_rate": 0.85
+    }
+  ],
+  "data_structures": {},
+  "join_order": [],
+  "aggregation": "scalar_sum",
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "unit": "block",
+    "threads": "auto(nproc)"
+  },
+  "output": {
+    "columns": ["revenue"],
+    "rows": 1,
+    "format": "single scalar value"
+  },
+  "parameters": [
+    {"name": "l_shipdate_lower", "type": "date_as_int32", "default_value": 8766, "default_date": "1994-01-01"},
+    {"name": "l_shipdate_upper", "type": "date_as_int32", "default_value": 8766, "default_date": "1994-01-01"},
+    {"name": "l_discount_lower", "type": "double", "default_value": 0.05},
+    {"name": "l_discount_upper", "type": "double", "default_value": 0.07},
+    {"name": "l_quantity_upper", "type": "double", "default_value": 24.0}
+  ],
+  "execution_target": "cpp",
+  "optimization_notes": "Category B/C: data_loading was 58ms (72% of total) because MAP_POPULATE forced all 1.68GB to be faulted in, but zonemap skips 85% of blocks so only ~252MB is needed. Fix: (1) Remove MAP_POPULATE from all mmap calls — use plain mmap so pages are demand-faulted only when accessed. (2) After zonemap filtering, use madvise(MADV_WILLNEED) only on qualifying block byte ranges for all 4 columns to trigger async readahead for just the needed pages. (3) Use madvise(MADV_DONTNEED) or simply skip madvise on non-qualifying ranges. (4) Pre-compute the list of qualifying blocks from the zonemap in a single-threaded pass first, then distribute only qualifying blocks to threads via OpenMP parallel for. (5) In the scan loop, apply filters in order: shipdate (int32 range, selectivity 0.15) → discount (double range, 0.27) → quantity (double threshold, 0.46). (6) Use thread-local double accumulators with final reduction. This should reduce data_loading to near-zero (mmap setup only) and concentrate I/O cost into the scan phase where it overlaps with computation on qualifying blocks only.",
+  "correctness_anchors": {
+    "date_arithmetic": "add_years(p_shipdate_upper_base, 1)"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "run_id": "2026-03-20T20-15-08",
+  "benchmark": "sec-edgar",
+  "scale_factor": 3,
+  "classifications": {
+    "NOVEL_SUCCESS": 6,
+    "SIGNIFICANT_IMPROVEMENT": 0,
+    "FAMILIAR": 0
+  },
+  "nodes_created": 13,
+  "nodes_updated": 0,
+  "edges_created": 14,
+  "skills_created": ["operators/hash-index-anti-join"],
+  "skills_updated": ["operators/composite-key-direct-mapping (gotcha added: bit-shift overflow)"],
+  "breakthroughs_found": 1,
+  "regressions_recorded": 1,
+  "details": {
+    "L0_nodes_created": ["L0_secedgar_Q1_sf3_20260320", "L0_secedgar_Q2_sf3_20260320", "L0_secedgar_Q3_sf3_20260320", "L0_secedgar_Q4_sf3_20260320", "L0_secedgar_Q6_sf3_20260320", "L0_secedgar_Q24_sf3_20260320"],
+    "L1_nodes_created": ["L1_secedgar_Q1", "L1_secedgar_Q2", "L1_secedgar_Q3", "L1_secedgar_Q4", "L1_secedgar_Q6", "L1_secedgar_Q24"],
+    "L3_nodes_created": ["L3_hash_index_anti_join"],
+    "breakthrough_details": [
+      {
+        "query": "Q1",
+        "type": "crash_to_fix",
+        "iter_0": "SIGSEGV crash (bit-shift composite key overflow: (stmt<<8)|rfile allocates 256 slots but needs up to 2049)",
+        "iter_1": "15.12ms (runtime-sized composite key: stmt*num_rfile+rfile, 18 groups, per-thread memory 2.76MB→194KB)",
+        "key_insight": "Composite key bit-shift formulas are data-dependent — ALWAYS read dictionary cardinalities at runtime and use multiplication, not bit-shifting"
+      }
+    ],
+    "regression_details": [
+      {
+        "query": "Q1",
+        "iter": 0,
+        "what_failed": "bit-shift composite key (stmt_code << 8 | rfile_code) with fixed 256-slot allocation",
+        "recorded_in": "operators/composite-key-direct-mapping/gotchas.md"
+      }
+    ],
+    "query_results": {
+      "Q1": {"timing_ms": 15.12, "iterations": 1, "classification": "NOVEL_SUCCESS"},
+      "Q2": {"timing_ms": 30.1, "iterations": 0, "classification": "NOVEL_SUCCESS"},
+      "Q3": {"timing_ms": 45.21, "iterations": 0, "classification": "NOVEL_SUCCESS"},
+      "Q4": {"timing_ms": 77.85, "iterations": 0, "classification": "NOVEL_SUCCESS"},
+      "Q6": {"timing_ms": 159.14, "iterations": 0, "classification": "NOVEL_SUCCESS"},
+      "Q24": {"timing_ms": 88.14, "iterations": 0, "classification": "NOVEL_SUCCESS"}
+    }
+  }
+}
