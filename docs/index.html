@@ -6,80 +6,8 @@
 <title>GenDB — LLM-Powered Generative Query Engine</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="demo/css/shared.css">
 <style>
-/* ── Reset & Base ────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
-body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: #fafafa;
-  color: #23272f;
-  line-height: 1.65;
-  overflow-x: hidden;
-}
-a { color: #6366f1; text-decoration: none; transition: color 0.2s; }
-a:hover { color: #4f46e5; }
-
-/* ── Utility ─────────────────────────────────────────────── */
-.container { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
-.mono { font-family: 'JetBrains Mono', monospace; }
-.dim { color: #8b8fa3; }
-.tag {
-  display: inline-block; padding: 5px 14px; border-radius: 20px;
-  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-}
-.tag-indigo { background: #eef2ff; color: #6366f1; }
-.tag-emerald { background: #ecfdf5; color: #059669; }
-.tag-amber { background: #fffbeb; color: #d97706; }
-.tag-rose { background: #fff1f2; color: #e11d48; }
-
-/* ── Nav ─────────────────────────────────────────────────── */
-nav {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-  background: rgba(250,250,250,0.85); backdrop-filter: blur(20px) saturate(1.5);
-  border-bottom: 1px solid #e5e7eb;
-}
-nav .container {
-  display: flex; align-items: center; justify-content: space-between;
-  height: 60px;
-}
-nav .logo { font-weight: 900; font-size: 1.2rem; letter-spacing: -0.03em; color: #23272f; }
-nav .logo span { color: #6366f1; }
-nav .links { display: flex; gap: 32px; }
-nav .links a { color: #6b7280; font-size: 0.9rem; font-weight: 500; transition: color 0.15s; }
-nav .links a:hover { color: #23272f; }
-
-/* Hamburger */
-.hamburger {
-  display: none; background: none; border: none; cursor: pointer;
-  width: 36px; height: 36px; position: relative; z-index: 110;
-  flex-shrink: 0;
-}
-.hamburger span {
-  display: block; width: 22px; height: 2px; background: #23272f;
-  position: absolute; left: 7px; transition: all 0.3s ease;
-  border-radius: 1px;
-}
-.hamburger span:nth-child(1) { top: 10px; }
-.hamburger span:nth-child(2) { top: 17px; }
-.hamburger span:nth-child(3) { top: 24px; }
-.hamburger.open span:nth-child(1) { top: 17px; transform: rotate(45deg); }
-.hamburger.open span:nth-child(2) { opacity: 0; }
-.hamburger.open span:nth-child(3) { top: 17px; transform: rotate(-45deg); }
-
-/* Mobile overlay */
-.mobile-overlay {
-  display: none; position: fixed; inset: 0; z-index: 99;
-  background: rgba(250,250,250,0.97); backdrop-filter: blur(20px);
-  flex-direction: column; align-items: center; justify-content: center; gap: 28px;
-}
-.mobile-overlay.open { display: flex; }
-.mobile-overlay a {
-  color: #23272f; font-size: 1.3rem; font-weight: 600;
-  transition: color 0.2s;
-}
-.mobile-overlay a:hover { color: #6366f1; }
-
 /* ── Hero ────────────────────────────────────────────────── */
 .hero {
   padding: 150px 0 100px;
@@ -121,29 +49,7 @@ nav .links a:hover { color: #23272f; }
 .hero-stat .number.c-amber { color: #d97706; }
 .hero-stat .number.c-rose { color: #e11d48; }
 .hero-stat .label { font-size: 0.85rem; color: #8b8fa3; margin-top: 6px; }
-.hero-buttons { display: flex; gap: 14px; justify-content: center; margin-top: 44px; }
-.btn {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 13px 28px; border-radius: 11px; font-weight: 600; font-size: 0.95rem;
-  transition: all 0.25s; border: none; cursor: pointer;
-}
-.btn-primary {
-  background: #6366f1; color: #fff;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.25), 0 0 0 0 rgba(99,102,241,0);
-}
-.btn-primary:hover {
-  background: #4f46e5; color: #fff;
-  box-shadow: 0 4px 20px rgba(99,102,241,0.35), 0 0 0 3px rgba(99,102,241,0.1);
-  transform: translateY(-1px);
-}
-.btn-secondary {
-  background: #fff; color: #23272f;
-  border: 1px solid #d1d5db; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}
-.btn-secondary:hover {
-  background: #f5f5f5; color: #23272f; border-color: #b0b5c0;
-  transform: translateY(-1px);
-}
+.hero-buttons { display: flex; gap: 14px; justify-content: center; margin-top: 44px; flex-wrap: wrap; }
 
 /* ── Sections ────────────────────────────────────────────── */
 section { padding: 88px 0; }
@@ -452,11 +358,8 @@ footer a:hover { color: #23272f; }
   .why-grid { grid-template-columns: 1fr; }
   .model-grid { grid-template-columns: repeat(2, 1fr); }
   .hero-stats { gap: 32px; }
-  nav .links { display: none; }
-  .hamburger { display: block; }
 }
 @media (max-width: 600px) {
-  .container { padding: 0 20px; }
   .hero { padding: 120px 0 56px; }
   .hero h1 { font-size: 2rem; }
   .hero .subtitle { font-size: 0.95rem; margin-bottom: 28px; }
@@ -500,6 +403,7 @@ footer a:hover { color: #23272f; }
   <div class="container">
     <a href="#" class="logo" style="text-decoration:none;"><span>Gen</span>DB</a>
     <div class="links">
+      <a href="demo/" style="color:#059669;font-weight:700;">&#10024; Demo</a>
       <a href="#about">About</a>
       <a href="#why">Why</a>
       <a href="#leaderboard">Leaderboard</a>
@@ -518,6 +422,7 @@ footer a:hover { color: #23272f; }
 
 <!-- Mobile overlay -->
 <div class="mobile-overlay" id="mobileMenu">
+  <a href="demo/" onclick="closeMenu()" style="color:#059669;font-weight:700;">&#10024; Demo</a>
   <a href="#about" onclick="closeMenu()">About</a>
   <a href="#why" onclick="closeMenu()">Why</a>
   <a href="#leaderboard" onclick="closeMenu()">Leaderboard</a>
@@ -540,7 +445,9 @@ footer a:hover { color: #23272f; }
     <div class="hero-buttons fade-in fade-in-d2">
       <a href="https://arxiv.org/abs/2603.02081" class="btn btn-primary">Read the Paper &rarr;</a>
       <a href="https://github.com/SolidLao/GenDB" class="btn btn-secondary">View on GitHub</a>
+      <a href="demo/" class="btn btn-demo">&#10024; Try the Interactive Demo &rarr; <span class="btn-new-badge">NEW</span></a>
     </div>
+    <div class="demo-callout fade-in fade-in-d2">&#9757; Interactive guided tour &bull; Step-by-step visualization &bull; Try your own data</div>
     <div class="hero-stats fade-in fade-in-d3">
       <div class="hero-stat">
         <div class="number c-emerald">3.2x</div>

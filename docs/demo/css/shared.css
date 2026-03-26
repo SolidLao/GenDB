@@ -1,0 +1,143 @@
+/* ── shared.css — Base styles shared by GenDB website and demo ── */
+
+/* ── Reset & Base ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: #23272f; background: #fafafa;
+  line-height: 1.6; font-size: 16px;
+}
+a { color: #6366f1; text-decoration: none; transition: color 0.2s; }
+a:hover { color: #4f46e5; }
+img { max-width: 100%; height: auto; }
+code, pre { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+
+/* ── Container ───────────────────────────────────────────── */
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* ── Nav ─────────────────────────────────────────────────── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+  background: rgba(250,250,250,0.85);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(229,231,235,0.6);
+  padding: 0 24px;
+}
+nav .container {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 64px;
+}
+nav .logo {
+  font-size: 1.4rem; font-weight: 900; letter-spacing: -0.03em; color: #23272f;
+}
+nav .logo span { color: #6366f1; }
+nav .links { display: flex; gap: 24px; align-items: center; }
+nav .links a {
+  font-size: 0.88rem; font-weight: 500; color: #6b7280;
+  transition: color 0.2s;
+}
+nav .links a:hover { color: #23272f; }
+
+/* ── Hamburger (mobile) ──────────────────────────────────── */
+.hamburger {
+  display: none; background: none; border: none; cursor: pointer;
+  padding: 8px; flex-direction: column; gap: 5px;
+}
+.hamburger span {
+  display: block; width: 22px; height: 2px; background: #23272f;
+  border-radius: 2px; transition: all 0.3s;
+}
+.hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(5px, 5px); }
+.hamburger.open span:nth-child(2) { opacity: 0; }
+.hamburger.open span:nth-child(3) { transform: rotate(-45deg) translate(5px, -5px); }
+
+/* ── Mobile overlay ──────────────────────────────────────── */
+.mobile-overlay {
+  position: fixed; top: 64px; left: 0; right: 0; bottom: 0;
+  background: rgba(250,250,250,0.98);
+  backdrop-filter: blur(16px);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 48px 24px; gap: 20px;
+  transform: translateY(-100%); opacity: 0;
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none; z-index: 999;
+}
+.mobile-overlay.open {
+  transform: translateY(0); opacity: 1; pointer-events: auto;
+}
+.mobile-overlay a {
+  font-size: 1.1rem; font-weight: 600; color: #23272f;
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 28px; border-radius: 12px;
+  font-size: 0.92rem; font-weight: 600;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer; border: none; text-decoration: none;
+}
+.btn-primary {
+  background: #6366f1; color: #fff;
+  box-shadow: 0 2px 12px rgba(99,102,241,0.3);
+}
+.btn-primary:hover {
+  background: #4f46e5; color: #fff;
+  box-shadow: 0 6px 20px rgba(99,102,241,0.4);
+  transform: translateY(-2px);
+}
+.btn-secondary {
+  background: #fff; color: #23272f;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+.btn-secondary:hover {
+  border-color: #c7c9ff; color: #6366f1;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(99,102,241,0.1);
+}
+.btn-demo {
+  background: linear-gradient(135deg, #059669, #10b981); color: #fff;
+  box-shadow: 0 2px 12px rgba(5,150,105,0.3);
+  position: relative;
+  animation: demoPulse 2.5s ease-in-out infinite;
+}
+.btn-demo:hover {
+  background: linear-gradient(135deg, #047857, #059669); color: #fff;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(5,150,105,0.4);
+  animation: none;
+}
+@keyframes demoPulse {
+  0%, 100% { box-shadow: 0 2px 12px rgba(5,150,105,0.3); }
+  50% { box-shadow: 0 4px 20px rgba(5,150,105,0.5); }
+}
+.btn-new-badge {
+  display: inline-block;
+  background: #fff;
+  color: #059669;
+  font-size: 0.55rem;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  letter-spacing: 0.06em;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+.demo-callout {
+  font-size: 0.75rem;
+  color: #059669;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-align: right;
+  margin-top: 10px;
+}
+
+/* ── Responsive (shared) ─────────────────────────────────── */
+@media (max-width: 900px) {
+  nav .links { display: none; }
+  .hamburger { display: flex; }
+}

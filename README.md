@@ -6,6 +6,8 @@
 
 **[Website](https://solidlao.github.io/GenDB/)** &nbsp;|&nbsp; **[Paper](https://arxiv.org/abs/2603.02081)** &nbsp;|&nbsp; **[GitHub](https://github.com/SolidLao/GenDB)**
 
+> **Try the [Interactive Demo](https://solidlao.github.io/GenDB/demo/)** — explore GenDB's full pipeline with a guided audio walkthrough. See how six AI agents analyze data, design storage, plan execution, generate code, and optimize it step by step. Browse pre-computed results, write your own queries, or upload your own data.
+
 <p align="center">
   <img src="assets/GenDB.png" width="700" alt="GenDB System Overview">
 </p>
@@ -16,6 +18,7 @@
 
 ## News
 
+- **2026-03-25** — **[Interactive Demo](https://solidlao.github.io/GenDB/demo/)** :sparkles: — The best way to understand GenDB. A guided audio walkthrough takes you through the full pipeline on TPC-H Q3: from SQL parameterization, data and hardware profiling, storage design, query planning, code generation, to iterative optimization (593ms → 27ms, 22× speedup). The GitHub Pages deployment includes pre-computed results for TPC-H and SEC-EDGAR. For real-time code generation on new queries or your own data, deploy the demo server with GenDB on your machine (`node src/demo/server.mjs`).
 - **2026-03-23** — **SQL Template-Native Generation & Component Reuse.** GenDB now extracts parameterized SQL templates from queries and generates code at the template level. Queries sharing the same template structure (e.g., different date ranges or filter predicates) reuse the same generated code — no re-generation needed. Storage, indexes, and optimized query binaries are versioned and persisted across runs, with hardware fingerprinting to trigger automatic rebenchmarking when hardware changes. This enables incremental workload onboarding: run 5 queries today, add 17 more tomorrow, and GenDB only generates code for the new ones.
 - **2026-03-23** — **Self-Evolving Memory System (experimental).** GenDB can now learn from past runs via a 6-layer Hierarchical Abstraction Graph and auto-generated optimization skills. This feature is still under active development and testing, and is disabled by default. Enable with `--memory-dir <path>`. See `src/gendb/memory/README.md`.
 - **2026-03-09** — **Language comparison.** Compared GenDB's C++ output with Optimized C++ and Rust rewrites by Claude Code. See [results](docs/language-comparison.md).
@@ -204,6 +207,23 @@ src/gendb/
   memory/                   # Self-evolving memory system (experimental)
   tools/                    # Result comparison, template extraction
   utils/                    # C++ utility headers (mmap, hashing, timing, dates)
+
+docs/demo/                  # Interactive demo (static site, GitHub Pages)
+  index.html                #   Demo page with control panel, pipeline visualization
+  css/                      #   Styles (demo.css, viz.css, tutorial.css, shared.css)
+  js/                       #   App logic, pipeline renderer, tutorial controller
+    tutorial.js             #     Guided walkthrough with spotlight tour
+    tutorial-script.js      #     Tour script data, subtitles, audio mappings
+    viz-renderer.js         #     Two-column progressive canvas renderer
+    data/                   #     Pre-computed benchmark + visualization data
+  generate-audio.mjs        #   Audio narration generator (OpenAI TTS)
+  audio/                    #   MP3 narration files (generated via generate-audio.mjs)
+
+src/demo/                   # Demo tooling
+  server.mjs                #   Local server for live code generation
+  extract-data.mjs          #   Extract benchmark data for demo
+  generate-viz.mjs          #   Generate visualization data via LLM
+  viz-agent/                #   VIZ generation agent prompt and extractor
 
 benchmarks/
   benchmark.py              # Benchmark GenDB against baseline systems
