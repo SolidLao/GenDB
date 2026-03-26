@@ -45,6 +45,20 @@ var Tutorial = (function () {
   /* ════════════════════════════════════════════════════════
      Audio
      ════════════════════════════════════════════════════════ */
+  var audioUnlocked = false;
+
+  // Mobile browsers block audio.play() until a user gesture triggers it.
+  // Call this from any click/tap handler to "unlock" the audio context.
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    var silent = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwBHAAAAAAD/+1DEAAAH+AJX9AAACQMB6v8xAABEREBEBAQEREREBAQEREREREREREREBAQEREREBAQE');
+    silent.volume = 0.01;
+    silent.play().then(function () {
+      audioUnlocked = true;
+      silent.pause();
+    }).catch(function () {});
+  }
+
   function getAudioPref() {
     try { return localStorage.getItem('gendb-tutorial-audio') !== 'false'; }
     catch (e) { return true; }
@@ -56,6 +70,7 @@ var Tutorial = (function () {
     updateAudioBtn();
   }
   function toggleAudio() {
+    unlockAudio(); // user gesture — unlock mobile audio
     setAudioPref(!audioEnabled);
     if (!audioEnabled) stopAudio();
   }
@@ -160,11 +175,13 @@ var Tutorial = (function () {
     overlay.appendChild(introEl);
 
     document.getElementById('tut-btn-watch').addEventListener('click', function () {
+      unlockAudio(); // unlock mobile audio on first user gesture
       landing.style.opacity = '0';
       landing.style.transition = 'opacity 0.4s ease';
       setTimeout(function () { landing.remove(); runIntroScenes(); }, 500);
     });
     document.getElementById('tut-btn-skip-intro').addEventListener('click', function () {
+      unlockAudio(); // unlock mobile audio on first user gesture
       skipIntro();
     });
   }
@@ -443,7 +460,7 @@ var Tutorial = (function () {
       '</div>';
     overlay.appendChild(tooltipEl);
 
-    tooltipEl.querySelector('.tut-tooltip-next').addEventListener('click', function () { nextTourStep(); });
+    tooltipEl.querySelector('.tut-tooltip-next').addEventListener('click', function () { unlockAudio(); nextTourStep(); });
     tooltipEl.querySelector('.tut-tooltip-skip').addEventListener('click', skipAll);
 
     document.addEventListener('keydown', handleTourKey);

@@ -396,7 +396,7 @@ span[data-layer], div.cv-badge[data-layer], div.cv-timing[data-layer], span.cv-c
 .gen-stat-val { font-size: 0.82rem; font-weight: 700; color: var(--gray-700); font-family: var(--font-mono); line-height: 1.2; }
 .gen-stat-lbl { font-size: 0.55rem; color: var(--gray-400); text-transform: uppercase; letter-spacing: 0.03em; line-height: 1.2; }
 
-/* ══ Responsive ═══════════════════════════════════════════ */
+/* ══ Responsive: Tablet ═══════════════════════════════════ */
 @media (max-width: 700px) {
   .canvas { padding-left: 0; }
   .cv-left { position: static; width: 100%; }
@@ -405,4 +405,28 @@ span[data-layer], div.cv-badge[data-layer], div.cv-timing[data-layer], span.cv-c
   .cv-children { gap: 4px; flex-wrap: wrap; }
   .wa-disc-grid { grid-template-columns: 1fr; }
   .opt-bf-row { grid-template-columns: 1fr; }
+}
+
+/* ══ Responsive: Phone ═══════════════════════════════════ */
+@media (max-width: 480px) {
+  .viz-container { padding: 0 4px; }
+  /* Pipeline bar: shrink nodes for small screens */
+  .pipeline-bar { justify-content: flex-start; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .pn-circle { width: 28px; height: 28px; font-size: 0.55rem; }
+  .pn-label { font-size: 0.6rem; max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
+  .pipeline-connector svg { width: 18px; }
+  .pn-step { font-size: 0.65rem; }
+  /* Canvas */
+  .cv-sql-pre { font-size: 0.65rem; }
+  .cv-code-pre { font-size: 0.6rem; max-height: 200px; }
+  .cv-op { min-width: 60px; max-width: 120px; font-size: 0.65rem; padding: 4px 6px; }
+  .cv-op-rows { font-size: 0.55rem; }
+  .cv-tbl { min-width: 0; }
+  .cv-tbl-name { font-size: 0.72rem; }
+  .cv-badge { font-size: 0.65rem; padding: 4px 6px; }
+  .cv-hw-chip { font-size: 0.65rem; padding: 3px 8px; }
+  /* Detail panel */
+  .agent-detail-panel { padding: 12px; }
+  /* Benchmark */
+  .viz-bench-section { padding: 16px 8px; }
 }

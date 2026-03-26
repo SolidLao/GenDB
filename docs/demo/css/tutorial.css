@@ -516,20 +516,60 @@
   background: var(--indigo-bg);
 }
 
-/* ── Responsive ───────────────────────────────────────── */
+/* ── Responsive: Tablet ────────────────────────────────── */
+@media (max-width: 768px) {
+  .tut-controls { right: 16px; top: 16px; }
+  .tut-skip { padding: 7px 16px; font-size: 0.8rem; }
+  .tut-audio-btn { width: 34px; height: 34px; }
+  .tut-subtitle { max-width: 90%; padding: 12px 20px; font-size: 0.95rem; bottom: 32px; }
+  .tut-tooltip { max-width: 300px; }
+  .tut-landing-logo { font-size: 2.6rem; }
+  .tut-landing-tagline { font-size: 1rem; margin-bottom: 36px; }
+  .tut-scene { padding: 24px; }
+}
+
+/* ── Responsive: Phone ────────────────────────────────── */
 @media (max-width: 640px) {
-  .tut-logo-big { font-size: 3rem; }
-  .tut-problem-text h2 { font-size: 1.4rem; }
+  .tut-logo-big { font-size: 2.8rem; }
+  .tut-problem-text h2 { font-size: 1.3rem; }
+  .tut-problem-text p { font-size: 1rem; }
+  .tut-insight { max-width: 100%; }
   .tut-insight-headline { font-size: 1rem; white-space: normal; }
-  .tut-stats-row { gap: 24px; }
-  .tut-stat-number { font-size: 2.2rem; }
-  .tut-agent { width: 72px; }
-  .tut-agent-circle { width: 44px; height: 44px; font-size: 0.6rem; }
-  .tut-agent-name { font-size: 0.65rem; }
-  .tut-agent-role { display: none; }
-  .tut-tooltip { max-width: 280px; }
-  .tut-subtitle { font-size: 0.9rem; bottom: 24px; }
-  .tut-btn { padding: 12px 24px; font-size: 0.9rem; }
   .tut-code-morph { flex-direction: column; gap: 16px; }
-  .tut-bar { width: 40px; }
+  .tut-code-block { min-width: 0; width: 100%; }
+  .tut-arrow-morph { transform: rotate(90deg); }
+  .tut-stats-row { gap: 20px; }
+  .tut-stat-number { font-size: 2rem; }
+  .tut-results { max-width: 100%; }
+  .tut-results-bar { gap: 6px; }
+  .tut-bar { width: 36px; }
+  .tut-bar-ms { font-size: 0.55rem; }
+  .tut-bar-label { font-size: 0.6rem; }
+  /* Pipeline agents: wrap to 2 rows on small phones */
+  .tut-pipeline { flex-wrap: wrap; gap: 8px 0; justify-content: center; }
+  .tut-agent { width: 80px; }
+  .tut-agent-circle { width: 48px; height: 48px; font-size: 0.65rem; }
+  .tut-agent-name { font-size: 0.68rem; height: auto; }
+  .tut-agent-role { display: none; }
+  .tut-pipe-arrow { display: none; } /* hide arrows, agents wrap naturally */
+  /* Tooltip + subtitle */
+  .tut-tooltip { max-width: calc(100vw - 32px); padding: 16px 18px; }
+  .tut-tooltip-text { font-size: 0.88rem; }
+  .tut-subtitle { font-size: 0.85rem; bottom: 16px; padding: 10px 16px; max-width: 95%; }
+  .tut-btn { padding: 12px 24px; font-size: 0.9rem; }
+  .tut-landing-buttons { flex-direction: column; align-items: center; gap: 10px; }
+  .tut-tour-btn { font-size: 0.72rem; padding: 5px 10px; }
+}
+
+/* ── Responsive: Small phone ──────────────────────────── */
+@media (max-width: 380px) {
+  .tut-logo-big { font-size: 2.2rem; }
+  .tut-landing-logo { font-size: 2.2rem; }
+  .tut-agent { width: 64px; }
+  .tut-agent-circle { width: 40px; height: 40px; font-size: 0.55rem; }
+  .tut-agent-name { font-size: 0.6rem; }
+  .tut-stat-number { font-size: 1.8rem; }
+  .tut-bar { width: 28px; }
+  .tut-tooltip { padding: 14px 16px; }
+  .tut-tooltip-text { font-size: 0.82rem; line-height: 1.5; }
 }
