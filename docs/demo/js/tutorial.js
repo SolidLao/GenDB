@@ -48,14 +48,19 @@ var Tutorial = (function () {
   var audioUnlocked = false;
 
   // Mobile browsers block audio.play() until a user gesture triggers it.
-  // Call this from any click/tap handler to "unlock" the audio context.
+  // This preloads and starts (then immediately pauses) a real audio file
+  // inside the user gesture handler, which unlocks the audio context.
   function unlockAudio() {
     if (audioUnlocked) return;
-    var silent = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwBHAAAAAAD/+1DEAAAH+AJX9AAACQMB6v8xAABEREBEBAQEREREBAQEREREREREREREBAQEREREBAQE');
-    silent.volume = 0.01;
-    silent.play().then(function () {
+    // Play any available audio file to unlock the context within this gesture
+    var firstSrc = TUTORIAL_SCRIPT.audioFiles['intro-logo'];
+    if (!firstSrc) return;
+    var a = new Audio(firstSrc);
+    a.volume = 0;
+    a.play().then(function () {
+      a.pause();
+      a.currentTime = 0;
       audioUnlocked = true;
-      silent.pause();
     }).catch(function () {});
   }
 

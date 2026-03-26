@@ -537,7 +537,7 @@
   .tut-insight-headline { font-size: 1rem; white-space: normal; }
   .tut-code-morph { flex-direction: column; gap: 16px; }
   .tut-code-block { min-width: 0; width: 100%; }
-  .tut-arrow-morph { transform: rotate(90deg); }
+  .tut-arrow-morph { transform: rotate(90deg); margin: -8px 0; }
   .tut-stats-row { gap: 20px; }
   .tut-stat-number { font-size: 2rem; }
   .tut-results { max-width: 100%; }
@@ -545,13 +545,13 @@
   .tut-bar { width: 36px; }
   .tut-bar-ms { font-size: 0.55rem; }
   .tut-bar-label { font-size: 0.6rem; }
-  /* Pipeline agents: wrap to 2 rows on small phones */
-  .tut-pipeline { flex-wrap: wrap; gap: 8px 0; justify-content: center; }
-  .tut-agent { width: 80px; }
-  .tut-agent-circle { width: 48px; height: 48px; font-size: 0.65rem; }
-  .tut-agent-name { font-size: 0.68rem; height: auto; }
+  /* Pipeline agents: single scrollable row on small phones */
+  .tut-pipeline { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; justify-content: flex-start; padding: 0 16px; }
+  .tut-agent { width: 72px; flex-shrink: 0; }
+  .tut-agent-circle { width: 44px; height: 44px; font-size: 0.6rem; }
+  .tut-agent-name { font-size: 0.62rem; height: auto; }
   .tut-agent-role { display: none; }
-  .tut-pipe-arrow { display: none; } /* hide arrows, agents wrap naturally */
+  .tut-pipe-arrow { font-size: 0.9rem; margin: 0 2px; flex-shrink: 0; }
   /* Tooltip + subtitle */
   .tut-tooltip { max-width: calc(100vw - 32px); padding: 16px 18px; }
   .tut-tooltip-text { font-size: 0.88rem; }
