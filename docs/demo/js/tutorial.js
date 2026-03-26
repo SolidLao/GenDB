@@ -192,26 +192,55 @@ var Tutorial = (function () {
   }
 
   /* ════════════════════════════════════════════════════════
-     PART 1: Cinematic Intro Scenes
+     PART 1: Cinematic Intro Scenes (user-paced with Next)
      ════════════════════════════════════════════════════════ */
-  async function runIntroScenes() {
+  var introNextBtn = null;
+  var introSceneIdx = -1;
+  var introScenes = null;
+
+  function runIntroScenes() {
     if (aborted) return;
-    var scenes = TUTORIAL_SCRIPT.introScenes;
-    for (var i = 0; i < scenes.length; i++) {
-      if (aborted) return;
-      await renderScene(scenes[i]);
-      hideSubtitle();
-      await wait(200);
-    }
-    if (!aborted) transitionToTour();
+    introScenes = TUTORIAL_SCRIPT.introScenes;
+    introSceneIdx = -1;
+
+    // Create a persistent "Next" button for intro scenes
+    introNextBtn = el('button', 'tut-btn tut-btn-primary tut-intro-next', 'Next \u2192');
+    introNextBtn.addEventListener('click', function () {
+      unlockAudio();
+      advanceIntroScene();
+    });
+    overlay.appendChild(introNextBtn);
+
+    // Show first scene immediately
+    advanceIntroScene();
   }
 
-  async function renderScene(scene) {
+  async function advanceIntroScene() {
+    if (aborted) return;
+    introSceneIdx++;
+
+    // Done with all scenes?
+    if (introSceneIdx >= introScenes.length) {
+      hideSubtitle();
+      if (introNextBtn) { introNextBtn.remove(); introNextBtn = null; }
+      transitionToTour();
+      return;
+    }
+
+    var scene = introScenes[introSceneIdx];
+    var isLast = introSceneIdx === introScenes.length - 1;
+
+    // Update next button text
+    if (introNextBtn) {
+      introNextBtn.textContent = isLast ? 'Start Tour \u2192' : 'Next \u2192';
+    }
+
+    // Fade out previous scene
     var prev = introEl.querySelector('.tut-scene');
-    if (prev) { prev.classList.remove('active'); await wait(400); prev.remove(); }
+    if (prev) { prev.classList.remove('active'); await wait(350); prev.remove(); }
 
+    // Build new scene
     var s = el('div', 'tut-scene');
-
     switch (scene.id) {
       case 'logo': buildSceneLogo(s); break;
       case 'problem': buildSceneProblem(s); break;
@@ -220,34 +249,18 @@ var Tutorial = (function () {
       case 'results': buildSceneResults(s); break;
       case 'transition': buildSceneTransition(s); break;
     }
-
     introEl.appendChild(s);
     requestAnimationFrame(function () {
       requestAnimationFrame(function () { s.classList.add('active'); });
     });
 
-    // Start audio + subtitle, get a promise that resolves when audio ends
+    // Play audio + subtitle (user just tapped, so audio is allowed)
     showSubtitle(scene.subtitle);
-    var audioPromise = playAudio('intro-' + scene.id);
+    playAudioFire('intro-' + scene.id);
 
-    // Run scene-specific animations concurrently
+    // Run scene-specific animations
     if (scene.id === 'pipeline') animatePipeline(s, scene.duration);
     else if (scene.id === 'results') animateResults(s, scene.duration);
-
-    // Wait for audio to finish — playAudio resolves when audio ends,
-    // so no extra wait needed. Just a brief pause for visual breathing room.
-    var audioDurMs = await audioPromise;
-    if (audioDurMs === 0) {
-      // No audio (disabled or missing): use fallback duration
-      await wait(scene.duration || 3000);
-    } else {
-      // Audio just finished — brief pause before transitioning
-      await wait(600);
-    }
-
-    s.classList.remove('active');
-    await wait(400);
-    s.remove();
   }
 
   /* ── Scene Builders ── */
@@ -408,6 +421,7 @@ var Tutorial = (function () {
   function transitionToTour() {
     stopAudio();
     hideSubtitle();
+    if (introNextBtn) { introNextBtn.remove(); introNextBtn = null; }
     if (introEl) {
       introEl.classList.add('fade-out');
       setTimeout(function () {
@@ -422,6 +436,7 @@ var Tutorial = (function () {
   function skipIntro() {
     stopAudio();
     hideSubtitle();
+    if (introNextBtn) { introNextBtn.remove(); introNextBtn = null; }
     if (introEl) introEl.remove();
     introEl = null;
     document.body.style.overflow = '';
@@ -752,7 +767,8 @@ var Tutorial = (function () {
       overlay.classList.remove('active');
       overlay.innerHTML = '';
     }
-    introEl = null; spotlightSvg = null; spotlightRect = null;
+    introEl = null; introNextBtn = null; introScenes = null; introSceneIdx = -1;
+    spotlightSvg = null; spotlightRect = null;
     highlightRing = null; tooltipEl = null; skipBtn = null;
     audioBtn = null; subtitleEl = null; tourIdx = -1; advancing = false;
   }

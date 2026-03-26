@@ -379,6 +379,19 @@
   animation: tutFadeIn 0.8s ease 0.2s forwards;
 }
 
+/* ── Intro Next Button ─────────────────────────────────── */
+.tut-intro-next {
+  position: fixed;
+  right: 40px; bottom: 40px;
+  z-index: 10016;
+  padding: 12px 32px;
+  font-size: 0.95rem;
+  box-shadow: 0 4px 16px rgba(99,102,241,0.25);
+}
+@media (max-width: 640px) {
+  .tut-intro-next { right: 20px; bottom: 28px; padding: 10px 24px; font-size: 0.88rem; }
+}
+
 /* ── Intro fade-out ───────────────────────────────────── */
 .tut-intro.fade-out {
   animation: tutFadeOut 0.8s ease forwards;
@@ -537,7 +550,7 @@
   .tut-insight-headline { font-size: 1rem; white-space: normal; }
   .tut-code-morph { flex-direction: column; gap: 16px; }
   .tut-code-block { min-width: 0; width: 100%; }
-  .tut-arrow-morph { transform: rotate(90deg); margin: -8px 0; }
+  .tut-arrow-morph { transform: rotate(90deg); margin: -4px auto; align-self: center; }
   .tut-stats-row { gap: 20px; }
   .tut-stat-number { font-size: 2rem; }
   .tut-results { max-width: 100%; }
