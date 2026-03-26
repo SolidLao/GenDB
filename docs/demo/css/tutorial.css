@@ -389,7 +389,8 @@
   box-shadow: 0 4px 16px rgba(99,102,241,0.25);
 }
 @media (max-width: 640px) {
-  .tut-intro-next { right: 20px; bottom: 28px; padding: 10px 24px; font-size: 0.88rem; }
+  .tut-intro-next { right: 16px; bottom: 88px; padding: 9px 20px; font-size: 0.85rem; }
+  .tut-subtitle { bottom: 16px; max-width: 95%; font-size: 0.78rem; padding: 8px 12px; line-height: 1.45; }
 }
 
 /* ── Intro fade-out ───────────────────────────────────── */
@@ -558,13 +559,13 @@
   .tut-bar { width: 36px; }
   .tut-bar-ms { font-size: 0.55rem; }
   .tut-bar-label { font-size: 0.6rem; }
-  /* Pipeline agents: single scrollable row on small phones */
-  .tut-pipeline { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; justify-content: flex-start; padding: 0 16px; }
-  .tut-agent { width: 72px; flex-shrink: 0; }
-  .tut-agent-circle { width: 44px; height: 44px; font-size: 0.6rem; }
-  .tut-agent-name { font-size: 0.62rem; height: auto; }
+  /* Pipeline agents: wrap into 2 rows of 3 on phones */
+  .tut-pipeline { flex-wrap: wrap; justify-content: center; gap: 8px 0; max-width: 340px; margin: 0 auto; }
+  .tut-agent { width: 52px; }
+  .tut-agent-circle { width: 36px; height: 36px; font-size: 0.52rem; }
+  .tut-agent-name { font-size: 0.56rem; height: auto; line-height: 1.2; }
   .tut-agent-role { display: none; }
-  .tut-pipe-arrow { font-size: 0.9rem; margin: 0 2px; flex-shrink: 0; }
+  .tut-pipe-arrow { font-size: 0.7rem; margin: 0 1px; padding-top: 6px; }
   /* Tooltip + subtitle */
   .tut-tooltip { max-width: calc(100vw - 32px); padding: 16px 18px; }
   .tut-tooltip-text { font-size: 0.88rem; }
