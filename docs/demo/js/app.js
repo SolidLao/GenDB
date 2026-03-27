@@ -75,9 +75,9 @@ var App = (function () {
     // Check for server mode (non-blocking)
     ServerMode.initServerMode();
 
-    // Tutorial: always show on page load — users can skip via the landing screen
+    // Tutorial: start immediately — overlay is already visible in HTML to prevent flash
     if (typeof Tutorial !== 'undefined') {
-      setTimeout(function () { Tutorial.start(); }, 300);
+      Tutorial.start();
     }
 
     // Help button: replay tutorial

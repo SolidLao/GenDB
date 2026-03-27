@@ -130,6 +130,7 @@ var Tutorial = (function () {
     advancing = false;
     buildOverlay();
     overlay.classList.add('active');
+    overlay.style.background = '';  // clear inline preload background
     document.body.style.overflow = 'hidden';
     showLanding();
   }

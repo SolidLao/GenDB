@@ -44,7 +44,7 @@ const segments = [
   { name: 'intro-logo', text: 'Welcome to GenDB.' },
   { name: 'intro-problem', text: 'Traditional databases run every query through the same general-purpose engine \u2014 regardless of your data or hardware.' },
   { name: 'intro-insight', text: 'GenDB uses AI agents to generate instance-optimized query processing code, tailored to your specific data and hardware.' },
-  { name: 'intro-pipeline', text: 'Six specialized agents work in sequence \u2014 profiling your workload, designing storage, planning execution, generating code, and iteratively optimizing it.' },
+  { name: 'intro-pipeline', text: 'GenDB uses a multi-agent workflow \u2014 profiling your workload, designing storage, planning execution, generating code, and iteratively optimizing it.' },
   { name: 'intro-results', text: 'On the TPC-H benchmark, GenDB\u2019s generated code outperforms every established database system we tested \u2014 fully automatic, zero manual tuning.' },
   { name: 'intro-transition', text: 'Let\u2019s see how it works.' },
 
@@ -57,7 +57,7 @@ const segments = [
   { name: 'tour-custom-data-pane', text: 'Just provide your database schema, drop in CSV files, and write a query. GenDB takes care of storage design, execution planning, and code generation.' },
   { name: 'tour-back-to-browse', text: 'Let\u2019s see the pipeline on TPC-H Q3 \u2014 a three-table join with aggregation and top-K.' },
   { name: 'tour-view-pipeline', text: 'Click View Pipeline to dive in.' },
-  { name: 'tour-pipeline-bar', text: 'Here are the six agents. Each one builds on the previous, and you can click any agent to see exactly what it adds.' },
+  { name: 'tour-pipeline-bar', text: 'Here is the multi-agent pipeline. Each step builds on the previous, and you can click any to see exactly what it contributes.' },
   { name: 'tour-agent-sql', text: 'The SQL Input step extracts a parameterized template from your query. Different filter values or date ranges can reuse the same generated code.' },
   { name: 'tour-canvas-sql', text: 'See the color-coded values? Those are the extracted parameters \u2014 swap them out for different workloads without regenerating.' },
   { name: 'tour-agent-wa', text: 'Now the Workload Analyzer kicks in \u2014 it profiles your data and hardware to spot bottlenecks and opportunities before any code is written.' },

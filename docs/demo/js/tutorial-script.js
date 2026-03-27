@@ -26,7 +26,7 @@ var TUTORIAL_SCRIPT = (function () {
     {
       id: 'pipeline',
       duration: 9000,
-      subtitle: 'Six specialized agents work in sequence \u2014 profiling your workload, designing storage, planning execution, generating code, and iteratively optimizing it.'
+      subtitle: 'GenDB uses a multi-agent workflow \u2014 profiling your workload, designing storage, planning execution, generating code, and iteratively optimizing it.'
     },
     {
       id: 'results',
@@ -143,7 +143,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.pipeline-bar',
       action: 'highlight',
       tooltip: 'Six agents run in sequence. Each one enriches the visualization. Click any agent to see its contribution.',
-      subtitle: 'Here are the six agents. Each one builds on the previous, and you can click any agent to see exactly what it adds.',
+      subtitle: 'Here is the multi-agent pipeline. Each step builds on the previous, and you can click any to see exactly what it contributes.',
       position: 'bottom',
       scrollTo: true
     },
