@@ -16,12 +16,12 @@ var TUTORIAL_SCRIPT = (function () {
     {
       id: 'problem',
       duration: 7000,
-      subtitle: 'Traditional databases run every query through the same general-purpose engine \u2014 no matter what your data looks like or what hardware you have.'
+      subtitle: 'Traditional databases run every query through the same general-purpose engine \u2014 regardless of your data or hardware.'
     },
     {
       id: 'insight',
       duration: 7000,
-      subtitle: 'GenDB takes a different approach. It uses AI agents to generate instance-optimized query processing code, tailored to your specific data and hardware.'
+      subtitle: 'GenDB uses AI agents to generate instance-optimized query processing code, tailored to your specific data and hardware.'
     },
     {
       id: 'pipeline',
@@ -86,7 +86,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.control-tab[data-pane="new-query"]',
       action: 'click-tab',
       tooltip: 'Write any SQL query on an existing benchmark dataset. GenDB generates optimized code in real time.',
-      subtitle: 'But here\u2019s where it gets exciting \u2014 you can write any SQL you want, and GenDB generates optimized code for it in real time.',
+      subtitle: 'You can write any SQL you want, and GenDB generates optimized code for it in real time.',
       position: 'bottom'
     },
     {
@@ -103,7 +103,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.control-tab[data-pane="custom-data"]',
       action: 'click-tab',
       tooltip: 'Upload your own data and queries. GenDB generates optimized code tailored to your dataset.',
-      subtitle: 'You can even bring your own data and queries \u2014 GenDB generates optimized code for any dataset.',
+      subtitle: 'Or bring your own data \u2014 GenDB generates optimized code for any dataset.',
       position: 'bottom'
     },
     {
@@ -120,7 +120,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.control-tab[data-pane="browse"]',
       action: 'click-tab',
       tooltip: "Let's view a pre-computed result to walk through the full pipeline.",
-      subtitle: 'Now let\u2019s see the full pipeline in action on TPC-H Q3 \u2014 a three-table join with aggregation and top-K sorting.',
+      subtitle: 'Let\u2019s see the pipeline on TPC-H Q3 \u2014 a three-table join with aggregation and top-K.',
       position: 'bottom'
     },
     {
@@ -180,7 +180,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.cv-tables',
       action: 'highlight',
       tooltip: 'Each table shows cardinality, filter predicate, and a selectivity bar. The customer segment filter retains only 20% of rows (1.5M \u2192 300K).',
-      subtitle: 'Look at these table profiles \u2014 the customer segment filter keeps just 20% of rows, going from 1.5 million down to 300 thousand. That kind of insight is gold for optimization.',
+      subtitle: 'The customer segment filter keeps just 20% of rows, from 1.5 million down to 300 thousand. That kind of insight is gold for optimization.',
       position: 'top',
       scrollTo: true
     },
@@ -189,7 +189,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.cv-hw',
       action: 'highlight',
       tooltip: '64 cores \u2192 morsel-driven parallelism. HDD \u2192 prefer sequential I/O. 44 MB L3 \u2192 bitmap fits in cache. AVX-512 \u2192 SIMD aggregation.',
-      subtitle: 'And the hardware \u2014 64 cores enable morsel-driven parallelism, HDD favors sequential I/O, the 44-megabyte L3 cache fits the customer bitmap entirely, and AVX-512 unlocks SIMD aggregation. Every detail matters.',
+      subtitle: 'The hardware \u2014 64 cores enable morsel-driven parallelism, HDD favors sequential I/O, 44-megabyte L3 cache fits the customer bitmap, and AVX-512 unlocks SIMD aggregation.',
       position: 'top',
       scrollTo: true
     },
@@ -208,7 +208,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: '.cv-tables',
       action: 'highlight',
       tooltip: 'c_mktsegment: dictionary-encoded to 1 byte (5 values). Dates: epoch i32 for direct comparison. l_orderkey: grouped index mapping each key to a contiguous (start, count) range.',
-      subtitle: 'Check this out \u2014 market segment has only 5 values, so it gets dictionary-encoded into a single byte. And that grouped index on lineitem? It maps each order key to a contiguous range, turning a 60-million-row scan into an O(1) lookup. That\u2019s huge.',
+      subtitle: 'Market segment has only 5 values, so it gets dictionary-encoded into a single byte. The grouped index on lineitem maps each order key to a contiguous range, turning a 60-million-row scan into O(1) lookup.',
       position: 'top',
       scrollTo: true
     },
@@ -269,12 +269,21 @@ var TUTORIAL_SCRIPT = (function () {
       position: 'top',
       scrollTo: true
     },
+    {
+      id: 'canvas-opt-code',
+      target: '.opt-code-section',
+      action: 'highlight',
+      tooltip: 'Browse the actual C++ code for each iteration. Use the dropdown to compare how the code evolves across optimization rounds.',
+      subtitle: 'Browse the actual C++ code for each iteration. Use the dropdown to compare how the Optimizer rewrites the code at every step.',
+      position: 'top',
+      scrollTo: true
+    },
     /* ── Benchmark ── */
     {
       id: 'benchmark',
       target: '.viz-bench-section',
       action: 'highlight',
-      tooltip: 'GenDB vs Umbra, DuckDB, MonetDB, ClickHouse, and PostgreSQL on identical hardware.',
+      tooltip: 'GenDB vs Umbra, DuckDB, MonetDB, ClickHouse, and PostgreSQL on identical hardware. Only shown after completing the full pipeline.',
       subtitle: 'And the results speak for themselves \u2014 GenDB\u2019s generated code beats every established database system we tested. Fully automatic, zero manual tuning.',
       position: 'top',
       scrollTo: true
@@ -285,7 +294,7 @@ var TUTORIAL_SCRIPT = (function () {
       target: null,
       action: 'finish',
       tooltip: 'Click any agent to explore details. Switch queries to see different optimization strategies. Try the New Query or Custom Data tabs for live generation.',
-      subtitle: 'That\u2019s GenDB. Click any agent to dig deeper, switch queries to see different strategies, or try generating code on your own data. Enjoy exploring!'
+      subtitle: 'That\u2019s GenDB. Click any agent to dig deeper, switch queries, or try generating code on your own data. Enjoy exploring!'
     }
   ];
 
@@ -321,6 +330,7 @@ var TUTORIAL_SCRIPT = (function () {
     'canvas-cg': 'audio/tour-canvas-cg.mp3',
     'agent-opt': 'audio/tour-agent-opt.mp3',
     'canvas-opt': 'audio/tour-canvas-opt.mp3',
+    'canvas-opt-code': 'audio/tour-canvas-opt-code.mp3',
     'benchmark': 'audio/tour-benchmark.mp3',
     'finish': 'audio/tour-finish.mp3'
   };

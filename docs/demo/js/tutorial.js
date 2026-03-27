@@ -449,6 +449,9 @@ var Tutorial = (function () {
   function startTour() {
     tourIdx = -1;
     advancing = false;
+    // Clear viz so the tour starts with a clean slate — it will reload when View Pipeline is clicked
+    var vizEl = document.getElementById('viz-content');
+    if (vizEl) { vizEl.innerHTML = ''; vizEl.style.display = 'none'; }
     buildSpotlight();
     nextTourStep();
   }

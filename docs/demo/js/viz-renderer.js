@@ -5,7 +5,7 @@
    ============================================================ */
 var VizRenderer = (function () {
   'use strict';
-  var agents = [], selectedIdx = 0, canvasEl = null, detailEl = null, svgEl = null, canvasData = null;
+  var agents = [], selectedIdx = 0, canvasEl = null, detailEl = null, svgEl = null, canvasData = null, benchEl = null;
 
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -42,11 +42,12 @@ var VizRenderer = (function () {
     detailEl = el('div', 'agent-detail-panel');
     wrap.appendChild(detailEl);
 
-    // Benchmark
+    // Benchmark — hidden until Optimizer is selected
     if (vizData.benchmark) {
-      var bench = el('div', 'viz-bench-section');
-      buildBenchmark(bench, vizData.benchmark, canvasData.speedup);
-      wrap.appendChild(bench);
+      benchEl = el('div', 'viz-bench-section');
+      benchEl.style.display = 'none';
+      buildBenchmark(benchEl, vizData.benchmark, canvasData.speedup);
+      wrap.appendChild(benchEl);
     }
     container.appendChild(wrap);
     selectAgent(0, false);
@@ -110,6 +111,19 @@ var VizRenderer = (function () {
       } else {
         buildDetail(detailEl, agents[idx]);
       }
+    }
+    // Benchmark — only visible when Optimizer is selected
+    if (benchEl) {
+      benchEl.style.display = (idx === agents.length - 1) ? '' : 'none';
+    }
+    // Ensure canvas is tall enough for left column (SQL block) when code layer is not shown
+    if (canvasEl && idx < 4) {
+      setTimeout(function () {
+        var leftCol = canvasEl.querySelector('.cv-left');
+        if (leftCol) canvasEl.style.minHeight = leftCol.scrollHeight + 'px';
+      }, 50);
+    } else if (canvasEl) {
+      canvasEl.style.minHeight = '';
     }
   }
 
@@ -465,7 +479,9 @@ var VizRenderer = (function () {
       case 'sdDetail': renderSdD(panel, d); break;
       case 'qpDetail': renderQpD(panel, d); break;
       case 'cgDetail': renderCgD(panel, d); break;
-      case 'optDetail': VizJourney.render(panel, d.journey); break;
+      case 'optDetail': VizJourney.render(panel, d.journey, {
+        getCode: function (iterIdx) { return getCode('tpch', 'Q3', iterIdx); }
+      }); break;
     }
   }
 

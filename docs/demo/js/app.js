@@ -116,8 +116,12 @@ var App = (function () {
     var btn = document.getElementById('btn-browse');
     if (btn) {
       btn.addEventListener('click', function () {
-        // In viz mode, scroll to viz content; in legacy mode, scroll to first stage
         var vizEl = document.getElementById('viz-content');
+        // If viz was cleared (e.g. by tutorial), reload the query first
+        if (vizEl && (!vizEl.innerHTML || vizEl.style.display === 'none')) {
+          loadQuery(state.benchmark, state.queryId);
+        }
+        // Scroll to viz content or first stage
         var target = (vizEl && vizEl.style.display !== 'none') ? vizEl : document.getElementById('stage-sql');
         if (target) {
           var headerH = 64;

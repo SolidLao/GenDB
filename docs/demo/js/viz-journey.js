@@ -14,7 +14,9 @@ var VizJourney = (function () {
     return e;
   }
 
-  function render(container, journey) {
+  function render(container, journey, opts) {
+    opts = opts || {};
+    var getIterCode = opts.getCode || function () { return ''; };
     // ── Headline: speedup summary ──
     var headline = el('div', 'opt-headline');
     var hlLeft = el('div', 'opt-hl-left');
@@ -62,6 +64,7 @@ var VizJourney = (function () {
           container.querySelectorAll('.opt-tl-item').forEach(function (x) { x.classList.remove('selected'); });
           item.classList.add('selected');
           renderDetail(detailPanel, journey.iterations[i]);
+          updateCodeViewer(codeViewerObj, i);
         };
       })(idx));
 
@@ -73,6 +76,60 @@ var VizJourney = (function () {
     var detailPanel = el('div', 'opt-detail');
     renderDetail(detailPanel, journey.iterations[0]);
     container.appendChild(detailPanel);
+
+    // ── Code viewer with iteration selector ──
+    var codeViewerObj = null;
+    var initialCode = getIterCode(0);
+    if (initialCode && typeof CodeViewer !== 'undefined') {
+      var codeSection = el('div', 'opt-code-section');
+      var codeHdr = el('div', 'opt-code-header');
+      codeHdr.appendChild(el('span', 'opt-code-title', 'Generated C++'));
+      // Iteration selector
+      var iterSelect = document.createElement('select');
+      iterSelect.className = 'opt-iter-select';
+      journey.iterations.forEach(function (iter, i) {
+        var opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = 'Iter ' + iter.iteration + ': ' + iter.title +
+          ' (' + Math.round(iter.timingMs) + 'ms)';
+        iterSelect.appendChild(opt);
+      });
+      iterSelect.addEventListener('change', function () {
+        var idx = parseInt(iterSelect.value, 10);
+        updateCodeViewer(codeViewerObj, idx);
+        // Also sync the timeline selection
+        container.querySelectorAll('.opt-tl-item').forEach(function (x) { x.classList.remove('selected'); });
+        var items = container.querySelectorAll('.opt-tl-item');
+        if (items[idx]) items[idx].classList.add('selected');
+        renderDetail(detailPanel, journey.iterations[idx]);
+      });
+      codeHdr.appendChild(iterSelect);
+      codeSection.appendChild(codeHdr);
+
+      var codeContainer = el('div', 'opt-code-container');
+      codeViewerObj = CodeViewer.createCodeViewer(codeContainer, {
+        code: initialCode, language: 'cpp', lineNumbers: true,
+        maxHeight: 400, collapsible: true, collapsedLines: 25,
+        title: 'Iter 0: ' + journey.iterations[0].title
+      });
+      codeSection.appendChild(codeContainer);
+      container.appendChild(codeSection);
+    }
+
+    function updateCodeViewer(viewer, iterIdx) {
+      if (!viewer) return;
+      var code = getIterCode(iterIdx);
+      if (code) {
+        var iter = journey.iterations[iterIdx];
+        viewer.setCode(code);
+        // Update title in header
+        var titleEl = viewer.element.querySelector('.code-viewer-title');
+        if (titleEl) titleEl.textContent = 'Iter ' + iter.iteration + ': ' + iter.title;
+        // Sync dropdown
+        var sel = container.querySelector('.opt-iter-select');
+        if (sel) sel.value = iterIdx;
+      }
+    }
   }
 
   function renderDetail(panel, iter) {
