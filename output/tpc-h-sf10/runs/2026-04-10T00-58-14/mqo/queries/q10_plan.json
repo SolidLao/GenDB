@@ -1,0 +1,155 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q10",
+  "tail_node_id": "Q10_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_returnflag"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_name", "c_acctbal", "c_phone", "c_address", "c_comment", "c_nationkey"]
+    }
+  ],
+  "local_scans": [
+    {
+      "table": "nation",
+      "columns": ["n_nationkey", "n_name"],
+      "cardinality": 25,
+      "strategy": "direct_array",
+      "notes": "Load all 25 rows into array indexed by n_nationkey for O(1) lookup"
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "load_dimension",
+      "table": "nation",
+      "structure": "direct_array",
+      "index_key": "n_nationkey",
+      "payload": ["n_name"],
+      "array_size": 25,
+      "notes": "Pre-load nation into flat array[25] before pipeline starts"
+    },
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_returnflag = 'R'",
+      "encoded_predicate": "l_returnflag == 82",
+      "selectivity": 0.33,
+      "input_cardinality": 59986052,
+      "output_cardinality": 19795000,
+      "notes": "l_returnflag is int8-encoded; filter on raw encoded value (ASCII 'R' = 82)"
+    },
+    {
+      "step": 2,
+      "op": "hash_probe",
+      "on": "hash_orders_by_orderkey",
+      "probe_key": "l_orderkey",
+      "extract_columns": ["o_custkey", "o_orderdate"],
+      "residual_filter": "o_orderdate >= 19931001 AND o_orderdate < 19940101",
+      "selectivity_of_residual": 0.036,
+      "input_cardinality": 19795000,
+      "output_cardinality": 712600,
+      "notes": "Probe shared orders hash with l_orderkey, then apply date range filter on o_orderdate. 3-month window out of ~84 months ≈ 3.6% selectivity."
+    },
+    {
+      "step": 3,
+      "op": "hash_probe",
+      "on": "hash_customer_by_custkey",
+      "probe_key": "o_custkey",
+      "extract_columns": ["c_custkey", "c_name", "c_acctbal", "c_phone", "c_address", "c_comment", "c_nationkey"],
+      "input_cardinality": 712600,
+      "output_cardinality": 712600,
+      "notes": "Every order has a valid customer; no filter loss. Extract all customer columns needed for GROUP BY and projection."
+    },
+    {
+      "step": 4,
+      "op": "dimension_lookup",
+      "structure": "nation_array",
+      "lookup_key": "c_nationkey",
+      "extract_columns": ["n_name"],
+      "input_cardinality": 712600,
+      "output_cardinality": 712600,
+      "notes": "O(1) array lookup for nation name"
+    },
+    {
+      "step": 5,
+      "op": "aggregate",
+      "strategy": "hash_group_by",
+      "group_by": ["c_custkey"],
+      "aggregates": [
+        {
+          "name": "revenue",
+          "function": "SUM",
+          "expression": "l_extendedprice * (1 - l_discount)"
+        }
+      ],
+      "payload_columns": ["c_name", "c_acctbal", "c_phone", "n_name", "c_address", "c_comment"],
+      "payload_strategy": "store_first",
+      "estimated_groups": 450000,
+      "input_cardinality": 712600,
+      "notes": "Group by c_custkey (integer key). Payload columns are functionally determined by c_custkey so store-first is correct. ~450K distinct customers expected. Hash map pre-sized to ~450K entries."
+    },
+    {
+      "step": 6,
+      "op": "topk",
+      "order_by": [{"column": "revenue", "direction": "DESC"}],
+      "limit": 20,
+      "strategy": "min_heap",
+      "heap_size": 20,
+      "input_cardinality": 450000,
+      "notes": "Maintain min-heap of size 20 during aggregation finalization. No full sort needed."
+    },
+    {
+      "step": 7,
+      "op": "project",
+      "columns": [
+        {"name": "c_custkey", "type": "int32"},
+        {"name": "c_name", "type": "string"},
+        {"name": "revenue", "type": "double"},
+        {"name": "c_acctbal", "type": "double"},
+        {"name": "n_name", "type": "string"},
+        {"name": "c_address", "type": "string"},
+        {"name": "c_phone", "type": "string"},
+        {"name": "c_comment", "type": "string"}
+      ]
+    }
+  ],
+  "output_schema": [
+    {"name": "c_custkey", "type": "int32"},
+    {"name": "c_name", "type": "string"},
+    {"name": "revenue", "type": "double"},
+    {"name": "c_acctbal", "type": "double"},
+    {"name": "n_name", "type": "string"},
+    {"name": "c_address", "type": "string"},
+    {"name": "c_phone", "type": "string"},
+    {"name": "c_comment", "type": "string"}
+  ],
+  "data_structures": {
+    "nation_lookup": "direct_array(25)",
+    "aggregation": "compact_hash_map(pre_sized=450000, key=int32, value={double,string*6})",
+    "topk": "min_heap(20)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partitioning": "lineitem_scan_morsels",
+    "aggregation_merge": "thread_local_hash_maps_then_merge",
+    "notes": "Each thread processes morsels from the shared lineitem scan callback, maintaining thread-local aggregation hash maps. Final merge of thread-local maps followed by single-threaded top-K extraction."
+  },
+  "memory_estimate": {
+    "aggregation_per_thread_mb": 35,
+    "total_aggregation_mb": 560,
+    "nation_array_kb": 1,
+    "topk_kb": 1
+  },
+  "execution_target": "cpp"
+}

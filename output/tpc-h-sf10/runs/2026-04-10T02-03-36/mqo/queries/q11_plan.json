@@ -1,0 +1,124 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q11",
+  "tail_node_id": "Q11_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_partsupp_full",
+      "used_columns": ["ps_partkey", "ps_suppkey", "ps_availqty", "ps_supplycost"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'GERMANY'",
+      "output": "germany_nationkey",
+      "cardinality_in": 25,
+      "cardinality_out": 1,
+      "notes": "Tiny table, direct scan. Extract single nationkey value for GERMANY. Nation has dense_pk index."
+    },
+    {
+      "step": 2,
+      "op": "build_supplier_filter",
+      "input": "hash_supplier_by_suppkey",
+      "predicate": "s_nationkey = germany_nationkey",
+      "output": "german_supplier_bitset",
+      "data_structure": "bitset(100001)",
+      "cardinality_in": 100000,
+      "cardinality_out": 4000,
+      "notes": "Scan all suppliers from shared hash, check s_nationkey against GERMANY nationkey. Build bitset indexed by s_suppkey (dense_pk, max_key=100000) for O(1) probe. ~4K bits set."
+    },
+    {
+      "step": 3,
+      "op": "probe_aggregate_single_pass",
+      "input": "scan_partsupp_full",
+      "probe_against": "german_supplier_bitset",
+      "probe_key": "ps_suppkey",
+      "aggregation": {
+        "group_by": ["ps_partkey"],
+        "aggs": [
+          {
+            "name": "value",
+            "expr": "SUM(ps_supplycost * ps_availqty)"
+          }
+        ],
+        "also_compute": {
+          "name": "global_sum",
+          "expr": "SUM(ps_supplycost * ps_availqty)",
+          "purpose": "HAVING threshold (subquery folded into single pass)"
+        }
+      },
+      "data_structure": "direct_array(2000001, double)",
+      "cardinality_in": 8000000,
+      "cardinality_after_probe": 320000,
+      "cardinality_groups": 200000,
+      "notes": "Single pass over partsupp: probe bitset for German suppliers, accumulate per-partkey SUM into direct array (ps_partkey is dense 1..2M). Simultaneously accumulate global_sum for HAVING threshold. This folds the correlated subquery into the main aggregation — both compute identical joins/filters/aggregations, differing only in GROUP BY."
+    },
+    {
+      "step": 4,
+      "op": "having_filter",
+      "predicate": "value > global_sum * 0.0001",
+      "cardinality_in": 200000,
+      "cardinality_out": 1000,
+      "notes": "Scan the direct array, emit (ps_partkey, value) pairs where value > threshold. At SF10 with factor 0.0001, expect ~1K qualifying groups."
+    },
+    {
+      "step": 5,
+      "op": "sort",
+      "order_by": ["value DESC"],
+      "cardinality_in": 1000,
+      "notes": "Full sort on ~1K rows. Trivial — use std::sort in-place."
+    }
+  ],
+  "output_schema": [
+    {"name": "ps_partkey", "type": "int32"},
+    {"name": "value", "type": "double"}
+  ],
+  "parallelism": {
+    "strategy": "phased",
+    "details": {
+      "step_1": {
+        "threads": 1,
+        "reason": "25-row nation scan, trivial"
+      },
+      "step_2": {
+        "threads": 1,
+        "reason": "100K supplier scan, trivial (~0.5ms)"
+      },
+      "step_3": {
+        "threads": "auto(nproc)",
+        "strategy": "morsel_driven",
+        "morsel_size": 65536,
+        "merge": "thread_local_arrays_then_reduce",
+        "notes": "Each thread has its own double[2000001] array (~16MB) and local global_sum accumulator. After parallel pass, reduce thread-local arrays into final array by summing element-wise. 64 threads × 16MB = 1GB total — fits easily in 376GB RAM."
+      },
+      "step_4_5": {
+        "threads": 1,
+        "reason": "~1K output rows, sequential scan of 2M array + sort is fast"
+      }
+    }
+  },
+  "data_structures": {
+    "german_supplier_bitset": "bitset(100001)",
+    "partkey_agg_array": "direct_array(2000001, double, zero_initialized)",
+    "global_sum": "double_accumulator"
+  },
+  "indexes": [
+    {"index": "nation_dense_pk", "purpose": "direct lookup of nation rows by n_nationkey"},
+    {"index": "supplier_dense_pk", "purpose": "iterate all suppliers to filter by nationkey"}
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["value DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "notes": "Key optimization: the HAVING subquery is identical to the main query (same joins, filters, aggregation expression) but without GROUP BY. Both are computed in a single pass — the main aggregation populates per-partkey sums while a scalar accumulator tracks the global sum. The threshold (global_sum * 0.0001) is applied post-aggregation. Using a direct array indexed by ps_partkey avoids hash table overhead entirely."
+}

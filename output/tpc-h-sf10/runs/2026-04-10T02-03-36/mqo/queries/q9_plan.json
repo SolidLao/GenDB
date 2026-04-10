@@ -1,0 +1,154 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q9",
+  "tail_node_id": "Q9_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_name"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey"]
+    },
+    {
+      "component_id": "scan_partsupp_full",
+      "used_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_orderdate"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "hash_part_by_partkey",
+      "predicate": "p_name LIKE '%green%'",
+      "selectivity": 0.027,
+      "output": "filtered_partkeys",
+      "output_cardinality": 54000,
+      "notes": "Iterate shared part hash table, apply substring filter, collect matching p_partkey values into bitset"
+    },
+    {
+      "step": 2,
+      "op": "scan_nation",
+      "table": "nation",
+      "notes": "Direct scan of 25-row nation table, build direct_array[n_nationkey] -> n_name. Not a shared component."
+    },
+    {
+      "step": 3,
+      "op": "indexed_lineitem_gather",
+      "index": "lineitem_partkey_grouped",
+      "probe_keys": "filtered_partkeys",
+      "columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_quantity", "l_extendedprice", "l_discount"],
+      "output_cardinality": 1620000,
+      "notes": "Use partkey grouped index to gather only lineitem rows whose l_partkey matches filtered parts. Avoids full 60M row scan."
+    },
+    {
+      "step": 4,
+      "op": "probe_hash",
+      "on": "hash_supplier_by_suppkey",
+      "probe_key": "l_suppkey",
+      "extract": ["s_nationkey"],
+      "type": "inner",
+      "notes": "Every lineitem row has a valid supplier, 1:1 match"
+    },
+    {
+      "step": 5,
+      "op": "probe_composite_hash",
+      "index": "partsupp_composite_hash",
+      "on": "scan_partsupp_full",
+      "probe_keys": ["l_partkey", "l_suppkey"],
+      "extract": ["ps_supplycost"],
+      "type": "inner",
+      "notes": "Use pre-built partsupp composite hash index for O(1) lookup of ps_supplycost by (partkey, suppkey)"
+    },
+    {
+      "step": 6,
+      "op": "index_lookup",
+      "on": "scan_orders_full",
+      "index": "orders_pk_index",
+      "probe_key": "l_orderkey",
+      "extract": ["o_orderdate"],
+      "type": "inner",
+      "notes": "Dense PK index: o_orderkey -> row_id, then read o_orderdate from in-memory column"
+    },
+    {
+      "step": 7,
+      "op": "direct_array_lookup",
+      "on": "nation_array",
+      "probe_key": "s_nationkey",
+      "extract": ["n_name"],
+      "notes": "Direct array[25] lookup, nationkey -> n_name"
+    },
+    {
+      "step": 8,
+      "op": "compute",
+      "expressions": [
+        {"name": "o_year", "expr": "EXTRACT(YEAR FROM o_orderdate)"},
+        {"name": "amount", "expr": "l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity"}
+      ]
+    },
+    {
+      "step": 9,
+      "op": "hash_group_by",
+      "group_by": ["n_name", "o_year"],
+      "aggregates": [
+        {"func": "SUM", "arg": "amount", "alias": "sum_profit"}
+      ],
+      "estimated_groups": 175,
+      "notes": "25 nations * ~7 years = ~175 groups. Small enough for compact_hash_map per thread, then merge."
+    },
+    {
+      "step": 10,
+      "op": "sort",
+      "order_by": [
+        {"column": "nation", "direction": "ASC"},
+        {"column": "o_year", "direction": "DESC"}
+      ]
+    },
+    {
+      "step": 11,
+      "op": "project",
+      "columns": ["nation", "o_year", "sum_profit"]
+    }
+  ],
+  "output_schema": [
+    {"name": "nation", "type": "string"},
+    {"name": "o_year", "type": "int32"},
+    {"name": "sum_profit", "type": "double"}
+  ],
+  "data_structures": {
+    "filtered_partkeys": "bitset(2000001)",
+    "nation_array": "direct_array(25, string)",
+    "partsupp_lookup": "partsupp_composite_hash (pre-built index on storage)",
+    "orders_lookup": "orders_pk_index (dense, pre-built on storage)",
+    "lineitem_access": "lineitem_partkey_grouped (pre-built grouped index on storage)",
+    "aggregation": "compact_hash_map(pre_sized=256)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partition_unit": "filtered_partkeys batched into morsel ranges",
+    "thread_local_agg": true,
+    "merge_strategy": "sequential_merge_175_groups",
+    "notes": "Partition the 54K filtered partkeys into morsels. Each thread uses lineitem_partkey_grouped to gather lineitem rows for its partkey batch, performs all probes and accumulates into thread-local agg map. Final merge of ~175 groups is trivial."
+  },
+  "indexes": [
+    {"index": "lineitem_partkey_grouped", "purpose": "skip_full_scan_gather_by_partkey"},
+    {"index": "partsupp_composite_hash", "purpose": "join_lookup_ps_supplycost"},
+    {"index": "orders_pk_index", "purpose": "join_lookup_o_orderdate"}
+  ],
+  "aggregation": "hash_group_by",
+  "output": {
+    "order_by": [
+      {"column": "nation", "direction": "ASC"},
+      {"column": "o_year", "direction": "DESC"}
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

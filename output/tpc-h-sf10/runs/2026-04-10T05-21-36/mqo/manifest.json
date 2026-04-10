@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "queries": ["Q1","Q2","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q11","Q12","Q13","Q14","Q15","Q16","Q17","Q18","Q19","Q20","Q21","Q22"],
+  "fused_stages": {
+    "fused_scan_lineitem": ["Q1","Q3","Q5","Q6","Q7","Q8","Q9","Q10","Q12","Q14","Q15","Q17","Q18","Q19","Q20","Q21"],
+    "fused_scan_orders": ["Q4","Q13"],
+    "fused_scan_partsupp": ["Q2","Q11","Q16","Q20"],
+    "fused_scan_part": ["Q2","Q9","Q16","Q20"]
+  },
+  "independent": ["Q22"],
+  "executable": "./mqo",
+  "build_command": "make"
+}

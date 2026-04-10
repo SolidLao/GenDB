@@ -1,0 +1,113 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q20",
+  "tail_node_id": "Q20_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_shipdate_1994",
+      "used_columns": ["l_partkey", "l_suppkey", "l_quantity"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_name", "s_address", "s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'CANADA'",
+      "selectivity": 0.04,
+      "output_cardinality": 1,
+      "output_columns": ["n_nationkey"],
+      "notes": "25 rows, dictionary-encoded n_name. Extract single n_nationkey value for CANADA."
+    },
+    {
+      "step": 2,
+      "op": "scan_filter",
+      "table": "part",
+      "predicate": "p_name LIKE 'forest%'",
+      "selectivity": 0.0075,
+      "output_cardinality": 15000,
+      "output_columns": ["p_partkey"],
+      "strategy": "full_scan_varlen_prefix_match",
+      "materialization": "bitset",
+      "notes": "Scan 2M p_name varlen column, prefix match 'forest'. Materialize matching p_partkey into bitset(2000001) for O(1) membership test. ~15K matches expected."
+    },
+    {
+      "step": 3,
+      "op": "filtered_aggregation",
+      "on": "scan_lineitem_shipdate_1994",
+      "filter_predicate": "l_partkey IN forest_parts_bitset",
+      "group_by": ["l_partkey", "l_suppkey"],
+      "aggs": [{"func": "SUM", "col": "l_quantity", "alias": "sum_qty"}],
+      "input_cardinality": 9400000,
+      "post_filter_cardinality": 70000,
+      "output_cardinality": 60000,
+      "strategy": "parallel_hash_agg",
+      "notes": "Stream 9.4M rows from shared 1994 scan. Apply bitset filter on l_partkey (~0.75% pass). Aggregate survivors into hash_map<(partkey,suppkey), double>. Thread-local maps merged at end. ~60K groups expected."
+    },
+    {
+      "step": 4,
+      "op": "indexed_scan_with_correlated_check",
+      "table": "partsupp",
+      "index": "partsupp_partkey_idx",
+      "lookup_keys": "forest_parts_bitset",
+      "predicate": "ps_availqty > 0.5 * lineitem_agg[(ps_partkey, ps_suppkey)]",
+      "input_cardinality": 60000,
+      "output_cardinality": 7500,
+      "output_columns": ["ps_suppkey"],
+      "materialization": "bitset(100001)",
+      "notes": "For each of ~15K forest partkeys, use dense_range index to jump directly to partsupp rows (4 per partkey = ~60K rows). For each (ps_partkey, ps_suppkey), probe the lineitem agg hash map. If ps_availqty > 0.5 * sum_qty (or no lineitem match → threshold=0, so passes if availqty>0), collect ps_suppkey into qualifying_suppkeys bitset(100001). Index access avoids scanning 8M rows."
+    },
+    {
+      "step": 5,
+      "op": "probe_shared_hash_with_filter",
+      "on": "hash_supplier_by_suppkey",
+      "probe_keys": "qualifying_suppkeys_bitset",
+      "additional_filter": "s_nationkey = canada_nationkey",
+      "input_cardinality": 7500,
+      "output_cardinality": 300,
+      "output_columns": ["s_name", "s_address"],
+      "strategy": "iterate_bitset_probe_hash",
+      "notes": "Iterate qualifying_suppkeys bitset (~7500 set bits), probe shared supplier hash. Filter s_nationkey = CANADA's nationkey. ~300 suppliers expected (1/25 nations × 7500). Collect (s_name, s_address) pairs."
+    },
+    {
+      "step": 6,
+      "op": "sort",
+      "order_by": [{"col": "s_name", "dir": "ASC"}],
+      "input_cardinality": 300,
+      "strategy": "std_sort",
+      "notes": "Sort ~300 result tuples by s_name ascending. Trivially small, single-threaded."
+    }
+  ],
+  "output_schema": [
+    {"name": "s_name", "type": "varchar"},
+    {"name": "s_address", "type": "varchar"}
+  ],
+  "data_structures": {
+    "canada_nationkey": "scalar_int32",
+    "forest_parts": "bitset(2000001)",
+    "lineitem_agg": "compact_hash_map<pair<int32,int32>, double>(pre_sized=65536)",
+    "qualifying_suppkeys": "bitset(100001)",
+    "result_buffer": "vector<pair<string,string>>"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "parallel_steps": [3],
+    "single_thread_steps": [1, 2, 4, 5, 6],
+    "threads": "auto(nproc)",
+    "notes": "Only step 3 (lineitem agg) benefits from parallelism — 9.4M rows input. Steps 1-2 are small scans. Step 4 is ~60K indexed lookups (fast). Steps 5-6 process <10K rows."
+  },
+  "indexes": [
+    {"index": "partsupp_partkey_idx", "type": "dense_range", "purpose": "indexed_lookup_by_forest_partkeys"},
+    {"index": "part_pk_idx", "type": "dense_pk", "purpose": "not_used_scanning_full_part_table"}
+  ],
+  "output": {
+    "order_by": ["s_name ASC"],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

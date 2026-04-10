@@ -1,0 +1,217 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q20",
+  "tail_node_id": "Q20_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_name"]
+    },
+    {
+      "component_id": "scan_partsupp_full",
+      "used_columns": ["ps_partkey", "ps_suppkey", "ps_availqty"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey", "s_name", "s_address"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "hash_part_by_partkey",
+      "predicate": "p_name LIKE 'forest%'",
+      "output": "forest_partkeys_bitset",
+      "estimated_output_rows": 21551,
+      "notes": "Iterate shared part hash table, collect partkeys where p_name starts with 'forest' into bitset(2000001)"
+    },
+    {
+      "step": 2,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'CANADA'",
+      "output": "canada_nationkey",
+      "estimated_output_rows": 1,
+      "notes": "Tiny table (25 rows), not shared. Scan and extract nationkey=3 for CANADA. Single scalar value."
+    },
+    {
+      "step": 3,
+      "op": "residual_filter",
+      "on": "hash_supplier_by_suppkey",
+      "predicate": "s_nationkey = canada_nationkey",
+      "output": "canada_suppliers",
+      "estimated_output_rows": 4054,
+      "notes": "Iterate shared supplier hash table, filter by nationkey=3. Build two structures: (1) bitset(100001) of qualifying suppkeys, (2) hash_map suppkey -> {s_name, s_address} for final projection."
+    },
+    {
+      "step": 4,
+      "op": "residual_filter",
+      "on": "scan_partsupp_full",
+      "predicate": "ps_partkey IN forest_partkeys_bitset AND ps_suppkey IN canada_suppliers_bitset",
+      "output": "qualifying_partsupp",
+      "estimated_output_rows": 3494,
+      "notes": "Filter shared partsupp scan by both bitsets. Collect (ps_partkey, ps_suppkey, ps_availqty) triples into a flat vector. Also collect distinct partkeys into a vector for index-driven lineitem lookup."
+    },
+    {
+      "step": 5,
+      "op": "build_probe_set",
+      "input": "qualifying_partsupp",
+      "output": "ps_pair_hash",
+      "notes": "Build hash_map<(ps_partkey, ps_suppkey), ps_availqty> from the ~3494 qualifying partsupp rows. Also build a compact sorted vector of distinct partkeys (~3000) for index-driven lineitem access."
+    },
+    {
+      "step": 6,
+      "op": "index_lookup_aggregate",
+      "table": "lineitem",
+      "index": "lineitem_partkey_grouped",
+      "lookup_keys": "distinct_forest_canada_partkeys",
+      "filter": "l_shipdate >= 8766 AND l_shipdate < 9131 AND (l_partkey, l_suppkey) IN ps_pair_hash",
+      "aggregate": "SUM(l_quantity) GROUP BY (l_partkey, l_suppkey)",
+      "output": "lineitem_qty_agg",
+      "estimated_lookup_partkeys": 3000,
+      "estimated_lineitem_rows_accessed": 90000,
+      "estimated_after_date_and_pair_filter": 3500,
+      "estimated_groups": 3494,
+      "notes": "For each distinct partkey in qualifying_partsupp, use lineitem_partkey_grouped index to retrieve all lineitem row_ids for that partkey (~30 each). Filter by date range [1994-01-01, 1995-01-01) AND suppkey in canada_bitset, then aggregate SUM(l_quantity) per (partkey, suppkey). This avoids scanning 60M lineitem rows; only ~90K rows accessed via index."
+    },
+    {
+      "step": 7,
+      "op": "correlated_comparison",
+      "left": "ps_pair_hash",
+      "right": "lineitem_qty_agg",
+      "predicate": "ps_availqty > 0.5 * SUM(l_quantity)",
+      "output": "qualifying_suppkeys",
+      "estimated_output_rows": 460,
+      "notes": "For each (partkey, suppkey) pair in ps_pair_hash, look up the aggregated sum from lineitem_qty_agg. If no matching lineitem rows exist, the sum is 0 and the pair qualifies (availqty > 0). Collect distinct qualifying suppkeys into a hash_set."
+    },
+    {
+      "step": 8,
+      "op": "semi_join",
+      "build": "qualifying_suppkeys",
+      "probe": "canada_suppliers",
+      "type": "semi",
+      "strategy": "hash_set_probe",
+      "output": "result_unsorted",
+      "estimated_output_rows": 460,
+      "notes": "Probe canada_suppliers hash_map with qualifying_suppkeys hash_set to collect (s_name, s_address) for output."
+    },
+    {
+      "step": 9,
+      "op": "sort",
+      "input": "result_unsorted",
+      "order_by": ["s_name ASC"],
+      "output": "final_result",
+      "estimated_rows": 460,
+      "notes": "Sort ~460 result rows by s_name ascending. Trivial sort on small result set."
+    }
+  ],
+  "filters": [
+    {"table": "part", "predicate": "p_name LIKE 'forest%'", "selectivity": 0.01078, "estimated_rows": 21551},
+    {"table": "nation", "predicate": "n_name = 'CANADA'", "selectivity": 0.04, "estimated_rows": 1},
+    {"table": "supplier", "predicate": "s_nationkey = canada_nationkey", "selectivity": 0.04054, "estimated_rows": 4054},
+    {"table": "partsupp", "predicate": "ps_partkey IN forest AND ps_suppkey IN canada", "selectivity": 0.000437, "estimated_rows": 3494},
+    {"table": "lineitem", "predicate": "l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01'", "selectivity": 0.1517, "estimated_rows": 9102493}
+  ],
+  "data_structures": {
+    "forest_partkeys_bitset": "bitset(2000001)",
+    "canada_nationkey": "scalar_int32",
+    "canada_suppkey_bitset": "bitset(100001)",
+    "canada_supplier_map": "compact_hash_map<int32_t, {varlen s_name, varlen s_address}>(pre_sized=4054)",
+    "ps_pair_hash": "compact_hash_map<pair<int32_t,int32_t>, int32_t>(pre_sized=3494)",
+    "distinct_partkeys": "sorted_vector<int32_t>(~3000)",
+    "lineitem_qty_agg": "compact_hash_map<pair<int32_t,int32_t>, double>(pre_sized=3494)",
+    "qualifying_suppkeys": "hash_set<int32_t>(pre_sized=512)"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partkey_grouped",
+      "purpose": "index_lookup",
+      "notes": "Avoids 60M-row lineitem scan. Retrieves ~30 row_ids per partkey for ~3K partkeys = ~90K total row accesses. Read l_suppkey, l_shipdate, l_quantity columns at gathered row positions."
+    }
+  ],
+  "parallelism": {
+    "strategy": "phased",
+    "steps_1_3": {
+      "description": "Iterate shared hash tables for part/supplier filters",
+      "threads": 1,
+      "notes": "Small data volumes (2M part entries, 100K supplier entries). Single-thread avoids sync overhead."
+    },
+    "step_4": {
+      "description": "Filter partsupp scan output",
+      "threads": 1,
+      "notes": "8M rows scanned but only two bitset lookups per row. Memory-bound, single thread saturates."
+    },
+    "step_6": {
+      "description": "Index-driven lineitem aggregation",
+      "threads": 8,
+      "notes": "Partition ~3K distinct partkeys across 8 threads. Each thread maintains thread-local aggregation map. Moderate parallelism due to random I/O from index lookups on HDD—too many threads would cause disk thrashing. Merge thread-local maps after."
+    },
+    "steps_7_9": {
+      "description": "Comparison + semi-join + sort",
+      "threads": 1,
+      "notes": "~3.5K comparisons and ~460 result rows. Trivial single-threaded work."
+    }
+  },
+  "join_order": [
+    {
+      "build": "nation(filtered: CANADA)",
+      "probe": "hash_supplier_by_suppkey",
+      "type": "semi",
+      "strategy": "iterate_and_filter",
+      "build_cardinality": 1,
+      "probe_cardinality": 100000,
+      "output_cardinality": 4054,
+      "notes": "Scalar nationkey filter applied while iterating supplier hash table"
+    },
+    {
+      "build": "forest_partkeys_bitset + canada_suppkey_bitset",
+      "probe": "scan_partsupp_full",
+      "type": "semi",
+      "strategy": "dual_bitset_filter",
+      "build_cardinality": "21551 + 4054",
+      "probe_cardinality": 8000000,
+      "output_cardinality": 3494,
+      "notes": "Two O(1) bitset lookups per partsupp row for highly selective double filter"
+    },
+    {
+      "build": "qualifying_partsupp_pairs",
+      "probe": "lineitem (via index)",
+      "type": "inner",
+      "strategy": "index_nested_loop",
+      "build_cardinality": 3494,
+      "probe_cardinality": 90000,
+      "output_cardinality": 3494,
+      "notes": "Use lineitem_partkey_grouped index to avoid full 60M-row scan. Aggregate SUM(l_quantity) per pair."
+    },
+    {
+      "build": "qualifying_suppkeys (after availqty comparison)",
+      "probe": "canada_supplier_map",
+      "type": "semi",
+      "strategy": "hash_set_probe",
+      "build_cardinality": 460,
+      "probe_cardinality": 4054,
+      "output_cardinality": 460,
+      "notes": "Final semi-join to collect output columns"
+    }
+  ],
+  "aggregation": {
+    "type": "hash_group_by",
+    "group_by": ["l_partkey", "l_suppkey"],
+    "aggs": ["SUM(l_quantity)"],
+    "estimated_groups": 3494,
+    "notes": "Small aggregation map (~3.5K entries), built during index-driven lineitem access"
+  },
+  "output": {
+    "columns": ["s_name", "s_address"],
+    "order_by": ["s_name ASC"],
+    "limit": null
+  },
+  "output_schema": [
+    {"name": "s_name", "type": "varlen"},
+    {"name": "s_address", "type": "varlen"}
+  ],
+  "execution_target": "cpp",
+  "notes": "Key optimization: index-driven lineitem access via lineitem_partkey_grouped avoids scanning 60M rows. Only ~90K row accesses needed. The correlated subquery is decorrelated into a single pass: build (partkey,suppkey)->availqty from filtered partsupp, then for each pair's partkey, use the grouped_fk index to gather lineitem rows, filter by date+suppkey, and aggregate. Compare thresholds in a final pass. Total memory: ~250KB for bitsets + ~500KB for hash maps = trivial."
+}

@@ -1,0 +1,24 @@
+{
+  "iteration": 1,
+  "scope": "fused_scan:fused_scan_lineitem",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_lineitem",
+    "ms": 1082.0,
+    "share_of_total": 0.336
+  },
+  "secondary_targets": [
+    {
+      "region_name": "Q21_finalize",
+      "ms": 573.6,
+      "optimization": "Parallelized with OpenMP + single-pass per order instead of per-candidate"
+    },
+    {
+      "region_name": "Q18_finalize",
+      "ms": 325.2,
+      "optimization": "Iterate only populated orderkeys instead of full 15M scan"
+    }
+  ],
+  "edit_summary": "Removed Q18 atomic from lineitem scan (thread-local hashmap), parallelized Q21_finalize with single-pass restructuring, optimized Q18_finalize to skip empty keys.",
+  "expected_improvement": "~25-35% batch total reduction (~800-1100ms savings)",
+  "rationale": "Q18 atomic in the 60M-row hot loop adds locked-instruction overhead on every row. Q21_finalize's nested loop re-scans lineitems per candidate. Q18_finalize scans 15M entries when only populated ones matter."
+}

@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "mode": "fused",
+  "queries": [
+    {"id": "Q1",  "name": "Pricing Summary Report"},
+    {"id": "Q2",  "name": "Minimum Cost Supplier"},
+    {"id": "Q3",  "name": "Shipping Priority"},
+    {"id": "Q4",  "name": "Order Priority Checking"},
+    {"id": "Q5",  "name": "Local Supplier Volume"},
+    {"id": "Q6",  "name": "Forecasting Revenue Change"},
+    {"id": "Q7",  "name": "Volume Shipping"},
+    {"id": "Q8",  "name": "National Market Share"},
+    {"id": "Q9",  "name": "Product Type Profit Measure"},
+    {"id": "Q10", "name": "Returned Item Reporting"},
+    {"id": "Q11", "name": "Important Stock Identification"},
+    {"id": "Q12", "name": "Shipping Modes and Order Priority"},
+    {"id": "Q13", "name": "Customer Distribution"},
+    {"id": "Q14", "name": "Promotion Effect"},
+    {"id": "Q15", "name": "Top Supplier"},
+    {"id": "Q16", "name": "Parts/Supplier Relationship"},
+    {"id": "Q17", "name": "Small-Quantity-Order Revenue"},
+    {"id": "Q18", "name": "Large Volume Customer"},
+    {"id": "Q19", "name": "Discounted Revenue"},
+    {"id": "Q20", "name": "Potential Part Promotion"},
+    {"id": "Q21", "name": "Suppliers Who Kept Orders Waiting"},
+    {"id": "Q22", "name": "Global Sales Opportunity"}
+  ],
+  "fused_scans": {
+    "lineitem": ["Q1","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q12","Q14","Q15","Q17","Q18","Q19","Q20","Q21"],
+    "orders":   ["Q3","Q4","Q5","Q7","Q8","Q9","Q10","Q12","Q13","Q18","Q21"],
+    "customer": ["Q3","Q5","Q7","Q8","Q10","Q13","Q18","Q22"],
+    "part":     ["Q2","Q8","Q9","Q14","Q16","Q17","Q19"],
+    "partsupp": ["Q2","Q9","Q11","Q16","Q20"]
+  },
+  "build_command": "make",
+  "run_command": "./mqo --gendb-dir <path> --output-dir <dir> --all"
+}

@@ -1,0 +1,136 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q4",
+  "tail_node_id": "Q4_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_orderdate", "o_orderpriority"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_orders_full",
+      "predicate": "o_orderdate >= '1993-07-01' AND o_orderdate < '1993-10-01'",
+      "selectivity": 0.036,
+      "output_cardinality": 540000,
+      "actions": [
+        "set bit in qualifying_orderkeys bitset (indexed by o_orderkey)",
+        "store o_orderpriority code in priority_by_orderkey array (indexed by o_orderkey)"
+      ]
+    },
+    {
+      "step": 2,
+      "op": "independent_scan",
+      "table": "lineitem",
+      "columns": ["l_orderkey", "l_commitdate", "l_receiptdate"],
+      "scan_bytes_mb": 720,
+      "row_count": 59986052,
+      "note": "Q4 is not part of scan_lineitem_full consumer set; must scan independently"
+    },
+    {
+      "step": 3,
+      "op": "semi_join_probe",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "description": "For each lineitem row: if qualifying_orderkeys[l_orderkey] is set AND l_commitdate < l_receiptdate, set found_orderkeys[l_orderkey]",
+      "build_side": "qualifying_orderkeys bitset (from step 1)",
+      "probe_side": "lineitem scan (from step 2)",
+      "probe_predicates": ["l_commitdate < l_receiptdate"],
+      "commitdate_lt_receiptdate_selectivity": 0.5,
+      "output": "found_orderkeys bitset"
+    },
+    {
+      "step": 4,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "description": "Iterate qualifying_orderkeys bitset; for each set bit k, if found_orderkeys[k] is set, increment counts[priority_by_orderkey[k]]",
+      "group_by": ["o_orderpriority"],
+      "group_count": 5,
+      "aggs": [{"func": "count", "alias": "order_count"}],
+      "data_structure": "int64[5] counters indexed by dict code"
+    },
+    {
+      "step": 5,
+      "op": "sort_and_project",
+      "order_by": ["o_orderpriority ASC"],
+      "note": "Map dict codes back to strings, sort 5 rows alphabetically by priority string. Output order: 1-URGENT, 2-HIGH, 3-MEDIUM, 4-NOT SPECIFIED, 5-LOW"
+    }
+  ],
+  "data_structures": {
+    "qualifying_orderkeys": {
+      "type": "bitset",
+      "size_bits": 60000001,
+      "size_mb": 7.2,
+      "description": "Indexed by o_orderkey; marks orders passing date filter"
+    },
+    "found_orderkeys": {
+      "type": "bitset",
+      "size_bits": 60000001,
+      "size_mb": 7.2,
+      "description": "Indexed by o_orderkey; marks orders with qualifying lineitem"
+    },
+    "priority_by_orderkey": {
+      "type": "direct_array",
+      "element_type": "uint8",
+      "size_elements": 60000001,
+      "size_mb": 57.2,
+      "description": "Maps orderkey -> orderpriority dict code for date-filtered orders"
+    },
+    "agg_counters": {
+      "type": "direct_array",
+      "element_type": "int64",
+      "size_elements": 5,
+      "size_bytes": 40,
+      "description": "One counter per orderpriority dict code"
+    }
+  },
+  "dictionary": {
+    "o_orderpriority": {
+      "encoding": "uint8",
+      "entries": [
+        {"code": 0, "value": "5-LOW"},
+        {"code": 1, "value": "1-URGENT"},
+        {"code": 2, "value": "4-NOT SPECIFIED"},
+        {"code": 3, "value": "2-HIGH"},
+        {"code": 4, "value": "3-MEDIUM"}
+      ]
+    }
+  },
+  "parallelism": {
+    "step_1": {
+      "strategy": "callback_from_shared",
+      "note": "scan_orders_full delivers rows via callback; date filter + bitset/array writes are thread-safe via per-thread local bitsets merged at end"
+    },
+    "step_2_3": {
+      "strategy": "morsel_driven",
+      "threads": 64,
+      "morsel_size": 131072,
+      "note": "Lineitem scan is the bottleneck (720MB from HDD). Parallel morsels with thread-local found_orderkeys bitsets, merged via OR at end. Each thread: read morsel, check qualifying bitset, check commitdate < receiptdate, set found bitset."
+    },
+    "step_4": {
+      "strategy": "single_thread",
+      "note": "Iterate qualifying bitset (~540K set bits), check found bitset, increment 5 counters. Trivial cost."
+    }
+  },
+  "indexes": [
+    {
+      "index": "orders_o_orderdate_zonemap",
+      "purpose": "skip_blocks during date filter in step 1 (if shared scan supports block skipping)"
+    }
+  ],
+  "output_schema": [
+    {"name": "o_orderpriority", "type": "varchar"},
+    {"name": "order_count", "type": "int64"}
+  ],
+  "output": {
+    "order_by": ["o_orderpriority ASC"],
+    "limit": null,
+    "row_count": 5
+  },
+  "execution_target": "cpp",
+  "notes": "Q4 is NOT in the scan_lineitem_full consumer set, so the tail performs its own lineitem scan of 3 columns (720MB). The semi-join uses dual bitsets (qualifying + found, 7.2MB each, both fit in L3 cache) for cache-friendly probing. The priority_by_orderkey array (57MB) exceeds L3 but is written/read sparsely. Aggregation is trivially 5 direct counters."
+}

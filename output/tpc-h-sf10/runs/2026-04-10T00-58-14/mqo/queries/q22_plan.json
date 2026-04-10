@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q22",
+  "tail_node_id": "Q22_tail",
+  "shared_inputs": [],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_column",
+      "table": "orders",
+      "columns": ["o_custkey"],
+      "purpose": "build_anti_join_bitset",
+      "cardinality": 15000000,
+      "notes": "Sequential scan of o_custkey.bin (60MB). Build a bitset[0..1500000] marking all custkeys that have at least one order. Parallel morsel scan, each thread ORs bits into shared bitset using atomic 64-bit ops."
+    },
+    {
+      "step": 2,
+      "op": "scan_and_compute_scalar_subquery",
+      "table": "customer",
+      "columns": ["c_phone", "c_acctbal"],
+      "predicate": "c_acctbal > 0.00 AND SUBSTRING(c_phone, 1, 2) IN ('13','31','23','29','30','18','17')",
+      "aggregation": "AVG(c_acctbal)",
+      "selectivity": 0.23,
+      "output_cardinality": 345000,
+      "output": "avg_acctbal (scalar double)",
+      "notes": "First pass over customer. Extract 2-char phone prefix, check membership in 7-element set, filter c_acctbal > 0. Compute thread-local SUM and COUNT, then reduce to global AVG. Phone prefix check: parse first 2 bytes of c_phone varlen, compare against compile-time constant set."
+    },
+    {
+      "step": 3,
+      "op": "scan_filter_antijoin_aggregate",
+      "table": "customer",
+      "columns": ["c_custkey", "c_phone", "c_acctbal"],
+      "predicates": [
+        "SUBSTRING(c_phone, 1, 2) IN ('13','31','23','29','30','18','17')",
+        "c_acctbal > avg_acctbal (from step 2)",
+        "NOT bitset[c_custkey] (anti-join from step 1)"
+      ],
+      "selectivity_chain": [0.28, 0.5, 0.33],
+      "output_cardinality": 6400,
+      "group_by": ["cntrycode"],
+      "aggregations": ["COUNT(*) AS numcust", "SUM(c_acctbal) AS totacctbal"],
+      "num_groups": 7,
+      "notes": "Second pass over customer. Fused filter → anti-join check → aggregate pipeline. Apply predicates in selectivity order: (1) phone prefix IN set (eliminates ~72%), (2) c_acctbal > avg (eliminates ~50% of remainder), (3) bitset anti-join (eliminates ~67% of remainder — most customers have orders). Thread-local aggregation into 7-bucket array indexed by cntrycode, then reduce across threads."
+    },
+    {
+      "step": 4,
+      "op": "finalize_and_sort",
+      "input": "7 aggregated groups from step 3",
+      "order_by": ["cntrycode ASC"],
+      "notes": "Trivial: merge per-thread 7-bucket arrays (SUM counts, SUM totacctbals), then sort 7 rows by cntrycode. Single-threaded, O(1)."
+    }
+  ],
+  "output_schema": [
+    {"name": "cntrycode", "type": "char[2]"},
+    {"name": "numcust", "type": "int64"},
+    {"name": "totacctbal", "type": "double"}
+  ],
+  "data_structures": {
+    "orders_custkey_bitset": "bitset(1500001) — 187KB, fits in L3 cache. Indexed by c_custkey value. Bit set = customer has ≥1 order.",
+    "phone_prefix_set": "compile_time_constant_array — 7 two-char codes stored as uint16_t for branchless comparison",
+    "subquery_accumulators": "thread_local_pair(sum: double, count: int64) — one per thread, reduced after step 2",
+    "aggregation_buckets": "direct_array(7) per thread — indexed by cntrycode mapped to 0..6. Each bucket: {count: int64, sum_acctbal: double}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "step1_morsels": "65536 rows per morsel over o_custkey scan",
+    "step2_morsels": "65536 rows per morsel over customer scan",
+    "step3_morsels": "65536 rows per morsel over customer scan (second pass)",
+    "step4_threads": 1,
+    "notes": "Steps 1 and 2 are independent and can execute concurrently (different tables). Step 3 depends on both. Step 4 is single-threaded finalization of 7 rows."
+  },
+  "concurrent_steps": {
+    "group_1": ["step_1", "step_2"],
+    "group_2": ["step_3"],
+    "group_3": ["step_4"],
+    "notes": "Steps 1 (orders bitset build) and 2 (customer AVG subquery) read different tables and can run in parallel. Allocate ~32 threads each. Step 3 waits for both, then uses all 64 threads."
+  },
+  "indexes": [],
+  "storage_paths": {
+    "customer_dir": "storage/customer",
+    "orders_dir": "storage/orders",
+    "c_custkey": "storage/customer/c_custkey.bin",
+    "c_phone": "storage/customer/c_phone.bin",
+    "c_phone_data": "storage/customer/c_phone_data.bin",
+    "c_acctbal": "storage/customer/c_acctbal.bin",
+    "o_custkey": "storage/orders/o_custkey.bin"
+  },
+  "execution_target": "cpp"
+}

@@ -25,7 +25,7 @@ import { writeNode, addEdge, getAllNodes, getNodesByLayer, readAllEdges, updateI
 import { extractStructuralFeatures } from "../tools/sql-parser.mjs";
 import { setAgentProvider } from "../providers/index.mjs";
 import { runAgent } from "../shared.mjs";
-import { config as memoryManagerConfig } from "../agents/memory-manager/index.mjs";
+import { config as memoryManagerConfig } from "../agents/common/memory-manager/index.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

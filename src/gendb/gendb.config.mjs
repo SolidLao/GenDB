@@ -44,8 +44,32 @@ export const defaults = {
   // --- Agent timeouts (provider-agnostic) ---
   agentTimeoutMs: 30 * 60 * 1000, // 30 minutes per agent call
   agentTimeoutOverrides: {
-    storage_designer: 45 * 60 * 1000, // 45 minutes — includes data ingestion + index building
-    query_optimizer: 30 * 60 * 1000,  // 30 minutes
+    storage_designer: 45 * 60 * 1000,           // 45 minutes — includes data ingestion + index building
+    query_optimizer: 30 * 60 * 1000,            // 30 minutes
+    // MQO-mode agents (see src/gendb/orchestrator/mqo.mjs)
+    mqo_batch_code_generator: 60 * 60 * 1000,   // 60 minutes — large multi-file emission
+    mqo_global_integrator: 30 * 60 * 1000,      // 30 minutes
+  },
+
+  // --- MQO (Multiple Query Optimization) mode (provider-agnostic) ---
+  // Enabled via `--optimization-mode mqo` CLI flag. See plan file for full design.
+  mqo: {
+    enabled: false,                    // set to true when --optimization-mode mqo
+    analyzerThreshold: 30,             // batch size cutoff between small-batch (single-agent) and large-batch (Surveyor→Clusters→Integrator) paths
+    clustering: {
+      targetClustersPerLarge: 8,       // rough target cluster count in large-batch path
+      minSharedCandidates: 2,          // K: min shared candidate components for co-clustering
+    },
+    optimizer: {
+      maxIterations: 5,
+      stallThreshold: 5,
+      minImprovement: 0.02,            // 2% relative batch-total improvement to accept
+      regressionSlack: 0.05,           // max per-query regression tolerated for non-tail edits (5%)
+      compilationRetryCap: 2,
+    },
+    profile: {
+      runsPerMeasurement: 3,           // mirrors defaults.optimizationRuns idiom for hot-mode averaging
+    },
   },
 
   // --- Single-agent mode (provider-agnostic parts) ---
@@ -66,6 +90,14 @@ export const defaults = {
         code_generator: "opus",
         query_optimizer: "opus",
         memory_manager: "opus",
+        // MQO-mode agents
+        mqo_analyzer_small: "opus",
+        mqo_surveyor: "opus",
+        mqo_cluster_analyzer: "opus",
+        mqo_global_integrator: "opus",
+        mqo_skeleton_planner: "opus",
+        mqo_batch_code_generator: "opus",
+        mqo_optimizer: "opus",
       },
       // Claude effort: "low" | "medium" | "high" | "max" (max = Opus only)
       agentEffortLevels: {
@@ -75,6 +107,14 @@ export const defaults = {
         code_generator: "medium",
         query_optimizer: "medium",
         memory_manager: "medium",
+        // MQO-mode agents
+        mqo_analyzer_small: "medium",
+        mqo_surveyor: "low",              // tool-driven breadth walk, shallow reasoning
+        mqo_cluster_analyzer: "medium",
+        mqo_global_integrator: "medium",
+        mqo_skeleton_planner: "medium",
+        mqo_batch_code_generator: "high", // large output surface
+        mqo_optimizer: "medium",
       },
       escalationModel: "opus",
       escalationEffortLevel: "high",
@@ -92,6 +132,14 @@ export const defaults = {
         code_generator: "gpt-5.4",
         query_optimizer: "gpt-5.4",
         memory_manager: "gpt-5.4",
+        // MQO-mode agents
+        mqo_analyzer_small: "gpt-5.4",
+        mqo_surveyor: "gpt-5.4",
+        mqo_cluster_analyzer: "gpt-5.4",
+        mqo_global_integrator: "gpt-5.4",
+        mqo_skeleton_planner: "gpt-5.4",
+        mqo_batch_code_generator: "gpt-5.4",
+        mqo_optimizer: "gpt-5.4",
       },
       // Codex effort: "minimal" | "low" | "medium" | "high" | "xhigh"
       agentEffortLevels: {
@@ -101,6 +149,14 @@ export const defaults = {
         code_generator: "medium",
         query_optimizer: "medium",
         memory_manager: "medium",
+        // MQO-mode agents
+        mqo_analyzer_small: "medium",
+        mqo_surveyor: "low",
+        mqo_cluster_analyzer: "medium",
+        mqo_global_integrator: "medium",
+        mqo_skeleton_planner: "medium",
+        mqo_batch_code_generator: "high",
+        mqo_optimizer: "medium",
       },
       escalationModel: "gpt-5.4",
       escalationEffortLevel: "high",

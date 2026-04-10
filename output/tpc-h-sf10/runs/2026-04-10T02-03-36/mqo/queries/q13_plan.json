@@ -1,0 +1,96 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q13",
+  "tail_node_id": "Q13_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_custkey", "o_comment"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": [],
+      "usage": "enumerate_valid_custkeys"
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "parallel_scan_aggregate",
+      "on": "scan_orders_full",
+      "description": "Scan all 15M orders rows. For each row, evaluate NOT LIKE '%special%requests%' on o_comment. For passing rows, increment thread-local count_array[o_custkey]. This fuses the residual filter, LEFT JOIN probe, and first GROUP BY into a single pass.",
+      "residual_predicate": "o_comment NOT LIKE '%special%requests%'",
+      "predicate_notes": "Two-substring search: find 'special' then find 'requests' after it. Use strstr or memmem. Negate match. Estimated selectivity ~0.97 (only ~3% of comments match the pattern).",
+      "accumulator": "thread_local_count_array",
+      "accumulator_type": "direct_array<uint16_t>",
+      "accumulator_size": 1500000,
+      "accumulator_key": "o_custkey",
+      "accumulator_op": "increment_if_pass"
+    },
+    {
+      "step": 2,
+      "op": "merge_thread_local_arrays",
+      "description": "Element-wise sum of all thread-local count arrays into a single global count_array[1500000]. Use SIMD vectorized addition.",
+      "input": "thread_local_count_arrays",
+      "output": "merged_count_array",
+      "output_type": "direct_array<uint32_t>",
+      "output_size": 1500000
+    },
+    {
+      "step": 3,
+      "op": "histogram_sweep",
+      "description": "Sweep merged_count_array for all valid custkeys (0..1499999). For each custkey, read c_count = merged_count_array[custkey]. Increment histogram[c_count]++. Customers with 0 matching orders get c_count=0 (the LEFT JOIN semantics — they appear with count 0). Use hash_customer_by_custkey to confirm valid custkey range (dense PK: all keys 0..1499999 are valid).",
+      "input": "merged_count_array",
+      "output": "histogram_array",
+      "output_type": "direct_array<uint32_t>",
+      "output_size_hint": 64,
+      "notes": "Max c_count per customer is bounded by max orders per customer (~40 at SF10). Allocate histogram[0..63] or dynamically sized."
+    },
+    {
+      "step": 4,
+      "op": "materialize_and_sort",
+      "description": "Convert non-zero histogram entries to (c_count, custdist) tuples. Sort by custdist DESC, c_count DESC.",
+      "input": "histogram_array",
+      "output_columns": [
+        {"name": "c_count", "type": "int32"},
+        {"name": "custdist", "type": "int64"}
+      ],
+      "order_by": [
+        {"column": "custdist", "direction": "DESC"},
+        {"column": "c_count", "direction": "DESC"}
+      ],
+      "notes": "Result set is tiny (~40 rows). std::sort is sufficient."
+    }
+  ],
+  "output_schema": [
+    {"name": "c_count", "type": "int32"},
+    {"name": "custdist", "type": "int64"}
+  ],
+  "data_structures": {
+    "per_thread_count_array": "direct_array<uint16_t>[1500000] — one per thread, indexed by o_custkey",
+    "merged_count_array": "direct_array<uint32_t>[1500000] — single merged array",
+    "histogram": "direct_array<uint32_t>[64] — indexed by c_count value",
+    "result_tuples": "std::vector<pair<int32_t,int64_t>> — ~40 entries"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Step 1 is the bottleneck (15M rows with varlen o_comment access). Partition orders rows into morsels of 64K rows. Each thread maintains its own count_array to avoid contention. Step 2 merge is parallel across array segments. Steps 3-4 are single-threaded (trivially fast on 1.5M and ~40 entries respectively)."
+  },
+  "indexes": [
+    {
+      "index": "custkey_to_orders",
+      "purpose": "not_used",
+      "notes": "Sequential scan of shared scan_orders_full is preferred over index-based random access since all orders must be examined for the o_comment filter."
+    }
+  ],
+  "memory_estimate_mb": {
+    "per_thread_arrays": "~3MB per thread (1.5M * 2 bytes) × nproc",
+    "merged_array": "~6MB (1.5M * 4 bytes)",
+    "total_with_64_threads": "~198MB",
+    "notes": "Fits comfortably in 376GB RAM. Per-thread arrays fit in L3 cache (44MB) when threads < 14."
+  },
+  "left_join_semantics": "Implicit via direct_array initialization to 0. All valid custkeys (0..1499999) are swept in step 3. Customers with no qualifying orders have count_array[custkey]=0, yielding c_count=0 — equivalent to LEFT JOIN producing NULLs that COUNT(o_orderkey) maps to 0.",
+  "execution_target": "cpp"
+}

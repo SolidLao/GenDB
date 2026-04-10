@@ -1,0 +1,18 @@
+{
+  "iteration": 2,
+  "scope": "fused_scan:fused_scan_lineitem",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_lineitem",
+    "ms": 1200,
+    "share_of_total": 0.59
+  },
+  "diagnosis": {
+    "step": "Q2",
+    "category": "B",
+    "root_cause": "orders_pk_index[ok] (240MB, random access) looked up independently in 8 branches (Q3,Q5,Q7,Q8,Q9,Q10,Q12,Q21) per row. Since Q5 has no pre-filter, this means 8 redundant random accesses into a cache-exceeding array per row x 60M rows. Similarly o_orderdate[orow], o_custkey[orow], and s_nationkey[sk-1] are redundantly loaded across 5-6 branches each. Compiler cannot CSE these due to intervening unordered_map writes that may alias.",
+    "memory_footprint": "orders_pk_index: 60M x 4B = 240MB (6x L3). o_orderdate: 60MB. o_custkey: 60MB. All random access per row."
+  },
+  "edit_summary": "Hoisted orders_pk_index[ok], o_orderdate[orow], o_custkey[orow], and s_nationkey[sk-1] lookups to compute once per row and reuse across all 8 branches. Added __restrict__ qualifiers on all column pointers to enable compiler CSE/vectorization. Deferred loading of rarely-needed columns (tax, returnflag, linestatus, quantity) to inside their specific branches.",
+  "expected_improvement": "~15-25% scan latency reduction from eliminating 7 redundant random accesses per row into a 240MB array exceeding L3 cache",
+  "rationale": "See edit_rationale.md"
+}

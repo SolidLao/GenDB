@@ -1,0 +1,142 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q7",
+  "tail_node_id": "Q7_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_shipdate_1995_1996",
+      "used_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderkey", "o_custkey"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "load_nation_lookup",
+      "description": "Load nation table (25 rows) into a direct array nationkey→name. Identify nationkeys for FRANCE and GERMANY.",
+      "table": "nation",
+      "structure": "direct_array(25)",
+      "output": "nation_lookup_array",
+      "filter_nationkeys": ["FRANCE", "GERMANY"],
+      "output_keys": {
+        "france_key": "nationkey where n_name='FRANCE'",
+        "germany_key": "nationkey where n_name='GERMANY'"
+      }
+    },
+    {
+      "step": 1,
+      "op": "probe_and_filter",
+      "description": "For each row from shared lineitem scan (shipdate 1995-1996, ~18.8M rows): (1) probe hash_supplier_by_suppkey on l_suppkey to get s_nationkey, (2) early-filter: s_nationkey IN {france_key, germany_key} — eliminates ~92% of rows, (3) probe hash_orders_by_orderkey on l_orderkey to get o_custkey, (4) probe hash_customer_by_custkey on o_custkey to get c_nationkey, (5) filter: c_nationkey IN {france_key, germany_key}, (6) cross-filter: (s_nationkey=france_key AND c_nationkey=germany_key) OR (s_nationkey=germany_key AND c_nationkey=france_key)",
+      "input": "scan_lineitem_shipdate_1995_1996",
+      "probes": [
+        {
+          "order": 1,
+          "hash_component": "hash_supplier_by_suppkey",
+          "probe_key": "l_suppkey",
+          "extract_columns": ["s_nationkey"],
+          "early_filter": "s_nationkey IN (france_key, germany_key)",
+          "selectivity": 0.08,
+          "note": "Probe supplier first — smallest hash (100K entries, ~5.5MB, L3-resident). Early nation filter on supplier side eliminates ~92% immediately before expensive orders/customer probes."
+        },
+        {
+          "order": 2,
+          "hash_component": "hash_orders_by_orderkey",
+          "probe_key": "l_orderkey",
+          "extract_columns": ["o_custkey"],
+          "selectivity": 1.0
+        },
+        {
+          "order": 3,
+          "hash_component": "hash_customer_by_custkey",
+          "probe_key": "o_custkey",
+          "extract_columns": ["c_nationkey"],
+          "early_filter": "c_nationkey IN (france_key, germany_key)",
+          "selectivity": 0.08
+        }
+      ],
+      "cross_filter": "(s_nationkey == france_key AND c_nationkey == germany_key) OR (s_nationkey == germany_key AND c_nationkey == france_key)",
+      "cross_filter_selectivity": 0.5,
+      "estimated_input_rows": 18800000,
+      "estimated_output_rows": 60000
+    },
+    {
+      "step": 2,
+      "op": "compute_columns",
+      "description": "Compute derived columns for surviving rows",
+      "expressions": [
+        { "name": "supp_nation", "expr": "nation_lookup_array[s_nationkey]" },
+        { "name": "cust_nation", "expr": "nation_lookup_array[c_nationkey]" },
+        { "name": "l_year", "expr": "EXTRACT(YEAR FROM l_shipdate)" },
+        { "name": "volume", "expr": "l_extendedprice * (1.0 - l_discount)" }
+      ]
+    },
+    {
+      "step": 3,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "description": "Group by (supp_nation, cust_nation, l_year). Only 2 nation values × 2 nation values × 2 years = max 4 valid groups after cross-filter. Use a small fixed array indexed by (nation_pair_id, year_offset). No hash table needed.",
+      "group_by": ["supp_nation", "cust_nation", "l_year"],
+      "aggs": [
+        { "name": "revenue", "func": "SUM", "expr": "volume" }
+      ],
+      "max_groups": 4,
+      "encoding": {
+        "nation_pair": {
+          "0": "(FRANCE, GERMANY)",
+          "1": "(GERMANY, FRANCE)"
+        },
+        "year_offset": "l_year - 1995",
+        "index": "nation_pair * 2 + year_offset"
+      },
+      "estimated_input_rows": 60000,
+      "note": "With only 4 possible groups, use a flat array of 4 accumulators. Zero hash overhead, perfect cache behavior. Thread-local arrays merged at end."
+    },
+    {
+      "step": 4,
+      "op": "finalize_and_sort",
+      "description": "Materialize the 4 result rows from the direct array, sort by (supp_nation, cust_nation, l_year) ASC.",
+      "order_by": [
+        { "column": "supp_nation", "direction": "ASC" },
+        { "column": "cust_nation", "direction": "ASC" },
+        { "column": "l_year", "direction": "ASC" }
+      ],
+      "estimated_output_rows": 4,
+      "note": "With ≤4 rows, sorting is trivial — insertion sort or hardcoded comparison."
+    }
+  ],
+  "output_schema": [
+    { "name": "supp_nation", "type": "string" },
+    { "name": "cust_nation", "type": "string" },
+    { "name": "l_year", "type": "int32" },
+    { "name": "revenue", "type": "double" }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partitioning": "Morsel-driven over scan_lineitem_shipdate_1995_1996 output. Each thread has a local array[4] of SUM accumulators. Final merge: single-threaded sum of 4-element arrays from all threads — negligible cost.",
+    "thread_local_state": {
+      "accumulators": "double[4]",
+      "description": "One SUM accumulator per (nation_pair, year) combination"
+    }
+  },
+  "data_structures": {
+    "nation_lookup": "direct_array(25, nationkey → n_name string pointer)",
+    "aggregation": "direct_array(4, thread-local double accumulators)"
+  },
+  "execution_notes": {
+    "probe_order_rationale": "Probe supplier hash first (5.5MB, L3-resident) and apply nation filter immediately. This eliminates ~92% of rows before probing the larger orders hash (750MB) and customer hash (300MB), dramatically reducing cache pressure on those larger structures.",
+    "fused_pipeline": "Steps 1-3 are fused into a single tight loop per morsel: probe → filter → compute → accumulate. No intermediate materialization."
+  }
+}

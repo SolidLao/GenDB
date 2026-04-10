@@ -1,0 +1,417 @@
+{
+  "version": "1.0",
+  "generated_by": "mqo-analyzer-small",
+  "batch_size": 22,
+  "shared_components": [
+    {
+      "component_id": "scan_lineitem_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(lineitem)[*]",
+      "source_tables": [
+        "lineitem"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "l_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_linenumber",
+            "type": "int32"
+          },
+          {
+            "name": "l_quantity",
+            "type": "double"
+          },
+          {
+            "name": "l_extendedprice",
+            "type": "double"
+          },
+          {
+            "name": "l_discount",
+            "type": "double"
+          },
+          {
+            "name": "l_tax",
+            "type": "double"
+          },
+          {
+            "name": "l_returnflag",
+            "type": "int8"
+          },
+          {
+            "name": "l_linestatus",
+            "type": "int8"
+          },
+          {
+            "name": "l_shipdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_commitdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_receiptdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_shipinstruct",
+            "type": "uint8"
+          },
+          {
+            "name": "l_shipmode",
+            "type": "uint8"
+          }
+        ],
+        "row_order": "ordered_by_l_orderkey"
+      },
+      "cardinality_estimate": 59986052,
+      "consumers": [
+        "Q1",
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q6",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q12",
+        "Q14",
+        "Q15",
+        "Q17",
+        "Q18",
+        "Q19",
+        "Q20",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 2000,
+      "rationale": "Lineitem is the largest table (60M rows, ~4GB columnar on HDD). 17 of 22 queries access it. A single sequential HDD read (~2s) replaces up to 17 separate scans, saving ~32s of I/O. Each consumer evaluates its own residual predicates on the streamed rows at negligible CPU cost. This is the single highest-impact sharing opportunity in the batch.",
+      "notes": "On HDD, sequential I/O dominates. Zone-map benefits for narrow-range queries (Q6, Q14, Q15) are sacrificed but the marginal I/O cost of processing extra rows is far less than the cost of 16 additional disk scans. Consumers with correlated subqueries (Q4, Q17, Q20) can build per-query hash structures from this scan."
+    },
+    {
+      "component_id": "scan_lineitem_shipdate_1994",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(lineitem)[l_shipdate:>=:1994-01-01,l_shipdate:<:1995-01-01]",
+      "source_tables": [
+        "lineitem"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "l_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_quantity",
+            "type": "double"
+          },
+          {
+            "name": "l_extendedprice",
+            "type": "double"
+          },
+          {
+            "name": "l_discount",
+            "type": "double"
+          },
+          {
+            "name": "l_shipdate",
+            "type": "int32"
+          }
+        ],
+        "row_order": "unordered"
+      },
+      "cardinality_estimate": 9417770,
+      "consumers": [
+        "Q6",
+        "Q20"
+      ],
+      "build_cost_estimate_ms": 100,
+      "rationale": "Q6 and Q20 both filter lineitem by the exact same l_shipdate range [1994-01-01, 1995-01-01). Materializing this 9.4M-row subset during the full lineitem scan allows both consumers to work from a 6.3x smaller input. Q6 applies additional residual filters (l_discount BETWEEN 0.05-0.07, l_quantity < 24). Q20 pre-aggregates SUM(l_quantity) by (l_partkey, l_suppkey) for its correlated subquery. Derived from scan_lineitem_full at negligible incremental cost (~100ms buffer copy).",
+      "notes": "Can be materialized as a side-output of scan_lineitem_full. Both consumers need l_partkey, l_suppkey, l_quantity, l_extendedprice, l_discount."
+    },
+    {
+      "component_id": "scan_lineitem_shipdate_1995_1996",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(lineitem)[l_shipdate:>=:1995-01-01,l_shipdate:<=:1996-12-31]",
+      "source_tables": [
+        "lineitem"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "l_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_quantity",
+            "type": "double"
+          },
+          {
+            "name": "l_extendedprice",
+            "type": "double"
+          },
+          {
+            "name": "l_discount",
+            "type": "double"
+          },
+          {
+            "name": "l_shipdate",
+            "type": "int32"
+          }
+        ],
+        "row_order": "unordered"
+      },
+      "cardinality_estimate": 18835620,
+      "consumers": [
+        "Q7",
+        "Q14",
+        "Q15"
+      ],
+      "build_cost_estimate_ms": 120,
+      "rationale": "Q7 filters l_shipdate BETWEEN 1995-01-01 AND 1996-12-31. Q14 filters [1995-09-01, 1995-10-01) and Q15 filters [1996-01-01, 1996-04-01) — both strict subsets of Q7's range. The superset scan (Q7's range, ~18.8M rows) serves all three; Q14 and Q15 apply residual date filters on a 3.2x smaller input vs the full 60M rows. Derived from scan_lineitem_full.",
+      "notes": "Q14's subset is ~780K rows (1.3% of lineitem). Q15's subset is ~2.3M rows (3.9%). Both benefit from avoiding full-table filter evaluation."
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(orders, o_orderkey)",
+      "source_tables": [
+        "orders"
+      ],
+      "build_column": "o_orderkey",
+      "payload_columns": [
+        "o_custkey",
+        "o_orderdate",
+        "o_orderstatus",
+        "o_totalprice",
+        "o_orderpriority",
+        "o_shippriority"
+      ],
+      "cardinality_estimate": 15000000,
+      "consumers": [
+        "Q3",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q12",
+        "Q18",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 200,
+      "rationale": "9 queries join lineitem to orders via l_orderkey=o_orderkey. Building one shared hash table on o_orderkey (15M entries, ~750MB) allows all consumers to probe orders during the shared lineitem scan without redundant builds. Although orders has a dense_pk_idx, the hash table co-locates all payload columns in each entry for superior cache locality during millions of random probes. Saves 8 redundant builds of ~200ms each = ~1,600ms.",
+      "notes": "Payload includes all commonly needed orders columns. Consumers needing o_comment (Q13) access orders separately via the custkey_to_orders FK index."
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(customer, c_custkey)",
+      "source_tables": [
+        "customer"
+      ],
+      "build_column": "c_custkey",
+      "payload_columns": [
+        "c_name",
+        "c_nationkey",
+        "c_mktsegment",
+        "c_acctbal",
+        "c_phone",
+        "c_address",
+        "c_comment"
+      ],
+      "cardinality_estimate": 1500000,
+      "consumers": [
+        "Q3",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q10",
+        "Q13",
+        "Q18"
+      ],
+      "build_cost_estimate_ms": 40,
+      "rationale": "7 queries probe customer by c_custkey — either from orders.o_custkey (Q3, Q5, Q7, Q8, Q10, Q18) or via LEFT JOIN (Q13). Building one shared hash (1.5M entries, ~300MB, fits in memory) saves 6 redundant builds. The hash co-locates all customer columns per entry, enabling single-probe access to mktsegment (Q3), nationkey (Q5, Q7, Q8, Q10), acctbal/phone/address/comment (Q10, Q13, Q18).",
+      "notes": "Q3 filters c_mktsegment='BUILDING' as a residual on probe results. Q13 uses this for a LEFT JOIN pattern (missing keys → NULL count)."
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(supplier, s_suppkey)",
+      "source_tables": [
+        "supplier"
+      ],
+      "build_column": "s_suppkey",
+      "payload_columns": [
+        "s_name",
+        "s_nationkey",
+        "s_address",
+        "s_phone",
+        "s_acctbal",
+        "s_comment"
+      ],
+      "cardinality_estimate": 100000,
+      "consumers": [
+        "Q2",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q11",
+        "Q15",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 5,
+      "rationale": "8 queries probe supplier by s_suppkey — from lineitem.l_suppkey (Q5, Q7, Q8, Q9, Q15, Q21), from partsupp.ps_suppkey (Q2, Q11). Building once (100K entries, ~5.5MB, fits in L3 cache) keeps the hash hot across all consumers. The primary benefit is cache efficiency: 8 consumers probing the same small hash table maintains L3 residency vs 8 separate column-file accesses. Saves 7 × 5ms = 35ms in build time plus significant cache-miss reduction during probes.",
+      "notes": "Supplier is small (100K rows) so individual build cost is low, but sharing keeps it cache-resident across consumers processing 60M+ lineitem probes."
+    }
+  ],
+  "per_query_dependencies": {
+    "Q1": [
+      "scan_lineitem_full"
+    ],
+    "Q2": [
+      "hash_supplier_by_suppkey"
+    ],
+    "Q3": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q4": [
+      "scan_lineitem_full"
+    ],
+    "Q5": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q6": [
+      "scan_lineitem_full",
+      "scan_lineitem_shipdate_1994"
+    ],
+    "Q7": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey",
+      "scan_lineitem_shipdate_1995_1996"
+    ],
+    "Q8": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q9": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q10": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q11": [
+      "hash_supplier_by_suppkey"
+    ],
+    "Q12": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey"
+    ],
+    "Q13": [
+      "hash_customer_by_custkey"
+    ],
+    "Q14": [
+      "scan_lineitem_full",
+      "scan_lineitem_shipdate_1995_1996"
+    ],
+    "Q15": [
+      "scan_lineitem_full",
+      "hash_supplier_by_suppkey",
+      "scan_lineitem_shipdate_1995_1996"
+    ],
+    "Q16": [],
+    "Q17": [
+      "scan_lineitem_full"
+    ],
+    "Q18": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q19": [
+      "scan_lineitem_full"
+    ],
+    "Q20": [
+      "scan_lineitem_full",
+      "scan_lineitem_shipdate_1994",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q21": [
+      "scan_lineitem_full",
+      "hash_orders_by_orderkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q22": []
+  },
+  "rejected_candidates": [
+    {
+      "canonical_signature": "JOIN(lineitem, orders, l_orderkey=o_orderkey)",
+      "reason": "Result is 60M rows (~9GB materialized). Probing via hash_orders_by_orderkey is strictly better — consumers access only needed columns per probe without materializing the full join result."
+    },
+    {
+      "canonical_signature": "JOIN(customer, orders, c_custkey=o_custkey)",
+      "reason": "7 queries share this join, but each applies different o_orderdate filters (Q3: <1995-03-15, Q5: 1994 year, Q10: Q4 1993, Q13: no filter, Q18: no date filter). Materializing the full 15M-row result wastes space and I/O for date-filtered consumers. Better to probe via hash_customer_by_custkey."
+    },
+    {
+      "canonical_signature": "HASH(part, p_partkey)",
+      "reason": "8 queries join part, but each applies a different selective filter (Q2: p_size=15 AND p_type LIKE '%BRASS', Q8: p_type='ECONOMY ANODIZED STEEL', Q9: p_name LIKE '%green%', Q17: p_brand='Brand#23' AND p_container='MED BOX', Q19: 3 brand/container combos). A full 2M-entry hash (160MB) is less cache-efficient than per-query filtered hashes of a few thousand entries each. Part has a dense_pk_idx for fallback."
+    },
+    {
+      "canonical_signature": "SCAN(partsupp)[*]",
+      "reason": "5 consumers (Q2, Q9, Q11, Q16, Q20) but access patterns differ significantly. Q9 probes by composite key (partsupp_composite_hash index). Q11 scans with supplier-nation filter. Q16 joins with filtered part. Q2 has correlated subquery. Existing indexes (dense_range on ps_partkey, composite hash) serve most patterns efficiently."
+    },
+    {
+      "canonical_signature": "PARTIAL_AGG(lineitem, GROUP BY l_returnflag, l_linestatus)",
+      "reason": "Only Q1 uses this exact GROUP BY + aggregate combination. No other query groups by (l_returnflag, l_linestatus). Single-consumer component provides no sharing benefit."
+    },
+    {
+      "canonical_signature": "SCAN(nation)[*], SCAN(region)[*]",
+      "reason": "Nation (25 rows) and region (5 rows) are trivial reference tables. Scan cost <0.1ms. Shared component accounting overhead exceeds savings."
+    },
+    {
+      "canonical_signature": "SCAN(orders)[o_orderdate:range]",
+      "reason": "Considered shared orders scan for Q4 [1993-07-01, 1993-10-01), Q5 [1994-01-01, 1995-01-01), Q10 [1993-10-01, 1994-01-01). Superset [1993-07-01, 1995-01-01) covers all three (~3.5M rows). But zone_map on o_orderdate already enables efficient per-query scans, and the savings (~160ms) do not justify the materialization overhead for only 3 consumers."
+    }
+  ]
+}

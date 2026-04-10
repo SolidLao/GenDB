@@ -1,0 +1,103 @@
+{
+  "version": "1.0",
+  "generated_by": "global-skeleton-planner",
+  "nodes": [
+    { "id": "hash_supplier_by_suppkey",  "kind": "shared", "provides_to": ["Q2","Q5","Q7","Q8","Q9","Q11","Q15","Q16","Q20","Q21"] },
+    { "id": "hash_customer_by_custkey",  "kind": "shared", "provides_to": ["Q3","Q5","Q7","Q8","Q10","Q13","Q18","Q22"] },
+    { "id": "hash_part_by_partkey",      "kind": "shared", "provides_to": ["Q2","Q8","Q9","Q14","Q16","Q17","Q19","Q20"] },
+    { "id": "scan_partsupp_full",        "kind": "shared", "provides_to": ["Q2","Q9","Q11","Q16","Q20"] },
+    { "id": "scan_orders_full",          "kind": "shared", "provides_to": ["Q3","Q4","Q5","Q7","Q8","Q9","Q10","Q12","Q13","Q18","Q21","Q22"] },
+    { "id": "scan_lineitem_full",        "kind": "shared", "provides_to": ["Q1","Q3","Q5","Q6","Q7","Q8","Q10","Q12","Q14","Q15","Q18"] },
+    { "id": "Q1_tail",  "kind": "tail", "query_id": "Q1",  "consumes": ["scan_lineitem_full"] },
+    { "id": "Q2_tail",  "kind": "tail", "query_id": "Q2",  "consumes": ["hash_part_by_partkey","scan_partsupp_full","hash_supplier_by_suppkey"] },
+    { "id": "Q3_tail",  "kind": "tail", "query_id": "Q3",  "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey"] },
+    { "id": "Q4_tail",  "kind": "tail", "query_id": "Q4",  "consumes": ["scan_orders_full"] },
+    { "id": "Q5_tail",  "kind": "tail", "query_id": "Q5",  "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey","hash_supplier_by_suppkey"] },
+    { "id": "Q6_tail",  "kind": "tail", "query_id": "Q6",  "consumes": ["scan_lineitem_full"] },
+    { "id": "Q7_tail",  "kind": "tail", "query_id": "Q7",  "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey","hash_supplier_by_suppkey"] },
+    { "id": "Q8_tail",  "kind": "tail", "query_id": "Q8",  "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey","hash_part_by_partkey","hash_supplier_by_suppkey"] },
+    { "id": "Q9_tail",  "kind": "tail", "query_id": "Q9",  "consumes": ["scan_orders_full","hash_part_by_partkey","scan_partsupp_full","hash_supplier_by_suppkey"] },
+    { "id": "Q10_tail", "kind": "tail", "query_id": "Q10", "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey"] },
+    { "id": "Q11_tail", "kind": "tail", "query_id": "Q11", "consumes": ["scan_partsupp_full","hash_supplier_by_suppkey"] },
+    { "id": "Q12_tail", "kind": "tail", "query_id": "Q12", "consumes": ["scan_lineitem_full","scan_orders_full"] },
+    { "id": "Q13_tail", "kind": "tail", "query_id": "Q13", "consumes": ["scan_orders_full","hash_customer_by_custkey"] },
+    { "id": "Q14_tail", "kind": "tail", "query_id": "Q14", "consumes": ["scan_lineitem_full","hash_part_by_partkey"] },
+    { "id": "Q15_tail", "kind": "tail", "query_id": "Q15", "consumes": ["scan_lineitem_full","hash_supplier_by_suppkey"] },
+    { "id": "Q16_tail", "kind": "tail", "query_id": "Q16", "consumes": ["hash_part_by_partkey","scan_partsupp_full","hash_supplier_by_suppkey"] },
+    { "id": "Q17_tail", "kind": "tail", "query_id": "Q17", "consumes": ["hash_part_by_partkey"] },
+    { "id": "Q18_tail", "kind": "tail", "query_id": "Q18", "consumes": ["scan_lineitem_full","scan_orders_full","hash_customer_by_custkey"] },
+    { "id": "Q19_tail", "kind": "tail", "query_id": "Q19", "consumes": ["hash_part_by_partkey"] },
+    { "id": "Q20_tail", "kind": "tail", "query_id": "Q20", "consumes": ["hash_part_by_partkey","scan_partsupp_full","hash_supplier_by_suppkey"] },
+    { "id": "Q21_tail", "kind": "tail", "query_id": "Q21", "consumes": ["scan_orders_full","hash_supplier_by_suppkey"] },
+    { "id": "Q22_tail", "kind": "tail", "query_id": "Q22", "consumes": ["scan_orders_full","hash_customer_by_custkey"] }
+  ],
+  "execution_order": [
+    ["hash_supplier_by_suppkey", "hash_customer_by_custkey", "hash_part_by_partkey"],
+    ["scan_partsupp_full"],
+    ["scan_orders_full"],
+    ["scan_lineitem_full"],
+    ["Q1_tail","Q2_tail","Q3_tail","Q4_tail","Q5_tail","Q6_tail","Q7_tail","Q8_tail","Q9_tail","Q10_tail","Q11_tail","Q12_tail","Q13_tail","Q14_tail","Q15_tail","Q16_tail","Q17_tail","Q18_tail","Q19_tail","Q20_tail","Q21_tail","Q22_tail"]
+  ],
+  "fusion_hints": [
+    {
+      "shared_component": "scan_lineitem_full",
+      "mode": "callback",
+      "consumers": ["Q1_tail","Q3_tail","Q5_tail","Q6_tail","Q7_tail","Q8_tail","Q10_tail","Q12_tail","Q14_tail","Q15_tail","Q18_tail"],
+      "rationale": "lineitem is 60M rows (~4.2GB) on HDD — the dominant I/O cost at ~5s. Callback fusion streams rows once through 11 consumer callbacks, avoiding materializing the full scan result. Each consumer applies cheap residual filters and aggregations. All non-lineitem dependencies are materialized in earlier tiers, so callbacks can probe hash tables and orders data freely."
+    },
+    {
+      "shared_component": "scan_orders_full",
+      "mode": "materialize",
+      "consumers": ["Q3_tail","Q4_tail","Q5_tail","Q7_tail","Q8_tail","Q9_tail","Q10_tail","Q12_tail","Q13_tail","Q18_tail","Q21_tail","Q22_tail"],
+      "rationale": "orders (15M rows, ~600MB) is probed by 12 queries with diverse access patterns: some iterate by orderkey via dense_pk, others use custkey_to_orders grouped_fk index, others filter by date. Materialization enables random-access probing from the lineitem callback scan and independent index lookups."
+    },
+    {
+      "shared_component": "hash_customer_by_custkey",
+      "mode": "materialize",
+      "consumers": ["Q3_tail","Q5_tail","Q7_tail","Q8_tail","Q10_tail","Q13_tail","Q18_tail","Q22_tail"],
+      "rationale": "customer hash table is small (1.5M rows, ~120MB) with dense_pk enabling O(1) array lookups. 8 consumers probe it — materialize once for shared random access."
+    },
+    {
+      "shared_component": "hash_part_by_partkey",
+      "mode": "materialize",
+      "consumers": ["Q2_tail","Q8_tail","Q9_tail","Q14_tail","Q16_tail","Q17_tail","Q19_tail","Q20_tail"],
+      "rationale": "part hash table is small (2M rows, ~80MB) with dense_pk. 8 consumers apply diverse attribute filters — materialize once for shared O(1) lookups."
+    },
+    {
+      "shared_component": "scan_partsupp_full",
+      "mode": "materialize",
+      "consumers": ["Q2_tail","Q9_tail","Q11_tail","Q16_tail","Q20_tail"],
+      "rationale": "partsupp (8M rows, ~192MB) is joined via composite hash and partkey dense_range indexes. 5 consumers use different join patterns — materialize to enable indexed access from each tail."
+    },
+    {
+      "shared_component": "hash_supplier_by_suppkey",
+      "mode": "materialize",
+      "consumers": ["Q2_tail","Q5_tail","Q7_tail","Q8_tail","Q9_tail","Q11_tail","Q15_tail","Q16_tail","Q20_tail","Q21_tail"],
+      "rationale": "supplier is tiny (100K rows, ~8MB) with dense_pk. 10 consumers — the most widely shared component. Materialize for trivial O(1) lookups."
+    }
+  ],
+  "single_query_subsets": {
+    "Q1":  ["scan_lineitem_full", "Q1_tail"],
+    "Q2":  ["hash_part_by_partkey", "scan_partsupp_full", "hash_supplier_by_suppkey", "Q2_tail"],
+    "Q3":  ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "Q3_tail"],
+    "Q4":  ["scan_orders_full", "Q4_tail"],
+    "Q5":  ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "Q5_tail"],
+    "Q6":  ["scan_lineitem_full", "Q6_tail"],
+    "Q7":  ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "Q7_tail"],
+    "Q8":  ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "hash_part_by_partkey", "hash_supplier_by_suppkey", "Q8_tail"],
+    "Q9":  ["scan_orders_full", "hash_part_by_partkey", "scan_partsupp_full", "hash_supplier_by_suppkey", "Q9_tail"],
+    "Q10": ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "Q10_tail"],
+    "Q11": ["scan_partsupp_full", "hash_supplier_by_suppkey", "Q11_tail"],
+    "Q12": ["scan_lineitem_full", "scan_orders_full", "Q12_tail"],
+    "Q13": ["scan_orders_full", "hash_customer_by_custkey", "Q13_tail"],
+    "Q14": ["scan_lineitem_full", "hash_part_by_partkey", "Q14_tail"],
+    "Q15": ["scan_lineitem_full", "hash_supplier_by_suppkey", "Q15_tail"],
+    "Q16": ["hash_part_by_partkey", "scan_partsupp_full", "hash_supplier_by_suppkey", "Q16_tail"],
+    "Q17": ["hash_part_by_partkey", "Q17_tail"],
+    "Q18": ["scan_lineitem_full", "scan_orders_full", "hash_customer_by_custkey", "Q18_tail"],
+    "Q19": ["hash_part_by_partkey", "Q19_tail"],
+    "Q20": ["hash_part_by_partkey", "scan_partsupp_full", "hash_supplier_by_suppkey", "Q20_tail"],
+    "Q21": ["scan_orders_full", "hash_supplier_by_suppkey", "Q21_tail"],
+    "Q22": ["scan_orders_full", "hash_customer_by_custkey", "Q22_tail"]
+  }
+}

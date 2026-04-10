@@ -158,6 +158,14 @@ struct CompactHashMap {
     };
     Iterator begin() const { return Iterator(table.data(), table.data() + table.size()); }
     Iterator end() const { return Iterator(table.data() + table.size(), table.data() + table.size()); }
+
+    // Iterate all occupied entries, calling fn(key, value) for each.
+    template<typename Fn>
+    void for_each(Fn&& fn) const {
+        for (const auto& e : table) {
+            if (e.occupied) fn(e.key, e.value);
+        }
+    }
 };
 
 // Open-addressing hash set — for semi-joins, deduplication.

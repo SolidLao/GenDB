@@ -1,0 +1,508 @@
+{
+  "version": "1.0",
+  "generated_by": "mqo-analyzer-small",
+  "batch_size": 22,
+  "shared_components": [
+    {
+      "component_id": "scan_lineitem_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(lineitem)[*]",
+      "source_tables": [
+        "lineitem"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "l_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "l_quantity",
+            "type": "double"
+          },
+          {
+            "name": "l_extendedprice",
+            "type": "double"
+          },
+          {
+            "name": "l_discount",
+            "type": "double"
+          },
+          {
+            "name": "l_tax",
+            "type": "double"
+          },
+          {
+            "name": "l_returnflag",
+            "type": "int8"
+          },
+          {
+            "name": "l_linestatus",
+            "type": "int8"
+          },
+          {
+            "name": "l_shipdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_commitdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_receiptdate",
+            "type": "int32"
+          },
+          {
+            "name": "l_shipinstruct",
+            "type": "uint8"
+          },
+          {
+            "name": "l_shipmode",
+            "type": "uint8"
+          }
+        ],
+        "row_order": "ordered_by_l_orderkey"
+      },
+      "cardinality_estimate": 59986052,
+      "consumers": [
+        "Q1",
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q6",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q12",
+        "Q14",
+        "Q15",
+        "Q17",
+        "Q18",
+        "Q19",
+        "Q20",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 5000,
+      "rationale": "Lineitem is the largest table (60M rows) on HDD storage sorted by l_orderkey (not by filter columns), making zone-map skipping on l_shipdate ineffective. 17 queries touch lineitem; a single sequential scan reading all 14 hot columns once amortizes ~80s of redundant I/O across the batch. This is by far the highest-impact shared component.",
+      "notes": "Each consumer applies its own residual filters (date ranges, return flags, ship modes, etc.) and join lookups. Queries with correlated subqueries (Q4, Q17, Q20) may optionally use index paths for their subquery portions but still benefit from cached column data."
+    },
+    {
+      "component_id": "scan_orders_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(orders)[*]",
+      "source_tables": [
+        "orders"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "o_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "o_custkey",
+            "type": "int32"
+          },
+          {
+            "name": "o_orderstatus",
+            "type": "int8"
+          },
+          {
+            "name": "o_totalprice",
+            "type": "double"
+          },
+          {
+            "name": "o_orderdate",
+            "type": "int32"
+          },
+          {
+            "name": "o_orderpriority",
+            "type": "uint8"
+          },
+          {
+            "name": "o_shippriority",
+            "type": "int32"
+          },
+          {
+            "name": "o_comment",
+            "type": "varlen"
+          }
+        ],
+        "row_order": "ordered_by_o_orderkey"
+      },
+      "cardinality_estimate": 15000000,
+      "consumers": [
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q12",
+        "Q13",
+        "Q18",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 1500,
+      "rationale": "Orders (15M rows) is the second-largest table. 11 queries scan or join through it. Most queries filter on o_orderdate ranges or join on o_orderkey; since orders is sorted by o_orderkey (not o_orderdate), zone-map skipping on dates is poor. One sequential scan saves ~15s of redundant HDD I/O.",
+      "notes": "Q22 excluded: it only checks order existence via custkey_to_orders index and does not need order column data. Q13 uses LEFT JOIN via custkey_to_orders index but still reads all order rows, so it benefits from cached data."
+    },
+    {
+      "component_id": "scan_customer_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(customer)[*]",
+      "source_tables": [
+        "customer"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "c_custkey",
+            "type": "int32"
+          },
+          {
+            "name": "c_name",
+            "type": "varlen"
+          },
+          {
+            "name": "c_address",
+            "type": "varlen"
+          },
+          {
+            "name": "c_nationkey",
+            "type": "int32"
+          },
+          {
+            "name": "c_phone",
+            "type": "varlen"
+          },
+          {
+            "name": "c_acctbal",
+            "type": "double"
+          },
+          {
+            "name": "c_mktsegment",
+            "type": "uint8"
+          },
+          {
+            "name": "c_comment",
+            "type": "varlen"
+          }
+        ],
+        "row_order": "ordered_by_c_custkey"
+      },
+      "cardinality_estimate": 1500000,
+      "consumers": [
+        "Q3",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q10",
+        "Q13",
+        "Q18",
+        "Q22"
+      ],
+      "build_cost_estimate_ms": 200,
+      "rationale": "Customer (1.5M rows) is accessed by 8 queries for joins on c_custkey or direct scans (Q22). With ~100MB of column data on HDD, sharing one scan saves ~1.4s and ensures customer data is memory-resident for all subsequent lookups.",
+      "notes": "Customer has dense_pk on c_custkey enabling O(1) lookups from orders.o_custkey. The shared scan ensures columns are cached for both FK-lookup and full-scan consumers."
+    },
+    {
+      "component_id": "scan_part_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(part)[*]",
+      "source_tables": [
+        "part"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "p_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "p_name",
+            "type": "varlen"
+          },
+          {
+            "name": "p_mfgr",
+            "type": "uint8"
+          },
+          {
+            "name": "p_brand",
+            "type": "uint8"
+          },
+          {
+            "name": "p_type",
+            "type": "uint8"
+          },
+          {
+            "name": "p_size",
+            "type": "int32"
+          },
+          {
+            "name": "p_container",
+            "type": "uint8"
+          }
+        ],
+        "row_order": "ordered_by_p_partkey"
+      },
+      "cardinality_estimate": 2000000,
+      "consumers": [
+        "Q2",
+        "Q8",
+        "Q9",
+        "Q14",
+        "Q16",
+        "Q17",
+        "Q19"
+      ],
+      "build_cost_estimate_ms": 250,
+      "rationale": "Part (2M rows) is accessed by 7 queries with varied filters on p_type, p_brand, p_size, p_container, and p_name. A single scan reading all 7 needed columns saves ~1.5s of redundant I/O and makes part data memory-resident for subsequent FK lookups from lineitem.",
+      "notes": "Part has dense_pk on p_partkey. Each consumer applies its own predicate filters (LIKE, equality, IN-list, etc.)."
+    },
+    {
+      "component_id": "scan_partsupp_full",
+      "kind": "filtered_scan",
+      "canonical_signature": "SCAN(partsupp)[*]",
+      "source_tables": [
+        "partsupp"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "ps_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "ps_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "ps_availqty",
+            "type": "int32"
+          },
+          {
+            "name": "ps_supplycost",
+            "type": "double"
+          }
+        ],
+        "row_order": "ordered_by_ps_partkey_ps_suppkey"
+      },
+      "cardinality_estimate": 8000000,
+      "consumers": [
+        "Q2",
+        "Q9",
+        "Q11",
+        "Q16",
+        "Q20"
+      ],
+      "build_cost_estimate_ms": 800,
+      "rationale": "Partsupp (8M rows) is accessed by 5 queries. Reading 4 hot columns (~160MB) once on HDD saves ~3.2s of redundant sequential I/O. Also serves as input for the join_partsupp_european_suppliers component.",
+      "notes": "ps_comment excluded from output as no consumer query references it. Sorted by (ps_partkey, ps_suppkey) matching the composite PK."
+    },
+    {
+      "component_id": "join_partsupp_european_suppliers",
+      "kind": "join_result",
+      "canonical_signature": "JOIN(partsupp,supplier,nation,region)[r_name:=:EUROPE]",
+      "source_tables": [
+        "partsupp",
+        "supplier",
+        "nation",
+        "region"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "ps_partkey",
+            "type": "int32"
+          },
+          {
+            "name": "ps_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "ps_supplycost",
+            "type": "double"
+          },
+          {
+            "name": "ps_availqty",
+            "type": "int32"
+          },
+          {
+            "name": "s_acctbal",
+            "type": "double"
+          },
+          {
+            "name": "s_name",
+            "type": "varlen"
+          },
+          {
+            "name": "s_address",
+            "type": "varlen"
+          },
+          {
+            "name": "s_phone",
+            "type": "varlen"
+          },
+          {
+            "name": "s_comment",
+            "type": "varlen"
+          },
+          {
+            "name": "n_name",
+            "type": "varlen"
+          }
+        ],
+        "row_order": "unordered"
+      },
+      "cardinality_estimate": 1600000,
+      "consumers": [
+        "Q2",
+        "Q11"
+      ],
+      "build_cost_estimate_ms": 400,
+      "rationale": "Q2 (both main query and correlated subquery) needs partsupp joined with European suppliers+nation+region; Q11 needs the same join filtered to Germany (a subset of Europe). Building this 1.6M-row join result once avoids Q2 computing it twice internally and Q11 computing a similar join independently, saving ~800ms total. The European superset covers Q11's German filter as a residual predicate.",
+      "notes": "European suppliers = ~20K of 100K total (5 of 25 nations). Q11 applies residual n_name='GERMANY' filter. Q2's subquery probes this result by ps_partkey for MIN(ps_supplycost)."
+    }
+  ],
+  "per_query_dependencies": {
+    "Q1": [
+      "scan_lineitem_full"
+    ],
+    "Q2": [
+      "scan_part_full",
+      "scan_partsupp_full",
+      "join_partsupp_european_suppliers"
+    ],
+    "Q3": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full"
+    ],
+    "Q4": [
+      "scan_lineitem_full",
+      "scan_orders_full"
+    ],
+    "Q5": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full"
+    ],
+    "Q6": [
+      "scan_lineitem_full"
+    ],
+    "Q7": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full"
+    ],
+    "Q8": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full",
+      "scan_part_full"
+    ],
+    "Q9": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_partsupp_full",
+      "scan_part_full"
+    ],
+    "Q10": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full"
+    ],
+    "Q11": [
+      "scan_partsupp_full",
+      "join_partsupp_european_suppliers"
+    ],
+    "Q12": [
+      "scan_lineitem_full",
+      "scan_orders_full"
+    ],
+    "Q13": [
+      "scan_customer_full",
+      "scan_orders_full"
+    ],
+    "Q14": [
+      "scan_lineitem_full",
+      "scan_part_full"
+    ],
+    "Q15": [
+      "scan_lineitem_full"
+    ],
+    "Q16": [
+      "scan_part_full",
+      "scan_partsupp_full"
+    ],
+    "Q17": [
+      "scan_lineitem_full",
+      "scan_part_full"
+    ],
+    "Q18": [
+      "scan_lineitem_full",
+      "scan_orders_full",
+      "scan_customer_full"
+    ],
+    "Q19": [
+      "scan_lineitem_full",
+      "scan_part_full"
+    ],
+    "Q20": [
+      "scan_lineitem_full",
+      "scan_partsupp_full"
+    ],
+    "Q21": [
+      "scan_lineitem_full",
+      "scan_orders_full"
+    ],
+    "Q22": [
+      "scan_customer_full"
+    ]
+  },
+  "rejected_candidates": [
+    {
+      "canonical_signature": "HASH(orders, o_orderkey)",
+      "reason": "Orders has a dense_pk index on o_orderkey providing O(1) array-based lookup. A hash table would be redundant and waste ~120MB of memory for no latency improvement."
+    },
+    {
+      "canonical_signature": "HASH(customer, c_custkey)",
+      "reason": "Customer has a dense_pk index on c_custkey. Direct array lookup is faster than any hash probe. Same applies to HASH(part, p_partkey) and HASH(supplier, s_suppkey) — all PKs have dense indexes."
+    },
+    {
+      "canonical_signature": "JOIN(lineitem, orders)[l_orderkey:=:o_orderkey]",
+      "reason": "Materializing the full lineitem-orders join produces 60M rows with columns from both tables (~6GB+). The I/O and memory cost of materialization exceeds the savings vs. on-the-fly FK-PK lookups using the dense orders_pk_idx from shared scan data."
+    },
+    {
+      "canonical_signature": "FILTERED_SCAN(lineitem)[l_shipdate:>=:1994-01-01,l_shipdate:<:1995-01-01]",
+      "reason": "Q6 and Q20 share this exact l_shipdate range, but Q20 accesses lineitem via correlated subquery with index lookups (partkey+suppkey), not a scan. With scan_lineitem_full already shared, Q6 applies a cheap residual filter. Pre-materializing 9.4M rows for effectively 1 scan consumer is not profitable."
+    },
+    {
+      "canonical_signature": "PARTIAL_AGG(lineitem, GROUP BY l_orderkey, SUM(l_extendedprice*(1-l_discount)))",
+      "reason": "Q3, Q10, and Q18 all aggregate per-order revenue from lineitem, but with incompatible filters (Q3: l_shipdate > 1995-03-15; Q10: l_returnflag='R'; Q18: subquery on quantity > 300). Different filter sets produce different per-order aggregates, preventing shared partial aggregation."
+    },
+    {
+      "canonical_signature": "SCAN(supplier)[*]",
+      "reason": "Supplier has only 100K rows (~0.8MB). A full scan takes ~5ms on HDD. Even with 10 consumer queries, total savings of ~45ms does not justify the coordination overhead of a shared component."
+    },
+    {
+      "canonical_signature": "SCAN(nation)[*] / SCAN(region)[*]",
+      "reason": "Nation (25 rows) and region (5 rows) are trivially small reference tables. Scan time is <0.1ms. Sharing overhead far exceeds any possible savings."
+    },
+    {
+      "canonical_signature": "JOIN(lineitem, orders, customer)[l_orderkey:=:o_orderkey,o_custkey:=:c_custkey]",
+      "reason": "The 3-way join appears in 7 queries (Q3, Q5, Q7, Q8, Q10, Q13, Q18) but materializes 60M+ rows with wide schema from all three tables. On-the-fly FK-PK lookups using dense indexes from shared scan data are more memory-efficient."
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "iteration": 1,
+  "scope": "finalize:Q21",
+  "primary_bottleneck": {
+    "region_name": "Q21_finalize",
+    "ms": 1057.39,
+    "share_of_total": 0.369
+  },
+  "diagnosis": {
+    "step": "Q2+Q3",
+    "category": "B+C+D",
+    "root_cause": "Single-threaded Q21 finalize creates per-order heap-allocated unordered_map/unordered_set (3 hash sets per order × ~300K+ orders = millions of allocations). TPC-H orders have 1-7 lineitems, so hash set overhead dominates actual work.",
+    "memory_footprint": "Per order: 3 unordered_sets × ~200B overhead + unordered_map entry = ~700B alloc/dealloc per order × ~300K orders = ~200MB churn"
+  },
+  "edit_summary": "Parallelized Q21 finalize with OpenMP + replaced per-order heap-allocated hash sets with stack-allocated arrays and linear scan (optimal for TPC-H's 1-7 lineitems/order).",
+  "expected_improvement": "~90% Q21_finalize reduction (~1000ms → ~30ms) via 64-thread parallelism + zero-alloc inner loop, yielding ~35% batch total improvement",
+  "rationale": "See edit_rationale.md"
+}

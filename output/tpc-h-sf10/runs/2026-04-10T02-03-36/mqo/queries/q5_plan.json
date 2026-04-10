@@ -1,0 +1,160 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q5",
+  "tail_node_id": "Q5_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_nationkey"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey"]
+    }
+  ],
+  "local_scans": [
+    {
+      "table": "region",
+      "columns": ["r_regionkey", "r_name"],
+      "row_count": 5,
+      "filter": "r_name = 'ASIA'",
+      "output_rows": 1,
+      "encoding_note": "r_name is dictionary-encoded uint8; compare dict index for 'ASIA'"
+    },
+    {
+      "table": "nation",
+      "columns": ["n_nationkey", "n_name", "n_regionkey"],
+      "row_count": 25,
+      "filter": "n_regionkey = <asia_regionkey>",
+      "output_rows": 5,
+      "encoding_note": "n_name is dictionary-encoded uint8; resolve to string at output time"
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "build_nation_region_filter",
+      "description": "Scan region (5 rows), find r_regionkey where r_name='ASIA'. Scan nation (25 rows), filter n_regionkey = asia_regionkey. Build two structures: (a) bitset asia_nationkeys[25] marking 5 ASIA nations, (b) direct_array nationkey_to_name[25] mapping nationkey -> n_name dict index.",
+      "output": "asia_nationkey_set (5 keys), nationkey_to_name_map",
+      "data_structures": {
+        "asia_nationkey_set": "bitset(25)",
+        "nationkey_to_name": "direct_array(25, uint8_t)"
+      },
+      "estimated_output_rows": 5,
+      "thread": "single"
+    },
+    {
+      "step": 2,
+      "op": "filter_suppliers_by_nation",
+      "on": "hash_supplier_by_suppkey",
+      "description": "Iterate hash_supplier_by_suppkey, filter s_nationkey IN asia_nationkey_set. Build suppkey_to_nationkey map for qualifying suppliers.",
+      "filter_predicate": "s_nationkey IN asia_nationkey_set",
+      "selectivity": 0.2,
+      "estimated_input_rows": 100000,
+      "estimated_output_rows": 20000,
+      "data_structures": {
+        "suppkey_to_nationkey": "direct_array(max_suppkey+1, int8_t, default=-1)",
+        "sizing_note": "max s_suppkey = 100000 at SF10; direct_array[100001] of int8 = ~100KB, fits in L1 cache"
+      },
+      "thread": "single"
+    },
+    {
+      "step": 3,
+      "op": "residual_filter",
+      "on": "scan_orders_full",
+      "predicate": "o_orderdate >= 8766 AND o_orderdate < 9131",
+      "predicate_note": "1994-01-01 = epoch day 8766, 1995-01-01 = epoch day 9131; raw int32 comparison on encoded column",
+      "selectivity": 0.143,
+      "estimated_input_rows": 15000000,
+      "estimated_output_rows": 2143000
+    },
+    {
+      "step": 4,
+      "op": "join_and_filter",
+      "input": "step_3_output",
+      "probe_target": "hash_customer_by_custkey",
+      "join_key": "o_custkey = c_custkey",
+      "residual_filter": "c_nationkey IN asia_nationkey_set",
+      "description": "For each date-filtered order, probe customer hash on o_custkey. If customer exists AND c_nationkey is an ASIA nation, emit (o_orderkey, c_nationkey). Build orderkey_to_custnation hash map from results.",
+      "selectivity_of_nation_filter": 0.2,
+      "estimated_input_rows": 2143000,
+      "estimated_output_rows": 428600,
+      "output_columns": ["o_orderkey", "c_nationkey"],
+      "data_structures": {
+        "orderkey_to_custnation": "compact_hash_map(pre_sized=600000, key=int32_t o_orderkey, value=int8_t c_nationkey)",
+        "sizing_note": "428K entries, ~6MB at 75% load factor; fits in L3 cache (44MB)"
+      }
+    },
+    {
+      "step": 5,
+      "op": "stream_probe_and_aggregate",
+      "input": "scan_lineitem_full",
+      "description": "Stream all 60M lineitem rows. For each row: (1) probe orderkey_to_custnation on l_orderkey to get c_nationkey; if miss, skip. (2) Index suppkey_to_nationkey[l_suppkey] to get s_nationkey; if -1, skip. (3) Check s_nationkey == c_nationkey; if mismatch, skip. (4) Accumulate revenue = l_extendedprice * (1 - l_discount) into thread-local agg array by nationkey.",
+      "probe_maps": [
+        {"map": "orderkey_to_custnation", "key": "l_orderkey", "output": "c_nationkey"},
+        {"map": "suppkey_to_nationkey", "key": "l_suppkey", "output": "s_nationkey"}
+      ],
+      "correlated_check": "s_nationkey == c_nationkey",
+      "aggregate": {
+        "group_by": ["nationkey"],
+        "group_cardinality": 5,
+        "group_encoding": "direct_array(25, double)",
+        "aggs": [
+          {"name": "revenue", "func": "SUM", "expr": "l_extendedprice * (1.0 - l_discount)", "type": "double"}
+        ]
+      },
+      "estimated_input_rows": 59986052,
+      "estimated_probe_hits_orderkey": 1714000,
+      "estimated_final_matches": 342800,
+      "strategy": "thread_local_arrays_then_merge",
+      "per_thread_state": "double revenue[25], zero-initialized; index by nationkey; 200 bytes per thread"
+    },
+    {
+      "step": 6,
+      "op": "merge_and_finalize",
+      "input": "step_5_thread_local_arrays",
+      "description": "Sum all thread-local revenue[25] arrays element-wise. Extract 5 non-zero entries (ASIA nation keys). Map nationkey to n_name using nationkey_to_name + nation name dictionary.",
+      "estimated_output_rows": 5
+    },
+    {
+      "step": 7,
+      "op": "sort_and_project",
+      "input": "step_6_output",
+      "order_by": [{"col": "revenue", "dir": "DESC"}],
+      "sort_note": "Only 5 rows; use simple insertion sort or std::sort",
+      "projection": [
+        {"name": "n_name", "type": "varchar", "source": "nationkey_to_name[nationkey] -> dict lookup"},
+        {"name": "revenue", "type": "double"}
+      ],
+      "estimated_output_rows": 5
+    }
+  ],
+  "output_schema": [
+    {"name": "n_name", "type": "varchar"},
+    {"name": "revenue", "type": "double"}
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_operators": ["step_3 (orders filter)", "step_4 (customer probe, parallel build into concurrent hash map)", "step_5 (lineitem stream probe+aggregate)"],
+    "serial_operators": ["step_1 (5+25 rows)", "step_2 (100K rows)", "step_6 (merge 5-element arrays)", "step_7 (sort 5 rows)"],
+    "notes": "Step 5 dominates runtime (60M row scan + two hash probes per row). Morsel-driven parallelism on lineitem with thread-local aggregation arrays avoids contention. Steps 3-4 can also be parallelized for the orders filter+customer probe phase, building orderkey_to_custnation concurrently."
+  },
+  "memory_estimate": {
+    "suppkey_to_nationkey": "~100KB (direct array)",
+    "orderkey_to_custnation": "~6MB (hash map, 428K entries)",
+    "thread_local_agg": "~200 bytes * nthreads = ~12.5KB at 64 threads",
+    "total": "~7MB",
+    "fits_in_L3": true
+  },
+  "execution_target": "cpp"
+}

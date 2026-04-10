@@ -1,0 +1,104 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q4",
+  "tail_node_id": "Q4_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_commitdate", "l_receiptdate"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter_and_build_bitset",
+      "on": "scan_lineitem_full",
+      "predicate": "l_commitdate < l_receiptdate",
+      "output": "semi_join_bitset",
+      "notes": "Stream shared lineitem scan; for each row where l_commitdate < l_receiptdate, set bit at l_orderkey. Parallel: each thread processes morsels into thread-local bitset, then OR-merge. Result is a single bitset of qualifying orderkeys."
+    },
+    {
+      "step": 2,
+      "op": "scan_with_zonemap",
+      "table": "orders",
+      "columns": ["o_orderkey", "o_orderdate", "o_orderpriority"],
+      "predicate": "o_orderdate >= 8582 AND o_orderdate < 8674",
+      "predicate_readable": "o_orderdate >= DATE '1993-07-01' AND o_orderdate < DATE '1993-10-01'",
+      "index": "orders_o_orderdate_zonemap",
+      "selectivity": 0.036,
+      "estimated_output_rows": 540000,
+      "notes": "Scan orders with zonemap pruning on o_orderdate. Block size 65536, ~229 blocks; expect ~8 qualifying blocks. Read only o_orderkey, o_orderdate, o_orderpriority columns."
+    },
+    {
+      "step": 3,
+      "op": "semi_join",
+      "build": "semi_join_bitset (from step 1)",
+      "probe": "filtered_orders (from step 2)",
+      "join_key": "o_orderkey",
+      "type": "semi",
+      "strategy": "bitset_probe",
+      "estimated_output_rows": 52500,
+      "notes": "For each date-filtered order, probe the bitset at o_orderkey. If bit is set, the order qualifies (EXISTS satisfied). ~9.7% of date-filtered orders expected to match."
+    },
+    {
+      "step": 4,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "group_by": ["o_orderpriority"],
+      "group_by_encoding": "dictionary_uint8",
+      "num_groups": 5,
+      "aggs": [
+        {
+          "name": "order_count",
+          "func": "COUNT(*)",
+          "type": "int64"
+        }
+      ],
+      "notes": "o_orderpriority is dictionary-encoded uint8_t with 5 distinct values. Use int64_t count_array[5] indexed directly by dictionary code. Thread-local arrays merged at end."
+    },
+    {
+      "step": 5,
+      "op": "finalize_and_sort",
+      "order_by": ["o_orderpriority ASC"],
+      "limit": null,
+      "notes": "Decode 5 dictionary values back to strings, sort 5 rows by priority string. Trivial — no real sort needed if dictionary is already in alphabetical order; verify at runtime."
+    }
+  ],
+  "output_schema": [
+    {"name": "o_orderpriority", "type": "string"},
+    {"name": "order_count", "type": "int64"}
+  ],
+  "data_structures": {
+    "semi_join_bitset": {
+      "type": "bitset",
+      "max_key": 60000000,
+      "size_bytes": 7500000,
+      "notes": "7.5MB bitset indexed by l_orderkey. Fits in L3 cache (44MB). Thread-local copies during build, OR-merged once."
+    },
+    "aggregation_array": {
+      "type": "direct_array",
+      "element_type": "int64_t",
+      "num_elements": 5,
+      "notes": "Thread-local count arrays of 5 int64s, summed at merge."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "step1_detail": "Parallel morsel processing of shared lineitem stream; thread-local bitsets, final OR-merge barrier",
+    "step2_detail": "Parallel orders scan with zonemap block skipping; morsel = 1 block (65536 rows)",
+    "step3_detail": "Fused with step 2 — each thread probes bitset inline after date filter, no synchronization needed",
+    "step4_detail": "Fused with step 3 — thread-local direct arrays, final summation barrier"
+  },
+  "indexes": [
+    {
+      "index": "orders_o_orderdate_zonemap",
+      "purpose": "skip_blocks",
+      "block_size": 65536,
+      "num_blocks": 229
+    }
+  ],
+  "execution_target": "cpp",
+  "notes": "Steps 2-4 are fused into a single pass: scan orders block (zonemap-pruned) → date filter → bitset semi-join probe → direct-array accumulate. Step 1 must complete before steps 2-4 begin (barrier). Total memory: ~7.5MB for bitset + negligible for aggregation arrays."
+}

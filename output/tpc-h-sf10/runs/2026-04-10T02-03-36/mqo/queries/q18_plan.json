@@ -1,0 +1,114 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q18",
+  "tail_node_id": "Q18_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_quantity"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_custkey", "o_totalprice", "o_orderdate"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_name"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "sorted_group_by",
+      "input": "scan_lineitem_full",
+      "description": "Subquery: aggregate l_quantity per l_orderkey using sort order",
+      "group_by": ["l_orderkey"],
+      "aggs": [{"func": "SUM", "col": "l_quantity", "alias": "sum_qty"}],
+      "having": "sum_qty > 300",
+      "input_cardinality": 60000000,
+      "output_cardinality_estimate": 57,
+      "notes": "Data is ordered by l_orderkey; single-pass streaming aggregation. HAVING > 300 is extremely selective — fewer than ~60 qualifying orderkeys at SF10. Output: array of (l_orderkey, sum_qty) pairs."
+    },
+    {
+      "step": 2,
+      "op": "index_lookup",
+      "input": "step1_qualifying_orderkeys",
+      "target": "scan_orders_full",
+      "index": "orders_pk_idx",
+      "key": "l_orderkey -> o_orderkey",
+      "type": "inner",
+      "description": "For each qualifying orderkey, O(1) dense_pk lookup to fetch order row",
+      "fetch_columns": ["o_orderkey", "o_custkey", "o_totalprice", "o_orderdate"],
+      "input_cardinality": 57,
+      "output_cardinality_estimate": 57
+    },
+    {
+      "step": 3,
+      "op": "hash_probe",
+      "input": "step2_orders",
+      "target": "hash_customer_by_custkey",
+      "key": "o_custkey -> c_custkey",
+      "type": "inner",
+      "description": "Probe shared customer hash to fetch c_name for each qualifying order",
+      "fetch_columns": ["c_custkey", "c_name"],
+      "input_cardinality": 57,
+      "output_cardinality_estimate": 57
+    },
+    {
+      "step": 4,
+      "op": "sort",
+      "input": "step3_joined",
+      "order_by": [
+        {"col": "o_totalprice", "dir": "DESC"},
+        {"col": "o_orderdate", "dir": "ASC"}
+      ],
+      "input_cardinality": 57,
+      "notes": "Tiny result set; in-memory std::sort or partial_sort is trivial"
+    },
+    {
+      "step": 5,
+      "op": "limit",
+      "input": "step4_sorted",
+      "limit": 100,
+      "notes": "Likely fewer than 100 rows total, so limit is a no-op"
+    },
+    {
+      "step": 6,
+      "op": "project",
+      "input": "step5_limited",
+      "columns": [
+        {"name": "c_name", "type": "varlen"},
+        {"name": "c_custkey", "type": "int32"},
+        {"name": "o_orderkey", "type": "int32"},
+        {"name": "o_orderdate", "type": "int32"},
+        {"name": "o_totalprice", "type": "double"},
+        {"name": "sum_qty", "type": "double"}
+      ]
+    }
+  ],
+  "output_schema": [
+    {"name": "c_name", "type": "varlen"},
+    {"name": "c_custkey", "type": "int32"},
+    {"name": "o_orderkey", "type": "int32"},
+    {"name": "o_orderdate", "type": "int32"},
+    {"name": "o_totalprice", "type": "double"},
+    {"name": "sum_qty", "type": "double"}
+  ],
+  "data_structures": {
+    "subquery_agg": "streaming_sorted_group_by (no hash table needed; single accumulator per group, advance on key break)",
+    "qualifying_keys": "flat_array<struct{int32_t orderkey; double sum_qty;}> (~57 entries)",
+    "orders_lookup": "dense_pk_index (orders_pk_idx, max_key=60000000, O(1) array access)",
+    "customer_lookup": "shared hash_customer_by_custkey (probe only)",
+    "sort_buffer": "std::vector of result structs (~57 entries), in-place sort"
+  },
+  "indexes": [
+    {"index": "orders_pk_idx", "purpose": "O(1) lookup of order rows for qualifying orderkeys"}
+  ],
+  "parallelism": {
+    "strategy": "single_thread_tail",
+    "threads": 1,
+    "notes": "Step 1 (sorted group-by over 60M rows) runs as a callback consumer of the shared lineitem scan which is already parallelized via morsel-driven scanning. Each thread accumulates partial results for its morsel range; a final merge combines partial group boundaries. Steps 2-6 operate on ~57 rows and need no parallelism."
+  },
+  "execution_target": "cpp"
+}

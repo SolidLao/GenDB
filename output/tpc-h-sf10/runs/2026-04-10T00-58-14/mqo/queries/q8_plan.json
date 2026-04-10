@@ -1,0 +1,211 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q8",
+  "tail_node_id": "Q8_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_extendedprice", "l_discount"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderdate", "o_custkey"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_nationkey"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "build_dimension_lookups",
+      "description": "Pre-build tiny dimension structures before lineitem scan",
+      "sub_steps": [
+        {
+          "id": "part_filter_set",
+          "action": "scan_and_filter",
+          "table": "part",
+          "predicate": "p_type = 'ECONOMY ANODIZED STEEL'",
+          "encoding_note": "p_type is dictionary-encoded (uint8_t); resolve dict code for 'ECONOMY ANODIZED STEEL' then scan p_type column comparing codes",
+          "output": "hash_set<int32_t> of matching p_partkey values",
+          "estimated_cardinality": 13333,
+          "data_structure": "hash_set(pre_sized=16384)"
+        },
+        {
+          "id": "america_nation_bitset",
+          "action": "scan_and_join",
+          "tables": ["region", "nation"],
+          "predicate": "r_name = 'AMERICA' AND n1.n_regionkey = r_regionkey",
+          "output": "bitset<32> of n_nationkey values in AMERICA region",
+          "estimated_cardinality": 5,
+          "data_structure": "bitset(32)"
+        },
+        {
+          "id": "nation_name_lookup",
+          "action": "scan",
+          "table": "nation",
+          "output": "direct_array[25] mapping n_nationkey -> n_name dict code",
+          "data_structure": "direct_array(25)",
+          "note": "Also resolve dict code for 'BRAZIL' to enable fast comparison in aggregation"
+        }
+      ]
+    },
+    {
+      "step": 1,
+      "op": "probe_chain_on_lineitem_scan",
+      "description": "For each lineitem row from shared scan, apply probe chain with early termination",
+      "input": "scan_lineitem_full",
+      "probe_sequence": [
+        {
+          "order": 1,
+          "action": "probe_part_filter_set",
+          "key": "l_partkey",
+          "target": "part_filter_set",
+          "type": "semi",
+          "selectivity": 0.0067,
+          "surviving_rows": 400000,
+          "note": "Most selective filter applied first; eliminates 99.3% of rows"
+        },
+        {
+          "order": 2,
+          "action": "probe_shared_hash",
+          "key": "l_orderkey",
+          "target": "hash_orders_by_orderkey",
+          "type": "inner",
+          "extract": ["o_orderdate", "o_custkey"],
+          "selectivity": 1.0,
+          "note": "Every lineitem has a matching order"
+        },
+        {
+          "order": 3,
+          "action": "residual_filter",
+          "predicate": "o_orderdate >= days_since_epoch('1995-01-01') AND o_orderdate <= days_since_epoch('1996-12-31')",
+          "selectivity": 0.286,
+          "surviving_rows": 114000
+        },
+        {
+          "order": 4,
+          "action": "probe_shared_hash",
+          "key": "o_custkey",
+          "target": "hash_customer_by_custkey",
+          "type": "inner",
+          "extract": ["c_nationkey"],
+          "selectivity": 1.0
+        },
+        {
+          "order": 5,
+          "action": "probe_america_bitset",
+          "key": "c_nationkey",
+          "target": "america_nation_bitset",
+          "type": "semi",
+          "selectivity": 0.2,
+          "surviving_rows": 22800,
+          "note": "Filter to customers in AMERICA region only"
+        },
+        {
+          "order": 6,
+          "action": "probe_shared_hash",
+          "key": "l_suppkey",
+          "target": "hash_supplier_by_suppkey",
+          "type": "inner",
+          "extract": ["s_nationkey"],
+          "selectivity": 1.0
+        },
+        {
+          "order": 7,
+          "action": "lookup_nation_name",
+          "key": "s_nationkey",
+          "target": "nation_name_lookup",
+          "output": "nation (n2.n_name)",
+          "note": "Direct array lookup: O(1)"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "op": "compute_expressions",
+      "expressions": [
+        {
+          "name": "o_year",
+          "expr": "extract_year_from_days_since_epoch(o_orderdate)",
+          "type": "int32_t"
+        },
+        {
+          "name": "volume",
+          "expr": "l_extendedprice * (1.0 - l_discount)",
+          "type": "double"
+        }
+      ],
+      "estimated_input_rows": 22800
+    },
+    {
+      "step": 3,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "group_by": ["o_year"],
+      "group_by_mapping": "o_year - 1995 as array index (range [0,1] for years 1995-1996)",
+      "array_size": 2,
+      "aggregates": [
+        {
+          "name": "brazil_volume",
+          "expr": "SUM(CASE WHEN nation_dict_code == brazil_dict_code THEN volume ELSE 0.0 END)",
+          "type": "double"
+        },
+        {
+          "name": "total_volume",
+          "expr": "SUM(volume)",
+          "type": "double"
+        }
+      ],
+      "estimated_groups": 2,
+      "note": "Only 2 groups (1995, 1996); use direct array indexed by (o_year - 1995). Per-thread local arrays, merge at end. No hash table needed."
+    },
+    {
+      "step": 4,
+      "op": "finalize_and_project",
+      "compute": [
+        {
+          "name": "mkt_share",
+          "expr": "brazil_volume / total_volume",
+          "type": "double"
+        }
+      ],
+      "project": ["o_year", "mkt_share"],
+      "order_by": ["o_year ASC"],
+      "note": "2 rows; ordering is trivially year 1995 then 1996"
+    }
+  ],
+  "output_schema": [
+    {"name": "o_year", "type": "int32_t"},
+    {"name": "mkt_share", "type": "double"}
+  ],
+  "data_structures": {
+    "part_filter_set": "hash_set<int32_t>(pre_sized=16384, ~13K entries, ~100KB)",
+    "america_nation_bitset": "bitset<32>(5 bits set, trivial)",
+    "nation_name_lookup": "direct_array<uint8_t>[25](n_nationkey -> dict_code)",
+    "brazil_dict_code": "uint8_t(resolved at init time)",
+    "aggregation": "direct_array[2] of {double brazil_volume, double total_volume} per thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "description": "Parallel consumption of shared lineitem scan morsels. Each thread holds thread-local agg arrays (2 × 16 bytes = 32 bytes per thread). Final merge is trivial sum across threads.",
+    "threads": "auto(nproc)",
+    "partitioning": "none_needed",
+    "thread_local_agg": true,
+    "merge_cost": "negligible (2 groups × nthreads additions)"
+  },
+  "memory_estimate": {
+    "part_filter_set": "~200KB",
+    "dimension_lookups": "<1KB",
+    "per_thread_agg": "32 bytes",
+    "total_tail_specific": "<1MB",
+    "note": "Shared hash tables (orders ~750MB, customer ~300MB, supplier ~5.5MB) are NOT counted here"
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,170 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q3",
+  "tail_node_id": "Q3_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_mktsegment"],
+      "access_pattern": "full_scan_extract_bitset"
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"],
+      "access_pattern": "streaming_with_residual_filter"
+    },
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_shipdate"],
+      "access_pattern": "streaming_with_residual_filter"
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "extract_bitset",
+      "on": "hash_customer_by_custkey",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "output_data_structure": "bitset",
+      "bitset_size": 1500001,
+      "estimated_set_bits": 300000,
+      "selectivity": 0.2,
+      "notes": "c_mktsegment is dictionary-encoded uint8_t; resolve 'BUILDING' dict code once, then scan hash to build bitset of qualifying c_custkey values. Bitset is ~183KB, fits in L3."
+    },
+    {
+      "step": 2,
+      "op": "residual_filter_and_semi_join",
+      "on": "scan_orders_full",
+      "predicates": [
+        {
+          "predicate": "o_orderdate < DATE '1995-03-15'",
+          "selectivity": 0.48,
+          "encoding_note": "o_orderdate is days_since_epoch; DATE '1995-03-15' = 9204"
+        },
+        {
+          "predicate": "o_custkey IN customer_building_bitset",
+          "type": "semi_join_via_bitset",
+          "selectivity": 0.2
+        }
+      ],
+      "combined_selectivity": 0.096,
+      "input_cardinality": 15000000,
+      "output_cardinality": 1440000,
+      "output_columns": ["o_orderkey", "o_orderdate", "o_shippriority"],
+      "notes": "Apply date filter first (cheaper branch), then check bitset for custkey semi-join."
+    },
+    {
+      "step": 3,
+      "op": "hash_build",
+      "on": "step2_output",
+      "key": "o_orderkey",
+      "payload": ["o_orderdate", "o_shippriority"],
+      "build_cardinality": 1440000,
+      "data_structure": "compact_hash_map",
+      "pre_size": 2097152,
+      "estimated_memory_mb": 28,
+      "notes": "Hash map keyed by o_orderkey (int32) with payload (o_orderdate:int32, o_shippriority:int32). ~28MB, partially fits L3. Pre-sized to next power-of-2 above 1.44M."
+    },
+    {
+      "step": 4,
+      "op": "residual_filter_probe_and_aggregate",
+      "on": "scan_lineitem_full",
+      "residual_filter": {
+        "predicate": "l_shipdate > DATE '1995-03-15'",
+        "selectivity": 0.54,
+        "encoding_note": "l_shipdate is days_since_epoch; DATE '1995-03-15' = 9204"
+      },
+      "probe": {
+        "hash_table": "step3_orders_hash",
+        "probe_key": "l_orderkey",
+        "type": "inner",
+        "strategy": "hash_join"
+      },
+      "fused_aggregate": {
+        "group_by": ["l_orderkey"],
+        "payloads_from_probe": {
+          "o_orderdate": "carry_from_hash",
+          "o_shippriority": "carry_from_hash"
+        },
+        "aggregates": [
+          {
+            "name": "revenue",
+            "expr": "l_extendedprice * (1.0 - l_discount)",
+            "func": "SUM",
+            "type": "double"
+          }
+        ],
+        "estimated_groups": 1440000,
+        "notes": "Since l_orderkey functionally determines (o_orderdate, o_shippriority) via the hash lookup, GROUP BY is effectively on l_orderkey alone. Store o_orderdate and o_shippriority as carried payload in the aggregation entry."
+      },
+      "input_cardinality": 59986052,
+      "after_filter_cardinality": 32392467,
+      "after_probe_cardinality": 3110000,
+      "notes": "Fused pipeline: for each lineitem morsel, apply shipdate filter, probe orders hash, and aggregate into thread-local hash map. Zone map on l_shipdate can skip blocks entirely below threshold."
+    },
+    {
+      "step": 5,
+      "op": "aggregate_merge",
+      "input": "thread_local_aggregation_maps",
+      "merge_strategy": "sequential_merge",
+      "estimated_groups": 1440000,
+      "notes": "Merge per-thread partial aggregation maps into global map. With 64 threads and ~1.4M groups, each thread has ~22K groups on average — merge is fast."
+    },
+    {
+      "step": 6,
+      "op": "topk",
+      "order_by": [
+        {"column": "revenue", "direction": "DESC"},
+        {"column": "o_orderdate", "direction": "ASC"}
+      ],
+      "limit": 10,
+      "strategy": "partial_sort_heap",
+      "input_cardinality": 1440000,
+      "notes": "Min-heap of size 10 over 1.4M groups. Single-threaded, trivial cost."
+    },
+    {
+      "step": 7,
+      "op": "project",
+      "columns": [
+        {"name": "l_orderkey", "type": "int32_t"},
+        {"name": "revenue", "type": "double", "format": "decimal(15,2)"},
+        {"name": "o_orderdate", "type": "int32_t", "format": "date"},
+        {"name": "o_shippriority", "type": "int32_t"}
+      ]
+    }
+  ],
+  "output_schema": [
+    {"name": "l_orderkey", "type": "int32_t"},
+    {"name": "revenue", "type": "double"},
+    {"name": "o_orderdate", "type": "int32_t", "semantic": "date"},
+    {"name": "o_shippriority", "type": "int32_t"}
+  ],
+  "data_structures": {
+    "customer_building_bitset": "bitset(1500001)",
+    "orders_hash": "compact_hash_map<int32_t, struct{int32_t o_orderdate; int32_t o_shippriority;}>(pre_sized=2097152)",
+    "aggregation": "compact_hash_map<int32_t, struct{double revenue; int32_t o_orderdate; int32_t o_shippriority;}>(per_thread, pre_sized=32768)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "parallel_steps": [2, 4],
+    "serial_steps": [1, 3, 5, 6, 7],
+    "notes": "Steps 2 and 4 are the hot loops over orders (15M) and lineitem (60M) respectively. Step 3 (hash build) is serial since it's only 1.4M rows and building a shared hash map. Step 1 (bitset extraction from 1.5M customer rows) is serial and trivial. Thread-local aggregation in step 4 avoids contention."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_shipdate_zm",
+      "purpose": "skip_blocks",
+      "notes": "Zone map on l_shipdate allows skipping blocks where max(l_shipdate) <= 9204"
+    }
+  ],
+  "date_constants": {
+    "1995-03-15": 9204
+  },
+  "dictionary_constants": {
+    "BUILDING": "resolve_at_init_from_customer_mktsegment_dict"
+  },
+  "execution_target": "cpp"
+}

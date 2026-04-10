@@ -1,0 +1,125 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q1",
+  "tail_node_id": "Q1_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": [
+        "l_shipdate",
+        "l_returnflag",
+        "l_linestatus",
+        "l_quantity",
+        "l_extendedprice",
+        "l_discount",
+        "l_tax"
+      ]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate <= 10471",
+      "predicate_note": "l_shipdate <= DATE '1998-09-02' as epoch days",
+      "selectivity": 0.98,
+      "estimated_output_rows": 58786000
+    },
+    {
+      "step": 2,
+      "op": "parallel_aggregate",
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "group_key_encoding": {
+        "method": "direct_array",
+        "l_returnflag_map": {"65": 0, "78": 1, "82": 2},
+        "l_linestatus_map": {"70": 0, "79": 1},
+        "index_formula": "rf_idx * 2 + ls_idx",
+        "array_size": 6
+      },
+      "aggregates": [
+        {"name": "sum_qty", "func": "SUM", "col": "l_quantity", "type": "double"},
+        {"name": "sum_base_price", "func": "SUM", "col": "l_extendedprice", "type": "double"},
+        {"name": "sum_disc_price", "func": "SUM", "expr": "l_extendedprice * (1.0 - l_discount)", "type": "double"},
+        {"name": "sum_charge", "func": "SUM", "expr": "l_extendedprice * (1.0 - l_discount) * (1.0 + l_tax)", "type": "double"},
+        {"name": "sum_qty_for_avg", "func": "SUM", "col": "l_quantity", "type": "double", "shared_with": "sum_qty"},
+        {"name": "sum_price_for_avg", "func": "SUM", "col": "l_extendedprice", "type": "double", "shared_with": "sum_base_price"},
+        {"name": "sum_disc_for_avg", "func": "SUM", "col": "l_discount", "type": "double"},
+        {"name": "count_order", "func": "COUNT", "type": "int64"}
+      ],
+      "thread_local_strategy": {
+        "description": "Each thread maintains a local double[6][7] array (6 groups × 7 accumulators: sum_qty, sum_base_price, sum_disc_price, sum_charge, sum_disc, count, all doubles). After morsel processing, merge all thread-local arrays into a single global array.",
+        "accumulators_per_group": 7,
+        "accumulator_layout": [
+          "sum_qty (double)",
+          "sum_base_price (double)",
+          "sum_disc_price (double)",
+          "sum_charge (double)",
+          "sum_discount (double)",
+          "count (double, cast to int64 at finalize)"
+        ],
+        "total_bytes_per_thread": 336
+      }
+    },
+    {
+      "step": 3,
+      "op": "merge_thread_local",
+      "description": "Sum all thread-local arrays element-wise into one global[6][6] array"
+    },
+    {
+      "step": 4,
+      "op": "finalize_and_project",
+      "computations": [
+        {"col": "avg_qty", "expr": "sum_qty / count_order"},
+        {"col": "avg_price", "expr": "sum_base_price / count_order"},
+        {"col": "avg_disc", "expr": "sum_discount / count_order"}
+      ],
+      "output_columns": [
+        "l_returnflag", "l_linestatus",
+        "sum_qty", "sum_base_price", "sum_disc_price", "sum_charge",
+        "avg_qty", "avg_price", "avg_disc", "count_order"
+      ]
+    },
+    {
+      "step": 5,
+      "op": "sort",
+      "order_by": [
+        {"col": "l_returnflag", "dir": "ASC"},
+        {"col": "l_linestatus", "dir": "ASC"}
+      ],
+      "note": "With 6 rows and direct-array layout already ordered by index, sort is implicit if we iterate groups in index order (rf=0,1,2 × ls=0,1). Map back: rf_idx {0→A, 1→N, 2→R}, ls_idx {0→F, 1→O}."
+    }
+  ],
+  "output_schema": [
+    {"name": "l_returnflag", "type": "char(1)"},
+    {"name": "l_linestatus", "type": "char(1)"},
+    {"name": "sum_qty", "type": "double"},
+    {"name": "sum_base_price", "type": "double"},
+    {"name": "sum_disc_price", "type": "double"},
+    {"name": "sum_charge", "type": "double"},
+    {"name": "avg_qty", "type": "double"},
+    {"name": "avg_price", "type": "double"},
+    {"name": "avg_disc", "type": "double"},
+    {"name": "count_order", "type": "int64"}
+  ],
+  "data_structures": {
+    "aggregation": "direct_array[6][6_accumulators]",
+    "thread_local_agg": "stack_allocated_array_per_thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "note": "Each thread pulls morsels from shared scan callback, applies residual filter inline, and accumulates into its thread-local array. Zero contention during aggregation phase."
+  },
+  "indexes": [],
+  "output": {
+    "order_by": [
+      {"col": "l_returnflag", "dir": "ASC"},
+      {"col": "l_linestatus", "dir": "ASC"}
+    ],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

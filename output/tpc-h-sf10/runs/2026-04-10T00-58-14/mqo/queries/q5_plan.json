@@ -1,0 +1,144 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q5",
+  "tail_node_id": "Q5_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderdate", "o_custkey"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_nationkey"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "precompute_dimension_filter",
+      "description": "Scan region (5 rows) to find r_regionkey for r_name='ASIA'. Scan nation (25 rows), filter by matching r_regionkey. Build bitset[25] of ASIA nation keys and nationkey-to-n_name lookup array[25].",
+      "tables": ["region", "nation"],
+      "region_filter": "r_name = 'ASIA'",
+      "nation_join": "n_regionkey = r_regionkey",
+      "outputs": {
+        "asia_nation_bitset": "bitset(25) — true for nationkeys in ASIA",
+        "nationkey_to_name": "array[25] of uint8_t (dictionary code for n_name)"
+      },
+      "cardinality": {
+        "asia_regions": 1,
+        "asia_nations": 5
+      }
+    },
+    {
+      "step": 1,
+      "op": "probe_and_filter_pipeline",
+      "description": "For each lineitem row from shared scan, execute a fused probe-filter pipeline: (1) probe orders hash → get o_orderdate, o_custkey; (2) filter o_orderdate; (3) probe supplier hash → get s_nationkey; (4) check ASIA bitset; (5) probe customer hash → get c_nationkey; (6) check c_nationkey == s_nationkey.",
+      "input": "scan_lineitem_full",
+      "pipeline_stages": [
+        {
+          "stage": "probe_orders",
+          "shared_component": "hash_orders_by_orderkey",
+          "probe_key": "l_orderkey",
+          "extract_columns": ["o_orderdate", "o_custkey"],
+          "type": "inner"
+        },
+        {
+          "stage": "filter_orderdate",
+          "predicate": "o_orderdate >= DATE('1994-01-01') AND o_orderdate < DATE('1995-01-01')",
+          "selectivity": 0.143,
+          "estimated_output_rows": 8570000
+        },
+        {
+          "stage": "probe_supplier",
+          "shared_component": "hash_supplier_by_suppkey",
+          "probe_key": "l_suppkey",
+          "extract_columns": ["s_nationkey"],
+          "type": "inner"
+        },
+        {
+          "stage": "filter_asia_nation",
+          "predicate": "asia_nation_bitset[s_nationkey] == true",
+          "selectivity": 0.2,
+          "estimated_output_rows": 1714000
+        },
+        {
+          "stage": "probe_customer",
+          "shared_component": "hash_customer_by_custkey",
+          "probe_key": "o_custkey",
+          "extract_columns": ["c_nationkey"],
+          "type": "inner"
+        },
+        {
+          "stage": "filter_local_supplier",
+          "predicate": "c_nationkey == s_nationkey",
+          "selectivity": 0.2,
+          "estimated_output_rows": 342800
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "op": "aggregate",
+      "description": "GROUP BY s_nationkey (which maps 1:1 to n_name), SUM(l_extendedprice * (1 - l_discount)). Use direct array[25] indexed by nationkey — only 5 entries will be non-zero.",
+      "group_by": ["s_nationkey"],
+      "aggregates": [
+        {
+          "name": "revenue",
+          "expression": "SUM(l_extendedprice * (1 - l_discount))",
+          "type": "double"
+        }
+      ],
+      "strategy": "direct_array",
+      "array_size": 25,
+      "active_groups": 5,
+      "thread_local": true,
+      "merge": "sum_reduce"
+    },
+    {
+      "step": 3,
+      "op": "finalize_and_sort",
+      "description": "Map nationkey to n_name string via dictionary lookup. Filter out zero-revenue entries. Sort 5 results by revenue DESC.",
+      "input_groups": 5,
+      "projection": ["n_name", "revenue"],
+      "order_by": [{"column": "revenue", "direction": "DESC"}],
+      "limit": null
+    }
+  ],
+  "output_schema": [
+    {"name": "n_name", "type": "string"},
+    {"name": "revenue", "type": "double"}
+  ],
+  "data_structures": {
+    "asia_nation_bitset": "bitset(25)",
+    "nationkey_to_name": "direct_array(25, uint8_t)",
+    "aggregation": "direct_array(25, double) — thread-local, one per thread"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Parallelize over lineitem morsels from shared scan. Each thread maintains a local double[25] aggregation array. Final merge sums across all thread-local arrays — trivial for 25 entries."
+  },
+  "indexes": [],
+  "dimension_tables": {
+    "region": {
+      "path": "storage/region",
+      "rows": 5,
+      "columns_used": ["r_regionkey", "r_name"]
+    },
+    "nation": {
+      "path": "storage/nation",
+      "rows": 25,
+      "columns_used": ["n_nationkey", "n_name", "n_regionkey"]
+    }
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,112 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q1",
+  "tail_node_id": "Q1_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": [
+        "l_shipdate",
+        "l_returnflag",
+        "l_linestatus",
+        "l_quantity",
+        "l_extendedprice",
+        "l_discount",
+        "l_tax"
+      ]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate <= 19980902",
+      "predicate_note": "DATE '1998-12-01' - INTERVAL '90' DAY = 1998-09-02, encoded as int32 days-since-epoch; compare using <= on raw int32 column",
+      "selectivity": 0.96,
+      "estimated_output_rows": 57600000
+    },
+    {
+      "step": 2,
+      "op": "parallel_aggregate",
+      "input": "step_1_output",
+      "group_by": ["l_returnflag", "l_linestatus"],
+      "group_cardinality": 6,
+      "group_encoding": "direct_array_2d(3, 2)",
+      "group_index_formula": "l_returnflag_idx * 2 + l_linestatus_idx",
+      "group_key_mapping": {
+        "l_returnflag": {"A": 0, "N": 1, "R": 2},
+        "l_linestatus": {"F": 0, "O": 1}
+      },
+      "aggregates": [
+        {"name": "sum_qty", "func": "SUM", "col": "l_quantity", "type": "double"},
+        {"name": "sum_base_price", "func": "SUM", "col": "l_extendedprice", "type": "double"},
+        {"name": "sum_disc_price", "func": "SUM", "expr": "l_extendedprice * (1.0 - l_discount)", "type": "double"},
+        {"name": "sum_charge", "func": "SUM", "expr": "l_extendedprice * (1.0 - l_discount) * (1.0 + l_tax)", "type": "double"},
+        {"name": "sum_qty_for_avg", "func": "SUM", "col": "l_quantity", "type": "double", "shared_with": "sum_qty"},
+        {"name": "sum_price_for_avg", "func": "SUM", "col": "l_extendedprice", "type": "double", "shared_with": "sum_base_price"},
+        {"name": "sum_disc_for_avg", "func": "SUM", "col": "l_discount", "type": "double"},
+        {"name": "count_order", "func": "COUNT", "col": "*", "type": "int64"}
+      ],
+      "strategy": "thread_local_arrays_then_merge",
+      "per_thread_state": "fixed_array[6] of AggStruct (8 fields: 6 sums + 1 count, ~56 bytes per slot = 336 bytes per thread)",
+      "merge": "sum all thread-local arrays element-wise into global array[6]"
+    },
+    {
+      "step": 3,
+      "op": "finalize_averages",
+      "input": "step_2_output",
+      "computations": [
+        {"name": "avg_qty", "expr": "sum_qty / count_order"},
+        {"name": "avg_price", "expr": "sum_base_price / count_order"},
+        {"name": "avg_disc", "expr": "sum_disc_for_avg / count_order"}
+      ]
+    },
+    {
+      "step": 4,
+      "op": "sort_and_project",
+      "input": "step_3_output",
+      "order_by": [
+        {"col": "l_returnflag", "dir": "ASC"},
+        {"col": "l_linestatus", "dir": "ASC"}
+      ],
+      "sort_note": "Only 6 rows; group_index_formula already yields sorted order (A/F=0, A/O=1, N/F=2, N/O=3, R/F=4, R/O=5) — no runtime sort needed, just emit in index order",
+      "projection": [
+        {"name": "l_returnflag", "type": "char(1)"},
+        {"name": "l_linestatus", "type": "char(1)"},
+        {"name": "sum_qty", "type": "double"},
+        {"name": "sum_base_price", "type": "double"},
+        {"name": "sum_disc_price", "type": "double"},
+        {"name": "sum_charge", "type": "double"},
+        {"name": "avg_qty", "type": "double"},
+        {"name": "avg_price", "type": "double"},
+        {"name": "avg_disc", "type": "double"},
+        {"name": "count_order", "type": "int64"}
+      ]
+    }
+  ],
+  "output_schema": [
+    {"name": "l_returnflag", "type": "char(1)"},
+    {"name": "l_linestatus", "type": "char(1)"},
+    {"name": "sum_qty", "type": "double"},
+    {"name": "sum_base_price", "type": "double"},
+    {"name": "sum_disc_price", "type": "double"},
+    {"name": "sum_charge", "type": "double"},
+    {"name": "avg_qty", "type": "double"},
+    {"name": "avg_price", "type": "double"},
+    {"name": "avg_disc", "type": "double"},
+    {"name": "count_order", "type": "int64"}
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 64,
+    "morsel_size": 65536,
+    "notes": "Each thread processes morsels from scan_lineitem_full callback, applies residual filter, accumulates into thread-local fixed array[6]. Final merge of 64 arrays is trivial (384 additions)."
+  },
+  "data_structures": {
+    "aggregation": "direct_array[6] of AggStruct",
+    "thread_local_agg": "stack-allocated fixed array, 336 bytes per thread, fits in L1 cache"
+  },
+  "execution_target": "cpp"
+}

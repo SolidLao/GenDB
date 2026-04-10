@@ -1,0 +1,191 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q9",
+  "tail_node_id": "Q9_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_quantity", "l_extendedprice", "l_discount"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderdate"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "part",
+      "predicate": "p_name LIKE '%green%'",
+      "output_columns": ["p_partkey"],
+      "selectivity": 0.02,
+      "estimated_rows": 40000,
+      "notes": "Sequential scan of p_name column (variable-length string), filter rows containing 'green'"
+    },
+    {
+      "step": 2,
+      "op": "build_hash_set",
+      "input_step": 1,
+      "key": "p_partkey",
+      "structure": "hash_set",
+      "estimated_entries": 40000,
+      "estimated_memory_bytes": 640000,
+      "notes": "Semi-join filter: build hash set of matching partkeys to early-filter lineitem rows (~98% pruned)"
+    },
+    {
+      "step": 3,
+      "op": "load_direct_array",
+      "table": "nation",
+      "key": "n_nationkey",
+      "payload_columns": ["n_name"],
+      "size": 25,
+      "notes": "25-entry array indexed by nationkey for O(1) lookup of nation name"
+    },
+    {
+      "step": 4,
+      "op": "load_index",
+      "index": "partsupp_composite_hash.bin",
+      "table": "partsupp",
+      "key": ["ps_partkey", "ps_suppkey"],
+      "payload_columns": ["ps_supplycost"],
+      "estimated_entries": 8000000,
+      "notes": "Pre-built composite hash index on (ps_partkey, ps_suppkey) avoids building a new hash table for partsupp"
+    },
+    {
+      "step": 5,
+      "op": "probe_pipeline",
+      "input": "scan_lineitem_full",
+      "description": "Fused probe pipeline on each lineitem morsel",
+      "sub_ops": [
+        {
+          "sub_step": "5a",
+          "op": "semi_join_probe",
+          "hash_set_from_step": 2,
+          "probe_key": "l_partkey",
+          "type": "semi",
+          "strategy": "hash_set_probe",
+          "notes": "Early filter: skip ~98% of lineitem rows that don't match filtered parts"
+        },
+        {
+          "sub_step": "5b",
+          "op": "hash_probe",
+          "shared_component": "hash_supplier_by_suppkey",
+          "probe_key": "l_suppkey",
+          "extract_columns": ["s_nationkey"],
+          "type": "inner",
+          "notes": "Get s_nationkey for nation lookup"
+        },
+        {
+          "sub_step": "5c",
+          "op": "index_probe",
+          "index_from_step": 4,
+          "probe_keys": ["l_partkey", "l_suppkey"],
+          "extract_columns": ["ps_supplycost"],
+          "type": "inner",
+          "notes": "Composite key lookup into partsupp for ps_supplycost"
+        },
+        {
+          "sub_step": "5d",
+          "op": "hash_probe",
+          "shared_component": "hash_orders_by_orderkey",
+          "probe_key": "l_orderkey",
+          "extract_columns": ["o_orderdate"],
+          "type": "inner",
+          "notes": "Get o_orderdate for year extraction"
+        },
+        {
+          "sub_step": "5e",
+          "op": "direct_array_lookup",
+          "array_from_step": 3,
+          "lookup_key": "s_nationkey",
+          "extract_columns": ["n_name"],
+          "notes": "O(1) nation name lookup"
+        },
+        {
+          "sub_step": "5f",
+          "op": "compute",
+          "expressions": [
+            { "name": "o_year", "expr": "EXTRACT(YEAR FROM o_orderdate)" },
+            { "name": "amount", "expr": "l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity" }
+          ]
+        },
+        {
+          "sub_step": "5g",
+          "op": "thread_local_aggregate",
+          "group_by": ["n_nationkey", "o_year"],
+          "aggregates": [
+            { "func": "SUM", "input": "amount", "output": "sum_profit" }
+          ],
+          "estimated_groups": 175,
+          "structure": "direct_2d_array",
+          "dimensions": { "nation": 25, "year_range": [1992, 1998] },
+          "notes": "25 nations × 7 years = 175 cells; direct 2D array avoids hash overhead entirely"
+        }
+      ],
+      "estimated_input_rows": 60000000,
+      "estimated_rows_after_semi_join": 900000,
+      "notes": "Semi-join on part filters first (highest selectivity), then remaining probes only run on ~1.5% of rows"
+    },
+    {
+      "step": 6,
+      "op": "merge_thread_local_aggregates",
+      "input_step": "5g",
+      "group_by": ["n_nationkey", "o_year"],
+      "aggregates": [
+        { "func": "SUM", "input": "sum_profit", "output": "sum_profit" }
+      ],
+      "estimated_groups": 175,
+      "notes": "Merge per-thread 2D arrays by element-wise addition; trivial cost"
+    },
+    {
+      "step": 7,
+      "op": "project_and_sort",
+      "input_step": 6,
+      "project": [
+        { "name": "nation", "expr": "nation_array[n_nationkey].n_name" },
+        { "name": "o_year", "expr": "o_year" },
+        { "name": "sum_profit", "expr": "sum_profit" }
+      ],
+      "order_by": [
+        { "column": "nation", "direction": "ASC" },
+        { "column": "o_year", "direction": "DESC" }
+      ],
+      "estimated_rows": 175,
+      "notes": "175 rows; in-place sort is negligible"
+    }
+  ],
+  "output_schema": [
+    { "name": "nation", "type": "string" },
+    { "name": "o_year", "type": "int32" },
+    { "name": "sum_profit", "type": "double" }
+  ],
+  "data_structures": {
+    "part_semi_join": "hash_set(p_partkey, ~40K entries, ~640KB)",
+    "nation_lookup": "direct_array(25 entries, indexed by n_nationkey)",
+    "partsupp_lookup": "composite_hash_index(pre-built, 8M entries, loaded from partsupp_composite_hash.bin)",
+    "thread_local_agg": "direct_2d_array(25 × 7 = 175 cells of double)",
+    "global_agg": "direct_2d_array(175 cells of double)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partitioning": "lineitem morsels from shared scan callback",
+    "thread_local_state": "per-thread 2D aggregation array (175 × 8 bytes = 1.4KB per thread)",
+    "merge": "sequential element-wise sum of thread-local arrays"
+  },
+  "indexes": [
+    { "index": "partsupp_composite_hash.bin", "purpose": "join_lookup for (ps_partkey, ps_suppkey) → ps_supplycost" }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["nation ASC", "o_year DESC"],
+    "limit": null
+  },
+  "execution_target": "cpp"
+}

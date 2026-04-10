@@ -1,0 +1,94 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q12",
+  "tail_node_id": "Q12_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_shipmode", "l_shipdate", "l_commitdate", "l_receiptdate"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderpriority"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicates": [
+        { "column": "l_shipmode", "type": "uint8", "op": "in_set", "values_dict_codes": [1, 6], "values_labels": ["MAIL", "SHIP"], "selectivity": 0.286 },
+        { "column": "l_receiptdate", "type": "int32_date", "op": "range_half_open", "low": "1994-01-01", "high": "1995-01-01", "selectivity": 0.143 },
+        { "column": "l_commitdate", "type": "int32_date", "op": "lt_column", "rhs_column": "l_receiptdate", "selectivity": 0.5 },
+        { "column": "l_shipdate", "type": "int32_date", "op": "lt_column", "rhs_column": "l_commitdate", "selectivity": 0.5 }
+      ],
+      "filter_order_hint": "Evaluate l_shipmode IN first (cheapest, dict-encoded uint8 bitmask check), then l_receiptdate range (integer compare), then cross-column comparisons last.",
+      "input_cardinality": 59986052,
+      "output_cardinality_estimate": 1220000
+    },
+    {
+      "step": 2,
+      "op": "hash_probe",
+      "hash_component": "hash_orders_by_orderkey",
+      "probe_key": "l_orderkey",
+      "type": "inner",
+      "payload_columns": ["o_orderpriority"],
+      "input_cardinality": 1220000,
+      "output_cardinality_estimate": 1220000,
+      "notes": "All filtered lineitem rows have valid orderkeys; expect no misses."
+    },
+    {
+      "step": 3,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "group_by": [
+        { "column": "l_shipmode", "type": "uint8", "num_groups": 2, "group_mapping": "dict_code: 1->0(MAIL), 6->1(SHIP)" }
+      ],
+      "aggregates": [
+        {
+          "name": "high_line_count",
+          "func": "sum_conditional",
+          "condition": "o_orderpriority IN (1, 3)",
+          "condition_note": "dict codes for '1-URGENT'=1, '2-HIGH'=3",
+          "value": 1,
+          "type": "int64"
+        },
+        {
+          "name": "low_line_count",
+          "func": "sum_conditional",
+          "condition": "o_orderpriority NOT IN (1, 3)",
+          "condition_note": "dict codes 0,2,4 = '5-LOW','4-NOT SPECIFIED','3-MEDIUM'",
+          "value": 1,
+          "type": "int64"
+        }
+      ],
+      "num_groups": 2,
+      "memory_bytes": 64,
+      "notes": "Only 2 output groups. Use per-thread int64[2][2] arrays (shipmode_idx x agg_idx), no hashing needed. Final merge across threads is trivial."
+    },
+    {
+      "step": 4,
+      "op": "finalize_and_sort",
+      "order_by": [{ "column": "l_shipmode", "direction": "ASC" }],
+      "notes": "2 rows; resolve dict codes back to strings: 1->'MAIL', 6->'SHIP'. Already in correct sort order since MAIL < SHIP lexicographically and dict_code 1 < 6."
+    }
+  ],
+  "output_schema": [
+    { "name": "l_shipmode", "type": "varchar" },
+    { "name": "high_line_count", "type": "int64" },
+    { "name": "low_line_count", "type": "int64" }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "details": "Partition lineitem morsels across threads. Each thread applies residual filters, probes shared hash table, and accumulates into thread-local int64[2][2] direct arrays. Single-pass merge of 64 tiny arrays at end."
+  },
+  "data_structures": {
+    "shipmode_filter": "bitmask_uint8(codes 1 and 6 set)",
+    "priority_classifier": "lookup_table_uint8[5] -> {0=low, 1=high}",
+    "aggregation": "direct_array(int64[2][2], indexed by shipmode bucket)"
+  },
+  "execution_target": "cpp"
+}

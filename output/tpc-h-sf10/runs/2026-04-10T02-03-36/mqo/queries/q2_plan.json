@@ -1,0 +1,134 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q2",
+  "tail_node_id": "Q2_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_size", "p_type", "p_mfgr"]
+    },
+    {
+      "component_id": "scan_partsupp_full",
+      "used_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey", "s_acctbal", "s_name", "s_address", "s_phone", "s_comment"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "region",
+      "predicate": "r_name = 'EUROPE'",
+      "input_cardinality": 5,
+      "output_cardinality": 1,
+      "output_columns": ["r_regionkey"],
+      "notes": "Tiny table, single scalar result"
+    },
+    {
+      "step": 2,
+      "op": "scan_filter_join",
+      "table": "nation",
+      "predicate": "n_regionkey = europe_regionkey",
+      "input_cardinality": 25,
+      "output_cardinality": 5,
+      "output_columns": ["n_nationkey", "n_name"],
+      "data_structure": "flat_array<pair<int32,string>>",
+      "notes": "Build array of 5 European nation (key, name) pairs"
+    },
+    {
+      "step": 3,
+      "op": "build_european_suppliers",
+      "input": "hash_supplier_by_suppkey",
+      "filter": "s_nationkey IN (european_nation_keys)",
+      "input_cardinality": 100000,
+      "output_cardinality": 20000,
+      "data_structure": "hash_set<int32>(pre_sized=20000)",
+      "output_columns": ["s_suppkey"],
+      "notes": "Iterate shared supplier hash table, filter by 5 European nationkeys. Store qualifying suppkeys in hash_set for O(1) probe."
+    },
+    {
+      "step": 4,
+      "op": "residual_filter",
+      "on": "hash_part_by_partkey",
+      "predicate": "p_size = 15 AND p_type LIKE '%BRASS'",
+      "input_cardinality": 2000000,
+      "selectivity": 0.0008,
+      "output_cardinality": 1600,
+      "output_columns": ["p_partkey"],
+      "data_structure": "flat_array<int32>(capacity=2000)",
+      "notes": "Scan shared part hash, apply size+type filter. ~50 distinct sizes * ~25 type suffixes → ~0.08% selectivity."
+    },
+    {
+      "step": 5,
+      "op": "indexed_subquery_resolve",
+      "description": "For each qualifying partkey, use partsupp_partkey_idx to find all partsupp rows, filter by european supplier, compute MIN(ps_supplycost) and track the winning (suppkey, supplycost) pair.",
+      "input": "scan_partsupp_full",
+      "index": "partsupp_partkey_idx",
+      "driven_by": "filtered_partkeys (step 4)",
+      "filter": "ps_suppkey IN european_supplier_set (step 3)",
+      "input_cardinality_per_key": 4,
+      "num_keys": 1600,
+      "total_rows_probed": 6400,
+      "output_cardinality": 1600,
+      "output_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"],
+      "data_structure": "flat_array<tuple<int32,int32,double>>(capacity=1600)",
+      "notes": "Index-driven nested loop: partsupp_partkey_idx gives (start_row, count) per partkey. For each partkey's rows, filter by european_supplier_set, track min supplycost and winning suppkey. Resolves correlated subquery and main join in single pass. ~6400 random row accesses on in-memory materialized partsupp — fast."
+    },
+    {
+      "step": 6,
+      "op": "materialize_output",
+      "description": "For each of ~1600 result tuples, lookup full attributes from shared hash tables and nation array.",
+      "lookups": [
+        {"source": "hash_part_by_partkey", "key": "ps_partkey", "fetch": ["p_partkey", "p_mfgr"]},
+        {"source": "hash_supplier_by_suppkey", "key": "ps_suppkey", "fetch": ["s_acctbal", "s_name", "s_address", "s_phone", "s_comment", "s_nationkey"]},
+        {"source": "european_nations_array", "key": "s_nationkey", "fetch": ["n_name"]}
+      ],
+      "input_cardinality": 1600,
+      "output_cardinality": 1600
+    },
+    {
+      "step": 7,
+      "op": "sort_limit",
+      "order_by": [
+        {"column": "s_acctbal", "direction": "DESC"},
+        {"column": "n_name", "direction": "ASC"},
+        {"column": "s_name", "direction": "ASC"},
+        {"column": "p_partkey", "direction": "ASC"}
+      ],
+      "limit": 100,
+      "input_cardinality": 1600,
+      "strategy": "full_sort",
+      "notes": "~1600 rows — std::partial_sort or full sort, both trivially fast"
+    }
+  ],
+  "output_schema": [
+    {"name": "s_acctbal", "type": "double"},
+    {"name": "s_name", "type": "string"},
+    {"name": "n_name", "type": "string"},
+    {"name": "p_partkey", "type": "int32"},
+    {"name": "p_mfgr", "type": "string"},
+    {"name": "s_address", "type": "string"},
+    {"name": "s_phone", "type": "string"},
+    {"name": "s_comment", "type": "string"}
+  ],
+  "indexes": [
+    {"index": "partsupp_partkey_idx", "type": "dense_range", "purpose": "Index-driven lookup of partsupp rows per qualifying partkey. Avoids full 8M-row scan — only touches ~6400 rows."},
+    {"index": "supplier_pk_idx", "type": "dense_pk", "purpose": "Direct array access into supplier hash table by suppkey"}
+  ],
+  "parallelism": {
+    "strategy": "single_thread",
+    "rationale": "Steps 1-2 trivial (<25 rows). Step 3 scans 100K supplier rows — fast single-threaded. Step 4 scans 2M part rows — could parallelize but filter is cheap. Step 5 does ~6400 indexed accesses. Total work is small; thread synchronization overhead exceeds benefit. Total tail runtime estimated <20ms."
+  },
+  "memory_estimate": {
+    "european_supplier_set": "~320 KB (20K entries × 16B open-addressing)",
+    "filtered_partkeys": "~6.4 KB (1600 × 4B)",
+    "result_tuples": "~38 KB (1600 × 24B)",
+    "total": "<1 MB"
+  },
+  "execution_target": "cpp",
+  "notes": "Q2's correlated subquery is resolved via index-driven nested loop on partsupp_partkey_idx: for each qualifying partkey (p_size=15, p_type LIKE '%BRASS'), retrieve all partsupp rows via dense_range index, filter by European supplier set, and track MIN(ps_supplycost) with winning suppkey. This touches ~6400 rows instead of scanning 8M. All three shared components are consumed: part hash for residual filtering, supplier hash for European supplier identification and attribute lookup, partsupp scan for the materialized data backing indexed access."
+}

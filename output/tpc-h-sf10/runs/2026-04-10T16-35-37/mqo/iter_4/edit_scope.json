@@ -1,0 +1,18 @@
+{
+  "iteration": 4,
+  "scope": "fused_scan:fused_scan_partsupp",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_partsupp",
+    "ms": 630.191,
+    "share_of_total": 0.338
+  },
+  "diagnosis": {
+    "step": "Q2",
+    "category": "B",
+    "root_cause": "Q16 hot loop over 8M partsupp rows performs 2 unordered_set::count() hash probes per row for filtering, plus unordered_map lookup + unordered_set::insert per qualifying row (~1.1M rows). These hash operations are cache-hostile with random access patterns, dominating the 630ms runtime.",
+    "memory_footprint": "unordered_map<Q16Key, unordered_set<int32_t>>: ~1.1M entries across ~18K groups, each unordered_set node-allocated = ~50-100MB random heap allocations"
+  },
+  "edit_summary": "Replaced all hash-based data structures in Q16 partsupp scan with flat array lookups. Pre-classify 2M parts into group_ids via array[partkey]. Hot loop reduced to: array lookup + branch + vector push_back. Count distinct suppkeys via sort-based approach instead of per-group hash sets.",
+  "expected_improvement": "~400-500ms reduction in fused_scan_partsupp (from 630ms to ~130-200ms), ~20-25% batch total improvement",
+  "rationale": "See edit_rationale.md"
+}

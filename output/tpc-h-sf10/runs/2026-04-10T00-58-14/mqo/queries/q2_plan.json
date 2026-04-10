@@ -1,0 +1,157 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q2",
+  "tail_node_id": "Q2_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_name", "s_nationkey", "s_address", "s_phone", "s_acctbal", "s_comment"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "region",
+      "predicate": "r_name = 'EUROPE'",
+      "output": "europe_regionkey",
+      "cardinality_in": 5,
+      "cardinality_out": 1,
+      "notes": "Trivial scan of 5 rows to get the single EUROPE regionkey"
+    },
+    {
+      "step": 2,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_regionkey = europe_regionkey",
+      "output": "european_nations",
+      "output_columns": ["n_nationkey", "n_name"],
+      "cardinality_in": 25,
+      "cardinality_out": 5,
+      "data_structure": "flat_array",
+      "notes": "Filter 25 nations to 5 European nations. Store as flat array for lookup and n_name retrieval."
+    },
+    {
+      "step": 3,
+      "op": "filter_shared_hash",
+      "source": "hash_supplier_by_suppkey",
+      "predicate": "s_nationkey IN european_nations",
+      "output": "european_supplier_set",
+      "output_columns": ["s_suppkey", "s_name", "s_nationkey", "s_address", "s_phone", "s_acctbal", "s_comment"],
+      "cardinality_in": 100000,
+      "cardinality_out": 20000,
+      "data_structure": "hash_map<s_suppkey, supplier_payload>",
+      "notes": "Iterate shared supplier hash, keep only European suppliers (~20K). Build a suppkey-keyed hash_map holding all payload columns for output projection."
+    },
+    {
+      "step": 4,
+      "op": "scan_filter",
+      "table": "part",
+      "columns": ["p_partkey", "p_mfgr", "p_size", "p_type"],
+      "predicate": "p_size = 15 AND p_type LIKE '%BRASS'",
+      "cardinality_in": 2000000,
+      "cardinality_out": 1333,
+      "selectivity": 0.000667,
+      "notes": "p_size=15 → 1/50 sel. p_type dict-encoded, check suffix 'BRASS' on dict entries first (~5/150 types). Combined ~1333 qualifying parts. Decode dict for p_type suffix check."
+    },
+    {
+      "step": 5,
+      "op": "index_lookup_join",
+      "description": "For each qualifying partkey, use partsupp_partkey_idx to retrieve its partsupp rows",
+      "build": "step4_qualifying_partkeys",
+      "probe_table": "partsupp",
+      "index": "partsupp_partkey_idx",
+      "join_key": "p_partkey = ps_partkey",
+      "probe_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"],
+      "cardinality_in": 1333,
+      "cardinality_out": 5332,
+      "notes": "Dense range index gives (start_row, count) for each partkey. Each part has exactly 4 suppliers at SF10. ~1333 * 4 = 5332 partsupp rows."
+    },
+    {
+      "step": 6,
+      "op": "hash_join",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build": "european_supplier_set (from step 3)",
+      "probe": "partsupp_rows (from step 5)",
+      "join_key": "ps_suppkey = s_suppkey",
+      "build_cardinality": 20000,
+      "probe_cardinality": 5332,
+      "output_cardinality": 1066,
+      "notes": "Filter partsupp rows to only European suppliers. ~1/5 of 5332 → ~1066 rows. Probe into the european_supplier_set hash_map built in step 3."
+    },
+    {
+      "step": 7,
+      "op": "decorrelated_min_aggregate",
+      "description": "Compute MIN(ps_supplycost) per p_partkey among European-supplier partsupp rows",
+      "group_by": ["p_partkey"],
+      "aggs": ["MIN(ps_supplycost)"],
+      "cardinality_in": 1066,
+      "cardinality_out": 1333,
+      "data_structure": "direct_array(max_partkey=2000000)",
+      "notes": "Use a direct array indexed by p_partkey storing min_cost (double). Since partkeys are dense integers [1..2M], a 16MB array (2M * 8 bytes) is feasible and gives O(1) lookup. Alternatively, since only ~1333 keys, a compact_hash_map is also fine."
+    },
+    {
+      "step": 8,
+      "op": "filter_by_min",
+      "description": "Re-scan step 6 output, keep only rows where ps_supplycost = min_cost[p_partkey]",
+      "predicate": "ps_supplycost = min_supplycost_per_partkey",
+      "cardinality_in": 1066,
+      "cardinality_out": 1066,
+      "notes": "Most partkeys have exactly one European supplier at min cost. Output ~1066 rows (some ties possible). Can be fused with step 6+7 in a two-pass approach: pass 1 computes mins, pass 2 filters."
+    },
+    {
+      "step": 9,
+      "op": "projection_join_nation",
+      "description": "Attach n_name from european_nations array via supplier's s_nationkey",
+      "join_key": "s_nationkey = n_nationkey",
+      "strategy": "direct_array_lookup",
+      "data_structure": "direct_array(25)",
+      "cardinality_in": 1066,
+      "cardinality_out": 1066,
+      "notes": "25-element array indexed by n_nationkey → n_name. O(1) per row."
+    },
+    {
+      "step": 10,
+      "op": "sort_limit",
+      "order_by": ["s_acctbal DESC", "n_name ASC", "s_name ASC", "p_partkey ASC"],
+      "limit": 100,
+      "cardinality_in": 1066,
+      "strategy": "partial_sort",
+      "notes": "~1066 rows is tiny. std::partial_sort or full std::sort + take top 100. Single-threaded is sufficient."
+    },
+    {
+      "step": 11,
+      "op": "final_projection",
+      "columns": ["s_acctbal", "s_name", "n_name", "p_partkey", "p_mfgr", "s_address", "s_phone", "s_comment"]
+    }
+  ],
+  "output_schema": [
+    {"name": "s_acctbal", "type": "double"},
+    {"name": "s_name", "type": "string"},
+    {"name": "n_name", "type": "string"},
+    {"name": "p_partkey", "type": "int32"},
+    {"name": "p_mfgr", "type": "string"},
+    {"name": "s_address", "type": "string"},
+    {"name": "s_phone", "type": "string"},
+    {"name": "s_comment", "type": "string"}
+  ],
+  "parallelism": {
+    "strategy": "single_threaded",
+    "notes": "All intermediate cardinalities are tiny (<6K rows). Part scan (2M rows) is the only sizeable operation but completes in <50ms single-threaded on columnar data. Parallelism overhead would exceed benefit."
+  },
+  "data_structures": {
+    "european_nations": "flat_array(5 entries: n_nationkey → n_name)",
+    "european_supplier_set": "hash_map<int32_t s_suppkey, supplier_payload>(pre_sized=20000, ~1.5MB)",
+    "nation_name_lookup": "direct_array(25 entries: n_nationkey → n_name_ptr)",
+    "min_cost_per_partkey": "compact_hash_map<int32_t p_partkey, double min_cost>(pre_sized=2048)",
+    "part_mfgr_lookup": "direct_array via part_pk_idx for p_mfgr retrieval"
+  },
+  "indexes": [
+    {"index": "partsupp_partkey_idx", "purpose": "lookup partsupp rows for each qualifying partkey"},
+    {"index": "part_pk_idx", "purpose": "direct array access for p_mfgr by partkey (if not carried from scan)"}
+  ],
+  "execution_target": "cpp",
+  "notes": "Q2 decorrelation strategy: compute the correlated subquery (MIN ps_supplycost per partkey among European suppliers) in a single pass over the index-looked-up partsupp rows, then filter. The shared hash_supplier_by_suppkey avoids a separate supplier scan/build. All cardinalities are small (~1K-5K); the dominant cost is the part table scan (2M rows) and ~1333 random partsupp index lookups."
+}

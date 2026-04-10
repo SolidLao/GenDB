@@ -1,0 +1,12 @@
+{
+  "iteration": 3,
+  "scope": "fused_scan:fused_scan_lineitem",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_lineitem",
+    "ms": 2850.7,
+    "share_of_total": 0.561
+  },
+  "edit_summary": "Replaced Q18 #pragma omp atomic with thread-local dense arrays and parallel post-loop merge, eliminating ~60M atomic operations per batch run.",
+  "expected_improvement": "~20-40% reduction in fused_scan_lineitem latency (~600-1100ms savings)",
+  "rationale": "The Q18 branch executes an atomic double-add on every single lineitem row (~60M for SF10) to a shared array indexed by orderkey. Atomic double operations on x86 use compare-and-swap loops costing ~20-50ns each, yielding ~1.2-3.0s of overhead. Replacing with thread-local calloc'd arrays (lazy-allocated, so only touched pages consume physical memory) and a parallel merge pass eliminates all contention."
+}

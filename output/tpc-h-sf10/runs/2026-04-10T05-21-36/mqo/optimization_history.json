@@ -1,0 +1,52 @@
+{
+  "iterations": [
+    {
+      "iteration": 0,
+      "batch_total_ms": 3220,
+      "per_query_ms": {},
+      "validated": true,
+      "edit_scope": null,
+      "accepted": true
+    },
+    {
+      "iteration": 1,
+      "status": "rejected",
+      "edit_scope": "fused_scan:fused_scan_lineitem",
+      "edit_summary": "Removed Q18 atomic from lineitem scan (thread-local hashmap), parallelized Q21_finalize with single-pass restructuring, optimized Q18_finalize to skip empty keys.",
+      "batch_total_ms": 4937,
+      "improvement_ratio": -0.5332298136645963,
+      "per_query_ms": {},
+      "validated": true,
+      "per_query_regression": false,
+      "regression_details": []
+    },
+    {
+      "iteration": 2,
+      "status": "rejected",
+      "edit_scope": "fused_scan:fused_scan_lineitem",
+      "edit_summary": "Replaced Q18 #pragma omp atomic with thread-local hash map accumulation; parallelized Q21 finalize inner loop with OpenMP.",
+      "batch_total_ms": 4810,
+      "improvement_ratio": -0.4937888198757764,
+      "per_query_ms": {},
+      "validated": true,
+      "per_query_regression": false,
+      "regression_details": []
+    },
+    {
+      "iteration": 3,
+      "status": "rejected",
+      "edit_scope": "fused_scan:fused_scan_lineitem",
+      "edit_summary": "Replaced Q18 #pragma omp atomic with thread-local dense arrays and parallel post-loop merge, eliminating ~60M atomic operations per batch run.",
+      "batch_total_ms": 4893,
+      "improvement_ratio": -0.5195652173913043,
+      "per_query_ms": {},
+      "validated": true,
+      "per_query_regression": false,
+      "regression_details": []
+    }
+  ],
+  "best": {
+    "iteration": 0,
+    "batch_total_ms": 3220
+  }
+}

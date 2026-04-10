@@ -1,0 +1,66 @@
+{
+  "iterations": [
+    {
+      "iteration": 0,
+      "batch_total_ms": 3045,
+      "per_query_ms": {},
+      "validated": true,
+      "edit_scope": null,
+      "accepted": true
+    },
+    {
+      "iteration": 1,
+      "status": "accepted",
+      "edit_scope": "finalize:Q21",
+      "edit_summary": "Parallelized Q21 finalize with OpenMP + replaced per-order heap-allocated hash sets with stack-allocated arrays and linear scan (optimal for TPC-H's 1-7 lineitems/order).",
+      "batch_total_ms": 2037,
+      "improvement_ratio": 0.3310344827586207,
+      "per_query_ms": {},
+      "validated": true
+    },
+    {
+      "iteration": 2,
+      "status": "rejected",
+      "edit_scope": "fused_scan:fused_scan_lineitem",
+      "edit_summary": "Hoisted orders_pk_index[ok], o_orderdate[orow], o_custkey[orow], and s_nationkey[sk-1] lookups to compute once per row and reuse across all 8 branches. Added __restrict__ qualifiers on all column pointers to enable compiler CSE/vectorization. Deferred loading of rarely-needed columns (tax, returnflag, linestatus, quantity) to inside their specific branches.",
+      "batch_total_ms": 2008,
+      "improvement_ratio": 0.014236622484045164,
+      "per_query_ms": {},
+      "validated": true
+    },
+    {
+      "iteration": 3,
+      "status": "rejected",
+      "edit_scope": "fused_scan:fused_scan_partsupp",
+      "edit_summary": "Parallelized Q16 partsupp scan with OpenMP (64 threads). Replaced unordered_set<int> target_sizes and excluded_types with O(1) lookup arrays. Replaced per-group unordered_set<int32_t> for distinct suppkeys with bitsets (100K bits = 12.5KB each) merged via bitwise OR across threads. Pre-classified parts to avoid repeated dictionary lookups.",
+      "batch_total_ms": 7736,
+      "improvement_ratio": -2.7977417771232203,
+      "per_query_ms": {},
+      "validated": true
+    },
+    {
+      "iteration": 4,
+      "status": "accepted",
+      "edit_scope": "fused_scan:fused_scan_partsupp",
+      "edit_summary": "Replaced all hash-based data structures in Q16 partsupp scan with flat array lookups. Pre-classify 2M parts into group_ids via array[partkey]. Hot loop reduced to: array lookup + branch + vector push_back. Count distinct suppkeys via sort-based approach instead of per-group hash sets.",
+      "batch_total_ms": 1510,
+      "improvement_ratio": 0.25871379479626905,
+      "per_query_ms": {},
+      "validated": true
+    },
+    {
+      "iteration": 5,
+      "status": "accepted",
+      "edit_scope": "fused_scan:fused_scan_orders",
+      "edit_summary": "Replaced Q13 thread-local arrays with shared array + atomic increments, eliminating 384MB allocation and 96M-entry merge. Parallelized Q15 supplier revenue merge.",
+      "batch_total_ms": 1311,
+      "improvement_ratio": 0.1317880794701987,
+      "per_query_ms": {},
+      "validated": true
+    }
+  ],
+  "best": {
+    "iteration": 5,
+    "batch_total_ms": 1311
+  }
+}

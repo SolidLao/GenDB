@@ -159,6 +159,8 @@ All modes support `--optimization-target hot` (optimize for cached/warm runs, de
 
 All modes support `--agent-provider claude` (default) or `--agent-provider codex` to select the underlying LLM agent.
 
+**Multiple Query Optimization (MQO) mode.** By default, GenDB optimizes each query in isolation (`--optimization-mode single`). Pass `--optimization-mode mqo` to instead produce a single coordinated C++ artifact for the whole query batch: shared scans, hash builds, and partial aggregations are identified across queries and materialized once, amortizing redundant work at batch execution time. The resulting binary supports both `./mqo --all` (fused batch execution) and `./mqo --query Qi` (single-query subset). The MQO pipeline reuses the Phase 1 analysis and adds MQO-specific agents inside Phase 2 (MQO Analyzer → Global Skeleton Planner → Batch Code Generator → per-query Tail Planners/Code Generators → profile-directed ε optimizer). Large batches (> 30 queries) use a tool-equipped Surveyor + parallel Cluster Analyzers + Integrator to preserve global information without context overflow.
+
 ```bash
 # Multi-agent (5 agents, default, Claude)
 node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10
@@ -178,8 +180,14 @@ node src/gendb/single.mjs --benchmark tpc-h --sf 10 --agent-provider codex --mod
 # Run all GenDB version configurations (multi-agent, single-agent guided/high-level)
 bash scripts/ablation.sh
 
+# Multi-agent in MQO mode (Multiple Query Optimization)
+node src/gendb/orchestrator.mjs --benchmark tpc-h --sf 10 --optimization-mode mqo
+
 # Benchmark GenDB against baseline systems (DuckDB, Umbra, ClickHouse, etc.)
 python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --gendb-run output/tpc-h-sf10
+
+# Benchmark an MQO-mode run (--all batch mode + --query Qi single mode)
+python3 benchmarks/benchmark.py --benchmark tpc-h --sf 10 --mqo-run output/tpc-h-sf10/runs/latest
 ```
 
 ## Project Structure

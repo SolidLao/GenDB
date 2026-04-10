@@ -1,0 +1,125 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q17",
+  "tail_node_id": "Q17_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_partkey", "l_quantity", "l_extendedprice"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "part",
+      "predicate": "p_brand = 'Brand#23' AND p_container = 'MED BOX'",
+      "columns_read": ["p_partkey", "p_brand", "p_container"],
+      "encoding_note": "p_brand and p_container are dictionary-encoded (uint8_t); resolve dictionary codes for 'Brand#23' and 'MED BOX' at init time and compare integer codes",
+      "selectivity": 0.001,
+      "output_cardinality": 2000,
+      "output": "matching_partkeys_bitset"
+    },
+    {
+      "step": 2,
+      "op": "streamed_filter_and_materialize",
+      "input": "scan_lineitem_full",
+      "predicate": "matching_partkeys_bitset[l_partkey] == 1",
+      "description": "Single pass over shared lineitem scan. For each row where l_partkey matches: (a) accumulate SUM(l_quantity) and COUNT(*) into per-partkey aggregation array, (b) append (l_partkey, l_quantity, l_extendedprice) to materialization buffer",
+      "selectivity_on_lineitem": 0.001,
+      "output_cardinality": 60000,
+      "outputs": {
+        "agg_array": "direct_array keyed by l_partkey: {sum_qty: double, count: int64}",
+        "mat_buffer": "vector<tuple<int32, double, double>> of (partkey, quantity, extendedprice)"
+      }
+    },
+    {
+      "step": 3,
+      "op": "compute_thresholds",
+      "input": "agg_array from step 2",
+      "description": "For each matching partkey, compute threshold = 0.2 * (sum_qty / count). Store in threshold_array[partkey]",
+      "cardinality": 2000,
+      "output": "threshold_array"
+    },
+    {
+      "step": 4,
+      "op": "filter_and_aggregate",
+      "input": "mat_buffer from step 2",
+      "predicate": "l_quantity < threshold_array[l_partkey]",
+      "aggregation": "SUM(l_extendedprice)",
+      "input_cardinality": 60000,
+      "output_cardinality": 1,
+      "description": "Iterate materialized buffer, apply per-partkey quantity threshold, accumulate sum of extendedprice"
+    },
+    {
+      "step": 5,
+      "op": "finalize",
+      "expression": "SUM(l_extendedprice) / 7.0",
+      "alias": "avg_yearly",
+      "output_cardinality": 1
+    }
+  ],
+  "output_schema": [
+    {"name": "avg_yearly", "type": "double"}
+  ],
+  "data_structures": {
+    "matching_partkeys": "bitset(2000001)",
+    "per_partkey_agg": "direct_array(2000001, struct{double sum_qty; int64_t count;})",
+    "threshold_array": "direct_array(2000001, double)",
+    "mat_buffer": "vector<struct{int32_t partkey; double quantity; double extendedprice;}>",
+    "mat_buffer_reserve": 65536
+  },
+  "memory_estimate": {
+    "bitset": "250 KB",
+    "agg_array": "32 MB",
+    "threshold_array": "16 MB",
+    "mat_buffer": "1.5 MB",
+    "total": "~50 MB"
+  },
+  "parallelism": {
+    "step1_part_scan": {
+      "strategy": "single_thread",
+      "reason": "Part table is 2M rows, dictionary filter is trivial; single-thread completes in <5ms"
+    },
+    "step2_lineitem_consume": {
+      "strategy": "morsel_driven",
+      "threads": "auto(nproc)",
+      "notes": "Shared scan delivers morsels. Each thread has thread-local agg_array and mat_buffer. Bitset check is read-only shared. After scan, merge thread-local agg_arrays (add sum_qty, count) and concatenate mat_buffers."
+    },
+    "step3_thresholds": {
+      "strategy": "single_thread",
+      "reason": "Only ~2000 active entries in agg_array; iterate bitset to find them"
+    },
+    "step4_final_agg": {
+      "strategy": "parallel_reduce",
+      "threads": "auto(nproc)",
+      "notes": "Partition concatenated mat_buffer across threads. Each thread produces partial sum. Final reduce merges partial sums."
+    }
+  },
+  "indexes": [
+    {
+      "index": "part_pk_idx",
+      "purpose": "Not used; sequential scan with dictionary filter is faster for 2M rows"
+    }
+  ],
+  "join_order": [
+    {
+      "build": "part(filtered: Brand#23, MED BOX)",
+      "probe": "lineitem(from scan_lineitem_full)",
+      "type": "semi",
+      "strategy": "bitset_filter",
+      "build_cardinality": 2000,
+      "probe_cardinality": 59986052,
+      "notes": "Bitset indexed by p_partkey (250KB, fits in L3 cache). Probe is a single bit-test per lineitem row — zero hash overhead. Equivalent to a semi-join that also materializes matching rows."
+    }
+  ],
+  "aggregation": "two_phase: (1) streaming per-partkey avg via direct_array during scan, (2) post-scan scalar SUM with threshold filter over materialized buffer",
+  "output": {
+    "limit": null,
+    "order_by": null,
+    "projection": ["avg_yearly"]
+  },
+  "execution_target": "cpp",
+  "notes": "Q17's correlated subquery requires knowing AVG(l_quantity) per partkey before filtering, preventing a pure streaming approach. The decorrelation strategy uses a single pass over the shared lineitem scan with a ~50MB memory footprint: accumulate per-partkey statistics and materialize the ~60K matching rows (~1.5MB buffer), then post-scan compute thresholds and apply the final filter+aggregate over the small buffer. The part filter (Brand#23 + MED BOX) is extremely selective (~0.1%), making the bitset semi-join nearly free. Thread-local aggregation during the shared scan avoids contention."
+}

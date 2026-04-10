@@ -1,0 +1,104 @@
+{
+  "version": "1.0",
+  "generated_by": "global-skeleton-planner",
+  "nodes": [
+    { "id": "hash_customer_by_custkey",       "kind": "shared", "provides_to": ["Q3","Q5","Q7","Q8","Q10","Q13","Q18"] },
+    { "id": "hash_supplier_by_suppkey",       "kind": "shared", "provides_to": ["Q2","Q5","Q7","Q8","Q9","Q11","Q15","Q21"] },
+    { "id": "hash_orders_by_orderkey",        "kind": "shared", "provides_to": ["Q3","Q5","Q7","Q8","Q9","Q10","Q12","Q18","Q21"] },
+    { "id": "scan_lineitem_full",             "kind": "shared", "provides_to": ["Q1","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q12","Q14","Q15","Q17","Q18","Q19","Q20","Q21"] },
+    { "id": "scan_lineitem_shipdate_1994",    "kind": "shared", "provides_to": ["Q6","Q20"] },
+    { "id": "scan_lineitem_shipdate_1995_1996","kind": "shared", "provides_to": ["Q7","Q14","Q15"] },
+
+    { "id": "Q1_tail",  "kind": "tail", "query_id": "Q1",  "consumes": ["scan_lineitem_full"] },
+    { "id": "Q2_tail",  "kind": "tail", "query_id": "Q2",  "consumes": ["hash_supplier_by_suppkey"] },
+    { "id": "Q3_tail",  "kind": "tail", "query_id": "Q3",  "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey"] },
+    { "id": "Q4_tail",  "kind": "tail", "query_id": "Q4",  "consumes": ["scan_lineitem_full"] },
+    { "id": "Q5_tail",  "kind": "tail", "query_id": "Q5",  "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey","hash_supplier_by_suppkey"] },
+    { "id": "Q6_tail",  "kind": "tail", "query_id": "Q6",  "consumes": ["scan_lineitem_full","scan_lineitem_shipdate_1994"] },
+    { "id": "Q7_tail",  "kind": "tail", "query_id": "Q7",  "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey","hash_supplier_by_suppkey","scan_lineitem_shipdate_1995_1996"] },
+    { "id": "Q8_tail",  "kind": "tail", "query_id": "Q8",  "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey","hash_supplier_by_suppkey"] },
+    { "id": "Q9_tail",  "kind": "tail", "query_id": "Q9",  "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_supplier_by_suppkey"] },
+    { "id": "Q10_tail", "kind": "tail", "query_id": "Q10", "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey"] },
+    { "id": "Q11_tail", "kind": "tail", "query_id": "Q11", "consumes": ["hash_supplier_by_suppkey"] },
+    { "id": "Q12_tail", "kind": "tail", "query_id": "Q12", "consumes": ["scan_lineitem_full","hash_orders_by_orderkey"] },
+    { "id": "Q13_tail", "kind": "tail", "query_id": "Q13", "consumes": ["hash_customer_by_custkey"] },
+    { "id": "Q14_tail", "kind": "tail", "query_id": "Q14", "consumes": ["scan_lineitem_full","scan_lineitem_shipdate_1995_1996"] },
+    { "id": "Q15_tail", "kind": "tail", "query_id": "Q15", "consumes": ["scan_lineitem_full","hash_supplier_by_suppkey","scan_lineitem_shipdate_1995_1996"] },
+    { "id": "Q16_tail", "kind": "tail", "query_id": "Q16", "consumes": [] },
+    { "id": "Q17_tail", "kind": "tail", "query_id": "Q17", "consumes": ["scan_lineitem_full"] },
+    { "id": "Q18_tail", "kind": "tail", "query_id": "Q18", "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_customer_by_custkey"] },
+    { "id": "Q19_tail", "kind": "tail", "query_id": "Q19", "consumes": ["scan_lineitem_full"] },
+    { "id": "Q20_tail", "kind": "tail", "query_id": "Q20", "consumes": ["scan_lineitem_full","scan_lineitem_shipdate_1994","hash_supplier_by_suppkey"] },
+    { "id": "Q21_tail", "kind": "tail", "query_id": "Q21", "consumes": ["scan_lineitem_full","hash_orders_by_orderkey","hash_supplier_by_suppkey"] },
+    { "id": "Q22_tail", "kind": "tail", "query_id": "Q22", "consumes": [] }
+  ],
+  "execution_order": [
+    ["hash_customer_by_custkey", "hash_supplier_by_suppkey"],
+    ["hash_orders_by_orderkey"],
+    ["scan_lineitem_full"],
+    ["scan_lineitem_shipdate_1994", "scan_lineitem_shipdate_1995_1996"],
+    ["Q1_tail","Q2_tail","Q3_tail","Q4_tail","Q5_tail","Q6_tail","Q7_tail","Q8_tail","Q9_tail","Q10_tail","Q11_tail","Q12_tail","Q13_tail","Q14_tail","Q15_tail","Q16_tail","Q17_tail","Q18_tail","Q19_tail","Q20_tail","Q21_tail","Q22_tail"]
+  ],
+  "fusion_hints": [
+    {
+      "shared_component": "scan_lineitem_full",
+      "mode": "callback",
+      "consumers": ["Q1_tail","Q3_tail","Q4_tail","Q5_tail","Q6_tail","Q7_tail","Q8_tail","Q9_tail","Q10_tail","Q12_tail","Q14_tail","Q15_tail","Q17_tail","Q18_tail","Q19_tail","Q20_tail","Q21_tail"],
+      "rationale": "60M-row full scan dominates I/O (~2s on HDD). Callback fusion avoids materializing ~4GB; each consumer evaluates its residual predicates inline. The two filtered sub-scans (shipdate_1994, shipdate_1995_1996) are captured as materialized side-outputs during this callback pass."
+    },
+    {
+      "shared_component": "scan_lineitem_shipdate_1994",
+      "mode": "materialize",
+      "consumers": ["Q6_tail","Q20_tail"],
+      "rationale": "9.4M-row side-output captured during scan_lineitem_full at ~100ms incremental cost. Two consumers (Q6, Q20) apply different residual filters — materializing allows independent parallel access."
+    },
+    {
+      "shared_component": "scan_lineitem_shipdate_1995_1996",
+      "mode": "materialize",
+      "consumers": ["Q7_tail","Q14_tail","Q15_tail"],
+      "rationale": "18.8M-row side-output captured during scan_lineitem_full. Three consumers (Q7, Q14, Q15) need different date sub-ranges — materialize once, probe independently."
+    },
+    {
+      "shared_component": "hash_orders_by_orderkey",
+      "mode": "materialize",
+      "consumers": ["Q3_tail","Q5_tail","Q7_tail","Q8_tail","Q9_tail","Q10_tail","Q12_tail","Q18_tail","Q21_tail"],
+      "rationale": "15M-entry hash table (~750MB, fits in 376GB RAM) probed by 9 queries during the shared lineitem scan. Materialize once, probe many times."
+    },
+    {
+      "shared_component": "hash_customer_by_custkey",
+      "mode": "materialize",
+      "consumers": ["Q3_tail","Q5_tail","Q7_tail","Q8_tail","Q10_tail","Q13_tail","Q18_tail"],
+      "rationale": "1.5M-entry hash table (~300MB) probed by 7 queries. Small enough to stay resident; materialize once."
+    },
+    {
+      "shared_component": "hash_supplier_by_suppkey",
+      "mode": "materialize",
+      "consumers": ["Q2_tail","Q5_tail","Q7_tail","Q8_tail","Q9_tail","Q11_tail","Q15_tail","Q21_tail"],
+      "rationale": "100K-entry hash table (~5.5MB, fits in L3 cache) probed by 8 queries. Keeping it materialized maintains L3 residency across all consumers."
+    }
+  ],
+  "single_query_subsets": {
+    "Q1":  ["scan_lineitem_full", "Q1_tail"],
+    "Q2":  ["hash_supplier_by_suppkey", "Q2_tail"],
+    "Q3":  ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "Q3_tail"],
+    "Q4":  ["scan_lineitem_full", "Q4_tail"],
+    "Q5":  ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "Q5_tail"],
+    "Q6":  ["scan_lineitem_full", "scan_lineitem_shipdate_1994", "Q6_tail"],
+    "Q7":  ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "scan_lineitem_shipdate_1995_1996", "Q7_tail"],
+    "Q8":  ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "Q8_tail"],
+    "Q9":  ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_supplier_by_suppkey", "Q9_tail"],
+    "Q10": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "Q10_tail"],
+    "Q11": ["hash_supplier_by_suppkey", "Q11_tail"],
+    "Q12": ["scan_lineitem_full", "hash_orders_by_orderkey", "Q12_tail"],
+    "Q13": ["hash_customer_by_custkey", "Q13_tail"],
+    "Q14": ["scan_lineitem_full", "scan_lineitem_shipdate_1995_1996", "Q14_tail"],
+    "Q15": ["scan_lineitem_full", "hash_supplier_by_suppkey", "scan_lineitem_shipdate_1995_1996", "Q15_tail"],
+    "Q16": ["Q16_tail"],
+    "Q17": ["scan_lineitem_full", "Q17_tail"],
+    "Q18": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "Q18_tail"],
+    "Q19": ["scan_lineitem_full", "Q19_tail"],
+    "Q20": ["scan_lineitem_full", "scan_lineitem_shipdate_1994", "hash_supplier_by_suppkey", "Q20_tail"],
+    "Q21": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_supplier_by_suppkey", "Q21_tail"],
+    "Q22": ["Q22_tail"]
+  }
+}

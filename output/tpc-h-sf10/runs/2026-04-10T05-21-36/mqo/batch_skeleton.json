@@ -1,0 +1,477 @@
+{
+  "version": "2.0",
+  "generated_by": "global-skeleton-planner-fused",
+  "execution_model": "fused",
+  "hardware_summary": {
+    "cpu_cores": 64,
+    "l3_cache_mb": 44,
+    "memory_gb": 376,
+    "disk_type": "hdd",
+    "simd": "avx512"
+  },
+  "stages": [
+    {
+      "stage_id": "load_dimensions",
+      "kind": "parallel_build",
+      "description": "Load tiny dimension tables into memory arrays. Nation (25 rows) and region (5 rows) are used by many queries for nation/region filtering. All columnar files for orders, customer, supplier, part are mmap'd here so subsequent index lookups are ready.",
+      "operations": [
+        {
+          "op": "array_load",
+          "table": "nation",
+          "columns": ["n_nationkey", "n_name", "n_regionkey"],
+          "consumers": ["Q2", "Q5", "Q7", "Q8", "Q9", "Q10", "Q11", "Q20", "Q21"],
+          "estimated_rows": 25,
+          "notes": "25 rows → direct array lookup by n_nationkey. No hash needed."
+        },
+        {
+          "op": "array_load",
+          "table": "region",
+          "columns": ["r_regionkey", "r_name"],
+          "consumers": ["Q2", "Q5", "Q8"],
+          "estimated_rows": 5,
+          "notes": "5 rows → direct array lookup by r_regionkey."
+        },
+        {
+          "op": "mmap_columns",
+          "table": "orders",
+          "columns": ["o_orderkey", "o_custkey", "o_orderstatus", "o_totalprice", "o_orderdate", "o_orderpriority", "o_shippriority", "o_comment"],
+          "notes": "mmap all orders columns so orders_pk_idx lookups during lineitem scan hit page cache. 15M rows × ~50 bytes = ~750MB."
+        },
+        {
+          "op": "mmap_columns",
+          "table": "customer",
+          "columns": ["c_custkey", "c_name", "c_address", "c_nationkey", "c_phone", "c_acctbal", "c_mktsegment", "c_comment"],
+          "notes": "mmap customer columns for dense_pk lookups. 1.5M rows × ~80 bytes = ~120MB."
+        },
+        {
+          "op": "mmap_columns",
+          "table": "supplier",
+          "columns": ["s_suppkey", "s_name", "s_address", "s_nationkey", "s_phone", "s_acctbal", "s_comment"],
+          "notes": "mmap supplier columns for dense_pk lookups. 100K rows × ~80 bytes = ~8MB."
+        },
+        {
+          "op": "mmap_columns",
+          "table": "part",
+          "columns": ["p_partkey", "p_name", "p_mfgr", "p_brand", "p_type", "p_size", "p_container", "p_retailprice"],
+          "notes": "mmap part columns for dense_pk lookups and part scan. 2M rows × ~50 bytes = ~100MB."
+        }
+      ]
+    },
+    {
+      "stage_id": "fused_scan_part",
+      "kind": "fused_scan",
+      "table": "part",
+      "description": "Single-pass scan of part (2M rows). Builds per-query bitsets of qualifying p_partkey values. These bitsets are consumed during later lineitem and partsupp scans for early filtering, avoiding repeated per-row part lookups.",
+      "estimated_rows": 2000000,
+      "columns_needed": ["p_partkey", "p_name", "p_mfgr", "p_brand", "p_type", "p_size", "p_container"],
+      "consumer_branches": [
+        {
+          "query": "Q2",
+          "filter": "p_size = 15 AND p_type LIKE '%BRASS'",
+          "action": "set bit in part_bitset_q2[p_partkey]; store (p_partkey, p_mfgr) for final output",
+          "needs_columns": ["p_partkey", "p_size", "p_type", "p_mfgr"],
+          "output": "part_bitset_q2 (bitmap, 2M bits = 250KB)"
+        },
+        {
+          "query": "Q9",
+          "filter": "p_name LIKE '%green%'",
+          "action": "set bit in part_bitset_q9[p_partkey]",
+          "needs_columns": ["p_partkey", "p_name"],
+          "output": "part_bitset_q9 (bitmap, 2M bits = 250KB)"
+        },
+        {
+          "query": "Q16",
+          "filter": "p_brand <> 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%' AND p_size IN (49,14,23,45,19,3,36,9)",
+          "action": "set bit in part_bitset_q16[p_partkey]; store (p_partkey → p_brand, p_type, p_size) in part_attrs_q16 map",
+          "needs_columns": ["p_partkey", "p_brand", "p_type", "p_size"],
+          "output": "part_bitset_q16 + part_attrs_q16"
+        },
+        {
+          "query": "Q20",
+          "filter": "p_name LIKE 'forest%'",
+          "action": "set bit in part_bitset_q20[p_partkey]",
+          "needs_columns": ["p_partkey", "p_name"],
+          "output": "part_bitset_q20 (bitmap, 2M bits = 250KB)"
+        }
+      ],
+      "notes": "Parallelize with OpenMP across row chunks; each thread maintains a thread-local bitset; merge (OR) after the loop. Part is small enough (~100MB columnar) to scan in <1s even on HDD."
+    },
+    {
+      "stage_id": "fused_scan_lineitem",
+      "kind": "fused_scan",
+      "table": "lineitem",
+      "description": "Single-pass scan of lineitem (~60M rows, ~4.8GB columnar). The dominant I/O cost of the entire batch. Inside the loop, each row is simultaneously fed to all 16 consuming queries. Queries needing orders/customer/supplier/part data use O(1) dense_pk index lookups into mmap'd columns. Queries needing partsupp use the composite hash index.",
+      "estimated_rows": 59986052,
+      "columns_needed": [
+        "l_orderkey", "l_partkey", "l_suppkey", "l_quantity",
+        "l_extendedprice", "l_discount", "l_tax",
+        "l_returnflag", "l_linestatus",
+        "l_shipdate", "l_commitdate", "l_receiptdate",
+        "l_shipinstruct", "l_shipmode"
+      ],
+      "consumer_branches": [
+        {
+          "query": "Q1",
+          "filter": "l_shipdate <= 10471 (1998-09-02)",
+          "action": "accumulate: group by (l_returnflag, l_linestatus) → sum(qty), sum(price), sum(disc_price), sum(charge), sum(discount), count. 4 groups, use fixed array.",
+          "needs_columns": ["l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate"],
+          "notes": "~98.6% selectivity. Almost all rows qualify."
+        },
+        {
+          "query": "Q3",
+          "filter": "l_shipdate > 9204 (1995-03-15)",
+          "action": "probe orders_pk_idx[l_orderkey] → o_orderdate, o_custkey, o_shippriority. Filter o_orderdate < 9204. Probe customer_pk_idx[o_custkey] → c_mktsegment. Filter c_mktsegment = 'BUILDING'. Accumulate revenue = sum(l_extendedprice * (1-l_discount)) grouped by (l_orderkey, o_orderdate, o_shippriority). Maintain top-10 heap by revenue DESC.",
+          "needs_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "probes_indexes": ["orders_pk_idx", "customer_pk_idx"],
+          "notes": "~51% shipdate selectivity × ~49% orderdate × ~21% mktsegment ≈ 5.2% of rows contribute."
+        },
+        {
+          "query": "Q5",
+          "filter": "none on lineitem directly",
+          "action": "probe orders_pk_idx[l_orderkey] → o_orderdate, o_custkey. Filter o_orderdate in [1994-01-01, 1995-01-01). Probe customer_pk_idx[o_custkey] → c_nationkey. Probe nation[c_nationkey] → n_regionkey. Filter region[n_regionkey] = 'ASIA'. Probe supplier_pk_idx[l_suppkey] → s_nationkey. Filter s_nationkey = c_nationkey (same nation). Accumulate revenue by n_name.",
+          "needs_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"],
+          "probes_indexes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx"],
+          "notes": "~15.7% orderdate × ~20% region × same-nation filter. ~5 output groups."
+        },
+        {
+          "query": "Q6",
+          "filter": "l_shipdate >= 8766 (1994-01-01) AND l_shipdate < 9131 (1995-01-01) AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24",
+          "action": "accumulate: sum(l_extendedprice * l_discount). Single scalar.",
+          "needs_columns": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+          "notes": "~15.7% × 27.4% × 45.7% ≈ 1.97% selectivity. Pure filter+aggregate, no joins."
+        },
+        {
+          "query": "Q7",
+          "filter": "l_shipdate >= 9131 (1995-01-01) AND l_shipdate < 9862 (1997-01-01)",
+          "action": "probe supplier_pk_idx[l_suppkey] → s_nationkey → nation → n_name (supp_nation). Probe orders_pk_idx[l_orderkey] → o_custkey. Probe customer_pk_idx[o_custkey] → c_nationkey → nation → n_name (cust_nation). Filter (supp=FRANCE,cust=GERMANY) OR (supp=GERMANY,cust=FRANCE). Accumulate volume by (supp_nation, cust_nation, YEAR(l_shipdate)).",
+          "needs_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "probes_indexes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx"],
+          "notes": "~31.4% shipdate × (2/625) nation-pair ≈ 0.1%. 4 output groups."
+        },
+        {
+          "query": "Q8",
+          "filter": "none on lineitem directly",
+          "action": "probe part_pk_idx[l_partkey] → p_type. Filter p_type = 'ECONOMY ANODIZED STEEL'. Probe orders_pk_idx[l_orderkey] → o_orderdate, o_custkey. Filter o_orderdate in [1995-01-01, 1997-01-01). Probe customer_pk_idx[o_custkey] → c_nationkey → nation → n_regionkey. Filter region = 'AMERICA'. Probe supplier_pk_idx[l_suppkey] → s_nationkey → nation → n_name. Accumulate CASE volume by o_year.",
+          "needs_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_extendedprice", "l_discount"],
+          "probes_indexes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx", "part_pk_idx"],
+          "notes": "~0.7% part type × 31.4% orderdate × 20% region ≈ 0.04%. 2 output groups."
+        },
+        {
+          "query": "Q9",
+          "filter": "part_bitset_q9[l_partkey] is set (p_name LIKE '%green%')",
+          "action": "probe partsupp_composite_hash[(l_partkey, l_suppkey)] → ps_supplycost. Probe orders_pk_idx[l_orderkey] → o_orderdate → o_year. Probe supplier_pk_idx[l_suppkey] → s_nationkey → nation → n_name. Compute amount = l_extendedprice*(1-l_discount) - ps_supplycost*l_quantity. Accumulate by (nation, o_year).",
+          "needs_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_quantity", "l_extendedprice", "l_discount"],
+          "probes_indexes": ["orders_pk_idx", "supplier_pk_idx", "partsupp_composite_hash"],
+          "depends_on_bitset": ["part_bitset_q9"],
+          "notes": "~0.7% part filter → ~420K qualifying lineitem rows. ~175 output groups (25 nations × 7 years)."
+        },
+        {
+          "query": "Q10",
+          "filter": "l_returnflag = 'R'",
+          "action": "probe orders_pk_idx[l_orderkey] → o_orderdate, o_custkey. Filter o_orderdate in [1993-10-01, 1994-01-01). Probe customer_pk_idx[o_custkey] → c_custkey, c_name, c_acctbal, c_phone, c_nationkey, c_address, c_comment. Probe nation[c_nationkey] → n_name. Accumulate revenue by customer. Maintain top-20 heap.",
+          "needs_columns": ["l_orderkey", "l_returnflag", "l_extendedprice", "l_discount"],
+          "probes_indexes": ["orders_pk_idx", "customer_pk_idx"],
+          "notes": "~24.2% returnflag × 3.9% orderdate ≈ 0.94%. Top-20 output."
+        },
+        {
+          "query": "Q12",
+          "filter": "l_shipmode IN ('MAIL','SHIP') AND l_receiptdate >= 8766 (1994-01-01) AND l_receiptdate < 9131 (1995-01-01) AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate",
+          "action": "probe orders_pk_idx[l_orderkey] → o_orderpriority. Accumulate CASE(high_priority, low_priority) counts by l_shipmode.",
+          "needs_columns": ["l_orderkey", "l_shipmode", "l_shipdate", "l_commitdate", "l_receiptdate"],
+          "probes_indexes": ["orders_pk_idx"],
+          "notes": "~28.6% shipmode × ~15.7% receiptdate × date-ordering filters. 2 output groups."
+        },
+        {
+          "query": "Q14",
+          "filter": "l_shipdate >= 9374 (1995-09-01) AND l_shipdate < 9404 (1995-10-01)",
+          "action": "probe part_pk_idx[l_partkey] → p_type. Accumulate sum(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice*(1-l_discount)) and sum(l_extendedprice*(1-l_discount)). Single ratio output.",
+          "needs_columns": ["l_partkey", "l_shipdate", "l_extendedprice", "l_discount"],
+          "probes_indexes": ["part_pk_idx"],
+          "notes": "~1.3% selectivity (1 month). Single scalar output."
+        },
+        {
+          "query": "Q15",
+          "filter": "l_shipdate >= 9497 (1996-01-01) AND l_shipdate < 9587 (1996-04-01)",
+          "action": "accumulate sum(l_extendedprice * (1 - l_discount)) grouped by l_suppkey. Store in supplier_revenue array[100001].",
+          "needs_columns": ["l_suppkey", "l_shipdate", "l_extendedprice", "l_discount"],
+          "notes": "~3.9% selectivity. ~100K output groups (one per supplier). Find max in finalize."
+        },
+        {
+          "query": "Q17",
+          "filter": "none on lineitem directly",
+          "action": "probe part_pk_idx[l_partkey] → p_brand, p_container. Filter p_brand='Brand#23' AND p_container='MED BOX'. For qualifying rows, accumulate per-partkey: sum(l_quantity), count, and store all (l_quantity, l_extendedprice) pairs for second-pass filtering in finalize.",
+          "needs_columns": ["l_partkey", "l_quantity", "l_extendedprice"],
+          "probes_indexes": ["part_pk_idx"],
+          "notes": "~0.1% part selectivity (brand × container). ~2000 qualifying parts, ~60K lineitem rows. Store detail for avg-based filtering in finalize."
+        },
+        {
+          "query": "Q18",
+          "filter": "none",
+          "action": "accumulate sum(l_quantity) grouped by l_orderkey into orderkey_qty_sum array (dense, 60M entries × 8 bytes = 480MB). Qualifying orderkeys (sum > 300) identified in finalize.",
+          "needs_columns": ["l_orderkey", "l_quantity"],
+          "notes": "All 60M rows contribute. Dense array indexed by l_orderkey. ~57 qualifying orders (very selective HAVING)."
+        },
+        {
+          "query": "Q19",
+          "filter": "l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON'",
+          "action": "probe part_pk_idx[l_partkey] → p_brand, p_container, p_size. Apply 3-way OR condition: (Brand#12, SM cases, qty 1-11, size 1-5) OR (Brand#23, MED cases, qty 10-20, size 1-10) OR (Brand#34, LG cases, qty 20-30, size 1-15). Accumulate sum(l_extendedprice * (1 - l_discount)).",
+          "needs_columns": ["l_partkey", "l_quantity", "l_extendedprice", "l_discount", "l_shipmode", "l_shipinstruct"],
+          "probes_indexes": ["part_pk_idx"],
+          "notes": "~28.6% shipmode × 25% shipinstruct × ~0.3% combined part+qty filters. Single scalar output."
+        },
+        {
+          "query": "Q20",
+          "filter": "l_shipdate >= 8766 (1994-01-01) AND l_shipdate < 9131 (1995-01-01) AND part_bitset_q20[l_partkey] is set",
+          "action": "accumulate sum(l_quantity) grouped by (l_partkey, l_suppkey) into q20_qty_intermediate hash map. Used during partsupp scan to check ps_availqty > 0.5 * sum.",
+          "needs_columns": ["l_partkey", "l_suppkey", "l_quantity", "l_shipdate"],
+          "depends_on_bitset": ["part_bitset_q20"],
+          "output": "q20_qty_intermediate: HashMap<(partkey,suppkey), double>",
+          "notes": "~15.7% shipdate × ~0.7% part filter ≈ 0.11%. ~8.4K intermediate entries."
+        },
+        {
+          "query": "Q21",
+          "filter": "none on lineitem directly",
+          "action": "probe orders_pk_idx[l_orderkey] → o_orderstatus. Filter o_orderstatus = 'F'. Probe supplier_pk_idx[l_suppkey] → s_nationkey. Filter nation = 'SAUDI ARABIA'. For qualifying rows, record per-orderkey: (suppkey, l_receiptdate > l_commitdate flag). Build per-orderkey multi-supplier tracking structure for EXISTS(other supplier) AND NOT EXISTS(other late supplier) logic.",
+          "needs_columns": ["l_orderkey", "l_suppkey", "l_commitdate", "l_receiptdate"],
+          "probes_indexes": ["orders_pk_idx", "supplier_pk_idx"],
+          "notes": "~33% orderstatus=F × ~4% nation filter. Complex EXISTS/NOT EXISTS resolved per-orderkey in finalize."
+        }
+      ],
+      "notes": "Parallelize with OpenMP across row chunks (block_size=65536 rows). Each thread maintains thread-local accumulators for all 16 consumers. Merge thread-local results after the loop. Column access is sequential within each block for cache efficiency. HDD sequential read at ~150MB/s → ~32s I/O for 4.8GB. With 64 cores, CPU processing is not the bottleneck."
+    },
+    {
+      "stage_id": "fused_scan_orders",
+      "kind": "fused_scan",
+      "table": "orders",
+      "description": "Single-pass scan of orders (~15M rows, ~750MB). Handles Q4 and Q13 which are driven by orders and not handled during the lineitem scan. Q4 needs EXISTS check against lineitem; Q13 counts orders per customer.",
+      "estimated_rows": 15000000,
+      "columns_needed": ["o_orderkey", "o_custkey", "o_orderdate", "o_orderpriority", "o_comment"],
+      "consumer_branches": [
+        {
+          "query": "Q4",
+          "filter": "o_orderdate >= 8582 (1993-07-01) AND o_orderdate < 8674 (1993-10-01)",
+          "action": "probe lineitem_orderkey_idx[o_orderkey] → (start_row, count). Scan lineitem rows in range: check EXISTS(l_commitdate < l_receiptdate). If exists, increment count for o_orderpriority group.",
+          "needs_columns": ["o_orderkey", "o_orderdate", "o_orderpriority"],
+          "probes_indexes": ["lineitem_orderkey_idx"],
+          "notes": "~3.9% orderdate selectivity. 5 output groups. lineitem columns l_commitdate, l_receiptdate already mmap'd."
+        },
+        {
+          "query": "Q13",
+          "filter": "o_comment NOT LIKE '%special%requests%'",
+          "action": "increment count_per_customer[o_custkey] for qualifying orders. In finalize, build histogram of c_count values (including customers with 0 orders).",
+          "needs_columns": ["o_custkey", "o_comment"],
+          "output": "count_per_customer: dense array[1500001] of uint16",
+          "notes": "~99.4% selectivity on comment filter. 1.5M customer buckets → ~40 histogram groups in finalize."
+        }
+      ],
+      "notes": "Parallelize with OpenMP across row chunks. Each thread maintains thread-local accumulators. Q4 does random lineitem lookups via lineitem_orderkey_idx (already mmap'd). Q13 uses atomic increments on count_per_customer array (or thread-local arrays merged after). HDD sequential read at ~150MB/s → ~5s I/O for 750MB."
+    },
+    {
+      "stage_id": "fused_scan_partsupp",
+      "kind": "fused_scan",
+      "table": "partsupp",
+      "description": "Single-pass scan of partsupp (8M rows, ~320MB). Handles Q2, Q11, Q16, Q20 which are driven by partsupp joins. Uses part bitsets from fused_scan_part and lineitem intermediates from fused_scan_lineitem.",
+      "estimated_rows": 8000000,
+      "columns_needed": ["ps_partkey", "ps_suppkey", "ps_availqty", "ps_supplycost"],
+      "consumer_branches": [
+        {
+          "query": "Q2",
+          "filter": "part_bitset_q2[ps_partkey] is set",
+          "action": "probe supplier_pk_idx[ps_suppkey] → s_nationkey, s_name, s_acctbal, s_address, s_phone, s_comment. Probe nation[s_nationkey] → n_name, n_regionkey. Filter region[n_regionkey] = 'EUROPE'. Track minimum ps_supplycost per ps_partkey. Store all qualifying (partkey, suppkey, supplycost, supplier_info, part_info) tuples.",
+          "needs_columns": ["ps_partkey", "ps_suppkey", "ps_supplycost"],
+          "probes_indexes": ["supplier_pk_idx"],
+          "depends_on_bitset": ["part_bitset_q2"],
+          "notes": "~0.08% part filter (size=15 × type BRASS) × 20% region ≈ 640 qualifying rows. In finalize, select rows where supplycost = min per partkey, sort, limit 100."
+        },
+        {
+          "query": "Q11",
+          "filter": "none on partsupp directly",
+          "action": "probe supplier_pk_idx[ps_suppkey] → s_nationkey. Filter nation = 'GERMANY'. Accumulate sum(ps_supplycost * ps_availqty) by ps_partkey. Also accumulate global total for threshold (total * 0.0001).",
+          "needs_columns": ["ps_partkey", "ps_suppkey", "ps_availqty", "ps_supplycost"],
+          "probes_indexes": ["supplier_pk_idx"],
+          "notes": "~4% nation filter → ~320K qualifying rows. High cardinality output groups (~200K partkeys)."
+        },
+        {
+          "query": "Q16",
+          "filter": "part_bitset_q16[ps_partkey] is set",
+          "action": "probe supplier_pk_idx[ps_suppkey] → s_comment. Filter s_comment NOT LIKE '%Customer%Complaints%'. Add ps_suppkey to distinct supplier set per (p_brand, p_type, p_size) group (looked up from part_attrs_q16).",
+          "needs_columns": ["ps_partkey", "ps_suppkey"],
+          "probes_indexes": ["supplier_pk_idx"],
+          "depends_on_bitset": ["part_bitset_q16"],
+          "notes": "~14.7% combined part filter → ~1.18M qualifying partsupp rows. COUNT(DISTINCT ps_suppkey) per group → use HyperLogLog or small hash sets."
+        },
+        {
+          "query": "Q20",
+          "filter": "part_bitset_q20[ps_partkey] is set",
+          "action": "probe supplier_pk_idx[ps_suppkey] → s_nationkey, s_name, s_address. Filter nation = 'CANADA'. Lookup q20_qty_intermediate[(ps_partkey, ps_suppkey)] → qty_sum. Filter ps_availqty > 0.5 * qty_sum. Collect qualifying (s_name, s_address).",
+          "needs_columns": ["ps_partkey", "ps_suppkey", "ps_availqty"],
+          "probes_indexes": ["supplier_pk_idx"],
+          "depends_on_bitset": ["part_bitset_q20"],
+          "depends_on_intermediate": ["q20_qty_intermediate"],
+          "notes": "~0.7% part filter × 4% nation ≈ ~2.2K qualifying rows before availqty check."
+        }
+      ],
+      "notes": "Parallelize with OpenMP across row chunks. Each thread maintains thread-local accumulators. Merge after the loop. HDD sequential read at ~150MB/s → ~2s I/O for 320MB. ps_comment column is NOT read (excluded from output schema), saving ~150MB I/O."
+    },
+    {
+      "stage_id": "independent_queries",
+      "kind": "parallel_build",
+      "description": "Handle queries that do not participate in any shared fused scan. Q22 scans customer independently with index-based NOT EXISTS check.",
+      "operations": [
+        {
+          "op": "standalone_query",
+          "query": "Q22",
+          "action": "Scan customer: filter c_phone SUBSTRING(1,2) IN ('13','31','23','29','30','18','17'). Compute global avg(c_acctbal) for qualifying customers with acctbal > 0. Filter c_acctbal > avg. Check NOT EXISTS via custkey_to_orders grouped_fk index (if offset[custkey+1]-offset[custkey] == 0 → no orders). Accumulate count and sum(c_acctbal) by country code.",
+          "table": "customer",
+          "estimated_rows": 1500000,
+          "notes": "Two-pass: first pass computes avg(c_acctbal), second pass filters and checks NOT EXISTS. ~28% phone filter × ~acctbal filter × NOT EXISTS. 7 output groups. Customer is 120MB, fits in memory."
+        }
+      ]
+    },
+    {
+      "stage_id": "finalize_output",
+      "kind": "finalize",
+      "description": "Per-query finalization: compute derived values, sort, apply limits, format, write CSV. Each query finalizes independently. Can be parallelized across queries using thread pool.",
+      "operations": [
+        {
+          "query": "Q1",
+          "action": "compute AVG from SUM/COUNT for qty, price, discount. Sort by (returnflag ASC, linestatus ASC). Output CSV. 4 rows."
+        },
+        {
+          "query": "Q2",
+          "action": "filter to rows where ps_supplycost = min per partkey. Sort by (s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC). Limit 100. Output CSV."
+        },
+        {
+          "query": "Q3",
+          "action": "extract top-10 from heap. Sort by (revenue DESC, o_orderdate ASC). Output CSV."
+        },
+        {
+          "query": "Q4",
+          "action": "sort by (o_orderpriority ASC). Output CSV. 5 rows."
+        },
+        {
+          "query": "Q5",
+          "action": "sort by (revenue DESC). Output CSV. 5 rows."
+        },
+        {
+          "query": "Q6",
+          "action": "output single scalar. Output CSV. 1 row."
+        },
+        {
+          "query": "Q7",
+          "action": "sort by (supp_nation ASC, cust_nation ASC, l_year ASC). Output CSV. 4 rows."
+        },
+        {
+          "query": "Q8",
+          "action": "compute ratio = brazil_volume / total_volume per year. Sort by (o_year ASC). Output CSV. 2 rows."
+        },
+        {
+          "query": "Q9",
+          "action": "sort by (nation ASC, o_year DESC). Output CSV. ~175 rows."
+        },
+        {
+          "query": "Q10",
+          "action": "extract top-20 from heap by revenue DESC. Output CSV."
+        },
+        {
+          "query": "Q11",
+          "action": "compute threshold = total_value * 0.0001. Filter partkeys where value > threshold. Sort by (value DESC). Output CSV."
+        },
+        {
+          "query": "Q12",
+          "action": "sort by (l_shipmode ASC). Output CSV. 2 rows."
+        },
+        {
+          "query": "Q13",
+          "action": "scan count_per_customer array (including 0-count customers): build histogram c_count → custdist. Sort by (custdist DESC, c_count DESC). Output CSV. ~40 rows."
+        },
+        {
+          "query": "Q14",
+          "action": "compute 100.0 * promo_revenue / total_revenue. Output CSV. 1 row."
+        },
+        {
+          "query": "Q15",
+          "action": "scan supplier_revenue array, find max revenue. Probe supplier_pk_idx for supplier details. Sort by (s_suppkey ASC). Output CSV."
+        },
+        {
+          "query": "Q16",
+          "action": "extract distinct supplier counts per (brand, type, size) group. Sort by (supplier_cnt DESC, p_brand ASC, p_type ASC, p_size ASC). Output CSV."
+        },
+        {
+          "query": "Q17",
+          "action": "for each qualifying partkey, compute avg_qty = sum_qty/count. Sum l_extendedprice for rows where l_quantity < 0.2 * avg_qty. Output sum/7.0. Output CSV. 1 row."
+        },
+        {
+          "query": "Q18",
+          "action": "scan orderkey_qty_sum array, collect orderkeys where sum > 300. Probe orders_pk_idx for o_orderdate, o_totalprice, o_custkey. Probe customer_pk_idx for c_name. Sort by (o_totalprice DESC, o_orderdate ASC). Limit 100. Output CSV."
+        },
+        {
+          "query": "Q19",
+          "action": "output single scalar. Output CSV. 1 row."
+        },
+        {
+          "query": "Q20",
+          "action": "sort collected (s_name, s_address) by s_name ASC. Output CSV."
+        },
+        {
+          "query": "Q21",
+          "action": "resolve per-orderkey EXISTS/NOT EXISTS logic from accumulated multi-supplier tracking. Count by s_name. Sort by (numwait DESC, s_name ASC). Limit 100. Output CSV."
+        },
+        {
+          "query": "Q22",
+          "action": "sort by (cntrycode ASC). Output CSV. 7 rows."
+        }
+      ]
+    }
+  ],
+  "query_stage_mask": {
+    "Q1":  { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": [] },
+    "Q2":  { "stages": ["fused_scan_part", "fused_scan_partsupp", "finalize_output"], "hash_deps": [], "index_probes": ["supplier_pk_idx", "part_pk_idx"], "bitset_deps": ["part_bitset_q2"] },
+    "Q3":  { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx"] },
+    "Q4":  { "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [], "index_probes": ["lineitem_orderkey_idx"] },
+    "Q5":  { "stages": ["load_dimensions", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx"] },
+    "Q6":  { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": [] },
+    "Q7":  { "stages": ["load_dimensions", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx"] },
+    "Q8":  { "stages": ["load_dimensions", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx", "supplier_pk_idx", "part_pk_idx"] },
+    "Q9":  { "stages": ["load_dimensions", "fused_scan_part", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "supplier_pk_idx", "partsupp_composite_hash"], "bitset_deps": ["part_bitset_q9"] },
+    "Q10": { "stages": ["load_dimensions", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx"] },
+    "Q11": { "stages": ["load_dimensions", "fused_scan_partsupp", "finalize_output"], "hash_deps": [], "index_probes": ["supplier_pk_idx"] },
+    "Q12": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx"] },
+    "Q13": { "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [], "index_probes": [] },
+    "Q14": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["part_pk_idx"] },
+    "Q15": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": [] },
+    "Q16": { "stages": ["fused_scan_part", "fused_scan_partsupp", "finalize_output"], "hash_deps": [], "index_probes": ["supplier_pk_idx"], "bitset_deps": ["part_bitset_q16"] },
+    "Q17": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["part_pk_idx"] },
+    "Q18": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "customer_pk_idx"] },
+    "Q19": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["part_pk_idx"] },
+    "Q20": { "stages": ["fused_scan_part", "fused_scan_lineitem", "fused_scan_partsupp", "finalize_output"], "hash_deps": [], "index_probes": ["supplier_pk_idx"], "bitset_deps": ["part_bitset_q20"], "intermediate_deps": ["q20_qty_intermediate"] },
+    "Q21": { "stages": ["load_dimensions", "fused_scan_lineitem", "finalize_output"], "hash_deps": [], "index_probes": ["orders_pk_idx", "supplier_pk_idx"] },
+    "Q22": { "stages": ["independent_queries", "finalize_output"], "hash_deps": [], "index_probes": ["custkey_to_orders"] }
+  },
+  "stage_dependencies": {
+    "load_dimensions": [],
+    "fused_scan_part": ["load_dimensions"],
+    "fused_scan_lineitem": ["load_dimensions", "fused_scan_part"],
+    "fused_scan_orders": ["load_dimensions"],
+    "fused_scan_partsupp": ["load_dimensions", "fused_scan_part", "fused_scan_lineitem"],
+    "independent_queries": ["load_dimensions"],
+    "finalize_output": ["fused_scan_lineitem", "fused_scan_orders", "fused_scan_partsupp", "independent_queries"]
+  },
+  "parallelism_opportunities": {
+    "concurrent_stages": [
+      ["fused_scan_orders", "fused_scan_lineitem"],
+      ["fused_scan_orders", "independent_queries"]
+    ],
+    "notes": "fused_scan_orders and independent_queries have no data dependencies on fused_scan_lineitem and can run concurrently with it if I/O bandwidth allows. On HDD, concurrent random I/O may cause seek thrashing; on SSD this would be beneficial. Recommend sequential on HDD."
+  },
+  "estimated_io_summary": {
+    "lineitem_scan_bytes": "4800MB",
+    "orders_scan_bytes": "750MB",
+    "partsupp_scan_bytes": "320MB",
+    "part_scan_bytes": "100MB",
+    "dimension_loads_bytes": "130MB",
+    "total_sequential_read_bytes": "6100MB",
+    "estimated_wall_time_hdd_s": "~42s (sequential reads at 150MB/s) + CPU processing",
+    "savings_vs_independent": "Each of the 22 queries scanning independently would read ~25GB total. Fused execution reads ~6.1GB — a 4x I/O reduction."
+  }
+}

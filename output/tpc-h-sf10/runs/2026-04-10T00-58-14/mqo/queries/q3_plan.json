@@ -1,0 +1,120 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q3",
+  "tail_node_id": "Q3_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_mktsegment"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "precompute_customer_bitset",
+      "description": "At tail init, scan hash_customer_by_custkey to build a bitset of c_custkey values where c_mktsegment = 'BUILDING'. Customer PK is dense int32 up to 1.5M, so bitset is ~188KB. This converts the customer semi-join+filter into a single bitset lookup per row, avoiding hash probes on the hot path.",
+      "source": "hash_customer_by_custkey",
+      "predicate": "c_mktsegment = 'BUILDING'",
+      "output": "building_custkey_bitset",
+      "estimated_qualifying_keys": 300000
+    },
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate > 9204",
+      "predicate_readable": "l_shipdate > DATE '1995-03-15' (days_since_epoch = 9204)",
+      "selectivity": 0.54,
+      "estimated_output_rows": 32400000
+    },
+    {
+      "step": 2,
+      "op": "hash_probe_with_filter",
+      "on": "hash_orders_by_orderkey",
+      "probe_key": "l_orderkey",
+      "residual_predicate": "o_orderdate < 9204",
+      "residual_predicate_readable": "o_orderdate < DATE '1995-03-15' (days_since_epoch = 9204)",
+      "type": "inner",
+      "payload_columns": ["o_custkey", "o_orderdate", "o_shippriority"],
+      "selectivity_of_residual": 0.48,
+      "estimated_output_rows": 15550000
+    },
+    {
+      "step": 3,
+      "op": "bitset_semi_filter",
+      "on": "building_custkey_bitset",
+      "probe_key": "o_custkey",
+      "description": "Check o_custkey membership in precomputed BUILDING bitset",
+      "selectivity": 0.20,
+      "estimated_output_rows": 3110000
+    },
+    {
+      "step": 4,
+      "op": "aggregate",
+      "strategy": "hash_group_by",
+      "group_by": ["l_orderkey", "o_orderdate", "o_shippriority"],
+      "aggregates": [
+        {
+          "name": "revenue",
+          "func": "SUM",
+          "expr": "l_extendedprice * (1.0 - l_discount)"
+        }
+      ],
+      "estimated_groups": 780000,
+      "notes": "l_orderkey functionally determines o_orderdate and o_shippriority. Use l_orderkey as the effective hash key. Entry layout: {l_orderkey:int32, o_orderdate:int32, o_shippriority:int32, revenue:double} = 20 bytes. Thread-local hash maps (~780K entries × 20B ≈ 15MB each) fit in L3."
+    },
+    {
+      "step": 5,
+      "op": "aggregate_merge",
+      "description": "Merge per-thread hash maps. Same l_orderkey entries are summed.",
+      "estimated_output_rows": 780000
+    },
+    {
+      "step": 6,
+      "op": "topk",
+      "order_by": [
+        {"column": "revenue", "direction": "DESC"},
+        {"column": "o_orderdate", "direction": "ASC"}
+      ],
+      "limit": 10,
+      "strategy": "min_heap",
+      "notes": "Maintain a min-heap of size 10 during merge to avoid full sort of 780K groups."
+    },
+    {
+      "step": 7,
+      "op": "project",
+      "columns": ["l_orderkey", "revenue", "o_orderdate", "o_shippriority"]
+    }
+  ],
+  "output_schema": [
+    {"name": "l_orderkey", "type": "int32"},
+    {"name": "revenue", "type": "double"},
+    {"name": "o_orderdate", "type": "int32", "semantic": "date_days_since_epoch"},
+    {"name": "o_shippriority", "type": "int32"}
+  ],
+  "data_structures": {
+    "building_custkey_bitset": "bitset(1500001)",
+    "thread_local_agg": "compact_hash_map(pre_sized=1048576, entry=20B)",
+    "topk_heap": "min_heap(capacity=10)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "morsel_size": 65536,
+    "threads": "auto(nproc)",
+    "scope": "Steps 1-4 run in parallel over lineitem morsels. Each thread owns a local aggregation hash map (step 4). Step 5 merges thread-local maps sequentially with concurrent heap maintenance (step 6)."
+  },
+  "date_constants": {
+    "DATE_1995_03_15": 9204,
+    "note": "days_since_epoch for 1995-03-15"
+  },
+  "execution_target": "cpp"
+}

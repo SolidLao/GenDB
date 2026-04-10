@@ -1,0 +1,130 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q11",
+  "tail_node_id": "Q11_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'GERMANY'",
+      "output": "germany_nationkey",
+      "selectivity": 0.04,
+      "cardinality_in": 25,
+      "cardinality_out": 1,
+      "notes": "Scan 25-row nation table, dictionary-encoded n_name, extract single n_nationkey for GERMANY"
+    },
+    {
+      "step": 2,
+      "op": "probe_shared_hash_with_filter",
+      "shared_component": "hash_supplier_by_suppkey",
+      "method": "full_iteration",
+      "predicate": "s_nationkey = germany_nationkey",
+      "output": "german_suppkey_set",
+      "cardinality_in": 100000,
+      "cardinality_out": 4000,
+      "notes": "Iterate all 100K entries in shared supplier hash, filter by s_nationkey matching GERMANY. Collect qualifying s_suppkey values into a bitset indexed by suppkey (max_key=100000). Bitset is 12.5KB — fits in L1 cache."
+    },
+    {
+      "step": 3,
+      "op": "scan_join_aggregate",
+      "table": "partsupp",
+      "columns_needed": ["ps_partkey", "ps_suppkey", "ps_supplycost", "ps_availqty"],
+      "join_probe": {
+        "probe_key": "ps_suppkey",
+        "probe_structure": "german_suppkey_set",
+        "type": "semi",
+        "strategy": "bitset_probe"
+      },
+      "aggregate": {
+        "group_by": ["ps_partkey"],
+        "aggs": [
+          {
+            "name": "value",
+            "expr": "SUM(ps_supplycost * ps_availqty)"
+          }
+        ],
+        "simultaneous_total": {
+          "name": "total_value",
+          "expr": "SUM(ps_supplycost * ps_availqty)",
+          "notes": "Accumulate grand total alongside per-group aggregation in same pass — eliminates subquery"
+        }
+      },
+      "cardinality_in": 8000000,
+      "cardinality_after_join": 320000,
+      "cardinality_groups": 298000,
+      "notes": "Single-pass fused scan+probe+aggregate over partsupp. For each row, probe bitset on ps_suppkey; if hit, multiply ps_supplycost*ps_availqty and add to direct_array[ps_partkey] AND to running total. This computes both the main query and subquery in one pass."
+    },
+    {
+      "step": 4,
+      "op": "having_filter",
+      "predicate": "value > total_value * 0.0001000000",
+      "cardinality_in": 298000,
+      "cardinality_out": 1050,
+      "notes": "Scan aggregation array, emit groups where value exceeds threshold. Expected ~1K qualifying groups for SF10 with GERMANY."
+    },
+    {
+      "step": 5,
+      "op": "sort",
+      "order_by": ["value DESC"],
+      "cardinality_in": 1050,
+      "notes": "Sort ~1K rows by value descending. Trivial cost — std::sort suffices."
+    },
+    {
+      "step": 6,
+      "op": "project",
+      "columns": ["ps_partkey", "value"]
+    }
+  ],
+  "output_schema": [
+    {"name": "ps_partkey", "type": "int32_t"},
+    {"name": "value", "type": "double"}
+  ],
+  "data_structures": {
+    "german_suppkey_set": {
+      "type": "bitset",
+      "size": 100001,
+      "memory_bytes": 12501,
+      "notes": "Indexed by s_suppkey (dense PK, max 100000). 12.5KB fits in L1 cache for fast probe during partsupp scan."
+    },
+    "partkey_agg_array": {
+      "type": "direct_array",
+      "size": 2000001,
+      "value_type": "double",
+      "memory_bytes": 16000008,
+      "notes": "ps_partkey is dense FK (max 2M). Direct array = 16MB, fits in L3. Zero-initialized; non-zero entries after scan are the groups. Avoids hash table overhead entirely."
+    },
+    "total_accumulator": {
+      "type": "scalar",
+      "value_type": "double",
+      "notes": "Running sum for the HAVING threshold subquery, accumulated in same pass as per-group aggregation."
+    }
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 16,
+    "morsel_size": 65536,
+    "partsupp_scan": {
+      "method": "parallel_scan_with_thread_local_agg",
+      "merge": "sum_merge_direct_arrays",
+      "notes": "Each of 16 threads gets a thread-local 16MB direct_array + local total_value scalar. After scan completes, merge 16 arrays element-wise (16 * 16MB = 256MB total, well within memory). 16 threads chosen over 64 to balance parallelism vs merge cost and memory footprint."
+    },
+    "having_sort": {
+      "method": "single_thread",
+      "notes": "Post-aggregation HAVING filter + sort over ~1K rows — single-threaded is optimal."
+    }
+  },
+  "indexes": [],
+  "subquery_elimination": {
+    "strategy": "fused_single_pass",
+    "notes": "The HAVING subquery computes the same join chain (partsupp ⋈ supplier ⋈ nation WHERE GERMANY) with a global SUM. Instead of executing it separately, the grand total is accumulated as a side-effect of step 3's scan, eliminating a redundant 8M-row pass."
+  },
+  "execution_target": "cpp"
+}

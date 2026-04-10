@@ -1,0 +1,132 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q18",
+  "tail_node_id": "Q18_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_quantity"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate", "o_totalprice"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_name"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "partial_agg",
+      "description": "Aggregate lineitem by l_orderkey during shared scan callback",
+      "input": "scan_lineitem_full",
+      "group_by": ["l_orderkey"],
+      "aggs": [{"func": "SUM", "col": "l_quantity", "alias": "sum_qty"}],
+      "data_structure": "compact_hash_map",
+      "sizing_hint": "15000000 entries (one per distinct orderkey)",
+      "notes": "Single pass over shared scan. l_orderkey is ordered, so could use sorted_group_by to avoid hash table, but hash_map is simpler with shared scan callback model."
+    },
+    {
+      "step": 2,
+      "op": "having_filter",
+      "description": "Filter aggregated orderkeys where SUM(l_quantity) > 300",
+      "predicate": "sum_qty > 300",
+      "input_cardinality": 15000000,
+      "output_cardinality_estimate": 150,
+      "selectivity": 0.00001,
+      "output": "qualifying_orderkeys",
+      "notes": "Extremely selective. Very few orders exceed 300 total quantity. Output is a tiny set."
+    },
+    {
+      "step": 3,
+      "op": "hash_probe",
+      "description": "Probe shared orders hash to get order details for qualifying orderkeys",
+      "input": "qualifying_orderkeys",
+      "hash_table": "hash_orders_by_orderkey",
+      "probe_key": "l_orderkey",
+      "join_key": "o_orderkey",
+      "type": "inner",
+      "retrieved_columns": ["o_custkey", "o_orderdate", "o_totalprice"],
+      "probe_cardinality": 150,
+      "notes": "Tiny probe set (~150 rows) against shared hash table. Negligible cost."
+    },
+    {
+      "step": 4,
+      "op": "hash_probe",
+      "description": "Probe shared customer hash to get customer name",
+      "input": "step_3_output",
+      "hash_table": "hash_customer_by_custkey",
+      "probe_key": "o_custkey",
+      "join_key": "c_custkey",
+      "type": "inner",
+      "retrieved_columns": ["c_name"],
+      "probe_cardinality": 150,
+      "notes": "Tiny probe set. Single lookup per qualifying order."
+    },
+    {
+      "step": 5,
+      "op": "project",
+      "description": "Assemble final columns — no further aggregation needed since GROUP BY key includes o_orderkey (unique per group) and sum_qty was already computed in step 1",
+      "columns": [
+        {"name": "c_name", "source": "step_4"},
+        {"name": "c_custkey", "source": "step_4.o_custkey"},
+        {"name": "o_orderkey", "source": "step_3.l_orderkey"},
+        {"name": "o_orderdate", "source": "step_3"},
+        {"name": "o_totalprice", "source": "step_3"},
+        {"name": "sum_qty", "source": "step_2.sum_qty"}
+      ]
+    },
+    {
+      "step": 6,
+      "op": "sort_limit",
+      "description": "Top-100 by o_totalprice DESC, o_orderdate ASC",
+      "order_by": [
+        {"col": "o_totalprice", "dir": "DESC"},
+        {"col": "o_orderdate", "dir": "ASC"}
+      ],
+      "limit": 100,
+      "input_cardinality": 150,
+      "strategy": "full_sort",
+      "notes": "Input is ~150 rows. std::sort + truncate is sufficient; no need for partial_sort or priority queue."
+    }
+  ],
+  "output_schema": [
+    {"name": "c_name", "type": "string"},
+    {"name": "c_custkey", "type": "int32"},
+    {"name": "o_orderkey", "type": "int32"},
+    {"name": "o_orderdate", "type": "int32"},
+    {"name": "o_totalprice", "type": "double"},
+    {"name": "sum_qty", "type": "double"}
+  ],
+  "parallelism": {
+    "step_1_agg": {
+      "strategy": "morsel_driven",
+      "threads": "auto(nproc)",
+      "notes": "Partition lineitem morsels across threads. Each thread maintains a thread-local hash map for l_orderkey → SUM(l_quantity). Merge thread-local maps after scan completes."
+    },
+    "steps_2_to_6": {
+      "strategy": "single_thread",
+      "notes": "After HAVING filter, only ~150 rows survive. Hash probes, projection, and sort on 150 rows are trivial — no parallelism needed."
+    }
+  },
+  "data_structures": {
+    "orderkey_agg_map": {
+      "type": "compact_hash_map<int32, double>",
+      "sizing": "15000000",
+      "per_thread": true,
+      "notes": "Thread-local maps during morsel-driven aggregation. Key=l_orderkey, Value=running SUM(l_quantity). Merge after scan. Since l_orderkey is ordered in scan, an alternative is sorted_group_by with running accumulator (no hash table needed) — implementor's choice."
+    },
+    "qualifying_orderkeys": {
+      "type": "flat_array<{orderkey, sum_qty}>",
+      "sizing": "~150 entries"
+    }
+  },
+  "optimization_notes": {
+    "subquery_elimination": "The subquery (GROUP BY l_orderkey HAVING SUM(l_quantity) > 300) and the outer SUM(l_quantity) are equivalent since the outer GROUP BY includes o_orderkey. A single aggregation pass computes both — no second lineitem scan or semi-join needed.",
+    "sorted_scan_opportunity": "scan_lineitem_full outputs rows ordered by l_orderkey. The aggregation in step 1 can exploit this ordering via sorted_group_by (sequential accumulation without hashing) for better cache performance and lower memory usage. This avoids a 15M-entry hash table entirely."
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,110 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q19",
+  "tail_node_id": "Q19_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_brand", "p_container", "p_size"],
+      "notes": "Dense array indexed by p_partkey (dense_pk). Scan all 2M entries to identify qualifying partkeys for 3 OR branches."
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "part_filter_branch_tag",
+      "on": "hash_part_by_partkey",
+      "description": "Scan part dense array (2M entries). For each partkey, evaluate 3 OR branches on part-side predicates only. Store qualifying partkeys with their branch tag (1/2/3).",
+      "branches": [
+        {
+          "branch": 1,
+          "predicate": "p_brand = 'Brand#12' AND p_container IN ('SM CASE','SM BOX','SM PACK','SM PKG') AND p_size BETWEEN 1 AND 5",
+          "selectivity": 0.0004,
+          "estimated_parts": 800
+        },
+        {
+          "branch": 2,
+          "predicate": "p_brand = 'Brand#23' AND p_container IN ('MED BAG','MED BOX','MED PKG','MED PACK') AND p_size BETWEEN 1 AND 10",
+          "selectivity": 0.0008,
+          "estimated_parts": 1600
+        },
+        {
+          "branch": 3,
+          "predicate": "p_brand = 'Brand#34' AND p_container IN ('LG CASE','LG BOX','LG PACK','LG PKG') AND p_size BETWEEN 1 AND 15",
+          "selectivity": 0.0012,
+          "estimated_parts": 2400
+        }
+      ],
+      "output": "qualifying_partkeys_with_branch",
+      "output_cardinality": 4800,
+      "data_structure": "flat_array<struct{int32 partkey, uint8 branch}>",
+      "notes": "Use branch_tag array: uint8[2000001] initialized to 0, set to 1/2/3 for qualifying parts. Enables O(1) branch lookup during lineitem probe."
+    },
+    {
+      "step": 2,
+      "op": "index_lookup",
+      "index": "lineitem_partkey_grouped",
+      "index_path": "indexes/lineitem_partkey_grouped",
+      "index_format": "offsets_u32[max_key+2], row_ids_u32[num_rows]",
+      "lookup_keys": "qualifying_partkeys_with_branch",
+      "description": "For each of ~4800 qualifying partkeys, read offsets to get lineitem row_id ranges. Collect all row_ids.",
+      "estimated_lineitem_rows": 144000,
+      "notes": "~30 lineitem rows per partkey on average. Total ~144K row_ids gathered."
+    },
+    {
+      "step": 3,
+      "op": "gather_and_filter",
+      "on": "lineitem",
+      "columns_needed": ["l_partkey", "l_quantity", "l_shipmode", "l_shipinstruct", "l_extendedprice", "l_discount"],
+      "description": "Gather lineitem columns at collected row_ids. Apply common filters first (l_shipmode, l_shipinstruct), then branch-specific l_quantity range using branch_tag array from step 1.",
+      "common_filters": [
+        {"predicate": "l_shipmode IN ('AIR', 'AIR REG')", "selectivity": 0.29},
+        {"predicate": "l_shipinstruct = 'DELIVER IN PERSON'", "selectivity": 0.25}
+      ],
+      "branch_filters": [
+        {"branch": 1, "predicate": "l_quantity >= 1 AND l_quantity <= 11"},
+        {"branch": 2, "predicate": "l_quantity >= 10 AND l_quantity <= 20"},
+        {"branch": 3, "predicate": "l_quantity >= 20 AND l_quantity <= 30"}
+      ],
+      "filter_order": "Apply l_shipinstruct first (dict-encoded, cheapest), then l_shipmode (dict-encoded), then branch-specific l_quantity check using branch_tag[l_partkey].",
+      "estimated_surviving_rows": 2300
+    },
+    {
+      "step": 4,
+      "op": "aggregate",
+      "function": "SUM(l_extendedprice * (1 - l_discount))",
+      "strategy": "scalar_accumulator",
+      "description": "Single scalar SUM aggregation over ~2300 surviving rows. Use thread-local double accumulators, merge at end.",
+      "output_cardinality": 1
+    }
+  ],
+  "output_schema": [
+    {"name": "revenue", "type": "double"}
+  ],
+  "parallelism": {
+    "strategy": "partition_by_partkey_ranges",
+    "threads": 16,
+    "notes": "Partition the ~4800 qualifying partkeys across 16 threads. Each thread independently: looks up row_ids via grouped index, gathers lineitem columns, applies filters, accumulates into thread-local sum. 16 threads sufficient given small working set (~144K scattered row_ids). More threads would increase contention on random I/O without benefit. Final merge: sum 16 doubles."
+  },
+  "data_structures": {
+    "branch_tag_array": "uint8[2000001] — indexed by p_partkey, value 0=not qualifying, 1/2/3=branch. Built in step 1, read in step 3.",
+    "row_id_buffer": "vector<uint32> per thread — holds gathered row_ids from index lookup",
+    "accumulator": "double per thread — thread-local SUM accumulator"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partkey_grouped",
+      "path": "indexes/lineitem_partkey_grouped_{offsets,rows}.bin",
+      "purpose": "Selective lineitem access: only read ~144K of 60M rows (0.24%)",
+      "format": "offsets_u32[2000002], row_ids_u32[59986052]"
+    }
+  ],
+  "aggregation": "scalar_accumulator",
+  "output": {
+    "columns": ["revenue"],
+    "limit": null,
+    "order_by": null
+  },
+  "execution_target": "cpp"
+}

@@ -1,0 +1,64 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q6",
+  "tail_node_id": "Q6_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicates": [
+        { "column": "l_shipdate", "op": ">=", "value": "1994-01-01", "value_encoded": "int32_date", "selectivity": 0.14 },
+        { "column": "l_shipdate", "op": "<", "value": "1995-01-01", "value_encoded": "int32_date", "selectivity": 0.14 },
+        { "column": "l_discount", "op": "between", "low": 0.05, "high": 0.07, "selectivity": 0.11 },
+        { "column": "l_quantity", "op": "<", "value": 24, "selectivity": 0.46 }
+      ],
+      "combined_selectivity": 0.007,
+      "estimated_output_rows": 420000,
+      "evaluation_order": ["l_shipdate_range", "l_discount", "l_quantity"],
+      "notes": "Evaluate date range first (most selective single predicate pair ~14%), then discount, then quantity. All filters are on fixed-width columns — branch-free SIMD evaluation possible."
+    },
+    {
+      "step": 2,
+      "op": "scalar_aggregate",
+      "input": "step_1_output",
+      "aggs": [
+        {
+          "function": "SUM",
+          "expression": "l_extendedprice * l_discount",
+          "output_name": "revenue",
+          "output_type": "double"
+        }
+      ],
+      "notes": "No GROUP BY — single scalar accumulator per thread, merge at end."
+    },
+    {
+      "step": 3,
+      "op": "finalize_project",
+      "input": "step_2_output",
+      "columns": [
+        { "name": "revenue", "type": "double" }
+      ]
+    }
+  ],
+  "output_schema": [
+    { "name": "revenue", "type": "double" }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "notes": "Each thread maintains a thread-local double accumulator for SUM(l_extendedprice * l_discount). Final merge is a single addition across thread-local results — no contention. Filter + multiply-accumulate is compute-bound and embarrassingly parallel over morsels from the shared scan."
+  },
+  "data_structures": {
+    "aggregation": "thread_local_scalar",
+    "notes": "Single scalar SUM — no hash table needed. One double per thread, final reduction via atomic add or sequential merge."
+  },
+  "execution_target": "cpp"
+}

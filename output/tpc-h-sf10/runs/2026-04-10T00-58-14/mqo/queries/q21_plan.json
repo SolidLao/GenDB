@@ -1,0 +1,152 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q21",
+  "tail_node_id": "Q21_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_suppkey", "l_commitdate", "l_receiptdate"]
+    },
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "used_columns": ["o_orderstatus"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_nationkey", "s_name"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'SAUDI ARABIA'",
+      "output": "saudi_nationkey",
+      "cardinality": 1,
+      "notes": "Nation table is 25 rows; extract the single n_nationkey for SAUDI ARABIA at startup"
+    },
+    {
+      "step": 1,
+      "op": "build_supplier_filter",
+      "input": "hash_supplier_by_suppkey",
+      "predicate": "s_nationkey = saudi_nationkey",
+      "data_structure": "bitset(100001)",
+      "output": "saudi_suppkey_bitset",
+      "cardinality": 4000,
+      "notes": "Pre-scan shared supplier hash table; mark ~4K Saudi Arabia suppkeys in a bitset indexed by s_suppkey. Bitset fits in 12KB — stays in L1 cache for billions of probes."
+    },
+    {
+      "step": 2,
+      "op": "grouped_stream_process",
+      "input": "scan_lineitem_full",
+      "group_key": "l_orderkey",
+      "leverages_sort_order": true,
+      "description": "Single-pass over lineitem sorted by l_orderkey. Buffer all rows per orderkey group (avg ~4 rows). For each group, evaluate all conditions together.",
+      "sub_operations": [
+        {
+          "sub_step": "2a",
+          "op": "group_buffer",
+          "description": "For each orderkey group, collect (l_suppkey, is_late) tuples where is_late = (l_receiptdate > l_commitdate). Typical buffer size: 1-7 rows."
+        },
+        {
+          "sub_step": "2b",
+          "op": "probe_orders",
+          "input": "hash_orders_by_orderkey",
+          "predicate": "o_orderstatus = 'F'",
+          "selectivity": 0.49,
+          "notes": "Check once per group. Skip entire group if order is not status F."
+        },
+        {
+          "sub_step": "2c",
+          "op": "evaluate_per_candidate",
+          "description": "For each l1 in group WHERE is_late=true:",
+          "checks": [
+            {
+              "check": "supplier_filter",
+              "op": "bitset_lookup",
+              "input": "saudi_suppkey_bitset",
+              "predicate": "saudi_suppkey_bitset[l1.l_suppkey] == true",
+              "selectivity": 0.04,
+              "notes": "~4K out of 100K suppkeys are Saudi Arabian"
+            },
+            {
+              "check": "exists_semi_join",
+              "type": "semi",
+              "predicate": "EXISTS row in group with l_suppkey != l1.l_suppkey",
+              "strategy": "in_group_scan",
+              "selectivity": 0.82,
+              "notes": "Scan the small group buffer (~4 rows) for any different suppkey"
+            },
+            {
+              "check": "not_exists_anti_join",
+              "type": "anti",
+              "predicate": "NOT EXISTS row in group with l_suppkey != l1.l_suppkey AND is_late=true",
+              "strategy": "in_group_scan",
+              "selectivity": 0.18,
+              "notes": "Scan group buffer for any OTHER suppkey that is also late. Must find none."
+            }
+          ]
+        },
+        {
+          "sub_step": "2d",
+          "op": "resolve_supplier_name",
+          "input": "hash_supplier_by_suppkey",
+          "description": "For surviving l1 rows, probe shared supplier hash to retrieve s_name",
+          "notes": "Only ~50-100K rows survive all filters; each probe hits L3-resident hash"
+        }
+      ],
+      "input_cardinality": 59986052,
+      "output_cardinality": 75000
+    },
+    {
+      "step": 3,
+      "op": "hash_aggregate",
+      "input": "step_2_output",
+      "group_by": ["s_name"],
+      "aggregations": [
+        {"func": "COUNT(*)", "alias": "numwait"}
+      ],
+      "data_structure": "compact_hash_map(pre_sized_4096)",
+      "output_cardinality": 4000,
+      "notes": "~4K distinct s_name values from Saudi Arabia suppliers. Hash map fits in ~256KB."
+    },
+    {
+      "step": 4,
+      "op": "sort_limit",
+      "input": "step_3_output",
+      "order_by": [
+        {"column": "numwait", "direction": "DESC"},
+        {"column": "s_name", "direction": "ASC"}
+      ],
+      "limit": 100,
+      "strategy": "full_sort",
+      "input_cardinality": 4000,
+      "notes": "Only 4K rows to sort — use std::partial_sort or full std::sort, either is instant"
+    }
+  ],
+  "output_schema": [
+    {"name": "s_name", "type": "varchar(25)"},
+    {"name": "numwait", "type": "int64"}
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": 16,
+    "morsel_size": 65536,
+    "partitioning": "range_on_l_orderkey",
+    "notes": "Partition lineitem stream into morsel ranges by orderkey. Each thread buffers its own orderkey groups and aggregates into thread-local hash maps. Final merge of 16 small hash maps (4K entries each) is trivial. 16 threads suffice — bottleneck is sequential HDD read, not CPU. Orderkey-range partitioning ensures each orderkey group is processed by exactly one thread (no cross-thread coordination needed)."
+  },
+  "data_structures": {
+    "saudi_suppkey_bitset": "bitset(100001) — 12KB, L1 resident",
+    "group_buffer": "thread_local small_vector<{int32_t suppkey, bool is_late}, 8> — stack allocated per group",
+    "aggregation_map": "thread_local compact_hash_map<string_ref, int64_t, pre_sized=4096>"
+  },
+  "memory_estimate": {
+    "saudi_suppkey_bitset": "12 KB",
+    "per_thread_agg_map": "256 KB × 16 = 4 MB",
+    "group_buffer": "negligible (stack)",
+    "total": "~5 MB (excluding shared components)"
+  },
+  "notes": "Exploits lineitem sorted-by-orderkey to avoid materializing auxiliary hash maps for EXISTS/NOT EXISTS. Each orderkey group (~4 rows avg) is buffered on the stack and processed in-place. The three subquery checks (supplier filter, EXISTS, NOT EXISTS) are evaluated as in-group scans over the tiny buffer — O(group_size²) but group_size≈4 so this is faster than any hash-based approach. Orders probe and supplier bitset check are done early to skip non-qualifying groups/rows before the semi/anti-join logic."
+}

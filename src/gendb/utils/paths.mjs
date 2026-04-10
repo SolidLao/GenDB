@@ -220,3 +220,78 @@ export function getVersionMetaPath(workloadDir, queryId, version) {
 export function getIngestDir(workloadDir) {
   return resolve(workloadDir, "ingest");
 }
+
+// ---------------------------------------------------------------------------
+// MQO-mode paths (multi-query optimization artifact layout)
+// The MQO artifact lives inside a run audit dir: <runAuditDir>/mqo/
+// ---------------------------------------------------------------------------
+
+/** Root of the MQO artifact: `<runAuditDir>/mqo/`. */
+export function getMqoDir(runAuditDir) {
+  return resolve(runAuditDir, "mqo");
+}
+
+/** Shared components directory: `<runAuditDir>/mqo/shared/`. */
+export function getMqoSharedDir(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "shared");
+}
+
+/** Per-query tails directory: `<runAuditDir>/mqo/queries/`. */
+export function getMqoQueriesDir(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "queries");
+}
+
+/** MQO optimizer iteration dir: `<runAuditDir>/mqo/iter_<N>/`. */
+export function getMqoIterDir(runAuditDir, iteration) {
+  return resolve(runAuditDir, "mqo", `iter_${iteration}`);
+}
+
+/** Path to the compiled MQO binary: `<runAuditDir>/mqo/mqo`. */
+export function getMqoBinaryPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "mqo");
+}
+
+/** Path to the dispatcher source: `<runAuditDir>/mqo/mqo_main.cpp`. */
+export function getMqoMainPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "mqo_main.cpp");
+}
+
+/** Path to the shared-component blueprint JSON (MQO Analyzer output). */
+export function getMqoBlueprintPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "shared_component_blueprint.json");
+}
+
+/** Path to the batch skeleton JSON (Global Skeleton Planner output). */
+export function getMqoSkeletonPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "batch_skeleton.json");
+}
+
+/** Path to the artifact manifest (query → shared-dep list, updated by Batch Code Generator). */
+export function getMqoManifestPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "manifest.json");
+}
+
+/** Path to the global registry (large-batch MQO Analyzer, Surveyor output). */
+export function getMqoGlobalRegistryPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "global_registry.json");
+}
+
+/** Path to the clusters file (large-batch). */
+export function getMqoClustersPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "clusters.json");
+}
+
+/** Path to an MQO cluster shard dir for parallel cluster analyzers (large-batch). */
+export function getMqoClusterShardDir(runAuditDir, clusterIdx) {
+  return resolve(runAuditDir, "mqo", `cluster_${clusterIdx}`);
+}
+
+/** Path to the per-iteration source snapshot (for rollback). */
+export function getMqoIterSnapshotDir(runAuditDir, iteration) {
+  return resolve(runAuditDir, "mqo", `iter_${iteration}`, "source_snapshot");
+}
+
+/** Path to aggregated optimization history JSON across all MQO iterations. */
+export function getMqoOptimizationHistoryPath(runAuditDir) {
+  return resolve(runAuditDir, "mqo", "optimization_history.json");
+}

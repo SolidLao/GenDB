@@ -1,0 +1,324 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q8",
+  "tail_node_id": "Q8_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "access_mode": "callback",
+      "used_columns": ["l_orderkey", "l_partkey", "l_suppkey", "l_extendedprice", "l_discount"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "access_mode": "dense_pk_lookup",
+      "used_columns": ["o_orderdate", "o_custkey"],
+      "lookup_key": "o_orderkey",
+      "index": "orders_pk_idx"
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "access_mode": "dense_pk_lookup",
+      "used_columns": ["c_nationkey"],
+      "lookup_key": "c_custkey",
+      "index": "customer_pk_idx"
+    },
+    {
+      "component_id": "hash_part_by_partkey",
+      "access_mode": "dense_pk_lookup",
+      "used_columns": ["p_type"],
+      "lookup_key": "p_partkey",
+      "index": "part_pk_idx"
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "access_mode": "dense_pk_lookup",
+      "used_columns": ["s_nationkey"],
+      "lookup_key": "s_suppkey",
+      "index": "supplier_pk_idx"
+    }
+  ],
+  "local_tables": [
+    {
+      "table": "nation",
+      "path": "nation",
+      "columns_needed": ["n_nationkey", "n_name", "n_regionkey"],
+      "cardinality": 25
+    },
+    {
+      "table": "region",
+      "path": "region",
+      "columns_needed": ["r_regionkey", "r_name"],
+      "cardinality": 5
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "load_dimension",
+      "description": "Load region table, find r_regionkey where r_name='AMERICA'",
+      "table": "region",
+      "predicate": "r_name = 'AMERICA'",
+      "output": "america_regionkey",
+      "output_cardinality": 1
+    },
+    {
+      "step": 2,
+      "op": "load_dimension",
+      "description": "Load nation table. Build two structures: (1) america_custkey_nations: bitset of n_nationkey where n_regionkey=america_regionkey (for customer-side filter), (2) nation_name_lookup: direct array[25] of n_name indexed by n_nationkey (for supplier-side n2 name lookup)",
+      "table": "nation",
+      "outputs": {
+        "america_custkey_nations": {
+          "type": "bitset",
+          "size": 25,
+          "description": "n_nationkey values where n_regionkey = america_regionkey (AMERICA region nations)",
+          "estimated_set_bits": 5
+        },
+        "nation_name_lookup": {
+          "type": "direct_array",
+          "size": 25,
+          "description": "n_name string indexed by n_nationkey, for looking up supplier's nation (n2)"
+        },
+        "brazil_nationkey": {
+          "type": "scalar_int",
+          "description": "n_nationkey where n_name = 'BRAZIL', for conditional aggregation"
+        }
+      }
+    },
+    {
+      "step": 3,
+      "op": "build_part_filter",
+      "description": "Scan hash_part_by_partkey (dense array), build bitset of p_partkey where p_type = 'ECONOMY ANODIZED STEEL'",
+      "source": "hash_part_by_partkey",
+      "predicate": "p_type = 'ECONOMY ANODIZED STEEL'",
+      "p_type_encoding": "dictionary",
+      "output": "part_filter_bitset",
+      "output_type": "bitset(2000001)",
+      "estimated_set_bits": 13333,
+      "selectivity": 0.0067,
+      "notes": "~150 distinct p_type values, uniform distribution → ~13.3K matching parts. Bitset is 244KB, fits comfortably in L3 cache."
+    },
+    {
+      "step": 4,
+      "op": "callback_pipeline",
+      "description": "Main processing pipeline executed inside scan_lineitem_full callback. For each lineitem row, apply cascading filters and accumulate into thread-local aggregates.",
+      "source": "scan_lineitem_full",
+      "substeps": [
+        {
+          "substep": "4a",
+          "op": "semi_join_filter",
+          "description": "Test l_partkey against part_filter_bitset",
+          "probe_key": "l_partkey",
+          "build_side": "part_filter_bitset",
+          "strategy": "bitset_test",
+          "input_cardinality": 59986052,
+          "output_cardinality": 400000,
+          "selectivity": 0.0067,
+          "notes": "Most selective filter — applied first. Single bit test, ~0.3ns per row."
+        },
+        {
+          "substep": "4b",
+          "op": "join_lookup",
+          "description": "Lookup orders via dense_pk on l_orderkey to get o_orderdate and o_custkey",
+          "probe_key": "l_orderkey",
+          "target": "scan_orders_full",
+          "index": "orders_pk_idx",
+          "strategy": "dense_pk_array_lookup",
+          "retrieve_columns": ["o_orderdate", "o_custkey"],
+          "input_cardinality": 400000,
+          "output_cardinality": 400000,
+          "notes": "O(1) array lookup. orders_pk_idx maps o_orderkey -> row_id, then index into materialized o_orderdate[] and o_custkey[] arrays."
+        },
+        {
+          "substep": "4c",
+          "op": "residual_filter",
+          "description": "Filter o_orderdate BETWEEN '1995-01-01' AND '1996-12-31'",
+          "predicate": "o_orderdate >= 9131 AND o_orderdate <= 9861",
+          "date_encoding": "days_since_epoch_1970",
+          "date_constants": {
+            "1995-01-01": 9131,
+            "1996-12-31": 9861
+          },
+          "input_cardinality": 400000,
+          "output_cardinality": 114000,
+          "selectivity": 0.286,
+          "notes": "2 years out of ~7 year range in orders table."
+        },
+        {
+          "substep": "4d",
+          "op": "join_lookup",
+          "description": "Lookup customer via dense_pk on o_custkey to get c_nationkey",
+          "probe_key": "o_custkey",
+          "target": "hash_customer_by_custkey",
+          "index": "customer_pk_idx",
+          "strategy": "dense_pk_array_lookup",
+          "retrieve_columns": ["c_nationkey"],
+          "input_cardinality": 114000,
+          "output_cardinality": 114000
+        },
+        {
+          "substep": "4e",
+          "op": "residual_filter",
+          "description": "Filter c_nationkey IN america_custkey_nations (AMERICA region nations via n1→region path)",
+          "predicate": "america_custkey_nations.test(c_nationkey)",
+          "strategy": "bitset_test",
+          "input_cardinality": 114000,
+          "output_cardinality": 22800,
+          "selectivity": 0.2,
+          "notes": "5 regions with roughly equal nations → 20% pass rate."
+        },
+        {
+          "substep": "4f",
+          "op": "join_lookup",
+          "description": "Lookup supplier via dense_pk on l_suppkey to get s_nationkey",
+          "probe_key": "l_suppkey",
+          "target": "hash_supplier_by_suppkey",
+          "index": "supplier_pk_idx",
+          "strategy": "dense_pk_array_lookup",
+          "retrieve_columns": ["s_nationkey"],
+          "input_cardinality": 22800,
+          "output_cardinality": 22800
+        },
+        {
+          "substep": "4g",
+          "op": "compute_and_aggregate",
+          "description": "Compute o_year, volume, and conditionally aggregate into thread-local accumulators",
+          "expressions": {
+            "o_year": "extract_year(o_orderdate)",
+            "volume": "l_extendedprice * (1.0 - l_discount)",
+            "is_brazil": "s_nationkey == brazil_nationkey"
+          },
+          "aggregate_into": "thread_local_agg",
+          "input_cardinality": 22800
+        }
+      ]
+    },
+    {
+      "step": 5,
+      "op": "aggregate",
+      "description": "Thread-local aggregation during callback, then merge across threads",
+      "strategy": "direct_array",
+      "group_by": ["o_year"],
+      "group_key_type": "int(o_year - 1995)",
+      "group_key_range": [0, 1],
+      "num_groups": 2,
+      "aggregates": [
+        {
+          "name": "brazil_volume",
+          "expression": "SUM(CASE WHEN s_nationkey = brazil_nationkey THEN volume ELSE 0 END)",
+          "type": "double"
+        },
+        {
+          "name": "total_volume",
+          "expression": "SUM(volume)",
+          "type": "double"
+        }
+      ],
+      "thread_local": {
+        "structure": "double[2][2]",
+        "description": "2 years × 2 accumulators (brazil_volume, total_volume). 32 bytes per thread — trivially fits in registers.",
+        "merge": "element-wise sum across all thread-local arrays"
+      },
+      "output_cardinality": 2
+    },
+    {
+      "step": 6,
+      "op": "finalize",
+      "description": "Compute mkt_share = brazil_volume / total_volume for each year",
+      "expressions": {
+        "mkt_share": "brazil_volume / total_volume"
+      },
+      "output_cardinality": 2
+    },
+    {
+      "step": 7,
+      "op": "sort_and_project",
+      "description": "Output sorted by o_year ascending, project (o_year, mkt_share)",
+      "order_by": ["o_year ASC"],
+      "strategy": "trivial_2_element_sort",
+      "notes": "Only 2 rows (1995, 1996) — sort is trivial, just emit in order."
+    }
+  ],
+  "output_schema": [
+    { "name": "o_year", "type": "int32" },
+    { "name": "mkt_share", "type": "double" }
+  ],
+  "filters": [
+    { "table": "part", "predicate": "p_type = 'ECONOMY ANODIZED STEEL'", "selectivity": 0.0067, "encoding": "dictionary" },
+    { "table": "orders", "predicate": "o_orderdate BETWEEN '1995-01-01' AND '1996-12-31'", "selectivity": 0.286, "encoding": "days_since_epoch_1970" },
+    { "table": "region", "predicate": "r_name = 'AMERICA'", "selectivity": 0.2 },
+    { "table": "nation(n1)", "predicate": "n1.n_regionkey = america_regionkey", "selectivity": 0.2 }
+  ],
+  "join_order": [
+    {
+      "step": "4a",
+      "build": "part(filtered by p_type='ECONOMY ANODIZED STEEL')",
+      "probe": "lineitem(streaming)",
+      "type": "semi",
+      "strategy": "bitset_filter",
+      "build_cardinality": 13333,
+      "probe_cardinality": 59986052,
+      "output_cardinality": 400000,
+      "notes": "Most selective join — applied first. Bitset on p_partkey (244KB, L3-resident). Single bit test per lineitem row."
+    },
+    {
+      "step": "4b-4c",
+      "build": "orders(materialized, date-filtered)",
+      "probe": "lineitem(surviving part filter)",
+      "type": "inner",
+      "strategy": "dense_pk_array_lookup",
+      "probe_cardinality": 400000,
+      "output_cardinality": 114000,
+      "notes": "O(1) array lookup via orders_pk_idx. Date filter applied as residual after lookup."
+    },
+    {
+      "step": "4d-4e",
+      "build": "customer(materialized) + nation_bitset",
+      "probe": "surviving rows",
+      "type": "inner",
+      "strategy": "dense_pk_array_lookup + bitset_filter",
+      "probe_cardinality": 114000,
+      "output_cardinality": 22800,
+      "notes": "O(1) custkey→c_nationkey lookup, then bitset test for AMERICA region nations."
+    },
+    {
+      "step": "4f",
+      "build": "supplier(materialized)",
+      "probe": "surviving rows",
+      "type": "inner",
+      "strategy": "dense_pk_array_lookup",
+      "probe_cardinality": 22800,
+      "output_cardinality": 22800,
+      "notes": "O(1) suppkey→s_nationkey lookup. All suppliers match (no filter on supplier), just need nation key for n2 name."
+    }
+  ],
+  "data_structures": {
+    "part_filter": "bitset(2000001)",
+    "america_nations_filter": "bitset(25)",
+    "brazil_nationkey": "scalar_int32",
+    "thread_local_agg": "double[2][2]",
+    "global_agg": "double[2][2]"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "scope": "callback from scan_lineitem_full — parallelism is inherited from shared scan's morsel partitioning",
+    "threads": "auto(nproc)",
+    "thread_local_state": "double[2][2] per thread (32 bytes), no contention",
+    "merge": "single-threaded element-wise sum of thread-local arrays after callback completes"
+  },
+  "indexes": [
+    { "index": "orders_pk_idx", "type": "dense_pk", "purpose": "O(1) l_orderkey → orders row_id lookup" },
+    { "index": "customer_pk_idx", "type": "dense_pk", "purpose": "O(1) o_custkey → customer row_id lookup" },
+    { "index": "part_pk_idx", "type": "dense_pk", "purpose": "Pre-build part_filter_bitset by scanning p_type column" },
+    { "index": "supplier_pk_idx", "type": "dense_pk", "purpose": "O(1) l_suppkey → supplier row_id lookup" },
+    { "index": "nation_pk_idx", "type": "dense_pk", "purpose": "Direct array access for nation dimension" }
+  ],
+  "aggregation": "array_direct",
+  "output": {
+    "order_by": ["o_year ASC"],
+    "limit": null,
+    "columns": ["o_year", "mkt_share"]
+  },
+  "execution_target": "cpp",
+  "notes": "Q8 is a 8-table join but most complexity is absorbed by shared components and dense_pk indexes. The critical optimization is applying the highly selective part filter (0.67%) first as a bitset semi-join on the streaming lineitem callback, reducing 60M rows to ~400K before any random-access lookups. All subsequent joins are O(1) dense_pk array lookups. The final aggregation has only 2 groups (years 1995-1996) and fits in registers. Total random-access lookups: ~400K orders + ~114K customer + ~22.8K supplier ≈ 537K, all into memory-resident arrays."
+}

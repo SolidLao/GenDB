@@ -1,0 +1,18 @@
+{
+  "iteration": 3,
+  "scope": "fused_scan:fused_scan_partsupp",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_partsupp",
+    "ms": 630.2,
+    "share_of_total": 0.338
+  },
+  "diagnosis": {
+    "step": "Q2+D",
+    "category": "B+D",
+    "root_cause": "Q16 scans 8M partsupp rows single-threaded using unordered_map<Key, unordered_set<int32_t>> for distinct supplier counting. Hash operations on nested containers cause heavy heap allocation and cache misses. No parallelism despite 64 available cores.",
+    "memory_footprint": "unordered_set per group: ~2000 groups x avg 50 suppliers x 40B/node = ~4MB scattered heap; unordered_map overhead ~2000 x 56B = 112KB"
+  },
+  "edit_summary": "Parallelized Q16 partsupp scan with OpenMP (64 threads). Replaced unordered_set<int> target_sizes and excluded_types with O(1) lookup arrays. Replaced per-group unordered_set<int32_t> for distinct suppkeys with bitsets (100K bits = 12.5KB each) merged via bitwise OR across threads. Pre-classified parts to avoid repeated dictionary lookups.",
+  "expected_improvement": "~95% reduction in fused_scan_partsupp latency (630ms -> ~20-30ms) from 64-way parallelism + elimination of hash container overhead. Net batch improvement ~30% (600ms savings on 2037ms total).",
+  "rationale": "See edit_rationale.md"
+}

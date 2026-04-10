@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q14",
+  "tail_node_id": "Q14_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_partkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_type"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate >= 19950901 AND l_shipdate < 19951001",
+      "selectivity": 0.012,
+      "estimated_output_rows": 720000
+    },
+    {
+      "step": 2,
+      "op": "hash_probe",
+      "on": "hash_part_by_partkey",
+      "probe_key": "l_partkey",
+      "build_key": "p_partkey",
+      "type": "inner",
+      "fetch_columns": ["p_type"],
+      "estimated_output_rows": 720000,
+      "notes": "Every lineitem has a valid partkey; 1:1 match expected"
+    },
+    {
+      "step": 3,
+      "op": "aggregate",
+      "type": "scalar_aggregate",
+      "group_by": [],
+      "aggregates": [
+        {
+          "name": "promo_sum",
+          "expr": "SUM(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice * (1 - l_discount) ELSE 0 END)",
+          "type": "double"
+        },
+        {
+          "name": "total_sum",
+          "expr": "SUM(l_extendedprice * (1 - l_discount))",
+          "type": "double"
+        }
+      ],
+      "estimated_groups": 1,
+      "notes": "No GROUP BY — single scalar output. Use thread-local accumulators merged at end."
+    },
+    {
+      "step": 4,
+      "op": "finalize",
+      "projection": [
+        {
+          "name": "promo_revenue",
+          "expr": "100.00 * promo_sum / total_sum",
+          "type": "double"
+        }
+      ]
+    }
+  ],
+  "output_schema": [
+    { "name": "promo_revenue", "type": "double" }
+  ],
+  "data_structures": {
+    "thread_local_accumulators": "pair<double,double> per thread (promo_sum, total_sum)",
+    "p_type_check": "prefix_match on p_type LIKE 'PROMO%' via strncmp or encoded prefix check"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_distribution": "morsel over scan_lineitem_full output",
+    "aggregation_merge": "thread_local_accumulate then single-threaded merge of 2 doubles per thread"
+  },
+  "indexes": [],
+  "output": {
+    "order_by": [],
+    "limit": null
+  },
+  "execution_target": "cpp",
+  "notes": "Simple tail: date filter on shared lineitem scan (~1.2% selectivity for 1 month), probe shared part hash for p_type, scalar aggregate with two SUMs, final ratio projection. No sorting or grouping needed — single-row result."
+}

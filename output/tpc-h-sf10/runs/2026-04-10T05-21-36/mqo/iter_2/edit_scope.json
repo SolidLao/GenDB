@@ -1,0 +1,17 @@
+{
+  "iteration": 2,
+  "scope": "fused_scan:fused_scan_lineitem",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_lineitem",
+    "ms": 2930.9,
+    "share_of_total": 0.555
+  },
+  "secondary_bottleneck": {
+    "region_name": "Q21_finalize",
+    "ms": 597.8,
+    "share_of_total": 0.113
+  },
+  "edit_summary": "Replaced Q18 #pragma omp atomic with thread-local hash map accumulation; parallelized Q21 finalize inner loop with OpenMP.",
+  "expected_improvement": "~15-25% batch total reduction from eliminating atomic contention (~60M CAS ops) and parallelizing Q21 finalize",
+  "rationale": "Q18 atomic on every lineitem row was the single worst hotspot inside the fused scan. Q21 finalize was the largest finalization cost."
+}

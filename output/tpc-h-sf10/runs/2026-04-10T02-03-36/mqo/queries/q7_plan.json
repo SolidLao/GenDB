@@ -1,0 +1,182 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q7",
+  "tail_node_id": "Q7_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_custkey"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_nationkey"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 0,
+      "op": "load_dimension",
+      "table": "nation",
+      "storage_path": "nation/",
+      "columns": ["n_nationkey", "n_name"],
+      "cardinality": 25,
+      "notes": "Nation is tiny (25 rows), not shared. Load directly from storage."
+    },
+    {
+      "step": 1,
+      "op": "pre_filter_build",
+      "description": "Build suppkey filter set from shared supplier hash",
+      "input": "hash_supplier_by_suppkey",
+      "predicate": "s_nationkey IN (nationkey_of('FRANCE'), nationkey_of('GERMANY'))",
+      "output": "supp_nation_filter",
+      "output_structure": "hash_set<int32>",
+      "estimated_cardinality": 8000,
+      "side_output": "suppkey_to_nationkey_map",
+      "side_output_structure": "compact_hash_map<int32,int8>",
+      "notes": "Iterate shared supplier hash, keep only suppkeys whose nationkey matches FRANCE or GERMANY. ~2/25 nations = 8% of 100K = ~8K entries. Also store suppkey→nationkey mapping for later nation-name resolution."
+    },
+    {
+      "step": 2,
+      "op": "pre_filter_build",
+      "description": "Build custkey filter set from shared customer hash",
+      "input": "hash_customer_by_custkey",
+      "predicate": "c_nationkey IN (nationkey_of('FRANCE'), nationkey_of('GERMANY'))",
+      "output": "cust_nation_filter",
+      "output_structure": "hash_set<int32>",
+      "estimated_cardinality": 120000,
+      "side_output": "custkey_to_nationkey_map",
+      "side_output_structure": "compact_hash_map<int32,int8>",
+      "notes": "Iterate shared customer hash, keep only custkeys whose nationkey matches FRANCE or GERMANY. ~2/25 = 8% of 1.5M = ~120K entries."
+    },
+    {
+      "step": 3,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate >= date_to_int('1995-01-01') AND l_shipdate <= date_to_int('1996-12-31')",
+      "selectivity": 0.286,
+      "output_cardinality": 17150000,
+      "notes": "2 years out of ~7 year range. Applied as first filter on shared lineitem scan."
+    },
+    {
+      "step": 4,
+      "op": "semi_join_filter",
+      "description": "Filter lineitem by supplier nation",
+      "probe_key": "l_suppkey",
+      "filter_set": "supp_nation_filter",
+      "strategy": "hash_set_probe",
+      "selectivity": 0.08,
+      "output_cardinality": 1372000,
+      "notes": "Probe 17.1M date-filtered lineitem rows against 8K suppkey set. Hash set fits in L1 cache (~64KB). Massive reduction."
+    },
+    {
+      "step": 5,
+      "op": "join",
+      "type": "inner",
+      "description": "Join lineitem with orders to get o_custkey",
+      "build": "scan_orders_full",
+      "probe": "lineitem(filtered)",
+      "build_key": "o_orderkey",
+      "probe_key": "l_orderkey",
+      "strategy": "direct_array",
+      "build_cardinality": 15000000,
+      "probe_cardinality": 1372000,
+      "output_cardinality": 1372000,
+      "payload_columns": ["o_custkey"],
+      "notes": "o_orderkey is dense PK (1..15M). Use direct array lookup: o_custkey_array[l_orderkey] for O(1) access. Orders scan provides the array; no hash table needed."
+    },
+    {
+      "step": 6,
+      "op": "semi_join_filter",
+      "description": "Filter by customer nation",
+      "probe_key": "o_custkey",
+      "filter_set": "cust_nation_filter",
+      "strategy": "hash_set_probe",
+      "selectivity": 0.08,
+      "output_cardinality": 109760,
+      "notes": "Probe 1.37M rows against 120K custkey set (~960KB, fits in L3)."
+    },
+    {
+      "step": 7,
+      "op": "cross_nation_filter",
+      "description": "Enforce (FRANCE,GERMANY) or (GERMANY,FRANCE) nation pair constraint",
+      "lookup_supp_nation": "suppkey_to_nationkey_map[l_suppkey]",
+      "lookup_cust_nation": "custkey_to_nationkey_map[o_custkey]",
+      "predicate": "(supp_nationkey == FRANCE_KEY AND cust_nationkey == GERMANY_KEY) OR (supp_nationkey == GERMANY_KEY AND cust_nationkey == FRANCE_KEY)",
+      "selectivity": 0.5,
+      "output_cardinality": 54880,
+      "notes": "Of 4 possible nation pairs (FF,FG,GF,GG), only 2 survive (FG,GF). 50% selectivity."
+    },
+    {
+      "step": 8,
+      "op": "compute_columns",
+      "expressions": [
+        { "name": "supp_nation", "expr": "nation_name_lookup[suppkey_to_nationkey_map[l_suppkey]]", "type": "string" },
+        { "name": "cust_nation", "expr": "nation_name_lookup[custkey_to_nationkey_map[o_custkey]]", "type": "string" },
+        { "name": "l_year", "expr": "extract_year(l_shipdate)", "type": "int32" },
+        { "name": "volume", "expr": "l_extendedprice * (1.0 - l_discount)", "type": "double" }
+      ]
+    },
+    {
+      "step": 9,
+      "op": "aggregate",
+      "strategy": "direct_array",
+      "group_by": ["supp_nation", "cust_nation", "l_year"],
+      "group_key_encoding": "composite_index: nation_pair(0=FG,1=GF) * 2 + (l_year - 1995)",
+      "max_groups": 4,
+      "aggs": [
+        { "name": "revenue", "func": "SUM", "expr": "volume" }
+      ],
+      "output_cardinality": 4,
+      "notes": "Only 4 possible groups: 2 nation pairs × 2 years (1995,1996). Use a fixed 4-element array, no hash table needed. Thread-local arrays merged at end."
+    },
+    {
+      "step": 10,
+      "op": "sort",
+      "order_by": [
+        { "column": "supp_nation", "direction": "ASC" },
+        { "column": "cust_nation", "direction": "ASC" },
+        { "column": "l_year", "direction": "ASC" }
+      ],
+      "input_cardinality": 4,
+      "notes": "Trivial sort on 4 rows. The direct_array index ordering (FG-1995, FG-1996, GF-1995, GF-1996) already matches the desired sort order if FRANCE < GERMANY lexicographically, which it does."
+    }
+  ],
+  "output_schema": [
+    { "name": "supp_nation", "type": "string" },
+    { "name": "cust_nation", "type": "string" },
+    { "name": "l_year", "type": "int32" },
+    { "name": "revenue", "type": "double" }
+  ],
+  "data_structures": {
+    "nation_lookup": "array<string>[25], indexed by n_nationkey",
+    "supp_nation_filter": "hash_set<int32>(pre_sized=8000)",
+    "cust_nation_filter": "hash_set<int32>(pre_sized=120000)",
+    "suppkey_to_nationkey_map": "compact_hash_map<int32,int8>(pre_sized=8000)",
+    "custkey_to_nationkey_map": "compact_hash_map<int32,int8>(pre_sized=120000)",
+    "orders_custkey_array": "direct_array<int32>[max_orderkey+1], from scan_orders_full",
+    "agg_accumulators": "double[4] per thread, direct-indexed"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partition_on": "scan_lineitem_full morsels",
+    "merge": "sum thread-local agg arrays (4 elements each)",
+    "notes": "Steps 0-2 are sequential setup (tiny data). Steps 3-9 run parallel over lineitem morsels. Step 5 orders lookup is read-only direct array (no contention). Thread-local 4-element agg arrays merged via simple addition."
+  },
+  "indexes": [
+    {
+      "index": "orders_dense_pk",
+      "purpose": "direct_array_lookup for o_orderkey → o_custkey"
+    }
+  ],
+  "execution_target": "cpp"
+}

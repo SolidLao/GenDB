@@ -1,0 +1,296 @@
+{
+  "version": "1.0",
+  "generated_by": "mqo-analyzer-small",
+  "batch_size": 22,
+  "shared_components": [
+    {
+      "component_id": "hash_orders_by_orderkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(orders, o_orderkey)",
+      "source_tables": [
+        "orders"
+      ],
+      "build_column": "o_orderkey",
+      "payload_columns": [
+        "o_custkey",
+        "o_orderdate",
+        "o_orderstatus",
+        "o_orderpriority",
+        "o_shippriority",
+        "o_totalprice"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "o_orderkey",
+            "type": "int32"
+          },
+          {
+            "name": "o_custkey",
+            "type": "int32"
+          },
+          {
+            "name": "o_orderdate",
+            "type": "int32"
+          },
+          {
+            "name": "o_orderstatus",
+            "type": "int8"
+          },
+          {
+            "name": "o_orderpriority",
+            "type": "uint8"
+          },
+          {
+            "name": "o_shippriority",
+            "type": "int32"
+          },
+          {
+            "name": "o_totalprice",
+            "type": "double"
+          }
+        ],
+        "row_order": "hash_keyed"
+      },
+      "cardinality_estimate": 15000000,
+      "consumers": [
+        "Q3",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q12",
+        "Q18",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 200,
+      "rationale": "Nine queries join lineitem to orders on l_orderkey=o_orderkey. Building a single 15M-entry hash table on o_orderkey with payload columns (o_custkey, o_orderdate, etc.) avoids 8 redundant hash constructions. At ~200ms per build, this saves ~1600ms total across the batch. The orders dense_pk index provides row_id lookup, but a hash with pre-loaded payload columns eliminates repeated random column reads during probe-heavy joins from the lineitem side.",
+      "notes": "Consumers Q3, Q5, Q10, Q18 may drive from orders side in some plans; the hash still enables flexible plan choice. Q4 and Q13 access orders differently (scan/LEFT JOIN) and are not consumers."
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(customer, c_custkey)",
+      "source_tables": [
+        "customer"
+      ],
+      "build_column": "c_custkey",
+      "payload_columns": [
+        "c_nationkey",
+        "c_mktsegment",
+        "c_name",
+        "c_acctbal",
+        "c_phone",
+        "c_address",
+        "c_comment"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "c_custkey",
+            "type": "int32"
+          },
+          {
+            "name": "c_nationkey",
+            "type": "int32"
+          },
+          {
+            "name": "c_mktsegment",
+            "type": "uint8"
+          },
+          {
+            "name": "c_name",
+            "type": "varlen"
+          },
+          {
+            "name": "c_acctbal",
+            "type": "double"
+          },
+          {
+            "name": "c_phone",
+            "type": "varlen"
+          },
+          {
+            "name": "c_address",
+            "type": "varlen"
+          },
+          {
+            "name": "c_comment",
+            "type": "varlen"
+          }
+        ],
+        "row_order": "hash_keyed"
+      },
+      "cardinality_estimate": 1500000,
+      "consumers": [
+        "Q3",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q10",
+        "Q18"
+      ],
+      "build_cost_estimate_ms": 35,
+      "rationale": "Six queries probe customer by c_custkey from an orders/lineitem join stream. Building one 1.5M-entry hash table once (~35ms) eliminates 5 redundant builds, saving ~175ms. Payload includes all commonly needed customer columns (c_nationkey for nation joins in Q5/Q7/Q8/Q10, c_mktsegment for Q3 filter, c_name/c_acctbal for Q10/Q18 output).",
+      "notes": "Q13 (LEFT OUTER JOIN) and Q22 (NOT EXISTS anti-join) iterate customer as the driver and do not probe this hash. Customer has a dense_pk but the hash pre-loads all payload columns for cache-friendly probing."
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "kind": "hash_build",
+      "canonical_signature": "HASH(supplier, s_suppkey)",
+      "source_tables": [
+        "supplier"
+      ],
+      "build_column": "s_suppkey",
+      "payload_columns": [
+        "s_nationkey",
+        "s_name",
+        "s_address",
+        "s_phone",
+        "s_acctbal",
+        "s_comment"
+      ],
+      "output_schema": {
+        "columns": [
+          {
+            "name": "s_suppkey",
+            "type": "int32"
+          },
+          {
+            "name": "s_nationkey",
+            "type": "int32"
+          },
+          {
+            "name": "s_name",
+            "type": "varlen"
+          },
+          {
+            "name": "s_address",
+            "type": "varlen"
+          },
+          {
+            "name": "s_phone",
+            "type": "varlen"
+          },
+          {
+            "name": "s_acctbal",
+            "type": "double"
+          },
+          {
+            "name": "s_comment",
+            "type": "varlen"
+          }
+        ],
+        "row_order": "hash_keyed"
+      },
+      "cardinality_estimate": 100000,
+      "consumers": [
+        "Q2",
+        "Q5",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q15",
+        "Q20",
+        "Q21"
+      ],
+      "build_cost_estimate_ms": 8,
+      "rationale": "Eight queries probe supplier by s_suppkey (Q5/Q7/Q8/Q9/Q21 from lineitem joins, Q2 from partsupp, Q15 from CTE, Q20 for IN-list check). Building the 100K-entry hash once (~8ms) saves 7 redundant builds (~56ms). Payload includes s_nationkey (needed by Q2/Q5/Q7/Q8/Q9/Q20/Q21 for nation joins) and output columns (s_name, s_address, s_phone, s_acctbal, s_comment).",
+      "notes": "Supplier has a dense_pk and supplier_nationkey_grouped index, but the hash bundles all payload columns for cache-friendly probing. Entire table (~6MB) fits in L3 cache."
+    }
+  ],
+  "per_query_dependencies": {
+    "Q1": [],
+    "Q2": [
+      "hash_supplier_by_suppkey"
+    ],
+    "Q3": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q4": [],
+    "Q5": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q6": [],
+    "Q7": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q8": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q9": [
+      "hash_orders_by_orderkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q10": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q11": [],
+    "Q12": [
+      "hash_orders_by_orderkey"
+    ],
+    "Q13": [],
+    "Q14": [],
+    "Q15": [
+      "hash_supplier_by_suppkey"
+    ],
+    "Q16": [],
+    "Q17": [],
+    "Q18": [
+      "hash_orders_by_orderkey",
+      "hash_customer_by_custkey"
+    ],
+    "Q19": [],
+    "Q20": [
+      "hash_supplier_by_suppkey"
+    ],
+    "Q21": [
+      "hash_orders_by_orderkey",
+      "hash_supplier_by_suppkey"
+    ],
+    "Q22": []
+  },
+  "rejected_candidates": [
+    {
+      "canonical_signature": "SCAN(lineitem)[unfiltered]",
+      "reason": "Full lineitem scan sharing considered for Q1, Q18 subquery, and other lineitem-heavy queries. However, most queries (Q8, Q9, Q17, Q19, Q20, Q21) access lineitem via selective indexes (lineitem_partkey_grouped, lineitem_suppkey_grouped, lineitem_orderkey_idx) rather than full scans. With 376GB RAM, OS page cache ensures column files are loaded once from HDD and reused across queries. Only Q1 (98.6% selectivity) and Q18's subquery perform true full scans, and they need different column sets (7 vs 2 columns), limiting sharing benefit."
+    },
+    {
+      "canonical_signature": "HASH(part, p_partkey)",
+      "reason": "Seven queries (Q2, Q8, Q9, Q14, Q16, Q17, Q19) join to part by p_partkey. However, Q2/Q8/Q9/Q16/Q17/Q19 all DRIVE from part with selective filters (p_type LIKE, p_brand =, p_name LIKE, p_size IN) and scan part directly, not probing it from the lineitem side. Only Q14 probes part from lineitem (780K probes, 1 month scan). With only 1 probe-side consumer, the hash build would not be shared."
+    },
+    {
+      "canonical_signature": "JOIN_RESULT(lineitem, orders)",
+      "reason": "Materializing the lineitem-orders join result would produce ~60M rows (every lineitem row matches exactly one order). The materialized result would consume ~3.6GB and double the I/O vs. using the hash_orders_by_orderkey component for on-the-fly probing."
+    },
+    {
+      "canonical_signature": "SCAN(lineitem)[l_shipdate:>=:1994-01-01,l_shipdate:<:1995-01-01]",
+      "reason": "Q6 and Q20 both filter lineitem by l_shipdate in [1994-01-01, 1995-01-01). However, Q20 accesses lineitem via a correlated subquery probing by (l_partkey, l_suppkey) using grouped_fk indexes, not a sequential scan. Only Q6 performs a scan (with zone map assistance). One consumer does not justify a shared component."
+    },
+    {
+      "canonical_signature": "SCAN(orders)[o_orderdate:range_3mo]",
+      "reason": "Q4 [1993-07-01, 1993-10-01) and Q10 [1993-10-01, 1994-01-01) have adjacent 3-month date ranges on orders. Merging to a 6-month superset would serve only 2 consumers, scanning ~1.17M rows (~15ms build cost). The 15ms savings does not justify the coordination overhead, especially with zone maps on o_orderdate available for each query independently."
+    },
+    {
+      "canonical_signature": "HASH(nation, n_nationkey)",
+      "reason": "Nation table has only 25 rows. Any lookup completes in <0.1ms. The accounting overhead of managing a shared component exceeds the savings."
+    },
+    {
+      "canonical_signature": "HASH(region, r_regionkey)",
+      "reason": "Region table has only 5 rows. Trivially cheap to scan or hash independently. No sharing benefit."
+    },
+    {
+      "canonical_signature": "HASH(partsupp, ps_partkey, ps_suppkey)",
+      "reason": "The storage design already includes a partsupp_composite_hash index (open-addressing hash on (ps_partkey, ps_suppkey) with 16M capacity). Building a redundant in-memory hash would duplicate existing infrastructure."
+    }
+  ]
+}

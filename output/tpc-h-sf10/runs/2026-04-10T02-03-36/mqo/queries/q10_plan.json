@@ -1,0 +1,153 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q10",
+  "tail_node_id": "Q10_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_returnflag"]
+    },
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_custkey", "o_orderdate"]
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey", "c_name", "c_address", "c_nationkey", "c_phone", "c_acctbal", "c_comment"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_orders_full",
+      "predicate": "o_orderdate >= 8674 AND o_orderdate < 8766",
+      "predicate_readable": "o_orderdate >= '1993-10-01' AND o_orderdate < '1994-01-01'",
+      "selectivity": 0.036,
+      "output_cardinality": 540000
+    },
+    {
+      "step": 2,
+      "op": "hash_build",
+      "on": "step1_filtered_orders",
+      "key": "o_orderkey",
+      "payload": ["o_custkey"],
+      "build_cardinality": 540000,
+      "notes": "Build hash table on filtered orders keyed by o_orderkey. Small enough (~12MB) to fit L3 cache margin."
+    },
+    {
+      "step": 3,
+      "op": "residual_filter_and_probe",
+      "on": "scan_lineitem_full",
+      "residual_predicate": "l_returnflag == 'R'",
+      "residual_selectivity": 0.33,
+      "probe_into": "step2_orders_hash",
+      "probe_key": "l_orderkey",
+      "output_columns": ["l_extendedprice", "l_discount", "o_custkey"],
+      "output_cardinality": 720000,
+      "notes": "Fused filter+probe: check l_returnflag='R' first (cheap int8 compare), then probe orders hash. Both sides ordered by orderkey so probe pattern is sequential-friendly."
+    },
+    {
+      "step": 4,
+      "op": "hash_probe",
+      "on": "step3_output",
+      "probe_into": "hash_customer_by_custkey",
+      "probe_key": "o_custkey",
+      "lookup_key": "c_custkey",
+      "output_columns": ["l_extendedprice", "l_discount", "c_custkey", "c_name", "c_address", "c_nationkey", "c_phone", "c_acctbal", "c_comment"],
+      "output_cardinality": 720000,
+      "notes": "Probe shared customer hash table. All 720K rows will match (every order has a customer)."
+    },
+    {
+      "step": 5,
+      "op": "direct_array_lookup",
+      "on": "step4_output",
+      "table": "nation",
+      "lookup_key": "c_nationkey",
+      "array_index_column": "n_nationkey",
+      "fetch_columns": ["n_name"],
+      "array_size": 25,
+      "output_cardinality": 720000,
+      "notes": "Nation has 25 rows. Load n_name into a flat array indexed by n_nationkey for O(1) lookup. NOT a shared component — scan nation directly (tiny table, negligible cost)."
+    },
+    {
+      "step": 6,
+      "op": "hash_aggregate",
+      "on": "step5_output",
+      "group_by": ["c_custkey"],
+      "aggregates": [
+        {
+          "name": "revenue",
+          "expr": "SUM(l_extendedprice * (1 - l_discount))",
+          "type": "double"
+        }
+      ],
+      "payload_columns": ["c_name", "c_acctbal", "n_name", "c_address", "c_phone", "c_comment"],
+      "payload_note": "These are functionally dependent on c_custkey; store from first row per group.",
+      "estimated_groups": 350000,
+      "notes": "Hash aggregate keyed by c_custkey (int32). ~350K groups, pre-size hash table to ~512K slots. Payload columns stored once per group."
+    },
+    {
+      "step": 7,
+      "op": "topk",
+      "on": "step6_output",
+      "order_by": [{"column": "revenue", "direction": "DESC"}],
+      "limit": 20,
+      "strategy": "min_heap",
+      "notes": "Maintain min-heap of size 20 during aggregation finalization. With 350K groups, heap-based top-K is optimal."
+    },
+    {
+      "step": 8,
+      "op": "project",
+      "output_columns": [
+        {"name": "c_custkey", "type": "int32"},
+        {"name": "c_name", "type": "varlen"},
+        {"name": "revenue", "type": "double"},
+        {"name": "c_acctbal", "type": "double"},
+        {"name": "n_name", "type": "string"},
+        {"name": "c_address", "type": "varlen"},
+        {"name": "c_phone", "type": "varlen"},
+        {"name": "c_comment", "type": "varlen"}
+      ]
+    }
+  ],
+  "data_structures": {
+    "orders_hash": "compact_hash_map<int32_t, int32_t>(pre_sized=768000, key=o_orderkey, value=o_custkey)",
+    "nation_lookup": "flat_array<string>(size=25, index=n_nationkey, value=n_name)",
+    "aggregation": "compact_hash_map<int32_t, AggPayload>(pre_sized=512000, key=c_custkey)",
+    "topk_heap": "min_heap<double>(size=20)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "details": {
+      "step1_filter_orders": "parallel_scan with morsel_size=65536, thread-local output vectors",
+      "step2_build_orders_hash": "single_thread_build after parallel filter (540K rows, fast)",
+      "step3_filter_probe_lineitem": "parallel_scan morsel_size=131072, each thread filters+probes independently",
+      "step4_probe_customer": "fused with step3 in same parallel loop",
+      "step5_nation_lookup": "fused with step4 in same parallel loop",
+      "step6_aggregate": "thread-local hash tables, merge at end",
+      "step7_topk": "thread-local top-20 heaps, final merge of nproc*20 candidates"
+    }
+  },
+  "indexes": [
+    {
+      "index": "orders_orderdate_zm",
+      "purpose": "skip_blocks",
+      "notes": "Zone map on o_orderdate to skip blocks outside [8674, 8766) during step1 residual filter on shared orders scan"
+    }
+  ],
+  "nation_scan": {
+    "table": "nation",
+    "columns": ["n_nationkey", "n_name"],
+    "cardinality": 25,
+    "strategy": "direct_load_to_array",
+    "notes": "Not a shared component. 25 rows, load at query init into flat array."
+  },
+  "output": {
+    "order_by": [{"column": "revenue", "direction": "DESC"}],
+    "limit": 20
+  },
+  "execution_target": "cpp"
+}

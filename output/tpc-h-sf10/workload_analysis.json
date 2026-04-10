@@ -1,0 +1,160 @@
+{
+  "hardware": {
+    "cpu_cores": "64",
+    "cache_sizes": "L1d:1MiB L1i:1MiB L2:32MiB L3:44MiB",
+    "disk_type": "hdd",
+    "memory_gb": "376",
+    "simd": "avx512"
+  },
+  "tables": {
+    "lineitem": {
+      "role": "fact", "exact_row_count": 59986052,
+      "hot_columns": ["l_shipdate","l_returnflag","l_linestatus","l_quantity","l_extendedprice","l_discount","l_tax","l_orderkey","l_partkey","l_suppkey","l_shipmode","l_shipinstruct","l_commitdate","l_receiptdate"],
+      "column_stats": {
+        "l_shipdate": {"min":"1992-01-02","max":"1998-12-01","approx_distinct":2526},
+        "l_returnflag": {"min":"A","max":"R","approx_distinct":3},
+        "l_linestatus": {"min":"F","max":"O","approx_distinct":2},
+        "l_discount": {"min":"0.00","max":"0.10","approx_distinct":11},
+        "l_quantity": {"min":"1","max":"50","approx_distinct":50},
+        "l_shipmode": {"min":"AIR","max":"TRUCK","approx_distinct":7},
+        "l_shipinstruct": {"min":"COLLECT COD","max":"TAKE BACK RETURN","approx_distinct":4}
+      }
+    },
+    "orders": {
+      "role": "fact", "exact_row_count": 15000000,
+      "hot_columns": ["o_orderkey","o_custkey","o_orderdate","o_orderpriority","o_orderstatus","o_totalprice","o_shippriority","o_comment"],
+      "column_stats": {
+        "o_orderdate": {"min":"1992-01-01","max":"1998-08-02","approx_distinct":2406},
+        "o_orderstatus": {"min":"F","max":"P","approx_distinct":3},
+        "o_orderpriority": {"min":"1-URGENT","max":"5-LOW","approx_distinct":5}
+      }
+    },
+    "customer": {
+      "role": "dimension", "exact_row_count": 1500000,
+      "hot_columns": ["c_custkey","c_nationkey","c_mktsegment","c_acctbal","c_phone","c_name","c_address","c_comment"],
+      "column_stats": {
+        "c_mktsegment": {"min":"AUTOMOBILE","max":"MACHINERY","approx_distinct":5}
+      }
+    },
+    "part": {
+      "role": "dimension", "exact_row_count": 2000000,
+      "hot_columns": ["p_partkey","p_type","p_brand","p_size","p_container","p_mfgr","p_name","p_retailprice"],
+      "column_stats": {
+        "p_type": {"min":"...","max":"...","approx_distinct":150},
+        "p_brand": {"min":"Brand#11","max":"Brand#55","approx_distinct":25},
+        "p_size": {"min":"1","max":"50","approx_distinct":50},
+        "p_container": {"min":"...","max":"...","approx_distinct":40}
+      }
+    },
+    "partsupp": {
+      "role": "fact", "exact_row_count": 8000000,
+      "hot_columns": ["ps_partkey","ps_suppkey","ps_supplycost","ps_availqty"],
+      "column_stats": {}
+    },
+    "supplier": {
+      "role": "dimension", "exact_row_count": 100000,
+      "hot_columns": ["s_suppkey","s_nationkey","s_name","s_address","s_phone","s_acctbal","s_comment"],
+      "column_stats": {}
+    },
+    "nation": {
+      "role": "dimension", "exact_row_count": 25,
+      "hot_columns": ["n_nationkey","n_name","n_regionkey"],
+      "column_stats": {"n_name": {"min":"ALGERIA","max":"VIETNAM","approx_distinct":25}}
+    },
+    "region": {
+      "role": "dimension", "exact_row_count": 5,
+      "hot_columns": ["r_regionkey","r_name"],
+      "column_stats": {"r_name": {"min":"AFRICA","max":"MIDDLE EAST","approx_distinct":5}}
+    }
+  },
+  "joins": [
+    {"left":"lineitem.l_orderkey","right":"orders.o_orderkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true,"left_max_duplicates":7},
+    {"left":"orders.o_custkey","right":"customer.c_custkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true,"left_max_duplicates":2},
+    {"left":"lineitem.l_partkey","right":"part.p_partkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"lineitem.l_suppkey","right":"supplier.s_suppkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"partsupp.ps_partkey","right":"part.p_partkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true,"left_max_duplicates":4},
+    {"left":"partsupp.ps_suppkey","right":"supplier.s_suppkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"lineitem.l_partkey,l_suppkey","right":"partsupp.ps_partkey,ps_suppkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"supplier.s_nationkey","right":"nation.n_nationkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"customer.c_nationkey","right":"nation.n_nationkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true},
+    {"left":"nation.n_regionkey","right":"region.r_regionkey","type":"FK-PK","selectivity":"high","left_unique":false,"right_unique":true}
+  ],
+  "filters": [
+    {"table":"lineitem","column":"l_shipdate","operator":"<=","selectivity":0.986,"query":"Q1"},
+    {"table":"part","column":"p_size","operator":"=","selectivity":0.02,"query":"Q2"},
+    {"table":"part","column":"p_type","operator":"LIKE '%BRASS'","selectivity":0.04,"query":"Q2"},
+    {"table":"region","column":"r_name","operator":"=","selectivity":0.2,"query":"Q2,Q5,Q8"},
+    {"table":"customer","column":"c_mktsegment","operator":"=","selectivity":0.21,"query":"Q3"},
+    {"table":"orders","column":"o_orderdate","operator":"<","selectivity":0.487,"query":"Q3"},
+    {"table":"lineitem","column":"l_shipdate","operator":">","selectivity":0.513,"query":"Q3"},
+    {"table":"orders","column":"o_orderdate","operator":"range_3mo","selectivity":0.039,"query":"Q4"},
+    {"table":"lineitem","column":"l_shipdate","operator":"range_1yr","selectivity":0.157,"query":"Q6"},
+    {"table":"lineitem","column":"l_discount","operator":"between","selectivity":0.274,"query":"Q6"},
+    {"table":"lineitem","column":"l_quantity","operator":"<","selectivity":0.457,"query":"Q6"},
+    {"table":"lineitem","column":"l_returnflag","operator":"=","selectivity":0.242,"query":"Q10"},
+    {"table":"lineitem","column":"l_shipmode","operator":"IN(2)","selectivity":0.286,"query":"Q12"},
+    {"table":"nation","column":"n_name","operator":"=","selectivity":0.04,"query":"Q7,Q11,Q20,Q21"},
+    {"table":"part","column":"p_type","operator":"=","selectivity":0.007,"query":"Q8"},
+    {"table":"part","column":"p_name","operator":"LIKE 'forest%'","selectivity":0.007,"query":"Q20"},
+    {"table":"orders","column":"o_orderstatus","operator":"=","selectivity":0.33,"query":"Q21"},
+    {"table":"customer","column":"c_phone","operator":"SUBSTRING IN(7)","selectivity":0.28,"query":"Q22"},
+    {"table":"orders","column":"o_comment","operator":"NOT LIKE '%special%requests%'","selectivity":0.994,"query":"Q13"},
+    {"table":"lineitem","column":"l_shipdate","operator":"range_1mo","selectivity":0.013,"query":"Q14"},
+    {"table":"lineitem","column":"l_shipdate","operator":"range_3mo","selectivity":0.039,"query":"Q15"},
+    {"table":"part","column":"p_brand","operator":"=","selectivity":0.04,"query":"Q17"},
+    {"table":"part","column":"p_container","operator":"=","selectivity":0.025,"query":"Q17"},
+    {"table":"lineitem","column":"l_shipmode","operator":"IN(2)","selectivity":0.286,"query":"Q19"},
+    {"table":"lineitem","column":"l_shipinstruct","operator":"=","selectivity":0.25,"query":"Q19"},
+    {"table":"part","column":"p_brand","operator":"<>","selectivity":0.96,"query":"Q16"},
+    {"table":"part","column":"p_type","operator":"NOT LIKE 'MEDIUM POLISHED%'","selectivity":0.96,"query":"Q16"},
+    {"table":"part","column":"p_size","operator":"IN(8)","selectivity":0.16,"query":"Q16"},
+    {"table":"orders","column":"o_orderdate","operator":"range_1yr","selectivity":0.157,"query":"Q5"},
+    {"table":"lineitem","column":"l_shipdate","operator":"range_2yr","selectivity":0.314,"query":"Q7"},
+    {"table":"orders","column":"o_orderdate","operator":"range_2yr","selectivity":0.314,"query":"Q8"},
+    {"table":"orders","column":"o_orderdate","operator":"range_3mo","selectivity":0.039,"query":"Q10"}
+  ],
+  "aggregations": [
+    {"group_by":["l_returnflag","l_linestatus"],"functions":["SUM(l_quantity)","SUM(l_extendedprice)","SUM(l_extendedprice*(1-l_discount))","SUM(l_extendedprice*(1-l_discount)*(1+l_tax))","AVG(l_quantity)","AVG(l_extendedprice)","AVG(l_discount)","COUNT(*)"],"query":"Q1","estimated_groups":"4"},
+    {"group_by":["l_orderkey","o_orderdate","o_shippriority"],"functions":["SUM(l_extendedprice*(1-l_discount))"],"query":"Q3","estimated_groups":"high"},
+    {"group_by":["o_orderpriority"],"functions":["COUNT(*)"],"query":"Q4","estimated_groups":"5"},
+    {"group_by":["n_name"],"functions":["SUM(l_extendedprice*(1-l_discount))"],"query":"Q5","estimated_groups":"5"},
+    {"group_by":[],"functions":["SUM(l_extendedprice*l_discount)"],"query":"Q6","estimated_groups":"1"},
+    {"group_by":["supp_nation","cust_nation","l_year"],"functions":["SUM(volume)"],"query":"Q7","estimated_groups":"4"},
+    {"group_by":["o_year"],"functions":["SUM(CASE...)","SUM(volume)"],"query":"Q8","estimated_groups":"2"},
+    {"group_by":["nation","o_year"],"functions":["SUM(amount)"],"query":"Q9","estimated_groups":"175"},
+    {"group_by":["c_custkey","c_name","c_acctbal","c_phone","n_name","c_address","c_comment"],"functions":["SUM(l_extendedprice*(1-l_discount))"],"query":"Q10","estimated_groups":"high"},
+    {"group_by":["ps_partkey"],"functions":["SUM(ps_supplycost*ps_availqty)"],"query":"Q11","estimated_groups":"high"},
+    {"group_by":["l_shipmode"],"functions":["SUM(CASE...)"],"query":"Q12","estimated_groups":"2"},
+    {"group_by":["c_count"],"functions":["COUNT(*)"],"query":"Q13","estimated_groups":"~40"},
+    {"group_by":[],"functions":["SUM(CASE...)","SUM(l_extendedprice*(1-l_discount))"],"query":"Q14","estimated_groups":"1"},
+    {"group_by":["l_suppkey"],"functions":["SUM(l_extendedprice*(1-l_discount))"],"query":"Q15","estimated_groups":"100000"},
+    {"group_by":["p_brand","p_type","p_size"],"functions":["COUNT(DISTINCT ps_suppkey)"],"query":"Q16","estimated_groups":"high"},
+    {"group_by":["c_name","c_custkey","o_orderkey","o_orderdate","o_totalprice"],"functions":["SUM(l_quantity)"],"query":"Q18","estimated_groups":"high"},
+    {"group_by":["s_name"],"functions":["COUNT(*)"],"query":"Q21","estimated_groups":"~4000"},
+    {"group_by":["cntrycode"],"functions":["COUNT(*)","SUM(c_acctbal)"],"query":"Q22","estimated_groups":"7"},
+    {"group_by":[],"functions":["SUM(l_extendedprice)/7.0"],"query":"Q17","estimated_groups":"1"},
+    {"group_by":[],"functions":["SUM(l_extendedprice*(1-l_discount))"],"query":"Q19","estimated_groups":"1"},
+    {"group_by":["c_custkey"],"functions":["COUNT(o_orderkey)"],"query":"Q13_inner","estimated_groups":"1500000"},
+    {"group_by":["l_orderkey"],"functions":["SUM(l_quantity)"],"query":"Q18_sub","estimated_groups":"15000000"}
+  ],
+  "ordering": [
+    {"columns":["l_returnflag ASC","l_linestatus ASC"],"limit":null,"query":"Q1"},
+    {"columns":["s_acctbal DESC","n_name ASC","s_name ASC","p_partkey ASC"],"limit":100,"query":"Q2"},
+    {"columns":["revenue DESC","o_orderdate ASC"],"limit":10,"query":"Q3"},
+    {"columns":["o_orderpriority ASC"],"limit":null,"query":"Q4"},
+    {"columns":["revenue DESC"],"limit":null,"query":"Q5"},
+    {"columns":["o_totalprice DESC","o_orderdate ASC"],"limit":100,"query":"Q18"},
+    {"columns":["numwait DESC","s_name ASC"],"limit":100,"query":"Q21"},
+    {"columns":["revenue DESC"],"limit":20,"query":"Q10"},
+    {"columns":["value DESC"],"limit":null,"query":"Q11"},
+    {"columns":["supplier_cnt DESC","p_brand ASC","p_type ASC","p_size ASC"],"limit":null,"query":"Q16"},
+    {"columns":["supp_nation ASC","cust_nation ASC","l_year ASC"],"limit":null,"query":"Q7"},
+    {"columns":["o_year ASC"],"limit":null,"query":"Q8"},
+    {"columns":["nation ASC","o_year DESC"],"limit":null,"query":"Q9"},
+    {"columns":["l_shipmode ASC"],"limit":null,"query":"Q12"},
+    {"columns":["custdist DESC","c_count DESC"],"limit":null,"query":"Q13"},
+    {"columns":["s_suppkey ASC"],"limit":null,"query":"Q15"},
+    {"columns":["s_name ASC"],"limit":null,"query":"Q20"},
+    {"columns":["cntrycode ASC"],"limit":null,"query":"Q22"}
+  ]
+}

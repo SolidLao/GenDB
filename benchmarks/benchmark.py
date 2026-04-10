@@ -85,8 +85,67 @@ def main():
                         help="Skip all benchmarks; read existing metrics and re-plot")
     parser.add_argument("--with-indexes", action="store_true",
                         help="Also benchmark baseline systems with GenDB-equivalent indexes")
+    parser.add_argument("--mqo-run", type=Path, default=None,
+                        help="Benchmark a GenDB MQO-mode run directory (containing mqo/mqo). "
+                             "Measures --all (batch) and --query Qi (single) paths.")
 
     args = parser.parse_args()
+
+    # MQO short-circuit: if --mqo-run is given, run MQO-mode benchmarking only
+    # and exit. This path does NOT invoke the baseline systems.
+    if args.mqo_run is not None:
+        from benchmarks.lib.gendb_mqo import is_mqo_run, run_mqo_benchmark, write_mqo_metrics
+        run_dir = args.mqo_run.resolve()
+        if not is_mqo_run(run_dir):
+            parser.error(f"--mqo-run path does not contain a compiled MQO artifact: {run_dir}/mqo/mqo")
+        # Discover query IDs from the manifest
+        manifest = run_dir / "mqo" / "manifest.json"
+        import json as _json
+        query_ids = []
+        if manifest.exists():
+            try:
+                m = _json.loads(manifest.read_text())
+                query_ids = sorted(m.get("queries", {}).keys(), key=lambda q: int(q[1:]) if q[1:].isdigit() else 0)
+            except Exception:
+                pass
+        if not query_ids:
+            # Fallback: parse queries.sql
+            from benchmarks.lib.gendb_mqo import _run_binary  # noqa
+            queries_sql = benchmarks_dir / args.benchmark / "queries.sql"
+            if queries_sql.exists():
+                import re as _re
+                for line in queries_sql.read_text().splitlines():
+                    m = _re.match(r"^--\s*Q(\d+)", line, _re.IGNORECASE)
+                    if m:
+                        query_ids.append(f"Q{m.group(1)}")
+        if not query_ids:
+            parser.error("Could not determine query IDs for the MQO run.")
+
+        compare_tool = _project_root / "src" / "gendb" / "tools" / "compare_results.py"
+        ground_truth_dir = benchmarks_dir / args.benchmark / "query_results"
+        results = run_mqo_benchmark(
+            run_dir=run_dir,
+            query_ids=query_ids,
+            mode=args.mode,
+            runs_per_query=3,
+            timeout_s=args.timeout,
+            compare_tool=compare_tool if compare_tool.exists() else None,
+            ground_truth_dir=ground_truth_dir if ground_truth_dir.exists() else None,
+        )
+        # Write metrics to the standard location
+        if args.benchmark == "tpc-h" and args.sf is not None:
+            metrics_dir = benchmarks_dir / "tpc-h" / "results" / f"sf{args.sf}" / "metrics"
+        elif args.benchmark == "sec-edgar" and args.years is not None:
+            metrics_dir = benchmarks_dir / "sec-edgar" / "results" / f"sf{args.years}" / "metrics"
+        else:
+            metrics_dir = run_dir / "mqo" / "bench_results"
+        out_path = write_mqo_metrics(metrics_dir, results)
+        print(f"\n[MQO bench] Wrote metrics to {out_path}")
+        print(f"[MQO bench] Batch mode wall_ms_mean:  {results['batch_mode'].get('wall_ms_mean')}")
+        print(f"[MQO bench] Batch mode dispatcher_total_ms_mean: {results['batch_mode'].get('dispatcher_total_ms_mean')}")
+        for qid, entry in results["single_mode"].items():
+            print(f"[MQO bench] {qid}: wall_ms_mean={entry.get('wall_ms_mean')}")
+        return
 
     benchmarks_dir = Path(__file__).parent
 

@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "queries": {
+    "Q1":  { "shared_deps": ["scan_lineitem_full"] },
+    "Q2":  { "shared_deps": ["hash_supplier_by_suppkey"] },
+    "Q3":  { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q4":  { "shared_deps": ["scan_lineitem_full"] },
+    "Q5":  { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"] },
+    "Q6":  { "shared_deps": ["scan_lineitem_full", "scan_lineitem_shipdate_1994"] },
+    "Q7":  { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey", "scan_lineitem_shipdate_1995_1996"] },
+    "Q8":  { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"] },
+    "Q9":  { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_supplier_by_suppkey"] },
+    "Q10": { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q11": { "shared_deps": ["hash_supplier_by_suppkey"] },
+    "Q12": { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey"] },
+    "Q13": { "shared_deps": ["hash_customer_by_custkey"] },
+    "Q14": { "shared_deps": ["scan_lineitem_full", "scan_lineitem_shipdate_1995_1996"] },
+    "Q15": { "shared_deps": ["scan_lineitem_full", "hash_supplier_by_suppkey", "scan_lineitem_shipdate_1995_1996"] },
+    "Q16": { "shared_deps": [] },
+    "Q17": { "shared_deps": ["scan_lineitem_full"] },
+    "Q18": { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q19": { "shared_deps": ["scan_lineitem_full"] },
+    "Q20": { "shared_deps": ["scan_lineitem_full", "scan_lineitem_shipdate_1994", "hash_supplier_by_suppkey"] },
+    "Q21": { "shared_deps": ["scan_lineitem_full", "hash_orders_by_orderkey", "hash_supplier_by_suppkey"] },
+    "Q22": { "shared_deps": [] }
+  },
+  "components": [
+    { "component_id": "scan_lineitem_full",              "kind": "filtered_scan", "fusion": "callback" },
+    { "component_id": "scan_lineitem_shipdate_1994",     "kind": "filtered_scan", "fusion": "materialize" },
+    { "component_id": "scan_lineitem_shipdate_1995_1996","kind": "filtered_scan", "fusion": "materialize" },
+    { "component_id": "hash_orders_by_orderkey",         "kind": "hash_build",    "fusion": "materialize" },
+    { "component_id": "hash_customer_by_custkey",        "kind": "hash_build",    "fusion": "materialize" },
+    { "component_id": "hash_supplier_by_suppkey",        "kind": "hash_build",    "fusion": "materialize" }
+  ]
+}

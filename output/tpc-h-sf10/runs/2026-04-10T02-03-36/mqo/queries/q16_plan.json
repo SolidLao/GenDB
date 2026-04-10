@@ -1,0 +1,154 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q16",
+  "tail_node_id": "Q16_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_comment"]
+    },
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_brand", "p_type", "p_size"]
+    },
+    {
+      "component_id": "scan_partsupp_full",
+      "used_columns": ["ps_partkey", "ps_suppkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "build_anti_join_set",
+      "on": "hash_supplier_by_suppkey",
+      "predicate": "s_comment LIKE '%Customer%Complaints%'",
+      "description": "Scan all 100K supplier rows via dense_pk array, check s_comment for pattern, collect matching s_suppkey values into bitset(100001)",
+      "output": "complaint_suppkey_bitset",
+      "estimated_matches": 4,
+      "data_structure": "bitset(100001)",
+      "parallelism": "single_thread"
+    },
+    {
+      "step": 2,
+      "op": "build_part_filter_bitset",
+      "on": "hash_part_by_partkey",
+      "predicate": "p_brand <> 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%' AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)",
+      "description": "Scan all 2M part rows via dense_pk array. p_brand and p_type are dictionary-encoded (uint8): resolve dict codes for 'Brand#45' and 'MEDIUM POLISHED*' prefix at init time, then compare codes. p_size checked against 8-element lookup array or bitset(50). Collect passing p_partkey into bitset(2000001). Also store (p_partkey -> group_key) mapping for aggregation.",
+      "output": "valid_partkey_bitset",
+      "output_secondary": "partkey_to_group_map",
+      "selectivity": 0.15,
+      "estimated_output_rows": 300000,
+      "filter_details": {
+        "p_brand_ne": {
+          "encoding": "dictionary_uint8",
+          "strategy": "resolve_dict_code_once_compare_code",
+          "selectivity": 0.96
+        },
+        "p_type_not_like": {
+          "encoding": "dictionary_uint8",
+          "strategy": "precompute_excluded_dict_codes_into_bitset",
+          "selectivity": 0.94
+        },
+        "p_size_in": {
+          "encoding": "raw_int32",
+          "strategy": "lookup_bitset_50",
+          "selectivity": 0.16
+        }
+      },
+      "data_structure": "bitset(2000001) + direct_array(2000001, uint32_t group_id)",
+      "parallelism": "single_thread"
+    },
+    {
+      "step": 3,
+      "op": "scan_filter_aggregate",
+      "on": "scan_partsupp_full",
+      "description": "Morsel-driven parallel scan of 8M partsupp rows. For each row: (1) check ps_suppkey NOT in complaint_suppkey_bitset (anti-join), (2) check ps_partkey in valid_partkey_bitset (semi-join with filtered part). Surviving rows (~1.2M): look up group_id from partkey_to_group_map[ps_partkey], then insert ps_suppkey into thread-local per-group bitset for COUNT(DISTINCT).",
+      "anti_join": {
+        "probe_column": "ps_suppkey",
+        "against": "complaint_suppkey_bitset",
+        "type": "anti",
+        "strategy": "bitset_lookup"
+      },
+      "semi_join": {
+        "probe_column": "ps_partkey",
+        "against": "valid_partkey_bitset",
+        "type": "semi",
+        "strategy": "bitset_lookup"
+      },
+      "aggregation": {
+        "group_by_source": "partkey_to_group_map[ps_partkey]",
+        "group_by_columns": ["p_brand", "p_type", "p_size"],
+        "agg_function": "COUNT(DISTINCT ps_suppkey)",
+        "strategy": "thread_local_hash_map_of_roaring_bitsets",
+        "estimated_groups": 18000,
+        "distinct_key_range": "suppkey 1..100000"
+      },
+      "estimated_input_rows": 8000000,
+      "estimated_surviving_rows": 1200000,
+      "parallelism": "morsel_driven",
+      "morsel_size": 65536
+    },
+    {
+      "step": 4,
+      "op": "aggregate_merge",
+      "description": "Merge thread-local hash_map<group_id, bitset<suppkey>> structures by OR-ing bitsets for same group_id across all threads. Then popcount each merged bitset to get supplier_cnt.",
+      "output": "merged_groups",
+      "estimated_groups": 18000,
+      "parallelism": "single_thread"
+    },
+    {
+      "step": 5,
+      "op": "sort",
+      "on": "merged_groups",
+      "order_by": [
+        {"column": "supplier_cnt", "direction": "DESC"},
+        {"column": "p_brand", "direction": "ASC"},
+        {"column": "p_type", "direction": "ASC"},
+        {"column": "p_size", "direction": "ASC"}
+      ],
+      "description": "Sort ~18K result rows. Decode p_brand and p_type dictionary codes back to strings for output and for correct lexicographic sort order. Use std::sort on materialized result vector.",
+      "estimated_rows": 18000,
+      "parallelism": "single_thread"
+    },
+    {
+      "step": 6,
+      "op": "project",
+      "columns": ["p_brand", "p_type", "p_size", "supplier_cnt"],
+      "description": "Final projection. p_brand and p_type output as decoded strings."
+    }
+  ],
+  "output_schema": [
+    {"name": "p_brand", "type": "string"},
+    {"name": "p_type", "type": "string"},
+    {"name": "p_size", "type": "int32"},
+    {"name": "supplier_cnt", "type": "int64"}
+  ],
+  "data_structures": {
+    "complaint_suppkey_bitset": "bitset(100001) indexed by s_suppkey",
+    "valid_partkey_bitset": "bitset(2000001) indexed by p_partkey",
+    "partkey_to_group_map": "direct_array(2000001, uint32_t) mapping p_partkey -> composite group_id (0 = not valid)",
+    "group_id_encoding": "composite of (p_brand_code, p_type_code, p_size) packed into uint32_t: brand_code * 256 * 64 + type_code * 64 + size_bucket",
+    "thread_local_agg": "hash_map<uint32_t group_id, dynamic_bitset(100001)> per thread",
+    "group_decode_table": "flat_array mapping group_id -> (brand_string, type_string, size_int)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_steps": [3],
+    "sequential_steps": [1, 2, 4, 5, 6],
+    "notes": "Only the partsupp scan+filter+aggregate (step 3) is parallelized — it processes 8M rows. Steps 1-2 are fast single-threaded setup (100K + 2M rows on in-memory arrays). Steps 4-6 operate on ~18K groups."
+  },
+  "memory_estimate": {
+    "complaint_bitset": "12.5 KB",
+    "partkey_bitset": "250 KB",
+    "partkey_to_group_map": "8 MB",
+    "thread_local_agg_per_thread": "18K groups * 12.5KB bitset = ~225 MB worst case per thread, but sparse allocation reduces this significantly",
+    "optimization_note": "Use compressed/sparse bitsets (roaring) for per-group suppkey tracking to reduce memory. Alternatively, since most groups have <100 distinct suppkeys, use small hash_sets that upgrade to bitsets only above threshold."
+  },
+  "indexes_used": [
+    {"index": "supplier_pk_idx", "purpose": "dense_pk array access for s_comment scan in step 1"},
+    {"index": "part_pk_idx", "purpose": "dense_pk array access for part attribute filtering in step 2"}
+  ],
+  "execution_target": "cpp"
+}

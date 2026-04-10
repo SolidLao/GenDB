@@ -1,0 +1,35 @@
+{
+  "version": "2.0",
+  "execution_model": "fused",
+  "binary": "mqo",
+  "queries": {
+    "Q1":  { "bit": 0,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q2":  { "bit": 1,  "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q3":  { "bit": 2,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk"] },
+    "Q4":  { "bit": 3,  "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [] },
+    "Q5":  { "bit": 4,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk", "supplier_pk"] },
+    "Q6":  { "bit": 5,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q7":  { "bit": 6,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk", "supplier_pk"] },
+    "Q8":  { "bit": 7,  "stages": ["index_driven_queries", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk", "supplier_pk"] },
+    "Q9":  { "bit": 8,  "stages": ["index_driven_queries", "finalize_output"], "hash_deps": ["orders_pk", "supplier_pk"] },
+    "Q10": { "bit": 9,  "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk"] },
+    "Q11": { "bit": 10, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q12": { "bit": 11, "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": ["orders_pk"] },
+    "Q13": { "bit": 12, "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [] },
+    "Q14": { "bit": 13, "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q15": { "bit": 14, "stages": ["fused_scan_lineitem", "post_scan_dependent", "finalize_output"], "hash_deps": [] },
+    "Q16": { "bit": 15, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q17": { "bit": 16, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q18": { "bit": 17, "stages": ["fused_scan_lineitem", "post_scan_dependent", "finalize_output"], "hash_deps": ["orders_pk", "customer_pk"] },
+    "Q19": { "bit": 18, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q20": { "bit": 19, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q21": { "bit": 20, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": ["orders_pk"] },
+    "Q22": { "bit": 21, "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] }
+  },
+  "stage_consumers": {
+    "fused_scan_lineitem": ["Q1", "Q3", "Q5", "Q6", "Q7", "Q10", "Q12", "Q14", "Q15", "Q18"],
+    "fused_scan_orders":   ["Q4", "Q13"],
+    "index_driven_queries": ["Q2", "Q8", "Q9", "Q11", "Q16", "Q17", "Q19", "Q20", "Q21", "Q22"],
+    "post_scan_dependent": ["Q15", "Q18"]
+  }
+}

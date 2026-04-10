@@ -1,0 +1,382 @@
+{
+  "version": "2.0",
+  "generated_by": "global-skeleton-planner-fused",
+  "execution_model": "fused",
+  "hardware_summary": {
+    "cpu_cores": 64,
+    "l3_cache_mb": 44,
+    "memory_gb": 376,
+    "disk_type": "hdd",
+    "simd": "avx512"
+  },
+  "stages": [
+    {
+      "stage_id": "hash_builds",
+      "kind": "parallel_build",
+      "description": "Build hash tables for dimension/fact tables and load tiny reference tables as arrays. All operations are independent and execute in parallel across threads.",
+      "operations": [
+        {
+          "op": "array_load",
+          "table": "nation",
+          "key_column": "n_nationkey",
+          "payload_columns": ["n_name", "n_regionkey"],
+          "consumers": ["Q2", "Q5", "Q7", "Q8", "Q9", "Q10", "Q11", "Q20", "Q21"],
+          "estimated_rows": 25,
+          "notes": "25-entry array indexed by n_nationkey (0..24). Direct array lookup, no hashing. Fits in a single cache line pair."
+        },
+        {
+          "op": "array_load",
+          "table": "region",
+          "key_column": "r_regionkey",
+          "payload_columns": ["r_name"],
+          "consumers": ["Q2", "Q5", "Q8"],
+          "estimated_rows": 5,
+          "notes": "5-entry array indexed by r_regionkey (0..4). Direct array lookup."
+        },
+        {
+          "op": "hash_build",
+          "table": "orders",
+          "key_column": "o_orderkey",
+          "payload_columns": ["o_custkey", "o_orderdate", "o_orderstatus", "o_orderpriority", "o_shippriority", "o_totalprice"],
+          "consumers": ["Q3", "Q5", "Q7", "Q8", "Q9", "Q10", "Q12", "Q18", "Q21"],
+          "estimated_rows": 15000000,
+          "build_cost_estimate_ms": 200,
+          "notes": "15M-entry open-addressing hash table (~480MB with payload). Fits in RAM. Keyed on o_orderkey (sparse, max=60M, ~25% fill). Used as probe target during fused lineitem scan and by index-driven queries Q8/Q9/Q21."
+        },
+        {
+          "op": "hash_build",
+          "table": "customer",
+          "key_column": "c_custkey",
+          "payload_columns": ["c_nationkey", "c_mktsegment", "c_name", "c_acctbal", "c_phone", "c_address", "c_comment"],
+          "consumers": ["Q3", "Q5", "Q7", "Q8", "Q10", "Q18"],
+          "estimated_rows": 1500000,
+          "build_cost_estimate_ms": 35,
+          "notes": "1.5M-entry hash table (~120MB with varlen payload). Fits comfortably in RAM. Probed via o_custkey obtained from orders hash lookups."
+        },
+        {
+          "op": "hash_build",
+          "table": "supplier",
+          "key_column": "s_suppkey",
+          "payload_columns": ["s_nationkey", "s_name", "s_address", "s_phone", "s_acctbal", "s_comment"],
+          "consumers": ["Q2", "Q5", "Q7", "Q8", "Q9", "Q15", "Q20", "Q21"],
+          "estimated_rows": 100000,
+          "build_cost_estimate_ms": 8,
+          "notes": "100K-entry hash table (~6MB). Fits entirely in L3 cache. Probed by l_suppkey during fused lineitem scan and by index-driven queries."
+        }
+      ]
+    },
+    {
+      "stage_id": "fused_scan_lineitem",
+      "kind": "fused_scan",
+      "table": "lineitem",
+      "description": "Single-pass sequential scan of lineitem (~60M rows). Inside the loop body, each row is simultaneously fed to 10 consumer branches via bitmask-guarded if-blocks. This is the highest-value fused stage — it eliminates 9 redundant scans of the largest table.",
+      "estimated_rows": 59986052,
+      "columns_needed": [
+        "l_orderkey", "l_partkey", "l_suppkey", "l_quantity",
+        "l_extendedprice", "l_discount", "l_tax",
+        "l_returnflag", "l_linestatus",
+        "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipmode"
+      ],
+      "parallelism_notes": "Parallelize with OpenMP across 65536-row blocks. Each thread maintains thread-local accumulators for all active consumer branches. Merge thread-local state after the loop. With 64 cores and ~60M rows, each thread processes ~937K rows. Column files are mmap'd; OS page cache on 376GB RAM ensures single HDD read.",
+      "consumer_branches": [
+        {
+          "query": "Q1",
+          "filter": "l_shipdate <= date('1998-09-02')",
+          "action": "accumulate: group by (l_returnflag, l_linestatus) → sum(qty), sum(price), sum(disc_price), sum(charge), avg(qty), avg(price), avg(disc), count(*). Only 4 groups — use fixed-size array accumulator.",
+          "needs_columns": ["l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 0.986,
+          "notes": "Near-full scan (98.6% pass). Cheapest branch — no hash probes, just filter + accumulate."
+        },
+        {
+          "query": "Q3",
+          "filter": "l_shipdate > date('1995-03-15')",
+          "action": "probe orders hash by l_orderkey → check o_orderdate < date('1995-03-15') → probe customer hash by o_custkey → check c_mktsegment = 'BUILDING' → accumulate SUM(l_extendedprice * (1 - l_discount)) group by (l_orderkey, o_orderdate, o_shippriority). Top-10 heap on revenue DESC.",
+          "needs_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey"],
+          "estimated_selectivity": 0.513,
+          "notes": "Two hash probes per qualifying row. Use top-10 min-heap to avoid materializing all groups."
+        },
+        {
+          "query": "Q5",
+          "filter": "(no lineitem-level filter; all rows processed)",
+          "action": "probe orders hash by l_orderkey → check o_orderdate in [date('1994-01-01'), date('1995-01-01')) → get o_custkey → probe customer hash → get c_nationkey → check nation[c_nationkey].regionkey matches target region → probe supplier hash by l_suppkey → check s_nationkey == c_nationkey (same nation) → accumulate SUM(l_extendedprice * (1 - l_discount)) group by n_name.",
+          "needs_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"],
+          "estimated_selectivity": 1.0,
+          "notes": "All 60M rows enter the branch, but orders date filter (15.7%) and region filter (~20%) rapidly prune. Three hash probes only for rows passing orders date check. ~5 output groups."
+        },
+        {
+          "query": "Q6",
+          "filter": "l_shipdate >= date('1994-01-01') AND l_shipdate < date('1995-01-01') AND l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24",
+          "action": "accumulate: sum(l_extendedprice * l_discount). Single scalar accumulator.",
+          "needs_columns": ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 0.02,
+          "notes": "Highly selective compound filter (~2%). No hash probes. Cheapest branch after Q1."
+        },
+        {
+          "query": "Q7",
+          "filter": "l_shipdate >= date('1995-01-01') AND l_shipdate <= date('1996-12-31')",
+          "action": "probe supplier hash by l_suppkey → get s_nationkey → probe orders hash by l_orderkey → get o_custkey → probe customer hash → get c_nationkey → check (s_nation, c_nation) pair matches (FRANCE,GERMANY) or (GERMANY,FRANCE) → accumulate SUM(l_extendedprice * (1 - l_discount)) group by (supp_nation, cust_nation, extract_year(l_shipdate)).",
+          "needs_columns": ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"],
+          "estimated_selectivity": 0.314,
+          "notes": "Date filter narrows to 31.4%. Then nation-pair check (2/625 = 0.32%) yields very few qualifying rows. ~4 output groups. Early-exit after supplier nation check to avoid unnecessary orders+customer probes."
+        },
+        {
+          "query": "Q10",
+          "filter": "l_returnflag = 'R'",
+          "action": "probe orders hash by l_orderkey → check o_orderdate in [date('1993-10-01'), date('1994-01-01')) → get o_custkey → probe customer hash → get (c_name, c_acctbal, c_phone, c_nationkey, c_address, c_comment) → lookup nation[c_nationkey].n_name → accumulate SUM(l_extendedprice * (1 - l_discount)) group by (c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment). Top-20 heap on revenue DESC.",
+          "needs_columns": ["l_orderkey", "l_extendedprice", "l_discount", "l_returnflag"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey"],
+          "estimated_selectivity": 0.242,
+          "notes": "returnflag='R' filter (24.2%) then orders date filter (3.9%) → ~0.9% of rows reach aggregation. High-cardinality grouping — use hash map accumulator with top-20 heap."
+        },
+        {
+          "query": "Q12",
+          "filter": "l_shipmode IN ('MAIL', 'SHIP') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate AND l_receiptdate >= date('1994-01-01') AND l_receiptdate < date('1995-01-01')",
+          "action": "probe orders hash by l_orderkey → get o_orderpriority → accumulate SUM(CASE WHEN o_orderpriority IN ('1-URGENT','2-HIGH') THEN 1 ELSE 0) and SUM(CASE ... ELSE 1) group by l_shipmode.",
+          "needs_columns": ["l_orderkey", "l_shipmode", "l_commitdate", "l_receiptdate", "l_shipdate"],
+          "depends_on_hash": ["hash_orders_by_orderkey"],
+          "estimated_selectivity": 0.045,
+          "notes": "Compound filter ~4.5% selectivity. One hash probe per qualifying row. 2 output groups (fixed array accumulator)."
+        },
+        {
+          "query": "Q14",
+          "filter": "l_shipdate >= date('1995-09-01') AND l_shipdate < date('1995-10-01')",
+          "action": "lookup part type via dense_pk: p_type_col[l_partkey - 1] → accumulate SUM(CASE WHEN p_type LIKE 'PROMO%' THEN l_extendedprice*(1-l_discount) ELSE 0) and SUM(l_extendedprice*(1-l_discount)). Two scalar accumulators.",
+          "needs_columns": ["l_partkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 0.013,
+          "notes": "Very selective date filter (1.3% → ~780K rows). Part lookup via dense_pk array (no hash needed). p_type column mmap'd for random access."
+        },
+        {
+          "query": "Q15",
+          "filter": "l_shipdate >= date('1996-01-01') AND l_shipdate < date('1996-04-01')",
+          "action": "accumulate SUM(l_extendedprice * (1 - l_discount)) group by l_suppkey. Post-scan: find max revenue, then probe supplier hash for matching supplier(s).",
+          "needs_columns": ["l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 0.039,
+          "notes": "3.9% selectivity → ~2.3M rows. 100K groups (one per supplier). Use dense array accumulator indexed by l_suppkey. Post-scan max-finding + supplier hash probe deferred to finalize stage."
+        },
+        {
+          "query": "Q18_sub",
+          "filter": "(none — all rows processed)",
+          "action": "accumulate SUM(l_quantity) group by l_orderkey → post-scan: filter HAVING SUM > 300 → emit qualifying orderkey set for Q18_main in post_scan_dependent stage.",
+          "needs_columns": ["l_orderkey", "l_quantity"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 1.0,
+          "notes": "Full scan, 15M groups (one per orderkey). Use dense array accumulator indexed by orderkey (max 60M, ~480MB for doubles). HAVING > 300 is very selective — typically yields ~57 qualifying orders at SF10."
+        }
+      ]
+    },
+    {
+      "stage_id": "fused_scan_orders",
+      "kind": "fused_scan",
+      "table": "orders",
+      "description": "Single-pass sequential scan of orders (~15M rows). Two consumer branches. Can execute concurrently with fused_scan_lineitem (independent data, no cross-dependencies).",
+      "estimated_rows": 15000000,
+      "columns_needed": ["o_orderkey", "o_custkey", "o_orderdate", "o_orderpriority", "o_comment"],
+      "parallelism_notes": "Parallelize with OpenMP across 65536-row blocks. Each thread maintains thread-local accumulators. Q4 needs per-thread local priority counters (5 buckets). Q13 needs per-thread custkey→count maps (or dense array since custkey ≤ 1.5M). Merge after loop.",
+      "can_parallel_with": ["fused_scan_lineitem", "index_driven_queries"],
+      "consumer_branches": [
+        {
+          "query": "Q4",
+          "filter": "o_orderdate >= date('1993-07-01') AND o_orderdate < date('1993-10-01')",
+          "action": "for each qualifying order, probe lineitem_orderkey_idx to get lineitem row range, then scan those rows checking l_commitdate < l_receiptdate. If any match (EXISTS), increment count for o_orderpriority. 5-bucket array accumulator.",
+          "needs_columns": ["o_orderkey", "o_orderdate", "o_orderpriority"],
+          "depends_on_hash": [],
+          "uses_indexes": ["lineitem_orderkey_idx"],
+          "estimated_selectivity": 0.039,
+          "notes": "3.9% orders pass date filter (~585K). For each, lineitem_orderkey_idx gives ~4 lineitem rows to check. Zone maps on o_orderdate can skip blocks."
+        },
+        {
+          "query": "Q13",
+          "filter": "o_comment NOT LIKE '%special%requests%'",
+          "action": "count qualifying orders per o_custkey into dense array[1..1500000]. Post-scan: histogram the counts (including 0 for customers with no qualifying orders) → group by c_count, count(*).",
+          "needs_columns": ["o_custkey", "o_comment"],
+          "depends_on_hash": [],
+          "estimated_selectivity": 0.994,
+          "notes": "Near-full scan (99.4% pass comment filter). Dense custkey array accumulator (~6MB). Post-scan: iterate all 1.5M customer slots to build histogram (including 0-count customers via LEFT OUTER JOIN semantics). ~40 output groups."
+        }
+      ]
+    },
+    {
+      "stage_id": "index_driven_queries",
+      "kind": "parallel_execute",
+      "description": "Queries that use selective index access patterns on fact tables. Each query runs independently and in parallel. Can execute concurrently with fused scan stages (they only share read-only hash tables and mmap'd column files).",
+      "can_parallel_with": ["fused_scan_lineitem", "fused_scan_orders"],
+      "operations": [
+        {
+          "query": "Q2",
+          "strategy": "scan part (p_size = 15 AND p_type LIKE '%BRASS') → for each matching part, probe partsupp_partkey_idx → for each (ps_partkey, ps_suppkey), probe supplier hash → get s_nationkey → lookup nation → check region = 'EUROPE' → track min ps_supplycost per part → output top-100 by (s_acctbal DESC, n_name, s_name, p_partkey)",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "partsupp_partkey_idx"],
+          "depends_on_hash": ["hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 1600,
+          "notes": "p_size=15 (2%) × p_type LIKE '%BRASS' (4%) → ~1600 parts. Each part has 4 partsupp entries → 6400 lookups. Very fast."
+        },
+        {
+          "query": "Q8",
+          "strategy": "scan part (p_type = 'ECONOMY ANODIZED STEEL') → for each matching part, probe lineitem_partkey_grouped index → for each lineitem row, probe orders hash → check o_orderdate in [1995-01-01, 1996-12-31] → get o_custkey → probe customer hash → get c_nationkey → check nation→region='AMERICA' → probe supplier hash by l_suppkey → get s_nationkey → lookup nation → accumulate SUM(volume) and SUM(CASE nation='BRAZIL') by o_year",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "lineitem_partkey_grouped"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 14000,
+          "notes": "p_type='ECONOMY ANODIZED STEEL' (0.7%) → ~14K parts → ~420K lineitem rows via grouped FK index. Much cheaper than full 60M scan."
+        },
+        {
+          "query": "Q9",
+          "strategy": "scan part (p_name LIKE '%green%') → for each matching part, probe lineitem_partkey_grouped index → for each lineitem row, probe orders hash (get o_orderdate for year) → probe supplier hash (get s_nationkey) → probe partsupp_composite_hash by (l_partkey, l_suppkey) for ps_supplycost → lookup nation → accumulate SUM(l_extendedprice*(1-l_discount) - ps_supplycost*l_quantity) group by (nation, o_year)",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "lineitem_partkey_grouped", "partsupp_composite_hash"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 14000,
+          "notes": "p_name LIKE '%green%' (~0.7%) → ~14K parts → ~420K lineitem rows. partsupp_composite_hash provides O(1) lookup for supply cost. ~175 output groups."
+        },
+        {
+          "query": "Q11",
+          "strategy": "lookup nation for target nation (e.g., 'GERMANY') → get nationkey → use supplier_nationkey_grouped index to find suppliers in that nation → for each supplier, use partsupp_suppkey_grouped index → accumulate SUM(ps_supplycost * ps_availqty) group by ps_partkey. Also compute global total for HAVING threshold (0.0001 of total).",
+          "drives_from": "nation",
+          "indexes_used": ["supplier_nationkey_grouped", "partsupp_suppkey_grouped"],
+          "depends_on_hash": [],
+          "estimated_driving_rows": 4000,
+          "notes": "1 nation → ~4000 suppliers → ~320K partsupp rows. Fully index-driven. ~260K qualifying groups after HAVING filter."
+        },
+        {
+          "query": "Q16",
+          "strategy": "scan part (p_brand != 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%' AND p_size IN (49,14,23,45,19,3,36,9)) → for each matching part, probe partsupp_partkey_idx → collect distinct ps_suppkey per (p_brand, p_type, p_size) excluding blacklisted suppliers (s_comment LIKE '%Customer%Complaints%'). Build supplier blacklist first from supplier scan.",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "partsupp_partkey_idx"],
+          "depends_on_hash": [],
+          "estimated_driving_rows": 295000,
+          "notes": "~14.7% of parts pass combined filter → ~295K parts → 1.18M partsupp rows. Pre-build small bitset of blacklisted suppliers from supplier table scan."
+        },
+        {
+          "query": "Q17",
+          "strategy": "scan part (p_brand = 'Brand#23' AND p_container = 'MED BOX') → for each matching part, probe lineitem_partkey_grouped index → compute AVG(l_quantity) for that part → re-scan lineitem rows for part, filter l_quantity < 0.2 * avg → accumulate SUM(l_extendedprice) / 7.0",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "lineitem_partkey_grouped"],
+          "depends_on_hash": [],
+          "estimated_driving_rows": 800,
+          "notes": "p_brand (4%) × p_container (2.5%) → ~2K parts. Two-pass per part: compute avg, then filter. ~60K lineitem rows total."
+        },
+        {
+          "query": "Q19",
+          "strategy": "scan part with three OR'd (p_brand, p_container, p_size) filter combinations → for each matching part, probe lineitem_partkey_grouped index → check l_shipmode IN ('AIR','AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON' AND l_quantity range per brand group → accumulate SUM(l_extendedprice * (1 - l_discount))",
+          "drives_from": "part",
+          "indexes_used": ["part_pk_idx", "lineitem_partkey_grouped"],
+          "depends_on_hash": [],
+          "estimated_driving_rows": 6000,
+          "notes": "Three brand/container/size filter groups. ~6K matching parts → ~180K lineitem rows to check. Single scalar accumulator."
+        },
+        {
+          "query": "Q20",
+          "strategy": "lookup nation for target nation → use supplier_nationkey_grouped → get supplier set S. Scan part (p_name LIKE 'forest%') → get part set P. For each (s,p) in S×P that exists in partsupp (via composite hash), probe lineitem with partkey+suppkey grouped indexes, filter l_shipdate in [1994-01-01, 1995-01-01), compute SUM(l_quantity). Check if ps_availqty > 0.5 * SUM. Collect qualifying supplier names.",
+          "drives_from": "supplier+part",
+          "indexes_used": ["supplier_nationkey_grouped", "partsupp_composite_hash", "lineitem_partkey_grouped"],
+          "depends_on_hash": ["hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 4000,
+          "notes": "~4000 suppliers in nation, ~14K parts matching 'forest%'. partsupp composite hash filters to valid (s,p) pairs (~560). Correlated lineitem subquery via index."
+        },
+        {
+          "query": "Q21",
+          "strategy": "lookup nation for target nation → use supplier_nationkey_grouped → for each supplier, probe lineitem_suppkey_grouped → for each lineitem row (l1), probe orders hash → check o_orderstatus = 'F' → check EXISTS another lineitem (l2) for same order with l2.l_suppkey != l1.l_suppkey (via lineitem_orderkey_idx) → check NOT EXISTS l3 with l3.l_suppkey != l1.l_suppkey AND l3.l_receiptdate > l3.l_commitdate → accumulate COUNT(*) group by s_name. Top-100 by (numwait DESC, s_name ASC).",
+          "drives_from": "supplier",
+          "indexes_used": ["supplier_nationkey_grouped", "lineitem_suppkey_grouped", "lineitem_orderkey_idx"],
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 4000,
+          "notes": "~4000 suppliers → ~2.4M lineitem rows via suppkey index. Orders o_orderstatus='F' filter (~33%) and multi-supplier existence checks are the main cost. Top-100 heap."
+        },
+        {
+          "query": "Q22",
+          "strategy": "First pass: scan customer, filter c_phone substring IN (13,31,23,29,30,18,17) AND c_acctbal > 0 → compute AVG(c_acctbal). Second pass: scan customer with same phone filter AND c_acctbal > avg → for each, probe custkey_to_orders index → check NOT EXISTS (anti-join). Accumulate COUNT(*) and SUM(c_acctbal) group by cntrycode (phone prefix).",
+          "drives_from": "customer",
+          "indexes_used": ["customer_pk_idx", "custkey_to_orders"],
+          "depends_on_hash": [],
+          "estimated_driving_rows": 420000,
+          "notes": "Two-pass over customer (1.5M rows × 28% phone filter). Second pass checks ~420K customers for order existence via custkey_to_orders index. 7 output groups."
+        }
+      ]
+    },
+    {
+      "stage_id": "post_scan_dependent",
+      "kind": "parallel_execute",
+      "description": "Queries whose main logic depends on intermediate results produced by fused_scan_lineitem. Must execute after fused_scan_lineitem completes.",
+      "depends_on": ["fused_scan_lineitem"],
+      "operations": [
+        {
+          "query": "Q18_main",
+          "strategy": "From Q18_sub qualifying orderkey set (~57 orders with SUM(l_quantity) > 300) → for each orderkey: probe orders hash → get (o_custkey, o_orderdate, o_totalprice) → probe customer hash → get (c_name) → probe lineitem_orderkey_idx → collect all lineitem rows for output detail → accumulate SUM(l_quantity). Output top-100 by (o_totalprice DESC, o_orderdate ASC).",
+          "depends_on_result": "Q18_sub",
+          "depends_on_hash": ["hash_orders_by_orderkey", "hash_customer_by_custkey"],
+          "indexes_used": ["lineitem_orderkey_idx"],
+          "estimated_driving_rows": 57,
+          "notes": "Tiny driving set (~57 orders). ~228 lineitem detail rows. Effectively instant."
+        },
+        {
+          "query": "Q15_final",
+          "strategy": "From Q15 revenue-per-supplier array (100K entries) → find global max revenue → scan array for supplier(s) matching max → probe supplier hash for output columns (s_suppkey, s_name, s_address, s_phone, total_revenue).",
+          "depends_on_result": "Q15",
+          "depends_on_hash": ["hash_supplier_by_suppkey"],
+          "estimated_driving_rows": 1,
+          "notes": "Linear scan of 100K-entry array to find max, then one supplier hash probe. Effectively instant."
+        }
+      ]
+    },
+    {
+      "stage_id": "finalize_output",
+      "kind": "finalize",
+      "description": "Per-query finalization: sort, limit, format, write CSV. Each query's finalization is independent. Can parallelize across queries using thread pool.",
+      "operations": [
+        { "query": "Q1",  "action": "sort by (l_returnflag ASC, l_linestatus ASC) → output CSV. 4 rows." },
+        { "query": "Q2",  "action": "sort by (s_acctbal DESC, n_name ASC, s_name ASC, p_partkey ASC), LIMIT 100 → output CSV." },
+        { "query": "Q3",  "action": "top-10 already maintained by heap during scan → sort by (revenue DESC, o_orderdate ASC), LIMIT 10 → output CSV." },
+        { "query": "Q4",  "action": "sort by (o_orderpriority ASC) → output CSV. 5 rows." },
+        { "query": "Q5",  "action": "sort by (revenue DESC) → output CSV. ~5 rows." },
+        { "query": "Q6",  "action": "output single-row CSV. No sort needed." },
+        { "query": "Q7",  "action": "sort by (supp_nation ASC, cust_nation ASC, l_year ASC) → output CSV. 4 rows." },
+        { "query": "Q8",  "action": "compute ratio per year, sort by (o_year ASC) → output CSV. 2 rows." },
+        { "query": "Q9",  "action": "sort by (nation ASC, o_year DESC) → output CSV. ~175 rows." },
+        { "query": "Q10", "action": "top-20 already maintained by heap → sort by (revenue DESC), LIMIT 20 → output CSV." },
+        { "query": "Q11", "action": "sort by (value DESC) → output CSV. Filter HAVING value > 0.0001 * global_sum." },
+        { "query": "Q12", "action": "sort by (l_shipmode ASC) → output CSV. 2 rows." },
+        { "query": "Q13", "action": "histogram from custkey counts → sort by (custdist DESC, c_count DESC) → output CSV. ~40 rows." },
+        { "query": "Q14", "action": "compute ratio (promo_revenue / total_revenue * 100) → output single-row CSV." },
+        { "query": "Q15", "action": "output from Q15_final result → sort by s_suppkey ASC → output CSV." },
+        { "query": "Q16", "action": "sort by (supplier_cnt DESC, p_brand ASC, p_type ASC, p_size ASC) → output CSV." },
+        { "query": "Q17", "action": "compute avg_yearly = sum / 7.0 → output single-row CSV." },
+        { "query": "Q18", "action": "from Q18_main result → sort by (o_totalprice DESC, o_orderdate ASC), LIMIT 100 → output CSV." },
+        { "query": "Q19", "action": "output single-row CSV. No sort needed." },
+        { "query": "Q20", "action": "sort by (s_name ASC) → output CSV." },
+        { "query": "Q21", "action": "top-100 already maintained by heap → sort by (numwait DESC, s_name ASC), LIMIT 100 → output CSV." },
+        { "query": "Q22", "action": "sort by (cntrycode ASC) → output CSV. 7 rows." }
+      ]
+    }
+  ],
+  "query_stage_mask": {
+    "Q1":  { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q2":  { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": ["hash_supplier_by_suppkey"] },
+    "Q3":  { "stages": ["hash_builds", "fused_scan_lineitem", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q4":  { "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [] },
+    "Q5":  { "stages": ["hash_builds", "fused_scan_lineitem", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"] },
+    "Q6":  { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q7":  { "stages": ["hash_builds", "fused_scan_lineitem", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"] },
+    "Q8":  { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey", "hash_supplier_by_suppkey"] },
+    "Q9":  { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_supplier_by_suppkey"] },
+    "Q10": { "stages": ["hash_builds", "fused_scan_lineitem", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q11": { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q12": { "stages": ["hash_builds", "fused_scan_lineitem", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey"] },
+    "Q13": { "stages": ["fused_scan_orders", "finalize_output"], "hash_deps": [] },
+    "Q14": { "stages": ["fused_scan_lineitem", "finalize_output"], "hash_deps": [] },
+    "Q15": { "stages": ["hash_builds", "fused_scan_lineitem", "post_scan_dependent", "finalize_output"], "hash_deps": ["hash_supplier_by_suppkey"] },
+    "Q16": { "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q17": { "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q18": { "stages": ["hash_builds", "fused_scan_lineitem", "post_scan_dependent", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_customer_by_custkey"] },
+    "Q19": { "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] },
+    "Q20": { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": ["hash_supplier_by_suppkey"] },
+    "Q21": { "stages": ["hash_builds", "index_driven_queries", "finalize_output"], "hash_deps": ["hash_orders_by_orderkey", "hash_supplier_by_suppkey"] },
+    "Q22": { "stages": ["index_driven_queries", "finalize_output"], "hash_deps": [] }
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q22",
+  "tail_node_id": "Q22_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_custkey"],
+      "notes": "Ensures orders data is loaded so custkey_to_orders grouped_fk index is usable for NOT EXISTS check"
+    },
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_phone", "c_acctbal"],
+      "notes": "Iterate all 1.5M customer rows for scalar subquery and main filter+aggregate pass"
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scalar_subquery",
+      "description": "Compute AVG(c_acctbal) over customer WHERE c_acctbal > 0.00 AND SUBSTRING(c_phone,1,2) IN ('13','31','23','29','30','18','17')",
+      "source": "hash_customer_by_custkey",
+      "iterate": "all_customer_rows",
+      "columns_needed": ["c_phone", "c_acctbal"],
+      "filter": "c_acctbal > 0.0 AND phone_prefix_2char IN {'13','31','23','29','30','18','17'}",
+      "aggregation": "running_sum_and_count",
+      "output": "avg_acctbal_scalar",
+      "estimated_qualifying_rows": 300000,
+      "notes": "Single sequential pass over 1.5M customer rows. Extract first 2 chars of c_phone varlen, check membership in 7-element set (use lookup table or small hash). Accumulate sum and count, divide at end."
+    },
+    {
+      "step": 2,
+      "op": "anti_join_via_index",
+      "description": "For each qualifying customer, check NOT EXISTS in orders using custkey_to_orders grouped_fk index",
+      "source": "hash_customer_by_custkey",
+      "anti_join_index": "custkey_to_orders",
+      "anti_join_check": "offsets[custkey+1] == offsets[custkey]",
+      "filter_before_anti_join": "SUBSTRING(c_phone,1,2) IN ('13','31','23','29','30','18','17') AND c_acctbal > avg_acctbal_scalar",
+      "columns_needed": ["c_phone", "c_acctbal"],
+      "estimated_input_rows": 1500000,
+      "estimated_after_phone_filter": 420000,
+      "estimated_after_acctbal_filter": 210000,
+      "estimated_after_anti_join": 63000,
+      "notes": "Second pass over 1.5M customer rows. Apply phone prefix filter first (28% selectivity), then c_acctbal > avg (50% selectivity), then anti-join via custkey_to_orders index O(1) lookup (~30% of remaining survive). This avoids scanning 15M orders rows entirely."
+    },
+    {
+      "step": 3,
+      "op": "aggregate",
+      "description": "GROUP BY cntrycode (SUBSTRING(c_phone,1,2)), compute COUNT(*) and SUM(c_acctbal)",
+      "strategy": "direct_array",
+      "group_by": ["cntrycode"],
+      "aggregates": [
+        {"func": "COUNT", "alias": "numcust"},
+        {"func": "SUM", "col": "c_acctbal", "alias": "totacctbal"}
+      ],
+      "num_groups": 7,
+      "fused_with_step": 2,
+      "data_structure": "fixed_array_7_buckets",
+      "notes": "Fuse aggregation into the step 2 loop. Map each 2-char phone prefix to bucket index 0-6 via small lookup table. Each bucket holds {count: int64, sum: double}. Only 7 groups so no hash table needed — direct array of 112 bytes total."
+    },
+    {
+      "step": 4,
+      "op": "sort_and_output",
+      "description": "ORDER BY cntrycode ASC",
+      "input_rows": 7,
+      "strategy": "trivial_sort",
+      "output_columns": [
+        {"name": "cntrycode", "type": "char[2]"},
+        {"name": "numcust", "type": "int64"},
+        {"name": "totacctbal", "type": "double"}
+      ],
+      "notes": "7 rows — just sort bucket array by country code string. Essentially free."
+    }
+  ],
+  "output_schema": [
+    {"name": "cntrycode", "type": "char[2]"},
+    {"name": "numcust", "type": "int64"},
+    {"name": "totacctbal", "type": "double"}
+  ],
+  "indexes": [
+    {
+      "index": "custkey_to_orders",
+      "type": "grouped_fk",
+      "purpose": "anti_join_existence_check",
+      "files": ["custkey_to_orders_offsets.bin", "custkey_to_orders_rows.bin", "custkey_to_orders_meta.txt"],
+      "notes": "Only offsets array needed — check offsets[custkey+1] == offsets[custkey] for NOT EXISTS. rows array not accessed."
+    },
+    {
+      "index": "customer_pk_idx",
+      "type": "dense_pk",
+      "purpose": "sequential_iteration",
+      "notes": "Customer has dense_pk with max_key=1500000, enabling iteration over all rows by index 0..1499999"
+    }
+  ],
+  "data_structures": {
+    "phone_prefix_lookup": "fixed_array[100] mapping 2-digit int to bucket_id (0-6) or -1, populated at init from set {'13','17','18','23','29','30','31'}",
+    "scalar_accumulator": "struct { double sum; int64_t count; } for AVG computation in step 1",
+    "agg_buckets": "array[7] of struct { int64_t count; double sum; } — 112 bytes total, fits in L1 cache"
+  },
+  "parallelism": {
+    "strategy": "two_pass_sequential",
+    "pass1_threads": 1,
+    "pass2_threads": 1,
+    "notes": "Customer is only 1.5M rows with varlen c_phone access. Two lightweight sequential passes (avg computation, then filter+anti-join+aggregate) complete in ~10-20ms each. Parallelism overhead would exceed savings. The custkey_to_orders index lookup is random access but fits in memory. Total work is dominated by c_phone varlen decoding."
+  },
+  "execution_notes": {
+    "phone_prefix_extraction": "Read first 2 bytes of c_phone varlen string, convert to 2-digit integer (e.g., '13' -> 13), use as index into phone_prefix_lookup array",
+    "scan_orders_dependency": "scan_orders_full must complete before step 2 to ensure custkey_to_orders index offsets are valid in memory. However, step 1 (avg computation) can begin as soon as hash_customer_by_custkey is ready.",
+    "memory_estimate": "custkey_to_orders offsets array: ~6MB (1.5M+1 int32 entries). Customer columns (c_phone, c_acctbal): already loaded by shared component. Working memory: <1KB for accumulators."
+  },
+  "execution_target": "cpp"
+}

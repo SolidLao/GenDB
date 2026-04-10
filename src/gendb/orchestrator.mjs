@@ -48,12 +48,12 @@ const COMPARE_TOOL_PATH = resolve(__dirname, "tools", "compare_results.py");
 const UTILS_PATH = resolve(__dirname, "utils");
 
 import { defaults, getProviderConfig } from "./gendb.config.mjs";
-import { config as workloadAnalyzerConfig } from "./agents/workload-analyzer/index.mjs";
-import { config as storageDesignerConfig } from "./agents/storage-index-designer/index.mjs";
-import { config as queryOptimizerConfig } from "./agents/query-optimizer/index.mjs";
-import { config as codeGeneratorConfig } from "./agents/code-generator/index.mjs";
-import { config as queryPlannerConfig } from "./agents/query-planner/index.mjs";
-import { config as memoryManagerConfig } from "./agents/memory-manager/index.mjs";
+import { config as workloadAnalyzerConfig } from "./agents/common/workload-analyzer/index.mjs";
+import { config as storageDesignerConfig } from "./agents/common/storage-index-designer/index.mjs";
+import { config as queryOptimizerConfig } from "./agents/single-query-mode/query-optimizer/index.mjs";
+import { config as codeGeneratorConfig } from "./agents/single-query-mode/code-generator/index.mjs";
+import { config as queryPlannerConfig } from "./agents/single-query-mode/query-planner/index.mjs";
+import { config as memoryManagerConfig } from "./agents/common/memory-manager/index.mjs";
 import {
   initMemory,
   classifyQuery,
@@ -118,6 +118,13 @@ function parseArgs(argv) {
     agentProvider: defaults.agentProvider,
     memoryDir: defaults.memoryDir,
     reoptimize: null,  // --reoptimize <queryId> to force re-optimization
+    // MQO-mode options (see src/gendb/orchestrator/mqo.mjs)
+    optimizationMode: "single",                                 // "single" | "mqo"
+    mqoAnalyzerThreshold: defaults.mqo?.analyzerThreshold ?? 30,
+    mqoMaxIterations: defaults.mqo?.optimizer?.maxIterations ?? 5,
+    mqoStallThreshold: defaults.mqo?.optimizer?.stallThreshold ?? 5,
+    mqoMinImprovement: defaults.mqo?.optimizer?.minImprovement ?? 0.02,
+    mqoRegressionSlack: defaults.mqo?.optimizer?.regressionSlack ?? 0.05,
   };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === "--schema" && argv[i + 1]) args.schema = resolve(argv[++i]);
@@ -137,6 +144,15 @@ function parseArgs(argv) {
     if (argv[i] === "--memory-dir" && argv[i + 1]) args.memoryDir = argv[++i];
     if (argv[i] === "--no-memory") args.memoryDir = null;
     if (argv[i] === "--reoptimize" && argv[i + 1]) args.reoptimize = argv[++i];
+    if (argv[i] === "--optimization-mode" && argv[i + 1]) args.optimizationMode = argv[++i];
+    if (argv[i] === "--mqo-analyzer-threshold" && argv[i + 1]) args.mqoAnalyzerThreshold = parseInt(argv[++i], 10);
+    if (argv[i] === "--mqo-max-iterations" && argv[i + 1]) args.mqoMaxIterations = parseInt(argv[++i], 10);
+    if (argv[i] === "--mqo-stall-threshold" && argv[i + 1]) args.mqoStallThreshold = parseInt(argv[++i], 10);
+    if (argv[i] === "--mqo-min-improvement" && argv[i + 1]) args.mqoMinImprovement = parseFloat(argv[++i]);
+    if (argv[i] === "--mqo-regression-slack" && argv[i + 1]) args.mqoRegressionSlack = parseFloat(argv[++i]);
+  }
+  if (args.optimizationMode !== "single" && args.optimizationMode !== "mqo") {
+    throw new Error(`Invalid --optimization-mode: ${args.optimizationMode} (expected "single" or "mqo")`);
   }
   if (args.useSkills === undefined) args.useSkills = defaults.useSkills;
   // Resolve schema/queries from benchmark dir if not explicitly provided
@@ -637,7 +653,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
   const analyzerSystemPrompt = await readFile(workloadAnalyzerConfig.promptPath, "utf-8");
   const workloadAnalysisPath = resolve(runDir, "workload_analysis.json");
 
-  const waTemplatePath = resolve(__dirname, "agents/workload-analyzer/user-prompt.md");
+  const waTemplatePath = resolve(__dirname, "agents/common/workload-analyzer/user-prompt.md");
   const waTemplate = readFileSync(waTemplatePath, 'utf-8');
   const analyzerUserPrompt = renderTemplate(waTemplate, {
     schema: schema.trim(),
@@ -692,7 +708,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
   // Parse queries so we can pass them to the designer
   const parsedQueries = parseQueryFile(queries);
 
-  const sdTemplatePath = resolve(__dirname, "agents/storage-index-designer/user-prompt.md");
+  const sdTemplatePath = resolve(__dirname, "agents/common/storage-index-designer/user-prompt.md");
   const sdTemplate = readFileSync(sdTemplatePath, 'utf-8');
   const queriesSection = parsedQueries.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``).join('\n\n');
   const designerUserPrompt = renderTemplate(sdTemplate, {
@@ -751,7 +767,7 @@ async function runOfflineStorageOptimization(args, runDir, schema, queries) {
   for (const q of parsedQueries) {
     await mkdir(resolve(runDir, "queries", q.id), { recursive: true });
   }
-  const sdPass2TemplatePath = resolve(__dirname, "agents/storage-index-designer/user-prompt-pass2.md");
+  const sdPass2TemplatePath = resolve(__dirname, "agents/common/storage-index-designer/user-prompt-pass2.md");
   const sdPass2Template = readFileSync(sdPass2TemplatePath, 'utf-8');
   const sdPass2UserPrompt = renderTemplate(sdPass2Template, {
     storage_design_path: storageDesignPath,
@@ -1303,7 +1319,7 @@ async function runQueryFullPipeline(
     try {
       console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Query Planner`);
 
-      const qpTemplatePath = resolve(__dirname, "agents/query-planner/user-prompt.md");
+      const qpTemplatePath = resolve(__dirname, "agents/single-query-mode/query-planner/user-prompt.md");
       const qpTemplate = readFileSync(qpTemplatePath, 'utf-8');
       const qpUserPrompt = renderTemplate(qpTemplate, {
         query_id: queryId,
@@ -1358,7 +1374,7 @@ async function runQueryFullPipeline(
     // --- Template-native parameterized code generation ---
     console.log(`\n[Orchestrator] [${queryId}] Iteration 0: Code Generator (template-native${templateParams.length ? `, ${templateParams.length} params` : ""})`);
 
-    const cgTemplatePath = resolve(__dirname, "agents/code-generator/user-prompt.md");
+    const cgTemplatePath = resolve(__dirname, "agents/single-query-mode/code-generator/user-prompt.md");
     const cgTemplate = readFileSync(cgTemplatePath, 'utf-8');
 
     // Format storage_extensions from initial plan for Code Generator (if planner included them)
@@ -1817,7 +1833,7 @@ async function runQueryFullPipeline(
 
     await semaphore.acquire();
     try {
-      const qoTemplatePath = resolve(__dirname, "agents/query-optimizer/user-prompt.md");
+      const qoTemplatePath = resolve(__dirname, "agents/single-query-mode/query-optimizer/user-prompt.md");
       const qoTemplate = readFileSync(qoTemplatePath, 'utf-8');
       const qoUserPrompt = renderTemplate(qoTemplate, {
         query_id: queryId,
@@ -1882,7 +1898,7 @@ async function runQueryFullPipeline(
       console.log(`[Orchestrator] [${queryId}] Iteration ${iteration}: Code Generator (implementing revised plan)`);
       await semaphore.acquire();
       try {
-        const cgTemplatePath = resolve(__dirname, "agents/code-generator/user-prompt.md");
+        const cgTemplatePath = resolve(__dirname, "agents/single-query-mode/code-generator/user-prompt.md");
         const cgTemplate = readFileSync(cgTemplatePath, 'utf-8');
 
         // Build performance context for CG so it knows what to prioritize
@@ -2799,6 +2815,7 @@ async function main() {
   console.log(`[Orchestrator] Agent Provider:      ${args.agentProvider}`);
   console.log(`[Orchestrator] Agent Models:        ${JSON.stringify(activeProviderCfg.agentModels)}`);
   console.log(`[Orchestrator] Effort Levels:       ${JSON.stringify(activeProviderCfg.agentEffortLevels)}`);
+  console.log(`[Orchestrator] Optimization Mode:   ${args.optimizationMode}${args.optimizationMode === "mqo" ? " (Multiple Query Optimization)" : " (per-query independent)"}`);
   console.log(`[Orchestrator] Optimization Target: ${args.optimizationTarget}`);
   const runLabel = args.optimizationTarget === 'hot' ? `${defaults.optimizationRuns} hot` : `${defaults.optimizationRuns} cold`;
   console.log(`[Orchestrator] Optimization Runs:   ${runLabel}`);
@@ -2899,7 +2916,7 @@ async function main() {
         : "";
 
       const analyzerSystemPrompt = await readFile(workloadAnalyzerConfig.promptPath, "utf-8");
-      const waTemplatePath = resolve(__dirname, "agents/workload-analyzer/user-prompt.md");
+      const waTemplatePath = resolve(__dirname, "agents/common/workload-analyzer/user-prompt.md");
       const waTemplate = readFileSync(waTemplatePath, 'utf-8');
       const analyzerUserPrompt = renderTemplate(waTemplate, {
         schema: schema.trim(),
@@ -2930,7 +2947,7 @@ async function main() {
         const newQueriesSectionForStorage = newQueries.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``).join('\n\n');
         const existingQueriesSectionForStorage = skippedQueries.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``).join('\n\n');
 
-        const sdExtendTemplatePath = resolve(__dirname, "agents/storage-index-designer/user-prompt-extend.md");
+        const sdExtendTemplatePath = resolve(__dirname, "agents/common/storage-index-designer/user-prompt-extend.md");
         const sdExtendTemplate = readFileSync(sdExtendTemplatePath, 'utf-8');
         const sdExtendUserPrompt = renderTemplate(sdExtendTemplate, {
           existing_storage_design_path: storageDesignPath,
@@ -3017,7 +3034,7 @@ async function main() {
         const queriesSection = queriesNeedingPass2.map(q => `### ${q.id}\n\`\`\`sql\n${q.sql}\n\`\`\``).join('\n\n');
 
         const designerSystemPrompt = await readFile(storageDesignerConfig.promptPath, "utf-8");
-        const sdPass2TemplatePath = resolve(__dirname, "agents/storage-index-designer/user-prompt-pass2.md");
+        const sdPass2TemplatePath = resolve(__dirname, "agents/common/storage-index-designer/user-prompt-pass2.md");
         const sdPass2Template = readFileSync(sdPass2TemplatePath, 'utf-8');
         const pass2IngestDir = getIngestDir(runDir);
         await mkdir(pass2IngestDir, { recursive: true });
@@ -3055,15 +3072,21 @@ async function main() {
     // --- Retrieve memory context for Phase 2 (per-query) ---
     // Memory context is retrieved inside runQueryFullPipeline via args.memoryDir
 
-    // Phase 2: Online Per-Query Parallel Optimization
-    await runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath);
+    // Phase 2: branch on --optimization-mode
+    if (args.optimizationMode === "mqo") {
+      const { runMqoPhase2 } = await import("./orchestrator/mqo.mjs");
+      await runMqoPhase2(args, runDir, workloadAnalysisPath, storageDesignPath, recordAgentTelemetry);
+    } else {
+      // Default: per-query independent optimization
+      await runPerQueryParallelOptimization(args, runDir, workloadAnalysisPath, storageDesignPath);
+    }
 
     // Phase 3: Memory Manager (Post-Run Differential Learning)
     if (memoryReady && args.memoryDir) {
       console.log("\n[Orchestrator] ========== PHASE 3: MEMORY MANAGER ==========\n");
       try {
         const mmSystemPrompt = await readFile(memoryManagerConfig.promptPath, "utf-8");
-        const mmTemplatePath = resolve(__dirname, "agents/memory-manager/user-prompt.md");
+        const mmTemplatePath = resolve(__dirname, "agents/common/memory-manager/user-prompt.md");
         const mmTemplate = readFileSync(mmTemplatePath, 'utf-8');
 
         // Gather existing strategies for deduplication context

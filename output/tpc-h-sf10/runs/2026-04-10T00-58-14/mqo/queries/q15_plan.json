@@ -1,0 +1,110 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q15",
+  "tail_node_id": "Q15_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_shipdate_1995_1996",
+      "used_columns": ["l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_name", "s_address", "s_phone"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_shipdate_1995_1996",
+      "predicate": "l_shipdate >= 19960101 AND l_shipdate < 19960401",
+      "selectivity": 0.125,
+      "estimated_output_rows": 2140000,
+      "notes": "3 months out of 24-month shared scan range"
+    },
+    {
+      "step": 2,
+      "op": "aggregate",
+      "input": "step_1_output",
+      "group_by": ["l_suppkey"],
+      "aggs": [
+        {
+          "name": "total_revenue",
+          "func": "SUM",
+          "expr": "l_extendedprice * (1.0 - l_discount)"
+        }
+      ],
+      "strategy": "direct_array",
+      "array_size": 100001,
+      "key_range": [1, 100000],
+      "estimated_groups": 100000,
+      "notes": "l_suppkey is dense integer 1..100000; direct array = 100K * 8 bytes = 800KB, fits in L3 cache. Use per-thread local arrays then merge to avoid contention."
+    },
+    {
+      "step": 3,
+      "op": "scalar_aggregate",
+      "input": "step_2_output",
+      "aggs": [
+        {
+          "name": "max_revenue",
+          "func": "MAX",
+          "expr": "total_revenue"
+        }
+      ],
+      "notes": "Single pass over 100K aggregated entries to find max total_revenue"
+    },
+    {
+      "step": 4,
+      "op": "filter",
+      "input": "step_2_output",
+      "predicate": "total_revenue = max_revenue",
+      "estimated_output_rows": 1,
+      "notes": "Fuse with step 3 in a single pass: find max, then scan again to collect matching supplier_no(s). Alternatively two-pass."
+    },
+    {
+      "step": 5,
+      "op": "hash_probe",
+      "input": "step_4_output",
+      "hash_table": "hash_supplier_by_suppkey",
+      "probe_key": "l_suppkey",
+      "build_key": "s_suppkey",
+      "type": "inner",
+      "fetch_columns": ["s_suppkey", "s_name", "s_address", "s_phone"],
+      "estimated_output_rows": 1,
+      "notes": "Probe shared supplier hash table for the winning supplier(s). Extremely few probes (typically 1)."
+    },
+    {
+      "step": 6,
+      "op": "sort",
+      "input": "step_5_output",
+      "order_by": [{"column": "s_suppkey", "direction": "ASC"}],
+      "estimated_input_rows": 1,
+      "notes": "Trivial sort on ~1 row; likely no-op"
+    },
+    {
+      "step": 7,
+      "op": "project",
+      "columns": ["s_suppkey", "s_name", "s_address", "s_phone", "total_revenue"]
+    }
+  ],
+  "output_schema": [
+    {"name": "s_suppkey", "type": "int32"},
+    {"name": "s_name", "type": "string"},
+    {"name": "s_address", "type": "string"},
+    {"name": "s_phone", "type": "string"},
+    {"name": "total_revenue", "type": "double"}
+  ],
+  "data_structures": {
+    "revenue_agg": "direct_array(100001, double) per-thread with merge",
+    "max_scan": "single_pass_scalar"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "parallel_steps": [1, 2],
+    "serial_steps": [3, 4, 5, 6, 7],
+    "threads": "auto(nproc)",
+    "notes": "Steps 1-2 parallelized via morsel-driven processing on shared scan output; each thread maintains a local revenue array then merges. Steps 3-7 are serial on small data (100K groups → ~1 row)."
+  },
+  "execution_target": "cpp"
+}

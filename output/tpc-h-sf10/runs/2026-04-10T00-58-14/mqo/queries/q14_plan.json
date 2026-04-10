@@ -1,0 +1,87 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q14",
+  "tail_node_id": "Q14_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_shipdate_1995_1996",
+      "used_columns": ["l_partkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    }
+  ],
+  "local_scans": [
+    {
+      "table": "part",
+      "columns": ["p_partkey", "p_type"],
+      "row_count": 2000000,
+      "notes": "p_type is dict-encoded uint8 (150 entries, 25 start with PROMO). p_partkey is dense [1,2000000]."
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "build_direct_array",
+      "description": "Load p_type dict codes into uint8 direct_array[2000001] indexed by p_partkey. Pre-compute a 150-bit promo_bitset where bit i is set iff dict entry i starts with 'PROMO'.",
+      "source_table": "part",
+      "array_key": "p_partkey",
+      "array_value": "p_type (dict code, uint8)",
+      "array_size": 2000001,
+      "promo_dict_codes": [0, 5, 7, 15, 20, 26, 27, 39, 54, 56, 62, 63, 66, 75, 78, 79, 82, 96, 113, 118, 123, 131, 132, 134, 145],
+      "promo_dict_count": 25,
+      "total_dict_count": 150
+    },
+    {
+      "step": 2,
+      "op": "residual_filter",
+      "on": "scan_lineitem_shipdate_1995_1996",
+      "predicate": "l_shipdate >= 19950901 AND l_shipdate < 19951001",
+      "input_cardinality": 18800000,
+      "output_cardinality": 783000,
+      "selectivity": 0.042,
+      "notes": "Shared scan covers [1995-01-01, 1996-12-31]. Residual narrows to [1995-09-01, 1995-10-01). Dates stored as int32 YYYYMMDD."
+    },
+    {
+      "step": 3,
+      "op": "fused_join_aggregate",
+      "description": "For each row surviving residual filter: (a) lookup type_code = type_array[l_partkey], (b) compute revenue = l_extendedprice * (1 - l_discount), (c) accumulate total_sum += revenue, (d) if promo_bitset[type_code] then promo_sum += revenue. Thread-local double accumulators, no hash table needed.",
+      "join_type": "inner",
+      "join_strategy": "direct_array_lookup",
+      "build_side": "part (direct_array from step 1)",
+      "probe_side": "filtered lineitem (step 2 output)",
+      "probe_cardinality": 783000,
+      "aggregation": "scalar",
+      "accumulators": [
+        {"name": "promo_sum", "type": "double", "expr": "CASE WHEN promo_bitset[type_array[l_partkey]] THEN l_extendedprice * (1 - l_discount) ELSE 0 END"},
+        {"name": "total_sum", "type": "double", "expr": "l_extendedprice * (1 - l_discount)"}
+      ],
+      "notes": "Fuse join lookup + conditional aggregation into single pass. No materialization of join result. Direct array lookup is O(1) with perfect cache behavior for sequential partkeys."
+    },
+    {
+      "step": 4,
+      "op": "finalize",
+      "description": "Merge thread-local (promo_sum, total_sum) pairs. Compute promo_revenue = 100.0 * promo_sum / total_sum.",
+      "output_expression": "100.00 * promo_sum / total_sum AS promo_revenue"
+    }
+  ],
+  "output_schema": [
+    {"name": "promo_revenue", "type": "double"}
+  ],
+  "data_structures": {
+    "type_lookup": "direct_array<uint8>[2000001] indexed by p_partkey",
+    "promo_bitset": "bitset<150> (one bit per dict entry)",
+    "accumulators": "thread_local<double>[2] (promo_sum, total_sum)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scope": "step 2+3 fused: parallel morsels over shared scan output; step 1: single-thread load (2MB, trivial); step 4: single-thread merge",
+    "morsel_size": 16384
+  },
+  "memory_estimate": {
+    "type_array": "2 MB",
+    "accumulators": "< 1 KB",
+    "total": "~2 MB"
+  },
+  "indexes": [],
+  "notes": "Extremely lightweight tail. The key optimization is fusing the join and aggregation: since we only need p_type to decide promo vs non-promo, we store just the uint8 dict code in a direct array (2MB, fits in L3 cache). The PROMO check becomes a bitset test on 150 entries. No hash table, no materialized join output. The entire tail is a single streaming pass over ~783K rows with O(1) lookups."
+}

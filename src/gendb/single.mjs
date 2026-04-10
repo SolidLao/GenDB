@@ -34,7 +34,7 @@ import {
   setAgentProvider,
   getAgentProviderName,
 } from "./shared.mjs";
-import { config as singleAgentConfig } from "./agents/single-agent/index.mjs";
+import { config as singleAgentConfig } from "./agents/single-agent-mode/index.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

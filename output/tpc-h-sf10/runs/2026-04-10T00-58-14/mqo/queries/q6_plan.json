@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q6",
+  "tail_node_id": "Q6_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_shipdate_1994",
+      "used_columns": ["l_quantity", "l_extendedprice", "l_discount"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_shipdate_1994",
+      "predicates": [
+        { "column": "l_discount", "op": ">=", "value": 0.05, "type": "double" },
+        { "column": "l_discount", "op": "<=", "value": 0.07, "type": "double" },
+        { "column": "l_quantity", "op": "<", "value": 24, "type": "double" }
+      ],
+      "input_cardinality": 9400000,
+      "selectivity": 0.13,
+      "output_cardinality": 1220000,
+      "notes": "Shipdate range already applied by shared scan. Only discount range and quantity filter remain. Evaluate all three predicates in a single fused pass with short-circuit evaluation; discount predicates first (cheaper branch, higher combined selectivity ~28%) then quantity."
+    },
+    {
+      "step": 2,
+      "op": "scalar_aggregate",
+      "input": "step_1_output",
+      "aggs": [
+        {
+          "name": "revenue",
+          "function": "SUM",
+          "expression": "l_extendedprice * l_discount",
+          "type": "double"
+        }
+      ],
+      "strategy": "thread_local_accumulate_then_merge",
+      "notes": "No GROUP BY — each thread maintains a single double accumulator. Final merge sums across threads (trivial). Use Kahan summation for numerical stability on ~1.2M multiply-accumulate operations."
+    },
+    {
+      "step": 3,
+      "op": "project",
+      "columns": [
+        { "name": "revenue", "type": "double", "source": "step_2_output.revenue" }
+      ]
+    }
+  ],
+  "output_schema": [
+    { "name": "revenue", "type": "double" }
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "morsel_size": 65536,
+    "notes": "Shared scan delivers morsels of ~64K rows. Each thread applies residual filters and accumulates into a thread-local double. Final merge is a single reduction across thread accumulators — negligible cost. No synchronization needed during the hot loop."
+  },
+  "data_structures": {
+    "accumulator": "thread_local_double_array[nthreads]",
+    "notes": "One double per thread, cache-line padded to avoid false sharing. Total memory: 64 threads * 64 bytes = 4KB."
+  },
+  "memory_estimate_bytes": 4096,
+  "notes": "Extremely lightweight tail. The shared scan does the heavy lifting (HDD I/O + shipdate filtering). This tail is pure CPU: three cheap column comparisons + one multiply-accumulate per surviving row. Entire tail fits in L1 cache. Expected wall-clock contribution < 20ms on 64 cores."
+}

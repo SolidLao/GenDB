@@ -1,0 +1,128 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q21",
+  "tail_node_id": "Q21_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_orders_full",
+      "used_columns": ["o_orderkey", "o_orderstatus"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_name", "s_nationkey"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "nation",
+      "predicate": "n_name = 'SAUDI ARABIA'",
+      "output_columns": ["n_nationkey"],
+      "estimated_output_rows": 1,
+      "notes": "Tiny table (25 rows), single match → extract one nationkey scalar"
+    },
+    {
+      "step": 2,
+      "op": "probe_shared_hash",
+      "on": "hash_supplier_by_suppkey",
+      "action": "extract_filtered_entries",
+      "predicate": "s_nationkey = <sa_nationkey from step 1>",
+      "output": "sa_supplier_map",
+      "output_type": "hash_map<int32_t suppkey, string s_name>",
+      "estimated_output_rows": 4000,
+      "notes": "Iterate shared supplier hash table, filter by SA nationkey, build lookup map of SA suppliers"
+    },
+    {
+      "step": 3,
+      "op": "residual_filter",
+      "on": "scan_orders_full",
+      "predicate": "o_orderstatus = 'F'",
+      "selectivity": 0.49,
+      "output": "f_orders_bitset",
+      "output_type": "bitset<60000001>",
+      "estimated_output_rows": 7300000,
+      "notes": "Scan shared orders output, set bits for orderkeys with status F. Bitset indexed by o_orderkey (max 60M), ~7.5MB memory. Orders are dense PKs so bitset is ideal."
+    },
+    {
+      "step": 4,
+      "op": "sequential_scan_with_grouped_processing",
+      "table": "lineitem",
+      "scan_columns": ["l_orderkey", "l_suppkey", "l_receiptdate", "l_commitdate"],
+      "scan_bytes_estimate": "960MB (4 cols × 4 bytes × 60M rows)",
+      "index_used": "lineitem_orderkey_idx",
+      "processing_mode": "orderkey_group_streaming",
+      "description": "Single sequential pass over lineitem, processing rows in orderkey-group batches. Lineitem is physically sorted by l_orderkey (dense_range index confirms this). For each orderkey group:",
+      "per_group_logic": [
+        "1. Skip group if orderkey NOT in f_orders_bitset (fast bitset lookup)",
+        "2. For qualifying F-order groups, collect per-row: (suppkey, is_late) where is_late = (l_receiptdate > l_commitdate)",
+        "3. Identify l1 candidates: rows where suppkey ∈ sa_supplier_map AND is_late = true",
+        "4. For each l1 candidate, check EXISTS: group has at least one row with suppkey ≠ l1.suppkey",
+        "5. For each l1 candidate passing EXISTS, check NOT EXISTS: no other row in group has (suppkey ≠ l1.suppkey AND is_late = true)",
+        "6. For each row passing all checks: increment thread-local aggregation[s_name]++"
+      ],
+      "estimated_f_order_groups": 7300000,
+      "estimated_avg_group_size": 4,
+      "estimated_l1_candidates": 120000,
+      "estimated_final_matches": 40000
+    },
+    {
+      "step": 5,
+      "op": "aggregate_merge",
+      "strategy": "hash_group_by",
+      "group_by": ["s_name"],
+      "aggs": [{"func": "COUNT", "alias": "numwait"}],
+      "input": "thread-local hash_maps from step 4",
+      "merge": "sum counts across thread-local maps",
+      "estimated_groups": 4000,
+      "notes": "~4000 SA supplier names. Merge per-thread maps into single global map."
+    },
+    {
+      "step": 6,
+      "op": "topk_sort",
+      "order_by": [
+        {"column": "numwait", "direction": "DESC"},
+        {"column": "s_name", "direction": "ASC"}
+      ],
+      "limit": 100,
+      "strategy": "partial_sort",
+      "notes": "Only 4000 groups → full sort is fine, no need for heap-based top-K"
+    }
+  ],
+  "output_schema": [
+    {"name": "s_name", "type": "varchar"},
+    {"name": "numwait", "type": "int64"}
+  ],
+  "data_structures": {
+    "sa_nationkey": "scalar int32_t",
+    "sa_supplier_map": "hash_map<int32_t, std::string_view>(pre_sized=4096)",
+    "f_orders_bitset": "bitset<60000001>",
+    "lineitem_group_buffer": "thread_local small_vector<std::pair<int32_t,bool>, 8> (suppkey, is_late)",
+    "aggregation": "thread_local hash_map<std::string_view, int64_t>(pre_sized=4096)"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partitioning": "lineitem scan partitioned by orderkey ranges across threads; each thread processes contiguous orderkey groups",
+    "morsel_size": 65536,
+    "thread_local_agg": true,
+    "merge_strategy": "sequential_merge_4000_groups",
+    "notes": "Steps 1-3 are single-threaded (tiny inputs). Step 4 lineitem scan is parallel with thread-local aggregation. Step 5 merge and step 6 sort are single-threaded (small output)."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_orderkey_idx",
+      "type": "dense_range",
+      "purpose": "Confirms physical sort order by l_orderkey; enables group-boundary detection during sequential scan and morsel partitioning by orderkey range"
+    }
+  ],
+  "memory_estimate": {
+    "f_orders_bitset": "7.5MB",
+    "sa_supplier_map": "256KB",
+    "lineitem_scan_buffer": "64MB (morsel buffers across threads)",
+    "thread_local_agg_maps": "2MB (64 threads × 4000 entries × 8 bytes)",
+    "total": "~74MB"
+  },
+  "execution_target": "cpp"
+}

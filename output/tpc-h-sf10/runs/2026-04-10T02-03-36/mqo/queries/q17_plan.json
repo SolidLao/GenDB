@@ -1,0 +1,90 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q17",
+  "tail_node_id": "Q17_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_part_by_partkey",
+      "used_columns": ["p_partkey", "p_brand", "p_container"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "hash_part_by_partkey",
+      "predicate": "p_brand = 'Brand#23' AND p_container = 'MED BOX'",
+      "selectivity": 0.001,
+      "output": "qualifying_partkeys",
+      "output_cardinality": 2000,
+      "notes": "Scan the dense part array (2M entries), collect partkeys matching brand+container into a flat vector. ~1/25 brands * 1/40 containers ≈ 0.1%."
+    },
+    {
+      "step": 2,
+      "op": "indexed_gather",
+      "index": "lineitem_partkey_grouped",
+      "probe_keys": "qualifying_partkeys",
+      "columns_read": ["l_quantity", "l_extendedprice"],
+      "output": "matched_lineitem_rows",
+      "output_cardinality": 60000,
+      "notes": "For each qualifying partkey, use the grouped index (offsets+row_ids) to gather l_quantity and l_extendedprice. ~30 rows per partkey * ~2000 partkeys = ~60K rows. Rows are naturally grouped by partkey from the index structure."
+    },
+    {
+      "step": 3,
+      "op": "per_group_correlated_filter_agg",
+      "input": "matched_lineitem_rows",
+      "description": "Two-phase per-partkey processing (correlated subquery decorrelation)",
+      "phase_a": {
+        "op": "aggregate_per_partkey",
+        "agg": "AVG(l_quantity)",
+        "output": "threshold = 0.2 * AVG(l_quantity) per partkey"
+      },
+      "phase_b": {
+        "op": "filter_and_accumulate",
+        "predicate": "l_quantity < threshold",
+        "agg": "SUM(l_extendedprice)",
+        "output": "partial_sum per partkey"
+      },
+      "notes": "Since index groups rows by partkey, process each group independently: first pass computes avg, second pass filters and sums. Each group is ~30 rows so both passes are cache-local. Materialize l_quantity and l_extendedprice per group in a small buffer (~480 bytes per group)."
+    },
+    {
+      "step": 4,
+      "op": "finalize",
+      "agg": "SUM(partial_sums) / 7.0",
+      "output": "avg_yearly"
+    }
+  ],
+  "output_schema": [
+    { "name": "avg_yearly", "type": "double", "expr": "SUM(l_extendedprice) / 7.0" }
+  ],
+  "data_structures": {
+    "qualifying_partkeys": "flat_vector<int32>(pre_sized ~2000)",
+    "per_partkey_buffer": "thread_local flat_array<struct{double qty, double price}>(max_group_size ~64)",
+    "partial_sums": "thread_local double accumulator, reduce at end"
+  },
+  "parallelism": {
+    "strategy": "partition_parallel",
+    "partition_key": "qualifying_partkeys",
+    "description": "Partition ~2000 qualifying partkeys evenly across threads. Each thread processes its partkeys independently using the index — no synchronization needed during computation. Final reduction sums per-thread accumulators.",
+    "threads": 16,
+    "notes": "Only 16 threads despite 64 cores: the work is small (~60K rows total) and HDD random reads from the index are the bottleneck. More threads would cause disk seek thrashing."
+  },
+  "indexes": [
+    {
+      "index": "lineitem_partkey_grouped",
+      "path_prefix": "indexes/lineitem_partkey_grouped",
+      "format": "offsets_u32[max_key+2], row_ids_u32[num_rows]",
+      "max_key": 2000000,
+      "purpose": "selective_gather_by_partkey"
+    }
+  ],
+  "aggregation": "two_phase_per_group_then_global_reduce",
+  "output": {
+    "limit": null,
+    "order_by": null,
+    "projection": ["avg_yearly"]
+  },
+  "execution_target": "cpp",
+  "notes": "Q17 uses index-based access (NOT the shared scan_lineitem_full) because only ~0.1% of parts qualify, making indexed gather (~60K rows) vastly cheaper than scanning 60M rows. The correlated subquery is decorrelated into per-partkey two-phase processing, leveraging the natural grouping from lineitem_partkey_grouped index."
+}

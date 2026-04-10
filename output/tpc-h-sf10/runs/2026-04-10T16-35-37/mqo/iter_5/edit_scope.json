@@ -1,0 +1,18 @@
+{
+  "iteration": 5,
+  "scope": "fused_scan:fused_scan_orders",
+  "primary_bottleneck": {
+    "region_name": "fused_scan_orders",
+    "ms": 248.858,
+    "share_of_total": 0.186
+  },
+  "diagnosis": {
+    "step": "Q2",
+    "category": "B",
+    "root_cause": "Q13 thread-local arrays: 64 threads × (1.5M+1) × 4B = 384MB, massively exceeding 44MB L3 cache. Allocation zero-fills 384MB, merge iterates 96M entries with 64 OpenMP barriers.",
+    "memory_footprint": "Q13 thread-local: 64 × 6MB = 384MB; Q15 merge: sequential 63 × 800KB iterations"
+  },
+  "edit_summary": "Replaced Q13 thread-local arrays with shared array + atomic increments, eliminating 384MB allocation and 96M-entry merge. Parallelized Q15 supplier revenue merge.",
+  "expected_improvement": "~15-25% reduction in fused_scan_orders (save ~40-60ms from eliminated allocation + merge)",
+  "rationale": "See edit_rationale.md"
+}

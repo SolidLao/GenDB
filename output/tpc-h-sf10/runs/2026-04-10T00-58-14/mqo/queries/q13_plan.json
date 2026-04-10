@@ -1,0 +1,106 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q13",
+  "tail_node_id": "Q13_tail",
+  "shared_inputs": [
+    {
+      "component_id": "hash_customer_by_custkey",
+      "used_columns": ["c_custkey"],
+      "usage": "iterate_all_keys"
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "parallel_scan",
+      "table": "orders",
+      "columns": ["o_custkey", "o_comment"],
+      "notes": "Full sequential scan of orders table (15M rows). Read o_custkey (int32, raw) and o_comment (varlen)."
+    },
+    {
+      "step": 2,
+      "op": "residual_filter",
+      "on": "orders_scan",
+      "predicate": "o_comment NOT LIKE '%special%requests%'",
+      "selectivity": 0.995,
+      "estimated_output_rows": 14925000,
+      "notes": "Varlen string pattern match. ~0.5% of orders match the pattern and are excluded. Use strstr or two-needle search (find 'special' then check 'requests' after)."
+    },
+    {
+      "step": 3,
+      "op": "partial_agg_per_thread",
+      "description": "Per-customer order count via direct array",
+      "group_by": ["o_custkey"],
+      "aggs": [{"func": "COUNT", "column": "o_orderkey_implicit", "alias": "order_count"}],
+      "strategy": "direct_array",
+      "array_size": 1500001,
+      "element_type": "int32_t",
+      "memory_bytes": 6000004,
+      "notes": "c_custkey is dense PK [1..1500000]. Each thread maintains a thread-local int32 array of size 1.5M+1. For each surviving order row, increment array[o_custkey]. Array fits in ~6MB per thread."
+    },
+    {
+      "step": 4,
+      "op": "merge_thread_local_arrays",
+      "description": "Sum per-thread direct arrays into global count array",
+      "output": "global_order_count[1..1500000]",
+      "strategy": "parallel_reduce",
+      "notes": "Element-wise addition of thread-local arrays. Can parallelize the merge across array segments. Output: global_order_count[custkey] = total qualifying orders for that customer."
+    },
+    {
+      "step": 5,
+      "op": "left_join_finalize",
+      "description": "Derive c_count for every customer (LEFT JOIN semantics)",
+      "build_input": "hash_customer_by_custkey",
+      "probe_input": "global_order_count",
+      "logic": "Iterate all c_custkey values [1..1500000]. c_count = global_order_count[custkey] (0 if customer had no qualifying orders, which is the LEFT JOIN NULL→0 behavior of COUNT(o_orderkey)).",
+      "output_cardinality": 1500000,
+      "notes": "Dense PK means simple array iteration. No hash probe needed — just iterate the range. Customers with 0 orders naturally get c_count=0."
+    },
+    {
+      "step": 6,
+      "op": "aggregate",
+      "description": "Distribution aggregation: GROUP BY c_count",
+      "group_by": ["c_count"],
+      "aggs": [{"func": "COUNT", "column": "*", "alias": "custdist"}],
+      "strategy": "direct_array",
+      "array_size": 50,
+      "notes": "c_count range is [0..~42] for SF10. Use a small direct array of size 50. Single-threaded scan of 1.5M entries into 50-element array — trivially fast."
+    },
+    {
+      "step": 7,
+      "op": "sort",
+      "order_by": [
+        {"column": "custdist", "direction": "DESC"},
+        {"column": "c_count", "direction": "DESC"}
+      ],
+      "input_cardinality": 43,
+      "notes": "~43 distinct c_count values. Trivial sort on tiny result set."
+    }
+  ],
+  "output_schema": [
+    {"name": "c_count", "type": "int32_t"},
+    {"name": "custdist", "type": "int64_t"}
+  ],
+  "data_structures": {
+    "per_thread_count_array": "direct_array<int32_t>(1500001) per thread — ~6MB each",
+    "global_count_array": "direct_array<int32_t>(1500001) — ~6MB",
+    "custdist_array": "direct_array<int64_t>(50) — 400 bytes",
+    "comment_filter": "inline_strstr — no precomputation needed"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "scan_morsel_size": 65536,
+    "parallel_phases": [
+      "step1-2-3: parallel scan + filter + per-thread aggregation (main cost)",
+      "step4: parallel merge of thread-local arrays (segment-parallel)",
+      "step5-6-7: single-threaded (1.5M array scan + tiny agg + tiny sort)"
+    ],
+    "memory_per_thread_bytes": 6000004,
+    "total_parallel_memory_bytes": 384000256,
+    "notes": "64 threads × 6MB = 384MB for thread-local arrays. Fits easily in 376GB. Steps 5-7 operate on small data and run single-threaded to avoid synchronization overhead."
+  },
+  "indexes": [],
+  "execution_target": "cpp"
+}

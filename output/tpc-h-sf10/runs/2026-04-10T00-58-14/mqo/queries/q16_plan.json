@@ -1,0 +1,161 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q16",
+  "tail_node_id": "Q16_tail",
+  "shared_inputs": [],
+  "operators": [
+    {
+      "step": 1,
+      "op": "scan_filter",
+      "table": "supplier",
+      "columns": ["s_suppkey", "s_comment"],
+      "predicate": "s_comment LIKE '%Customer%Complaints%'",
+      "selectivity": 0.002,
+      "output_cardinality": 200,
+      "notes": "Scan supplier, filter by regex pattern on varlen s_comment. Produces tiny set of bad suppkeys."
+    },
+    {
+      "step": 2,
+      "op": "build_hash_set",
+      "input_step": 1,
+      "key": "s_suppkey",
+      "structure": "hash_set",
+      "cardinality": 200,
+      "purpose": "anti_join_build",
+      "notes": "Tiny hash set of excluded supplier keys for NOT IN anti-join."
+    },
+    {
+      "step": 3,
+      "op": "scan_filter",
+      "table": "part",
+      "columns": ["p_partkey", "p_brand", "p_type", "p_size"],
+      "predicates": [
+        {"predicate": "p_brand <> 'Brand#45'", "selectivity": 0.96, "encoding": "dictionary_code_neq"},
+        {"predicate": "p_type NOT LIKE 'MEDIUM POLISHED%'", "selectivity": 0.97, "encoding": "dictionary_prefix_filter"},
+        {"predicate": "p_size IN (49, 14, 23, 45, 19, 3, 36, 9)", "selectivity": 0.16, "encoding": "int32_set_lookup"}
+      ],
+      "combined_selectivity": 0.15,
+      "output_cardinality": 300000,
+      "notes": "All three filters applied during scan. p_brand and p_type use dictionary codes for fast comparison. p_size uses 8-element bitset or flat array lookup."
+    },
+    {
+      "step": 4,
+      "op": "hash_build",
+      "input_step": 3,
+      "key": "p_partkey",
+      "payload": ["p_brand", "p_type", "p_size"],
+      "structure": "compact_hash_map",
+      "cardinality": 300000,
+      "purpose": "join_build",
+      "notes": "Build hash map on filtered part rows. Payload stores dictionary-coded brand/type (uint16) and size (int32) for compact layout. ~300K entries fits in L3 cache (44MB)."
+    },
+    {
+      "step": 5,
+      "op": "scan_probe_antijoin_aggregate",
+      "table": "partsupp",
+      "scan_columns": ["ps_partkey", "ps_suppkey"],
+      "probe_hash_map": "step_4",
+      "anti_join_hash_set": "step_2",
+      "join_key": "ps_partkey = p_partkey",
+      "anti_join_key": "ps_suppkey NOT IN bad_suppkeys",
+      "input_cardinality": 8000000,
+      "post_join_cardinality": 1200000,
+      "post_antijoin_cardinality": 1195000,
+      "notes": "Fused operator: scan partsupp → probe part hash map (inner join) → check anti-join hash set → feed to aggregation. Single pass over partsupp."
+    },
+    {
+      "step": 6,
+      "op": "aggregate",
+      "type": "hash_group_by",
+      "group_by": ["p_brand", "p_type", "p_size"],
+      "aggregates": [
+        {"func": "count_distinct", "column": "ps_suppkey", "alias": "supplier_cnt"}
+      ],
+      "strategy": "partitioned_hash_set_dedup",
+      "estimated_groups": 18000,
+      "notes": "Two-phase COUNT(DISTINCT): Phase 1 — per-thread hash_set<(group_key, ps_suppkey)> for dedup during parallel scan. Phase 2 — merge thread-local sets, then count per group. Group key encoded as composite of dictionary-coded brand (uint16) + type (uint16) + size (int32) = 8 bytes."
+    },
+    {
+      "step": 7,
+      "op": "sort",
+      "order_by": [
+        {"column": "supplier_cnt", "direction": "DESC"},
+        {"column": "p_brand", "direction": "ASC"},
+        {"column": "p_type", "direction": "ASC"},
+        {"column": "p_size", "direction": "ASC"}
+      ],
+      "input_cardinality": 18000,
+      "notes": "Sort ~18K result rows. Small enough for single-threaded pdqsort. Decode dictionary strings for final string comparison on brand/type."
+    },
+    {
+      "step": 8,
+      "op": "projection",
+      "columns": ["p_brand", "p_type", "p_size", "supplier_cnt"],
+      "decode": {
+        "p_brand": "dictionary_decode",
+        "p_type": "dictionary_decode"
+      },
+      "notes": "Decode dictionary codes to strings for output. Can be deferred to sort step or done here."
+    }
+  ],
+  "join_order": [
+    {
+      "build": "supplier(filtered)",
+      "probe": "partsupp",
+      "type": "anti",
+      "strategy": "hash_set",
+      "build_cardinality": 200,
+      "notes": "Tiny anti-join set checked inline during partsupp scan"
+    },
+    {
+      "build": "part(filtered)",
+      "probe": "partsupp",
+      "type": "inner",
+      "strategy": "hash_join",
+      "build_cardinality": 300000,
+      "notes": "Filtered part fits in L3 cache. Probe during single partsupp scan."
+    }
+  ],
+  "filters": [
+    {"table": "supplier", "predicate": "s_comment LIKE '%Customer%Complaints%'", "selectivity": 0.002},
+    {"table": "part", "predicate": "p_brand <> 'Brand#45'", "selectivity": 0.96},
+    {"table": "part", "predicate": "p_type NOT LIKE 'MEDIUM POLISHED%'", "selectivity": 0.97},
+    {"table": "part", "predicate": "p_size IN (49, 14, 23, 45, 19, 3, 36, 9)", "selectivity": 0.16}
+  ],
+  "data_structures": {
+    "bad_suppkey_set": "hash_set<int32>(pre_sized=256)",
+    "part_hash_map": "compact_hash_map<int32, struct{uint16 brand_code, uint16 type_code, int32 size}>(pre_sized=524288)",
+    "dedup_set": "per_thread_hash_set<uint64>(packed group_key|suppkey)",
+    "group_count_map": "compact_hash_map<uint64, uint32>(pre_sized=32768)",
+    "p_size_filter": "bitset<50> with bits set at positions {3,9,14,19,23,36,45,49}"
+  },
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "partsupp_scan": "parallel_morsel(block_size=65536)",
+    "supplier_scan": "single_thread",
+    "part_scan": "parallel_morsel(block_size=65536)",
+    "aggregation_merge": "single_thread",
+    "sort": "single_thread",
+    "notes": "Supplier scan is tiny (100K rows), single-threaded. Part scan (2M) and partsupp scan (8M) parallelized. Aggregation merge of ~18K groups is fast single-threaded."
+  },
+  "indexes": [
+    {"index": "part_pk_index.bin", "purpose": "not_used_scan_preferred"},
+    {"index": "partsupp_partkey_idx.bin", "purpose": "not_used_hash_join_preferred"},
+    {"index": "supplier_pk_index.bin", "purpose": "not_used_full_scan_with_filter"}
+  ],
+  "aggregation": "hash_group_by_with_count_distinct",
+  "output": {
+    "order_by": ["supplier_cnt DESC", "p_brand ASC", "p_type ASC", "p_size ASC"],
+    "limit": null
+  },
+  "output_schema": [
+    {"name": "p_brand", "type": "varchar"},
+    {"name": "p_type", "type": "varchar"},
+    {"name": "p_size", "type": "int32"},
+    {"name": "supplier_cnt", "type": "int64"}
+  ],
+  "execution_target": "cpp",
+  "notes": "Standalone tail — no shared components consumed. Pipeline: (1) build tiny anti-join set from supplier, (2) build part hash map with dictionary-coded payloads (~300K entries, fits L3), (3) parallel scan partsupp fusing probe + anti-join + dedup aggregation in single pass, (4) merge per-thread dedup sets and count groups, (5) sort ~18K result rows. Critical optimization: p_size IN filter uses 50-bit bitset; brand/type filters operate on dictionary codes avoiding string comparison."
+}

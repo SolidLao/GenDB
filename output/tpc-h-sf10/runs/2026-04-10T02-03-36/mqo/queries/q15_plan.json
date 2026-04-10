@@ -1,0 +1,124 @@
+{
+  "version": "1.0",
+  "mode": "mqo-tail",
+  "query_id": "Q15",
+  "tail_node_id": "Q15_tail",
+  "shared_inputs": [
+    {
+      "component_id": "scan_lineitem_full",
+      "used_columns": ["l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"]
+    },
+    {
+      "component_id": "hash_supplier_by_suppkey",
+      "used_columns": ["s_suppkey", "s_name", "s_address", "s_phone"]
+    }
+  ],
+  "operators": [
+    {
+      "step": 1,
+      "op": "residual_filter",
+      "on": "scan_lineitem_full",
+      "predicate": "l_shipdate >= 9497 AND l_shipdate < 9588",
+      "predicate_note": "1996-01-01 = epoch day 9497, 1996-04-01 = epoch day 9588 (days_since_epoch encoding)",
+      "selectivity": 0.036,
+      "estimated_output_rows": 2160000,
+      "zonemap": {
+        "index": "lineitem_l_shipdate_zonemap",
+        "block_size": 65536,
+        "usage": "skip_blocks_outside_range"
+      }
+    },
+    {
+      "step": 2,
+      "op": "aggregate",
+      "type": "parallel_direct_array",
+      "group_by": ["l_suppkey"],
+      "aggs": [
+        {
+          "name": "total_revenue",
+          "expr": "SUM(l_extendedprice * (1.0 - l_discount))",
+          "type": "double"
+        }
+      ],
+      "array_size": 100001,
+      "key_range": "[1, 100000]",
+      "estimated_groups": 100000,
+      "memory_per_thread_bytes": 800008,
+      "merge_strategy": "element_wise_sum",
+      "notes": "l_suppkey is dense integer 1..100K; direct array avoids hash overhead. Per-thread local arrays merged after scan."
+    },
+    {
+      "step": 3,
+      "op": "scalar_aggregate",
+      "input": "step2_output",
+      "aggs": [
+        {
+          "name": "max_revenue",
+          "expr": "MAX(total_revenue)",
+          "type": "double"
+        }
+      ],
+      "scan_size": 100000,
+      "notes": "Single-threaded linear scan over 100K entries to find max. Trivial cost."
+    },
+    {
+      "step": 4,
+      "op": "filter",
+      "input": "step2_output",
+      "predicate": "total_revenue == max_revenue",
+      "estimated_output_rows": 1,
+      "notes": "Filter aggregated groups for total_revenue = max. Typically 1 match. Can combine with step 3 in a single pass: track max and matching suppkeys simultaneously."
+    },
+    {
+      "step": 5,
+      "op": "hash_join_probe",
+      "build_side": "hash_supplier_by_suppkey",
+      "probe_keys": ["l_suppkey"],
+      "build_keys": ["s_suppkey"],
+      "type": "inner",
+      "strategy": "shared_hash_probe",
+      "probe_cardinality": 1,
+      "output_columns": ["s_suppkey", "s_name", "s_address", "s_phone", "total_revenue"],
+      "notes": "Probe shared supplier hash with ~1 matching suppkey. Trivial."
+    },
+    {
+      "step": 6,
+      "op": "sort",
+      "order_by": [{"column": "s_suppkey", "direction": "ASC"}],
+      "input_rows": 1,
+      "notes": "Typically 1 row; sort is effectively a no-op."
+    },
+    {
+      "step": 7,
+      "op": "project",
+      "columns": ["s_suppkey", "s_name", "s_address", "s_phone", "total_revenue"]
+    }
+  ],
+  "output_schema": [
+    {"name": "s_suppkey", "type": "int32"},
+    {"name": "s_name", "type": "char(25)"},
+    {"name": "s_address", "type": "varchar(40)"},
+    {"name": "s_phone", "type": "char(15)"},
+    {"name": "total_revenue", "type": "double"}
+  ],
+  "parallelism": {
+    "strategy": "morsel_driven",
+    "threads": "auto(nproc)",
+    "parallel_steps": [1, 2],
+    "serial_steps": [3, 4, 5, 6, 7],
+    "notes": "Steps 1-2 (filter + aggregate) are parallelized via morsel-driven scan with thread-local direct arrays. Steps 3-7 operate on ≤100K or ≤1 rows and run single-threaded."
+  },
+  "data_structures": {
+    "revenue_agg": "direct_array(double, 100001) per thread — index by l_suppkey",
+    "merged_revenue": "direct_array(double, 100001) — merged result",
+    "max_tracking": "inline with filter pass — single double variable"
+  },
+  "indexes": [
+    {
+      "index": "lineitem_l_shipdate_zonemap",
+      "purpose": "skip_blocks_outside_shipdate_range"
+    }
+  ],
+  "execution_target": "cpp",
+  "notes": "Two-phase plan: (1) parallel morsel-driven filter+aggregate over shared lineitem scan using direct arrays keyed by l_suppkey, (2) serial max-find + filter + probe shared supplier hash. Steps 3+4 can be fused into a single pass. Total memory: ~50MB for 64 thread-local arrays."
+}
