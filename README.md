@@ -6,7 +6,7 @@
 
 **[Website](https://solidlao.github.io/GenDB/)** &nbsp;|&nbsp; **[Paper](https://arxiv.org/abs/2603.02081)** &nbsp;|&nbsp; **[GitHub](https://github.com/SolidLao/GenDB)**
 
-> **Try the [Interactive Demo](https://solidlao.github.io/GenDB/demo/)** — explore GenDB's full pipeline with a guided audio walkthrough. See how six AI agents analyze data, design storage, plan execution, generate code, and optimize it step by step. Browse pre-computed results, write your own queries, or upload your own data.
+> **Try the [Interactive Demo, VLDB 2026](https://solidlao.github.io/GenDB/demo/)** — explore GenDB's full pipeline with a guided audio walkthrough. See how six AI agents analyze data, design storage, plan execution, generate code, and optimize it step by step. Browse pre-computed results, write your own queries, or upload your own data.
 
 <p align="center">
   <img src="assets/GenDB.png" width="700" alt="GenDB System Overview">
@@ -17,6 +17,8 @@
 > **Note:** This project is under active development. The stable version used for the [arxiv paper](https://arxiv.org/abs/2603.02081) is available in the [`arxiv-03-02-2026`](https://github.com/SolidLao/GenDB/tree/arxiv-03-02-2026) branch.
 
 ## News
+
+- **2026-05-31** - [GenDB Demo](https://solidlao.github.io/GenDB/demo/) has been accepted to **VLDB 2026!**
 
 - **2026-03-25** — **[Interactive Demo](https://solidlao.github.io/GenDB/demo/)** :sparkles: — The best way to understand GenDB. A guided audio walkthrough takes you through the full pipeline on TPC-H Q3: from SQL parameterization, data and hardware profiling, storage design, query planning, code generation, to iterative optimization (593ms → 27ms, 22× speedup). The GitHub Pages deployment includes pre-computed results for TPC-H and SEC-EDGAR. For real-time code generation on new queries or your own data, deploy the demo server with GenDB on your machine (`node src/demo/server.mjs`).
 - **2026-03-23** — **SQL Template-Native Generation & Component Reuse.** GenDB now extracts parameterized SQL templates from queries and generates code at the template level. Queries sharing the same template structure (e.g., different date ranges or filter predicates) reuse the same generated code — no re-generation needed. Storage, indexes, and optimized query binaries are versioned and persisted across runs, with hardware fingerprinting to trigger automatic rebenchmarking when hardware changes. This enables incremental workload onboarding: run 5 queries today, add 17 more tomorrow, and GenDB only generates code for the new ones.
